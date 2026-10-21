@@ -3587,6 +3587,7 @@ async def _run_skill_once(
                 owns_pending_gate=owns_pending_gate,
                 codex_outer_sandboxed=codex_outer_sandboxed,
                 delivery=fly_delivery,
+                neotoma_tools_granted=bool(allowed_mcp_servers(agent_def.tools)),
             )
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
@@ -3702,11 +3703,24 @@ async def _run_skill_once(
         )
         return proc.returncode, out, err
 
+    def _report_fly_capability(message: str) -> None:
+        log.warning("[apis] %s: %s", skill, message)
+        print(message, file=sys.stderr, flush=True)
+        if notifier is not None:
+            try:
+                from lib.notify import Priority
+
+                notifier.send(message, priority=Priority.WARN, handler="apis")
+            except Exception as exc:
+                log.debug(f"[apis] Fly capability notifier.send failed: {exc}")
+
     _start_ns = time.monotonic_ns()
     try:
         try:
             if _fly_job is not None:
                 try:
+                    if _fly_job.neotoma_tools_unavailable:
+                        _report_fly_capability(fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE)
                     returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
                 except fly_runner.FlyRefusal as exc:
                     msg = f"fly runner refused: {exc}"
@@ -3724,6 +3738,16 @@ async def _run_skill_once(
                     _refusal = _fly_refusal_or_fallback(reason)
                     if _refusal is not None:
                         return _refusal
+                    if _fly_job.neotoma_tools_unavailable:
+                        # FlyIneligible is raised BEFORE any launch is requested;
+                        # only FlyLaunchError means a launch was attempted.
+                        _report_fly_capability(
+                            "This run was not eligible for Fly, so it ran locally "
+                            "with its normal tools."
+                            if isinstance(exc, fly_runner.FlyIneligible)
+                            else "The Fly launch failed; this run fell back to a "
+                            "local run with its normal tools."
+                        )
                     _fly_job = None
                     _start_ns = time.monotonic_ns()
                     returncode, stdout, stderr = await _run_local()
@@ -3994,6 +4018,12 @@ async def _run_skill_once(
             usage=_usage,
             ok=_dispatch_ok,
         )
+
+        if _fly_job is not None and _fly_job.neotoma_tools_unavailable:
+            _note = fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE
+            _stdout_text = f"{_stdout_text.rstrip()}\n{_note}\n"
+            _fly_note += f" {_note}"
+            log.warning("[apis] %s: %s", skill, _note)
 
         result = SkillResult(
             skill=skill,

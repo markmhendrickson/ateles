@@ -275,6 +275,40 @@ def _deadline_in(seconds: float) -> str:
 
 
 class TestRunJob:
+    def test_key_only_child_has_no_neotoma_mcp_and_probes_unshipped_role_token(
+            self, tmp_path):
+        token_name = "LANIUS_NEOTOMA_TOKEN"
+        shared_bearer = "synthetic-shared-bearer"
+        job_dir = tmp_path / "job"
+        _write_job(
+            job_dir,
+            secrets={"NEOTOMA_AAUTH_PRIVATE_JWK": json.dumps(_test_jwk())},
+            spec={"probe_env_names": [token_name]},
+            argv=["claude", "--print", "--mcp-config", run_job.MCP_CONFIG_PLACEHOLDER,
+                  "--other"],
+        )  # fmt: skip
+        job = run_job.load_job(job_dir)
+        child_home = tmp_path / "child-home"
+        child_home.mkdir()
+        argv, child_env = run_job.prepare_child(
+            job, child_home,
+            {"PATH": "/usr/bin", "NEOTOMA_BEARER_TOKEN": shared_bearer,
+             token_name: shared_bearer},
+        )  # fmt: skip
+        assert argv == ["claude", "--print", "--other"]
+        assert token_name not in child_env
+        assert "NEOTOMA_BEARER_TOKEN" not in child_env
+        assert all(shared_bearer not in arg for arg in argv)
+        assert shared_bearer not in child_env.values()
+
+        report = run_job.credential_probe(
+            job, child_env, job_dir=tmp_path / "removed-job",
+            own_env={token_name: shared_bearer},
+        )
+        assert report["env"][token_name] == "present"
+        assert token_name in report["present"]
+        assert report["ok"] is False
+
     def test_a_readable_secret_path_fails_the_probe(self, tmp_path, monkeypatch):
         for name in run_job.DEFAULT_PROBE_ENV_NAMES:
             monkeypatch.delenv(name, raising=False)

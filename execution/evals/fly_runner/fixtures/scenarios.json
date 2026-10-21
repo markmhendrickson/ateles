@@ -69,6 +69,124 @@
       }
     },
     {
+      "id": "shared_role_token_uses_aauth_key_without_shipping_bearer",
+      "description": "The role token matches the shared daemon bearer, so the Fly job ships only its AAuth key: the child launches without a Neotoma MCP server while the runner still signs its result record with that key. The discarded token name remains in the forbidden-environment probe.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+        "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY KEY FALLBACK OK\n"
+        }
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "FLY KEY FALLBACK OK",
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "minted": 1,
+        "revoked_all_minted": true,
+        "in_flight_after": 0,
+        "machine_gone": true,
+        "key_only_no_agent_mcp": true,
+        "dispatch_events": ["key_only_notice", "launch"],
+        "result_record_aauth_key": true,
+        "probe_env_contains": "LANIUS_NEOTOMA_TOKEN"
+      }
+    },
+    {
+      "id": "shared_role_token_fly_launch_falls_back_with_correction",
+      "description": "A key-only Fly launch is refused; the opted-in dispatch corrects its capability notice and completes locally with normal tools, without claiming a Fly result.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+        "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "create": "refused"
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "LOCAL GATE_INHERITANCE: clear",
+        "local_cli_ran": true,
+        "machines_created": 0,
+        "in_flight_after": 0,
+        "revoked_all_minted": true,
+        "dispatch_events": ["key_only_notice", "launch", "local_correction"],
+        "local_key_only_correction": "The Fly launch failed; this run fell back to a local run with its normal tools."
+      }
+    },
+    {
+      "id": "shared_role_token_fly_ineligible_falls_back_with_correction",
+      "description": "A key-only Fly run becomes ineligible before any launch request; the opted-in dispatch reports that reason and completes locally with normal tools.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+        "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "raise_before_launch": "ineligible"
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "LOCAL GATE_INHERITANCE: clear",
+        "local_cli_ran": true,
+        "fly_requests": 0,
+        "machines_created": 0,
+        "minted": 0,
+        "in_flight_after": 0,
+        "dispatch_events": ["key_only_notice", "run_attempt", "local_correction"],
+        "local_key_only_correction": "This run was not eligible for Fly, so it ran locally with its normal tools."
+      }
+    },
+    {
       "id": "forced_fly_ineligible_role_refused",
       "description": "--runner fly for a role with no Neotoma identity of its own: refused with the reason; nothing runs locally or on Fly.",
       "settings": {},

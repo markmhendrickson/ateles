@@ -311,10 +311,7 @@ def _claude_runs_per_job_unless_its_login_machine_is_tested(request, monkeypatch
 def fly_env(monkeypatch, tmp_path):
     keys = tmp_path / "keys"
     keys.mkdir()
-    (keys / "lanius.jwk.json").write_text(json.dumps({
-        "kty": "EC", "crv": "P-256", "x": "x", "y": "y", "d": "private-scalar-canary",
-        "sub": "lanius@ateles-swarm",
-    }))  # fmt: skip
+    (keys / "lanius.jwk.json").write_text(json.dumps(_valid_role_jwk()))
     for name, value in {
         "APIS_FLY_APP": "runner-app",
         "APIS_FLY_API_TOKEN": FLY_TOKEN,
@@ -334,6 +331,20 @@ def fly_env(monkeypatch, tmp_path):
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN", raising=False)
     return tmp_path
+
+
+def _valid_role_jwk() -> dict[str, str]:
+    """P-256's generator point is the public point for private scalar one."""
+    def encoded(hex_value: str) -> str:
+        return base64.urlsafe_b64encode(bytes.fromhex(hex_value)).rstrip(b"=").decode()
+
+    return {
+        "kty": "EC", "crv": "P-256",
+        "x": encoded("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"),
+        "y": encoded("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"),
+        "d": encoded("00" * 31 + "01"),
+        "sub": "lanius@ateles-swarm",
+    }
 
 
 class Clock:
@@ -503,6 +514,7 @@ def test_per_job_machine_config_and_credential_set(fly_env, caplog):
 
 def test_mcp_and_shared_token_never_ship_when_role_has_only_a_key(fly_env):
     job = _job()
+    assert "LANIUS_NEOTOMA_TOKEN" in job.probe_env_names
     assert SHARED_BEARER not in json.dumps(job.secrets)
     assert "NEOTOMA_BEARER_TOKEN" not in job.secrets
 
@@ -618,10 +630,116 @@ def test_role_without_its_own_identity_is_not_eligible(fly_env, monkeypatch):
         _job()
 
 
-def test_role_token_equal_to_the_shared_bearer_is_refused(fly_env, monkeypatch):
+def test_role_token_equal_to_shared_bearer_uses_valid_key_only(fly_env, monkeypatch,
+                                                                 caplog):  # fmt: skip
     monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
-    with pytest.raises(fly_runner.FlyIneligible, match="shared daemon bearer"):
+    caplog.set_level(logging.DEBUG)
+    job = _job()
+    assert job.neotoma_jwk_name == fly_runner.AAUTH_JWK_JOB_NAME
+    assert job.neotoma_token_name == ""
+    assert set(job.secrets) == {fly_runner.AAUTH_JWK_JOB_NAME}
+    assert "LANIUS_NEOTOMA_TOKEN" in job.probe_env_names
+    assert "LANIUS_NEOTOMA_TOKEN" not in job.child_credential_names
+    assert SHARED_BEARER not in json.dumps(job.secrets)
+    assert SHARED_BEARER not in json.dumps(job.argv)
+    files = fly_runner.job_files(job, fly_runner.FlyConfig.from_env())
+    file_text = "\n".join(base64.b64decode(f["raw_value"]).decode() for f in files)
+    assert SHARED_BEARER not in file_text
+    assert '"LANIUS_NEOTOMA_TOKEN"' in file_text
+    assert SHARED_BEARER not in caplog.text
+
+
+def test_role_token_equal_to_shared_bearer_without_key_is_refused(fly_env, monkeypatch):
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")
+    with pytest.raises(fly_runner.FlyIneligible,
+                       match="equals the shared daemon bearer and no valid AAuth key") as exc:  # fmt: skip
         _job()
+    assert SHARED_BEARER not in str(exc.value)
+
+
+@pytest.mark.parametrize("key_text", [
+    '{"sub": "wrong@ateles-swarm", "d": "private-scalar"}',
+    '{"sub": "lanius@ateles-swarm", "d": ""}',
+    '{invalid-json',
+])
+def test_role_token_equal_to_shared_bearer_with_invalid_key_is_refused(
+        fly_env, monkeypatch, key_text):
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
+    (fly_env / "keys" / "lanius.jwk.json").write_text(key_text)
+    with pytest.raises(fly_runner.FlyIneligible) as exc:
+        _job()
+    assert "equals the shared daemon bearer and no valid AAuth key" in str(exc.value)
+    assert SHARED_BEARER not in str(exc.value)
+
+
+@pytest.mark.parametrize("shared_token", [False, True])
+def test_role_key_without_cryptography_is_ineligible(fly_env, monkeypatch, shared_token):
+    if shared_token:
+        monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
+    else:
+        monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    original_import = __import__
+
+    def missing_cryptography(name, *args, **kwargs):
+        if name == "cryptography.hazmat.primitives.asymmetric":
+            raise ImportError("cryptography unavailable")
+        return original_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=missing_cryptography):
+        with pytest.raises(fly_runner.FlyIneligible, match="cannot verify the role key") as exc:
+            _job()
+    assert SHARED_BEARER not in str(exc.value)
+
+
+@pytest.mark.parametrize("key_value", [[], "x", 123, None])
+@pytest.mark.parametrize("shared_token", [False, True])
+def test_non_object_role_key_is_ineligible(fly_env, monkeypatch, key_value, shared_token):
+    if shared_token:
+        monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
+    (fly_env / "keys" / "lanius.jwk.json").write_text(json.dumps(key_value))
+    message = "equals the shared daemon bearer and no valid AAuth key" if shared_token \
+        else "AAuth key file for 'lanius' is unreadable"  # fmt: skip
+    with pytest.raises(fly_runner.FlyIneligible, match=message):
+        _job()
+
+
+@pytest.mark.parametrize("invalid", [
+    "wrong_kty", "wrong_crv", "missing_x", "missing_y", "missing_d",
+    "mismatched_d", "wrong_sub",
+])
+def test_invalid_role_key_shape_is_ineligible(fly_env, invalid):
+    jwk = _valid_role_jwk()
+    if invalid.startswith("missing_"):
+        jwk.pop(invalid.removeprefix("missing_"))
+    elif invalid == "mismatched_d":
+        pytest.importorskip("cryptography")
+        jwk["d"] = base64.urlsafe_b64encode((2).to_bytes(32, "big")).rstrip(b"=").decode()
+    elif invalid == "wrong_sub":
+        jwk["sub"] = "another@ateles-swarm"
+    else:
+        jwk[invalid.removeprefix("wrong_")] = "wrong"
+    (fly_env / "keys" / "lanius.jwk.json").write_text(json.dumps(jwk))
+    with pytest.raises(fly_runner.FlyIneligible, match="not that role's private key"):
+        _job()
+
+
+def test_generated_p256_role_key_is_accepted(fly_env):
+    ec = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ec")
+    private = ec.generate_private_key(ec.SECP256R1())
+    numbers = private.private_numbers()
+
+    def encoded(value):
+        return base64.urlsafe_b64encode(value.to_bytes(32, "big")).rstrip(b"=").decode()
+
+    jwk = {
+        "kty": "EC", "crv": "P-256", "sub": "lanius@ateles-swarm",
+        "x": encoded(numbers.public_numbers.x),
+        "y": encoded(numbers.public_numbers.y),
+        "d": encoded(numbers.private_value),
+    }
+    (fly_env / "keys" / "lanius.jwk.json").write_text(json.dumps(jwk))
+    assert _job().neotoma_jwk_name == fly_runner.AAUTH_JWK_JOB_NAME
 
 
 def test_own_token_is_shipped_by_name(fly_env, monkeypatch):
@@ -629,6 +747,8 @@ def test_own_token_is_shipped_by_name(fly_env, monkeypatch):
     job = _job()
     assert job.neotoma_token_name == "LANIUS_NEOTOMA_TOKEN"
     assert job.secrets["LANIUS_NEOTOMA_TOKEN"] == "lanius-own-token-0009"
+    assert "LANIUS_NEOTOMA_TOKEN" not in job.probe_env_names
+    assert fly_runner.AAUTH_JWK_JOB_NAME in job.secrets
     assert "LANIUS_NEOTOMA_TOKEN" not in job.child_credential_names
 
 
@@ -900,13 +1020,65 @@ def test_seam_forced_fly_returns_the_machine_result(fly_env, seam, monkeypatch):
         result = _once(runner="fly", repository="owner/repo",
                        github_token=None, include_github_contract=True)  # fmt: skip
     assert result.ok, result.error
-    assert result.stdout == "GATE_INHERITANCE: clear\n"
+    assert result.stdout == (
+        "GATE_INHERITANCE: clear\n" + fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE + "\n"
+    )
     assert spawned == []
     assert minted == ["owner/repo"] and revoked == [MINTED]
     files = _files(json.loads(fake.calls("POST", "/machines")[0].content))
     argv = json.loads(files["/run/job/argv.json"])
     assert argv[0] == "claude" and fly_runner.MCP_CONFIG_PLACEHOLDER in argv
     assert SHARED_BEARER not in _all_request_text(fake)
+
+
+@pytest.mark.parametrize("own_token,tools_granted,disclosed", [
+    (False, True, True),
+    (True, True, False),
+    (False, False, False),
+])
+def test_key_only_neotoma_tool_loss_is_disclosed_in_result_and_log(
+        fly_env, seam, monkeypatch, caplog, capsys, own_token, tools_granted, disclosed):
+    _, fake_exec = seam
+    if own_token:
+        monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    if not tools_granted:
+        monkeypatch.setattr(
+            skill_runner, "_load_agent_def",
+            lambda role: AgentDefinition(
+                entity_id="e", name=role, prompt_markdown="You are lanius.",
+                tool_allowlist="Bash", aauth_sub=f"{role}@ateles-swarm",
+            ),
+        )
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "task result\n"})
+    events = []
+    original_run = executor.run
+
+    async def observed_run(job):
+        events.append(("launch", capsys.readouterr().err,
+                       [record.getMessage() for record in caplog.records]))
+        return await original_run(job)
+
+    class Notifier:
+        def send(self, message, **kwargs):
+            events.append(("notify", message, kwargs))
+
+    monkeypatch.setattr(executor, "run", observed_run)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with caplog.at_level(logging.WARNING), \
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(runner="fly", repository="owner/repo",
+                       include_github_contract=True, notifier=Notifier())
+    note = fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE
+    assert result.ok
+    assert (note in result.stdout) is disclosed
+    assert (note in caplog.text) is disclosed
+    launch = next(event for event in events if event[0] == "launch")
+    assert (note in launch[1]) is disclosed
+    assert (any(note in message for message in launch[2])) is disclosed
+    assert (any(event[0] == "notify" and event[1] == note for event in events)) is disclosed
+    if disclosed:
+        assert events[0][0] == "notify"
 
 
 def test_seam_cap_refusal_returns_cooled_until(fly_env, seam, monkeypatch):
@@ -932,6 +1104,48 @@ def test_seam_definite_launch_failure_falls_back_or_fails(fly_env, seam, monkeyp
         forced = _once(runner="fly", repository="owner/repo", include_github_contract=True)
     assert opted.ok and len(spawned) == 1  # logged, counted local fallback
     assert not forced.ok and forced.error.startswith("fly runner refused: Fly launch failed")
+
+
+@pytest.mark.parametrize("error, correction", [
+    (fly_runner.FlyIneligible,
+     "This run was not eligible for Fly, so it ran locally with its normal tools."),
+    (fly_runner.FlyLaunchError,
+     "The Fly launch failed; this run fell back to a local run with its normal tools."),
+])
+def test_key_only_local_fallback_reports_the_actual_fly_failure(
+        fly_env, seam, monkeypatch, caplog, capsys, error, correction):
+    spawned, fake_exec = seam
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    executor, _, _ = make_executor(FakeFly())
+
+    async def fail_before_result(job):
+        raise error("eval refusal")
+
+    notices = []
+
+    class Notifier:
+        def send(self, message, **kwargs):
+            notices.append(message)
+
+    monkeypatch.setattr(executor, "run", fail_before_result)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with caplog.at_level(logging.WARNING), \
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(action_class="carry_forward_check", model="m",
+                       repository="owner/repo", github_token="t-local",
+                       include_github_contract=True,
+                       notifier=Notifier())
+
+    assert result.ok and result.stdout == "local output" and len(spawned) == 1
+    stderr = capsys.readouterr().err
+    assert correction in stderr
+    assert correction in caplog.text
+    assert correction in notices
+    other = "The Fly launch failed" if error is fly_runner.FlyIneligible else "not eligible for Fly"
+    assert other not in stderr and other not in caplog.text
+    assert all(other not in message for message in notices)
+    assert fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE not in result.stdout
 
 
 @pytest.mark.parametrize("terminates", [True, False])

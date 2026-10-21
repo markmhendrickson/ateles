@@ -71,6 +71,9 @@ RESULT_ENTITY_TYPE = "fly_runner_result"
 # run_job.py keeps the LAST this-many bytes of stdout (STDOUT_CAP_BYTES there).
 RUNNER_STDOUT_CAP_BYTES = 256 * 1024
 MCP_CONFIG_PLACEHOLDER = "@@ATELES_JOB_MCP_CONFIG@@"
+KEY_ONLY_NEOTOMA_TOOLS_NOTE = (
+    "Ran on Fly with the role's AAuth key only: this run had no Neotoma MCP tools."
+)
 # Where Claude's system prompt file goes in argv; run_job.py writes the file
 # (shipped as a job file) and puts its path here.
 SYSTEM_PROMPT_PLACEHOLDER = "@@ATELES_JOB_SYSTEM_PROMPT@@"
@@ -1726,6 +1729,7 @@ class FlyJob:
     neotoma_token_name: str = ""
     neotoma_jwk_name: str = ""
     neotoma_base_url: str = ""
+    neotoma_tools_unavailable: bool = False
     probe_env_names: list[str] = field(default_factory=list)
     # Claude's system prompt, shipped as a job file instead of an argument.
     system_prompt: str = field(repr=False, default="")
@@ -1791,6 +1795,36 @@ def role_jwk_path(role: str) -> Path | None:
     return path if path.is_file() else None
 
 
+def _validated_role_jwk(role: str, jwk: Any) -> bool:
+    """Check the role's P-256 private key before it can be sent to a runner."""
+    if not isinstance(jwk, dict) or jwk.get("kty") != "EC" or jwk.get("crv") != "P-256":
+        return False
+    if jwk.get("sub") != f"{role}@ateles-swarm":
+        return False
+    coordinates = []
+    for name in ("x", "y", "d"):
+        value = jwk.get(name)
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+            return False
+        try:
+            raw = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_",
+                                   validate=True)  # fmt: skip
+        except ValueError:
+            return False
+        if not raw:
+            return False
+        coordinates.append(int.from_bytes(raw, "big"))
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ec
+    except ImportError:
+        raise FlyIneligible("cannot verify the role key: the cryptography package is unavailable") from None
+    try:
+        public = ec.derive_private_key(coordinates[2], ec.SECP256R1()).public_key().public_numbers()
+    except ValueError:
+        return False
+    return (public.x, public.y) == tuple(coordinates[:2])
+
+
 def build_job(
     *,
     provider: str,
@@ -1809,6 +1843,7 @@ def build_job(
     codex_outer_sandboxed: bool = False,
     config: FlyConfig | None = None,
     delivery: dict | None = None,
+    neotoma_tools_granted: bool = False,
 ) -> FlyJob:
     """Check eligibility and assemble the job, minus the GitHub token (which
     is minted at launch). Raises ``FlyIneligible`` with the reason.
@@ -1849,8 +1884,12 @@ def build_job(
     shared_bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     token_name = neotoma_token_env_name(role)
     own_token = os.environ.get(token_name, "").strip()
-    if own_token and shared_bearer and own_token == shared_bearer.strip():
-        raise FlyIneligible(f"{token_name} is the shared daemon bearer, not the role's own")
+    token_is_shared = bool(own_token and shared_bearer and own_token == shared_bearer.strip())
+    if token_is_shared:
+        own_token = ""  # The shared daemon bearer must never enter a Fly job.
+    shared_token_without_key = (
+        f"{token_name} equals the shared daemon bearer and no valid AAuth key exists for {role!r}"
+    )
     jwk_path = role_jwk_path(role)
     jwk_text = ""
     if jwk_path is not None:
@@ -1858,10 +1897,20 @@ def build_job(
             jwk_text = jwk_path.read_text(encoding="utf-8").strip()
             jwk = json.loads(jwk_text)
         except (OSError, ValueError):
+            if token_is_shared:
+                raise FlyIneligible(shared_token_without_key) from None
             raise FlyIneligible(f"the AAuth key file for {role!r} is unreadable") from None
-        if str(jwk.get("sub") or "") != f"{role}@ateles-swarm" or not jwk.get("d"):
+        if not isinstance(jwk, dict):
+            if token_is_shared:
+                raise FlyIneligible(shared_token_without_key)
+            raise FlyIneligible(f"the AAuth key file for {role!r} is unreadable")
+        if not _validated_role_jwk(role, jwk):
+            if token_is_shared:
+                raise FlyIneligible(shared_token_without_key)
             raise FlyIneligible(f"the AAuth key file for {role!r} is not that role's private key")
     if not own_token and not jwk_text:
+        if token_is_shared:
+            raise FlyIneligible(shared_token_without_key)
         raise FlyIneligible(
             f"role {role!r} has no Neotoma identity of its own ({token_name} or an AAuth "
             "key); the shared daemon bearer never leaves the Mac"
@@ -1888,6 +1937,7 @@ def build_job(
         # Every other role's PAT by name, plus the operator's canary name(s).
         *sorted(n for n in os.environ if n.endswith("_AGENT_PAT")),
         *sorted(n for n in os.environ if n.endswith("_NEOTOMA_TOKEN") and n != token_name),
+        *([token_name] if not own_token else []),
         *config.extra_probe_env_names,
     ]))  # fmt: skip
 
@@ -1915,6 +1965,7 @@ def build_job(
         neotoma_token_name=token_name if own_token else "",
         neotoma_jwk_name=AAUTH_JWK_JOB_NAME if jwk_text else "",
         neotoma_base_url=base_url,
+        neotoma_tools_unavailable=bool(neotoma_tools_granted and not own_token),
         probe_env_names=probe,
         system_prompt=system_prompt,
         delivery=delivery,
