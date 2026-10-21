@@ -1817,7 +1817,7 @@ def _validated_role_jwk(role: str, jwk: Any) -> bool:
     try:
         from cryptography.hazmat.primitives.asymmetric import ec
     except ImportError:
-        return True  # The dispatcher has no cryptography package; structural checks still apply.
+        raise FlyIneligible("cannot verify the role key: the cryptography package is unavailable") from None
     try:
         public = ec.derive_private_key(coordinates[2], ec.SECP256R1()).public_key().public_numbers()
     except ValueError:

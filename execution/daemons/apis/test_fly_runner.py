@@ -673,6 +673,25 @@ def test_role_token_equal_to_shared_bearer_with_invalid_key_is_refused(
     assert SHARED_BEARER not in str(exc.value)
 
 
+@pytest.mark.parametrize("shared_token", [False, True])
+def test_role_key_without_cryptography_is_ineligible(fly_env, monkeypatch, shared_token):
+    if shared_token:
+        monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
+    else:
+        monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    original_import = __import__
+
+    def missing_cryptography(name, *args, **kwargs):
+        if name == "cryptography.hazmat.primitives.asymmetric":
+            raise ImportError("cryptography unavailable")
+        return original_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=missing_cryptography):
+        with pytest.raises(fly_runner.FlyIneligible, match="cannot verify the role key") as exc:
+            _job()
+    assert SHARED_BEARER not in str(exc.value)
+
+
 @pytest.mark.parametrize("key_value", [[], "x", 123, None])
 @pytest.mark.parametrize("shared_token", [False, True])
 def test_non_object_role_key_is_ineligible(fly_env, monkeypatch, key_value, shared_token):
@@ -1018,7 +1037,7 @@ def test_seam_forced_fly_returns_the_machine_result(fly_env, seam, monkeypatch):
     (False, False, False),
 ])
 def test_key_only_neotoma_tool_loss_is_disclosed_in_result_and_log(
-        fly_env, seam, monkeypatch, caplog, own_token, tools_granted, disclosed):
+        fly_env, seam, monkeypatch, caplog, capsys, own_token, tools_granted, disclosed):
     _, fake_exec = seam
     if own_token:
         monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
@@ -1032,14 +1051,34 @@ def test_key_only_neotoma_tool_loss_is_disclosed_in_result_and_log(
         )
     fake = FakeFly()
     executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "task result\n"})
+    events = []
+    original_run = executor.run
+
+    async def observed_run(job):
+        events.append(("launch", capsys.readouterr().err,
+                       [record.getMessage() for record in caplog.records]))
+        return await original_run(job)
+
+    class Notifier:
+        def send(self, message, **kwargs):
+            events.append(("notify", message, kwargs))
+
+    monkeypatch.setattr(executor, "run", observed_run)
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     with caplog.at_level(logging.WARNING), \
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+        result = _once(runner="fly", repository="owner/repo",
+                       include_github_contract=True, notifier=Notifier())
     note = fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE
     assert result.ok
     assert (note in result.stdout) is disclosed
     assert (note in caplog.text) is disclosed
+    launch = next(event for event in events if event[0] == "launch")
+    assert (note in launch[1]) is disclosed
+    assert (any(note in message for message in launch[2])) is disclosed
+    assert (any(event[0] == "notify" and event[1] == note for event in events)) is disclosed
+    if disclosed:
+        assert events[0][0] == "notify"
 
 
 def test_seam_cap_refusal_returns_cooled_until(fly_env, seam, monkeypatch):

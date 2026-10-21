@@ -3673,6 +3673,17 @@ async def _run_skill_once(
         try:
             if _fly_job is not None:
                 try:
+                    if _fly_job.neotoma_tools_unavailable:
+                        _note = fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE
+                        log.warning("[apis] %s: %s", skill, _note)
+                        print(_note, file=sys.stderr, flush=True)
+                        if notifier is not None:
+                            try:
+                                from lib.notify import Priority
+
+                                notifier.send(_note, priority=Priority.WARN, handler="apis")
+                            except Exception as exc:
+                                log.debug(f"[apis] Fly capability notifier.send failed: {exc}")
                     returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
                 except fly_runner.FlyRefusal as exc:
                     msg = f"fly runner refused: {exc}"
