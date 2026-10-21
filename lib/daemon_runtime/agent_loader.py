@@ -578,7 +578,7 @@ def load_agent_definition_or_exit(daemon_name: str) -> "AgentDefinition":
     daemon also refuses: absence supplies no authority to start.
     """
     try:
-        return AgentLoader(daemon_name).load()
+        return admit_agent_definition(AgentLoader(daemon_name).load(), daemon_name)
     except AgentDefinitionUnavailable as exc:
         log.error(
             f"[{daemon_name}] Refusing to start: agent_definition unavailable "
@@ -845,9 +845,9 @@ class AgentLoader:
         """Fetch JSON from Neotoma and return the parsed body (shape not yet validated).
 
         Per-agent AAuth-signed when ``NEOTOMA_AAUTH_VIA_CLI`` is on and this agent
-        has a key; otherwise the unsigned/bearer httpx path. If the signing helper
-        itself FAILS (raises: no key, helper error, timeout) the bearer path is tried;
-        a signed request that RETURNS a result is final either way.
+        has a key; otherwise the unsigned/bearer httpx path. Bearer fallback is
+        permitted only when a signed failure is known to precede any response.
+        A timeout or a returned signed result is final.
 
         The transport RESULT is validated before any body is read, identically on both
         paths: it must be a well-formed result whose status is exactly
@@ -875,11 +875,18 @@ class AgentLoader:
             except _LoadBusy:
                 raise
             except Exception as exc:
-                if isinstance(exc, ns.SignedRequestError) and exc.response_received:
+                if isinstance(exc, ns.SignedRequestError) and exc.response_received is True:
                     status = exc.http_status
                     if isinstance(status, int) and not isinstance(status, bool) and status != SUCCESS_STATUS:
                         raise _TransportStatus(status) from None
                     raise self._unavailable("bad_response") from None
+                if (not isinstance(exc, ns.SignedRequestError)
+                        or exc.response_received is not False
+                        or exc.code not in {
+                            "busy", "no_key", "identity_changed",
+                            "helper_signer_missing", "transport_error",
+                        }):
+                    raise self._unavailable("timeout") from None
                 log.warning(
                     f"[{self.agent_name}] signed request failed ({type(exc).__name__}); "
                     "falling back to bearer"

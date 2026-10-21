@@ -519,16 +519,16 @@ def test_a_retry_that_cannot_fit_is_not_started(monkeypatch):
     assert raised.value.attempts == 1 and len(clock.launched) == 1
 
 
-def test_the_signed_request_and_its_bearer_fallback_share_one_deadline(monkeypatch):
+def test_the_signed_request_timeout_refuses_without_bearer_fallback(monkeypatch):
     clock = _VClock()
     _virtual(monkeypatch, clock, [HANG], signed=True)
 
     with pytest.raises(AgentDefinitionUnavailable):
         AgentLoader("pavo").load()
 
-    # the signing helper takes 20 s of the 25; the fallback gets the 5 s that are left
+    # A timed-out helper may have received a response, so no bearer request starts.
     assert clock.launched[0] == (20.0, 25.0)
-    assert clock.launched[1][0] == pytest.approx(5.0)
+    assert len(clock.launched) == 1
     assert clock.elapsed <= CAP + 1e-9
 
 
@@ -684,7 +684,7 @@ def test_a_bad_signed_result_is_unavailable_and_does_not_fall_back_to_bearer(
     assert transport["bearer_calls"] == 0, "a returned signed result is final: no bearer fallback"
 
 
-def test_a_signed_helper_that_raises_still_falls_back_to_the_bearer_path(transport, monkeypatch):
+def test_an_unclassified_signed_helper_error_refuses_without_bearer(transport, monkeypatch):
     monkeypatch.setattr(al.ns, "via_cli_enabled", lambda: True)
 
     def broken():
@@ -692,8 +692,9 @@ def test_a_signed_helper_that_raises_still_falls_back_to_the_bearer_path(transpo
 
     transport["signed"] = broken
     transport["bearer"] = lambda: _Obj(200)
-    assert AgentLoader("pavo").load().entity_id == "ent_pavo"
-    assert transport["signed_calls"] == 1 and transport["bearer_calls"] == 1
+    with pytest.raises(AgentDefinitionUnavailable):
+        AgentLoader("pavo").load()
+    assert transport["signed_calls"] == 1 and transport["bearer_calls"] == 0
 
 
 def test_positive_controls_exactly_200_with_a_json_body_loads_on_both_paths(transport, monkeypatch):

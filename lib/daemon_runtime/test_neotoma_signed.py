@@ -437,7 +437,7 @@ class NeotomaSignedTest(unittest.TestCase):
                 else:
                     real_request("POST", "http://fixture.invalid", {}, agent_name="apus",
                                  timeout=1, cancelled=cancelled)
-            except (ns.SignedRequestError, subprocess.TimeoutExpired) as exc:
+            except (ns.SignedRequestError, subprocess.TimeoutExpired, al.AgentDefinitionUnavailable) as exc:
                 errors.append(exc)
 
         with mock.patch.object(ns, "NEOTOMA_RC_DIR", str(root)), mock.patch.object(
@@ -466,7 +466,9 @@ class NeotomaSignedTest(unittest.TestCase):
                 os.close(ready_fd)
                 os.close(release_fd)
         self.assertTrue(bounded, "helper creation held the direct caller")
-        self.assertTrue(fallback if loader else errors, "abandoned attempt was accepted")
+        self.assertTrue(errors, "abandoned attempt was accepted")
+        if loader:
+            self.assertFalse(fallback, "ambiguous timeout used bearer fallback")
         self.assertFalse(effect.exists(), "an abandoned attempt produced a real helper effect")
 
     def test_cancelled_attempt_has_no_effect_at_process_boundary(self):
@@ -540,13 +542,11 @@ class NeotomaSignedTest(unittest.TestCase):
             for _ in range(taken):
                 ns._signed_permits.release()
 
-    def test_loader_falls_back_to_bearer_on_each_signed_failure_class(self):
+    def test_loader_falls_back_only_for_known_pre_response_failures(self):
         import agent_loader as al
         self._write_key("apus")
-        failures = [ns.SignedRequestError("x", code) for code in
-                    ("busy", "expired", "helper_timeout", "response_not_json", "transport_error",
-                     "helper_error", "no_key")]
-        failures.append(subprocess.TimeoutExpired("signed_request", 20))
+        failures = [ns.SignedRequestError("x", code, response_received=False) for code in
+                    ("busy", "transport_error", "helper_signer_missing", "no_key")]
         for failure in failures:
             with self.subTest(failure=getattr(failure, "code", type(failure).__name__)):
                 response = mock.Mock(status_code=200, headers={"content-type": "application/json"},
@@ -558,6 +558,23 @@ class NeotomaSignedTest(unittest.TestCase):
                 ):
                     self.assertEqual(al.AgentLoader("apus")._neotoma("GET", "http://fixture.invalid"),
                                      {"via": "bearer"})
+
+    def test_loader_refuses_ambiguous_signed_failures_without_bearer(self):
+        import agent_loader as al
+        failures = [ns.SignedRequestError("x", code, response_received=None) for code in
+                    ("expired", "helper_timeout", "helper_error")]
+        failures.append(ns.SignedRequestError("x", "helper_error", response_received=False))
+        failures.append(subprocess.TimeoutExpired("signed_request", 20))
+        for failure in failures:
+            with self.subTest(failure=getattr(failure, "code", type(failure).__name__)):
+                with mock.patch.object(al, "ns", ns), mock.patch.object(
+                    ns, "signed_request", side_effect=failure
+                ), mock.patch.dict(os.environ, {"NEOTOMA_AAUTH_VIA_CLI": "1"}), mock.patch.object(
+                    al.httpx, "get"
+                ) as bearer:
+                    with self.assertRaises(al.AgentDefinitionUnavailable):
+                        al.AgentLoader("apus")._neotoma("GET", "http://fixture.invalid")
+                bearer.assert_not_called()
 
     # ── ateles#795 constraint 2: explicit subject, never ambient ──────────────
 

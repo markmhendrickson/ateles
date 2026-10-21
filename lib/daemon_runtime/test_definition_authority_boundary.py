@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
+import time
+from io import StringIO
+from pathlib import Path
 
 import httpx
 import pytest
@@ -85,6 +89,39 @@ def test_unregistered_daemon_refuses_start(monkeypatch):
     assert refused.value.code != 0
 
 
+@pytest.mark.parametrize("selector", ["default", "--dangerously-skip-permissions"])
+def test_daemon_startup_refuses_invalid_capability(monkeypatch, caplog, selector):
+    definition = loader.AgentDefinition(
+        entity_id="ent_fixture", name="anthus", status="active",
+        prompt_markdown="A defined role", tool_allowlist=[selector],
+    )
+    monkeypatch.setattr(loader.AgentLoader, "load", lambda self: definition)
+    with pytest.raises(SystemExit) as refused:
+        loader.load_agent_definition_or_exit("anthus")
+    assert refused.value.code == 1
+    assert selector not in caplog.text
+
+
+def test_anthus_entry_refuses_invalid_capability_before_signer(monkeypatch):
+    import asyncio
+    anthus_dir = Path(__file__).resolve().parents[2] / "execution/daemons/anthus"
+    monkeypatch.syspath_prepend(str(anthus_dir))
+    import anthus
+
+    definition = loader.AgentDefinition(
+        entity_id="ent_fixture", name="anthus", status="active",
+        prompt_markdown="A defined role", tool_allowlist=["default"],
+    )
+    monkeypatch.setattr(loader.AgentLoader, "load", lambda self: definition)
+    signer_calls = []
+    monkeypatch.setattr(anthus.AAuthSigner, "from_key_file",
+                        lambda *args: signer_calls.append(args))
+    with pytest.raises(SystemExit) as refused:
+        asyncio.run(anthus.main())
+    assert refused.value.code == 1
+    assert not signer_calls
+
+
 @pytest.mark.parametrize("raw", [None, "", [], "[]", "[invalid", [None]])
 def test_unknown_tool_set_never_becomes_a_wildcard(raw):
     assert loader.AgentDefinition(tool_allowlist=raw).tools == []
@@ -122,27 +159,8 @@ def test_real_helper_body_timeout_preserves_response_boundary(real_helper, statu
     )
     with pytest.raises(signed.SignedRequestError) as raised:
         signed.signed_request("GET", "https://fixture.invalid", agent_name="pavo", timeout=1)
-    assert raised.value.response_received is True
-    assert raised.value.http_status == status
-
-
-def test_planted_response_boundary_regression_is_detected(real_helper, monkeypatch, tmp_path):
-    # Restore the former helper's behavior after headers: only an untyped error
-    # survives a stream failure. The real-helper control above must go red.
-    original = signed._HELPER.read_text()
-    marker = '  process.stdout.write(JSON.stringify({ response_received: true, status: resp.status }) + "\\n");\n'
-    mutant = original.replace(marker, "").replace(
-        "{ status: resp.status, ok: resp.ok, body_error: true }",
-        "{ error: 'synthetic stream failure' }",
-    )
-    assert mutant != original and "response_received: true" not in mutant
-    helper = tmp_path / "old-helper.mjs"
-    helper.write_text(mutant)
-    monkeypatch.setattr(signed, "_HELPER", helper)
-    with pytest.raises(pytest.fail.Exception, match="DID NOT RAISE"):
-        test_real_helper_completed_response_never_uses_bearer(
-            real_helper, monkeypatch, 401, True,
-        )
+    assert raised.value.response_received is None
+    assert raised.value.http_status is None
 
 
 @pytest.mark.parametrize("status", [200, 403])
@@ -168,15 +186,71 @@ def test_real_helper_body_timeout_never_retries_as_bearer(real_helper, monkeypat
     assert not bearer
 
 
-def test_planted_late_status_record_is_detected(real_helper, monkeypatch, tmp_path):
-    original = signed._HELPER.read_text()
-    marker = '  process.stdout.write(JSON.stringify({ response_received: true, status: resp.status }) + "\\n");\n'
-    mutant = original.replace(marker, "")
-    assert mutant != original
-    helper = tmp_path / "late-status-helper.mjs"
-    helper.write_text(mutant)
-    monkeypatch.setattr(signed, "_HELPER", helper)
-    # The final signed-request helper reports a bounded error to its caller;
-    # without the early record, the response-boundary assertion must fail.
-    with pytest.raises(AssertionError):
-        test_real_helper_body_timeout_preserves_response_boundary(real_helper, 200)
+@pytest.mark.parametrize("unread_response", [
+    '{"response_received":true,"status":200}\n{"status":200,"body":"{}"}',
+    "",
+])
+def test_deadline_timeout_never_retries_as_bearer(
+    monkeypatch, unread_response,
+):
+    class Sender:
+        def __init__(self):
+            self.messages = []
+
+        def send(self, message):
+            self.messages.append(message)
+
+        def poll(self, timeout):
+            return True
+
+        def recv(self):
+            return ("run", time.monotonic() + 5)
+
+        def close(self):
+            pass
+
+    class Process:
+        def __init__(self):
+            self.communicate_calls = 0
+            self.stdout = StringIO(unread_response)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def communicate(self, **kwargs):
+            # A complete result can be waiting in the pipe while the timeout
+            # exception reports no output consumed by communicate().
+            self.communicate_calls += 1
+            raise subprocess.TimeoutExpired("helper", 1, output="")
+
+        def kill(self):
+            pass
+
+    sender = Sender()
+    process = Process()
+    monkeypatch.setattr(signed.os, "setsid", lambda: None)
+    signed._prepare_signed_request(
+        sender, lambda *args, **kwargs: {"key": "fixture", "sub": "pavo", "kid": "kid"},
+        "pavo", None, "", "GET", "https://fixture.invalid", None,
+        time.monotonic() + 5, "node", "helper", "rc", {},
+        lambda *args, **kwargs: process,
+    )
+    assert process.communicate_calls == 1
+    assert process.stdout.read() == unread_response
+    errors = [message for message in sender.messages if message[0] == "error"]
+    assert errors == [("error", "helper_timeout", None, None)]
+    error = signed.SignedRequestError("timed out", errors[0][1],
+                                      response_received=errors[0][2])
+    monkeypatch.setattr(signed, "via_cli_enabled", lambda: True)
+    def timed_out(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(signed, "signed_request", timed_out)
+    bearer = []
+    monkeypatch.setattr(loader.httpx, "get", lambda *args, **kwargs: bearer.append(True))
+    with pytest.raises(loader.AgentDefinitionUnavailable):
+        loader.AgentLoader("pavo")._neotoma("GET", "https://fixture.invalid")
+    assert not bearer

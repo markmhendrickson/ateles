@@ -160,6 +160,9 @@ def agent_identity(
 class SignedRequestError(RuntimeError):
     """A signed request failure, retaining whether HTTP headers were received.
 
+    ``response_received`` is True for an observed response, False only when
+    pre-response failure is known, and None when the boundary is unknown.
+
     ``code`` is a short, fixed, non-sensitive reason a caller may log:
 
     ``no_key``                the agent has no signing key (or, for a pinned call, none that
@@ -180,7 +183,7 @@ class SignedRequestError(RuntimeError):
     body, a header or a filesystem path, and callers must never log it.
     """
 
-    def __init__(self, message: str, code: str, *, response_received: bool = False,
+    def __init__(self, message: str, code: str, *, response_received: bool | None = None,
                  http_status: int | None = None):
         super().__init__(message)
         self.code = code
@@ -359,10 +362,11 @@ def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method,
                 stdout, stderr = proc.communicate(
                     input=request_json, timeout=remaining - report_margin
                 )
-            except subprocess.TimeoutExpired as exc:
-                received, status, _ = _signed_helper_output(exc.stdout)
+            except subprocess.TimeoutExpired:
+                # TimeoutExpired.stdout is only what communicate consumed. A
+                # complete response may still be unread in the helper pipe.
                 proc.kill()
-                sender.send(("error", "helper_timeout", received, status))
+                sender.send(("error", "helper_timeout", None, None))
                 return
         received, status, payload = _signed_helper_output(stdout)
         try:
@@ -398,7 +402,7 @@ def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method,
     except BaseException as exc:
         try:
             code = "helper_timeout" if isinstance(exc, subprocess.TimeoutExpired) else "helper_error"
-            sender.send(("error", code))
+            sender.send(("error", code, None, None))
         except (BrokenPipeError, EOFError, OSError):
             pass
     finally:
@@ -546,7 +550,7 @@ def signed_request(
                 if message[0] == "error":
                     raise SignedRequestError("no AAuth key" if message[1] == "no_key"
                                              else "signing request failed", message[1],
-                                             response_received=bool(message[2]) if len(message) > 2 else False,
+                                             response_received=message[2] if len(message) > 2 else False,
                                              http_status=message[3] if len(message) > 3 else None)
                 if message[0] != "result":
                     raise SignedRequestError("signing helper failed", "helper_error")
@@ -567,7 +571,8 @@ def signed_request(
     else:
         permits = _signed_permits
         if not permits.acquire(blocking=False):
-            raise SignedRequestError("no free signing worker", "busy")
+            raise SignedRequestError("no free signing worker", "busy",
+                                     response_received=False)
         try:
             future = _signed_pool.submit(_run_in_signing_worker, perform)
         except BaseException:
