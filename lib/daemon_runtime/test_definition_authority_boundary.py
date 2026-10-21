@@ -169,8 +169,6 @@ def test_real_helper_body_timeout_never_retries_as_bearer(real_helper, monkeypat
 
 
 def test_planted_late_status_record_is_detected(real_helper, monkeypatch, tmp_path):
-    import subprocess
-
     original = signed._HELPER.read_text()
     marker = '  process.stdout.write(JSON.stringify({ response_received: true, status: resp.status }) + "\\n");\n'
     mutant = original.replace(marker, "")
@@ -178,5 +176,7 @@ def test_planted_late_status_record_is_detected(real_helper, monkeypatch, tmp_pa
     helper = tmp_path / "late-status-helper.mjs"
     helper.write_text(mutant)
     monkeypatch.setattr(signed, "_HELPER", helper)
-    with pytest.raises(subprocess.TimeoutExpired):
+    # The final signed-request helper reports a bounded error to its caller;
+    # without the early record, the response-boundary assertion must fail.
+    with pytest.raises(AssertionError):
         test_real_helper_body_timeout_preserves_response_boundary(real_helper, 200)

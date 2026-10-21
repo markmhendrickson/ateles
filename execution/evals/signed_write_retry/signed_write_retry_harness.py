@@ -13,6 +13,9 @@ per attempt, each one of
     hang          the helper never answers: it runs until the timeout it was given
     lost          the write LANDS, then the response is lost (a transport error)
     http:<n>      the server answers with status n and applies nothing
+    not_json      the write LANDS, then the server's body is not JSON (response_not_json)
+    lost_rotate   the write LANDS, the response is lost, and the lens's signing key is
+                  rotated before the next attempt (a different signing principal)
 
 Scenarios in ``scenarios.json`` run `IssueGateStore.sign_off` unchanged; only the
 transport, the clock and the store are fakes. ``mutation`` reinstates a defect so a
@@ -42,7 +45,8 @@ gate_waive = base.gate_waive
 ns = base.ns
 GATE_STATUS_FIELD = base.GATE_STATUS_FIELD
 
-MUTATIONS = ("none", "no_retry", "retry_4xx", "fresh_key_per_attempt", "old_cap", "timeout_before_thread_only")
+MUTATIONS = ("none", "no_retry", "retry_4xx", "fresh_key_per_attempt", "old_cap", "timeout_before_thread_only",
+             "no_principal_check")
 
 
 def load() -> dict:
@@ -58,8 +62,16 @@ class FlakyStore(base.FakeIssueStore):
         self.seen_keys: set[str] = set()
         self.attempts: dict[str, list[str]] = {}  # field -> idempotency key per attempt
         self.timeouts: list[float] = []  # the timeout each hanging attempt was given
+        self.principal = ("", base.LENS_TP)
 
-    def transport(self, body: dict, sub: str | None, timeout: float = 20.0, clock=None) -> tuple[int, dict]:
+    def transport(self, body: dict, sub: str | None, timeout: float = 20.0, clock=None,
+                  principal_pin=None) -> tuple[int, dict]:
+        # The real preparer reports the principal it resolved, and the shared helper
+        # refuses to authorize transport when it differs from the pin. The pin class
+        # is the real one; only the key resolution is scripted.
+        principal = (sub, self.principal[1])
+        if principal_pin is not None and not principal_pin.admit(principal):
+            raise ns.SignedRequestError("signing principal changed (private detail)", "identity_changed")
         field, key = body["field"], body.get("idempotency_key", "")
         self.attempts.setdefault(field, []).append(key)
         outcome = (self.script.get(field) or ["ok"]).pop(0) if self.script.get(field) else "ok"
@@ -82,6 +94,11 @@ class FlakyStore(base.FakeIssueStore):
             status, resp = self.apply(body, sub)
         if outcome == "lost" and status < 300:
             raise ns.SignedRequestError("response lost (private detail)", "transport_error")
+        if outcome == "lost_rotate" and status < 300:
+            self.principal = (sub, "thumbprint-after-rotation")
+            raise ns.SignedRequestError("response lost (private detail)", "transport_error")
+        if outcome == "not_json" and status < 300:
+            raise ns.SignedRequestError("body was <html>private detail</html>", "response_not_json")
         return status, resp
 
 
@@ -108,8 +125,23 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
     with pytest.MonkeyPatch.context() as mp:
         issue_store = base._wire(mp, store, signer_fails=None)
 
-        def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None, **request_options):
-            return store.transport(body, sub, timeout, clock)
+        if scenario.get("rotate_after_precheck"):
+            load = issue_store.load
+            first_load = True
+
+            async def load_and_rotate(repo, issue_number):
+                nonlocal first_load
+                state = await load(repo, issue_number)
+                if first_load:
+                    store.principal = ("", "thumbprint-after-rotation")
+                    first_load = False
+                return state
+
+            mp.setattr(issue_store, "load", load_and_rotate)
+
+        def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None,
+                   principal_pin=None, **request_options):
+            return store.transport(body, sub, timeout, clock, principal_pin)
 
         mp.setattr(gate_waive._ns, "signed_request", signed)
         mp.setattr(gate_waive, "_retry_sleep", sleep, raising=False)
@@ -129,13 +161,16 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
         if mutation == "timeout_before_thread_only":
             # The previous design: compute the helper timeout, hand the call to the
             # executor and await it with no deadline of its own.
-            async def old(self, entity_id, field_name, value, key, *, lens_agent, lens_sub, deadline=None):
+            async def old(self, entity_id, field_name, value, key, *, lens_agent, lens_sub, deadline=None,
+                          principal_pin=None):
                 timeout = min(gate_waive.SIGNED_ATTEMPT_TIMEOUT_S, deadline - gate_waive._monotonic())
                 return await asyncio.to_thread(
                     gate_waive._ns.signed_request, "POST", "u", {"field": field_name, "value": value,
                     "idempotency_key": key}, agent_name=lens_agent, timeout=timeout, sub=lens_sub)
 
             mp.setattr(gate_waive.IssueGateStore, "_signed_correct", old)
+        if mutation == "no_principal_check":
+            mp.setattr(gate_waive._ns.PrincipalPin, "admit", lambda self, principal: True)
         if mutation == "no_retry":
             mp.setattr(gate_waive, "retries_for_reason", lambda code: 0)
             mp.setattr(gate_waive, "retries_for_status", lambda status: 0)
@@ -203,6 +238,10 @@ def check(scenario: dict, obs: dict) -> list[str]:
         for field, keys in store.attempts.items():
             if len(set(keys)) != 1:
                 bad.append(f"{field}: retries changed the idempotency key: {len(set(keys))} keys")
+    if "max_attempts_per_key" in exp:
+        sent = [k for keys in store.attempts.values() for k in keys]
+        want("most times one idempotency key was sent", max((sent.count(k) for k in set(sent)), default=0),
+             exp["max_attempts_per_key"])
     if "delays" in exp:
         want("backoff delays", obs["delays"], exp["delays"])
     if "writes_issued" in exp:
@@ -226,11 +265,15 @@ def check(scenario: dict, obs: dict) -> list[str]:
 
 
 def delayed_preparation_identity(agent_name, *, sub=None, keys_dir=None):
-    """Synthetic, spawn-safe resolver used only by the offline timing eval."""
+    """Synthetic, spawn-safe resolver used only by the offline timing eval.
+
+    Its key is a synthetic public JWK, so a pinned request can fingerprint it."""
     import time
     (Path(keys_dir) / "started").write_text("started")
     time.sleep(2)
-    return {"key": "synthetic-unused", "sub": sub or "synthetic", "kid": "synthetic"}
+    key = Path(keys_dir) / "synthetic-eval.jwk.json"
+    key.write_text(json.dumps({"kty": "EC", "crv": "P-256", "x": "synthetic-x", "y": "synthetic-y"}))
+    return {"key": str(key), "sub": sub or "synthetic", "kid": "synthetic"}
 
 
 def run_preparation_boundary(directory, *, mutation=False, cancel=False):
@@ -241,8 +284,7 @@ def run_preparation_boundary(directory, *, mutation=False, cancel=False):
     """
     import threading
     import time
-    from types import SimpleNamespace
-    launches = []
+    _write_helper_fixture(directory)
     permits = threading.BoundedSemaphore(1)
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     observation = {}
@@ -255,10 +297,9 @@ def run_preparation_boundary(directory, *, mutation=False, cancel=False):
         mp.setattr(gate_waive, "MIN_ATTEMPT_TIMEOUT_S", 0.01)
         mp.setattr(gate_waive, "SIGNED_ATTEMPT_TIMEOUT_S", 5)
         mp.setattr(ns, "AAUTH_KEYS_DIR", str(directory))
+        mp.setattr(ns, "NEOTOMA_RC_DIR", str(directory))
         mp.setattr(ns, "agent_identity", delayed_preparation_identity)
-        mp.setattr(ns.subprocess, "run", lambda *a, **k: (
-            launches.append(time.monotonic()) or SimpleNamespace(stdout='{"status":200,"body":"{}"}')
-        ))
+        mp.setenv("ATELES_SIGNED_EVAL_EFFECT", str(directory / "effect"))
         if mutation:
             def detached(*args, **kwargs):
                 kwargs.pop("deadline", None)
@@ -292,7 +333,7 @@ def run_preparation_boundary(directory, *, mutation=False, cancel=False):
         finally:
             # Join while all patches still hold, including in the planted control.
             pool.shutdown(wait=True)
-    observation["helper_launches"] = len(launches)
+    observation["helper_launches"] = int((directory / "effect").exists())
     return observation
 
 
@@ -303,4 +344,370 @@ def check_preparation_boundary(observation):
            if observation.get(key) != value]
     if observation["caller_seconds"] > 1.2:
         bad.append("caller exceeded deadline allowance")
+    return bad
+
+
+_REAL_POPEN = subprocess.Popen
+
+
+def _helper_creation_barrier(*args, **kwargs):
+    """Spawn-safe seam: release leads to the actual original helper process."""
+    import os
+    ready = os.open(os.environ["ATELES_SIGNED_EVAL_READY"], os.O_WRONLY)
+    os.write(ready, str(os.getpid()).encode())
+    os.close(ready)
+    release = os.open(os.environ["ATELES_SIGNED_EVAL_RELEASE"], os.O_RDONLY)
+    try:
+        os.read(release, 1)
+    finally:
+        os.close(release)
+    return _REAL_POPEN(*args, **kwargs)
+
+
+def _write_helper_fixture(directory):
+    module = directory / "dist" / "cli" / "aauth_signer.js"
+    module.parent.mkdir(parents=True, exist_ok=True)
+    (directory / "package.json").write_text('{"type":"module"}')
+    module.write_text('''import fs from "node:fs";
+import {spawn} from "node:child_process";
+export async function loadCliSignerConfig() {
+  return { privateJwk: JSON.parse(fs.readFileSync(process.env.NEOTOMA_AAUTH_PRIVATE_JWK_PATH, "utf8")) };
+}
+export async function cliSignedFetch(url, options) {
+  if (process.env.ATELES_SIGNED_EVAL_DESCENDANT === "1") {
+    const script = `const fs=require("node:fs");
+      const ready=fs.openSync(process.env.ATELES_SIGNED_EVAL_READY,"w");
+      fs.writeSync(ready,String(process.pid));fs.closeSync(ready);
+      const release=fs.openSync(process.env.ATELES_SIGNED_EVAL_RELEASE,"r");
+      fs.readSync(release,Buffer.alloc(1),0,1,null);fs.closeSync(release);
+      fs.writeFileSync(process.env.ATELES_SIGNED_EVAL_EFFECT,"late");
+      const done=fs.openSync(process.env.ATELES_SIGNED_EVAL_READY,"w");
+      fs.writeSync(done,"effect");fs.closeSync(done);`;
+    const child=spawn(process.execPath,["-e",script],{stdio:["ignore","inherit","inherit"]});
+    fs.writeFileSync(process.env.ATELES_SIGNED_EVAL_PIDS,JSON.stringify({helper:process.pid,descendant:child.pid}));
+    await new Promise(resolve=>child.on("exit",resolve));
+  } else {
+    fs.writeFileSync(process.env.ATELES_SIGNED_EVAL_EFFECT,JSON.stringify({pid:process.pid,body:options.body}));
+  }
+  return {status:200,ok:true,text:async()=>"{}"};
+}
+''')
+
+
+def _terminal_pid(pid):
+    with _REAL_POPEN(["ps", "-p", str(pid), "-o", "stat="],
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+        stdout, _ = proc.communicate(timeout=2)
+    return proc.returncode == 1 or stdout.strip().startswith("Z")
+
+
+def run_complete_boundary(directory, *, caller="gate", cancel=False,
+                          descendant=False, mutation=False, start=False):
+    """Synthetic agent request -> actual gate/shared call -> original Node helper.
+
+    External key metadata and signer effects are synthetic. Real OS startup,
+    pipes, cancellation, descendants and the SAME worker permit are observed.
+    """
+    import os
+    import contextlib
+    import select
+    import threading
+    import time
+    _write_helper_fixture(directory)
+    (directory / "synthetic.jwk.json").write_text('{"kid":"synthetic"}')
+    ready, release = directory / "ready", directory / "release"
+    os.mkfifo(ready)
+    os.mkfifo(release)
+    ready_fd = os.open(ready, os.O_RDWR | os.O_NONBLOCK)
+    release_fd = os.open(release, os.O_RDWR | os.O_NONBLOCK)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    permits = threading.BoundedSemaphore(1)
+    abandoned = threading.Event()
+    state, control = {}, {}
+    real_request = ns.signed_request
+    original_killpg = os.killpg
+    context = ns.multiprocessing.get_context("spawn")
+    real_process = context.Process
+    created = []
+
+    def controlled_process(*args, **kwargs):
+        child = real_process(*args, **kwargs)
+        launch = child.start
+
+        def controlled_start():
+            os.write(ready_fd, str(os.getpid()).encode())
+            # A real OS barrier before the original Process.start; releasing
+            # it still creates the actual child, even after caller abandonment.
+            import select
+            select.select([release_fd], [], [], 6)
+            os.read(release_fd, 1)
+            del child.start
+            launch()
+            created.append(child.pid)
+
+        child.start = controlled_start
+        return child
+    # This is the synthetic agent's selected request, including a fresh key.
+    request = {"entity_id": "synthetic", "field": "gate_status", "value": {},
+               "idempotency_key": "synthetic-unique-attempt"}
+
+    def detached(*args, **kwargs):
+        kwargs.pop("deadline", None)
+        kwargs.pop("cancelled", None)
+        kwargs["timeout"] = 5
+        return real_request(*args, **kwargs)
+
+    def run():
+        began = time.monotonic()
+        try:
+            if caller == "direct":
+                def call():
+                    return ns.signed_request("POST", "http://fixture.invalid", request,
+                                             agent_name="synthetic", timeout=0.8, cancelled=abandoned)
+                if mutation == "unbound_start":
+                    ns._run_in_signing_worker(call)
+                else:
+                    call()
+            else:
+                async def call():
+                    control["loop"] = asyncio.get_running_loop()
+                    control["task"] = asyncio.current_task()
+                    return await gate_waive.IssueGateStore("http://fixture.invalid", "")._signed_correct(
+                        "synthetic", "gate_status", {}, request["idempotency_key"],
+                        lens_agent="synthetic", lens_sub="synthetic@ateles-swarm",
+                        deadline=time.monotonic() + 0.8)
+                asyncio.run(call())
+            state["failed"] = False
+        except (ns.SignedRequestError, subprocess.TimeoutExpired, asyncio.CancelledError):
+            state["failed"] = True
+        finally:
+            state["caller_seconds"] = time.monotonic() - began
+
+    cleanup = contextlib.ExitStack()
+    cleanup.callback(os.close, ready_fd)
+    cleanup.callback(os.close, release_fd)
+    cleanup.callback(pool.shutdown, wait=True)
+
+    def stop_control_group():
+        if mutation == "no_group" and state.get("owned_group"):
+            try:
+                original_killpg(state["owned_group"], __import__("signal").SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    cleanup.callback(stop_control_group)
+    with cleanup, pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ns, "AAUTH_KEYS_DIR", str(directory))
+        mp.setattr(ns, "NEOTOMA_RC_DIR", str(directory))
+        mp.setattr(ns, "_signed_pool", pool)
+        mp.setattr(ns, "_signed_permits", permits)
+        mp.setattr(gate_waive, "_signed_pool", pool)
+        mp.setattr(gate_waive, "_signed_permits", permits)
+        mp.setattr(gate_waive, "_monotonic", time.monotonic)
+        mp.setattr(gate_waive, "MIN_ATTEMPT_TIMEOUT_S", 0.01)
+        mp.setenv("ATELES_SIGNED_EVAL_EFFECT", str(directory / "effect"))
+        mp.setenv("ATELES_SIGNED_EVAL_READY", str(ready))
+        mp.setenv("ATELES_SIGNED_EVAL_RELEASE", str(release))
+        mp.setenv("ATELES_SIGNED_EVAL_PIDS", str(directory / "pids"))
+        mp.setenv("ATELES_SIGNED_EVAL_DESCENDANT", "1" if descendant else "0")
+        if start:
+            mp.setattr(context, "Process", controlled_process)
+            mp.setattr(ns.multiprocessing, "get_context", lambda method: context)
+        elif not descendant:
+            mp.setattr(ns.subprocess, "Popen", _helper_creation_barrier)
+        if mutation is True:
+            mp.setattr(ns, "signed_request", detached)
+        if mutation == "no_group":
+            mp.setattr(ns.os, "killpg", lambda pid, sig: None)
+        thread = threading.Thread(target=run)
+        thread.start()
+        try:
+            state["boundary_reached"] = bool(select.select([ready_fd], [], [], 2)[0])
+            if state["boundary_reached"]:
+                state["boundary_pid"] = int(os.read(ready_fd, 100))
+            if descendant and (directory / "pids").exists():
+                owned = json.loads((directory / "pids").read_text())
+                state["owned_group"] = os.getpgid(owned["helper"])
+                assert state["owned_group"] == os.getpgid(owned["descendant"])
+            if cancel:
+                abandoned.set()
+                if caller == "gate" and "task" in control:
+                    control["loop"].call_soon_threadsafe(control["task"].cancel)
+            thread.join(1.5)
+            state["caller_bounded"] = not thread.is_alive()
+            if start:
+                state["permit_held_during_start"] = not permits.acquire(blocking=False)
+                if not state["permit_held_during_start"]:
+                    permits.release()
+            if (directory / "pids").exists():
+                state["owned_pids"] = json.loads((directory / "pids").read_text())
+                state["owned_pids_terminal_at_return"] = all(
+                    _terminal_pid(pid) for pid in state["owned_pids"].values())
+        finally:
+            os.write(release_fd, b"1")
+            thread.join(6)
+            # Drain actual work without replacing either the pool or permit.
+            pool.submit(lambda: None).result(timeout=6)
+        if mutation == "no_group":
+            state["effect_signal"] = bool(select.select([ready_fd], [], [], 2)[0])
+            if state["effect_signal"]:
+                assert os.read(ready_fd, 100) == b"effect"
+        state["late_effect"] = (directory / "effect").exists()
+        if start:
+            state["actual_created_pids"] = created
+            state["created_pids_terminal"] = bool(created) and all(_terminal_pid(pid) for pid in created)
+        state["permit_recovered"] = permits.acquire(blocking=False)
+        if state["permit_recovered"]:
+            permits.release()
+        mp.setattr(ns.subprocess, "Popen", _REAL_POPEN)
+        mp.setattr(context, "Process", real_process)
+        mp.setattr(ns.os, "killpg", original_killpg)
+        mp.setattr(ns, "signed_request", real_request)
+        mp.setenv("ATELES_SIGNED_EVAL_DESCENDANT", "0")
+        if (directory / "pids").exists():
+            state["owned_pids"] = json.loads((directory / "pids").read_text())
+            state["owned_pids_terminal"] = all(_terminal_pid(pid) for pid in state["owned_pids"].values())
+        state["healthy_result"] = real_request("POST", "http://fixture.invalid", request,
+                                                agent_name="synthetic", timeout=3) == (200, {})
+        state["healthy_effect"] = (directory / "effect").exists()
+    return state
+
+
+def check_complete_boundary(observation):
+    expected = {"boundary_reached": True, "caller_bounded": True, "failed": True,
+                "late_effect": False, "permit_recovered": True,
+                "healthy_result": True, "healthy_effect": True}
+    if "owned_pids" in observation:
+        expected["owned_pids_terminal"] = True
+        expected["owned_pids_terminal_at_return"] = True
+    if "actual_created_pids" in observation:
+        expected["created_pids_terminal"] = True
+        expected["permit_held_during_start"] = True
+    bad = [f"{key}: {observation.get(key)!r}" for key, value in expected.items()
+           if observation.get(key) != value]
+    if observation.get("caller_seconds", float("inf")) > 1.2:
+        bad.append("caller exceeded complete-attempt allowance")
+    return bad
+
+
+def _write_rotating_helper(directory):
+    """A Node signer fixture that records each time it is asked to SIGN. Its first
+    call loses the response (a transport error after the write 'landed') and, when
+    ATELES_SIGNED_EVAL_ROTATE is 1, replaces the lens's key file, so the next attempt
+    would be signed by another principal. Like the real signer it exports
+    ``loadCliSignerConfig`` (reads the key file once) and honours ``configOverride``;
+    the repo's own ``signed_fetch.mjs`` is the helper under test, unmodified."""
+    module = directory / "dist" / "cli" / "aauth_signer.js"
+    module.parent.mkdir(parents=True, exist_ok=True)
+    (directory / "package.json").write_text('{"type":"module"}')
+    module.write_text('''import fs from "node:fs";
+export async function loadCliSignerConfig() {
+  const privateJwk = JSON.parse(fs.readFileSync(process.env.NEOTOMA_AAUTH_PRIVATE_JWK_PATH, "utf8"));
+  return { privateJwk, sub: process.env.NEOTOMA_AAUTH_SUB };
+}
+export async function cliSignedFetch(url, options) {
+  const launches = process.env.ATELES_SIGNED_EVAL_LAUNCHES;
+  const first = !fs.existsSync(launches);
+  const config = options.configOverride ?? (await loadCliSignerConfig());
+  fs.appendFileSync(launches, config.privateJwk.x + "\\n");
+  if (first) {
+    if (process.env.ATELES_SIGNED_EVAL_ROTATE === "1") {
+      fs.writeFileSync(process.env.NEOTOMA_AAUTH_PRIVATE_JWK_PATH,
+        JSON.stringify({kty: "EC", crv: "P-256", x: "rotated-x", y: "synthetic-y", kid: "synthetic"}));
+    }
+    throw new Error("fetch failed");
+  }
+  return {status: 200, ok: true, text: async () => "{}"};
+}
+''')
+    (directory / "synthetic.jwk.json").write_text(_KEY_ORIGINAL)
+
+
+_KEY_ORIGINAL = json.dumps({"kty": "EC", "crv": "P-256", "x": "original-x", "y": "synthetic-y", "kid": "synthetic"})
+_KEY_SWAPPED = json.dumps({"kty": "EC", "crv": "P-256", "x": "swapped-x", "y": "synthetic-y", "kid": "synthetic"})
+
+
+def helper_without_key_check(directory):
+    """The repo's own helper with only its key verification removed (planted red)."""
+    source = (Path(ns.__file__).resolve().parent / "signed_fetch.mjs").read_text()
+    needle = "ecThumbprint(configOverride.privateJwk) !== spec.expect_thumbprint"
+    assert needle in source, "the helper's verification moved; update the planted control"
+    stripped = directory / "unchecked" / "signed_fetch.mjs"
+    stripped.parent.mkdir(exist_ok=True)
+    stripped.write_text(source.replace(needle, "false"))
+    return stripped
+
+
+def run_identity_boundary(directory, *, rotate=False, swap=False, mutation=False):
+    """The REAL gate write -> real spawned preparer -> real signed_fetch.mjs helper,
+    with an inert signer fixture, where the lens's signing key changes
+
+    * ``rotate``: between a first attempt (which lost its response) and the retry's
+      preparer, so the preparer's own comparison must stop it; or
+    * ``swap``: AFTER the retry's preparer fingerprinted the key and BEFORE the helper
+      reads it (the swap runs in the parent right after the pin admitted the principal
+      and before transport is authorized), so only the helper's check can stop it.
+
+    Offline: the key is a synthetic public JWK. ``mutation`` True removes the pin's
+    preparer-side comparison; ``"no_helper_check"`` removes the helper's key check;
+    ``"no_checks"`` removes both.
+    """
+    import time
+    _write_rotating_helper(directory)
+    capture = base._Capture()
+    logger = logging.getLogger("apis.gate_waive")
+    logger.addHandler(capture)
+    observation = {}
+
+    async def instant(delay):
+        return None
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ns, "AAUTH_KEYS_DIR", str(directory))
+        mp.setattr(ns, "NEOTOMA_RC_DIR", str(directory))
+        mp.setattr(gate_waive, "_retry_sleep", instant)
+        mp.setattr(gate_waive, "_monotonic", time.monotonic)
+        mp.setenv("ATELES_SIGNED_EVAL_LAUNCHES", str(directory / "launches"))
+        mp.setenv("ATELES_SIGNED_EVAL_ROTATE", "1" if rotate else "0")
+        real_admit = ns.PrincipalPin.admit
+        admissions = {"n": 0}
+
+        def admit(self, principal):
+            allowed = real_admit(self, principal) or mutation in (True, "no_checks")
+            admissions["n"] += 1
+            if swap and admissions["n"] == 2:
+                (directory / "synthetic.jwk.json").write_text(_KEY_SWAPPED)
+            return allowed
+
+        mp.setattr(ns.PrincipalPin, "admit", admit)
+        if mutation in ("no_helper_check", "no_checks"):
+            mp.setattr(ns, "_HELPER", helper_without_key_check(directory))
+        try:
+            observation["result"] = asyncio.run(
+                gate_waive.IssueGateStore("http://unused.invalid", "")._sign_off_write(
+                    "synthetic", "gate_status", {}, "synthetic-key", lens_agent="synthetic",
+                    lens_sub="synthetic@ateles-swarm", context=("synthetic", 1, "pm")))
+        finally:
+            logger.removeHandler(capture)
+    launches = directory / "launches"
+    observation["signed_with"] = launches.read_text().split() if launches.exists() else []
+    observation["launches"] = len(observation["signed_with"])
+    observation["log"] = "\n".join(capture.lines)
+    return observation
+
+
+def check_identity_boundary(observation, *, blocked):
+    """``blocked``: the retry must not be signed or sent, and the write fails closed."""
+    if blocked:
+        expected = {"result": gate_waive.SIGN_OFF_SIGNING_FAILED, "launches": 1}
+    else:
+        expected = {"result": "", "launches": 2}
+    bad = [f"{key}: {observation.get(key)!r}" for key, value in expected.items()
+           if observation.get(key) != value]
+    if blocked and "reason=identity_changed" not in observation["log"]:
+        bad.append("the failure was not reported as identity_changed")
+    if blocked and "swapped-x" in observation["signed_with"]:
+        bad.append("the retry was signed with the swapped key")
+    if any(word in observation["log"] for word in ("rotated-x", "original-x", "swapped-x")):
+        bad.append("the log carries key material")
     return bad

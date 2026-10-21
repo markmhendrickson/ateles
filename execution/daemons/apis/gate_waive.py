@@ -36,12 +36,10 @@ Shape notes learned from the live prod entity (``ent_4c1f77bc5fc86a2bad2025d6``)
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import inspect
 import hashlib
 import json
 import subprocess
-import threading
 import time
 import logging
 import os
@@ -265,10 +263,19 @@ def new_history_entries(current: list[dict], entries: list[dict]) -> list[dict]:
 # of the same observation, never applied twice. The retry is for the failures that
 # say "the server or the path to it was briefly unavailable" and for nothing else:
 #
-#   transport_error / helper_timeout / response_not_json   2 retries
-#   HTTP 5xx                                               2 retries
-#   HTTP 401 (a one-off token hiccup)                      1 retry
-#   every other 4xx, and every other reason code           none
+#   transport_error / helper_timeout / busy / response_not_json   2 retries
+#   HTTP 5xx                                                      2 retries
+#   HTTP 401 (a one-off token hiccup)                             1 retry
+#   every other 4xx, and every other reason code                  none
+#
+# A response body that is not JSON (`response_not_json`, for example a gateway's HTML
+# error page) is the same uncertainty as a lost response: the write may have landed.
+# Repeating it with the same idempotency key is therefore safe, and it is retried.
+#
+# A retry also requires the SAME signing principal (`neotoma_signed.PrincipalPin`):
+# the server de-duplicates per principal, so a retry signed by a different principal
+# would be a second first attempt. If the principal changed, nothing is sent and the
+# write fails closed (reason `identity_changed`, never retried).
 #
 # Backoff is short (1 s, then 3 s). The whole write is bounded by ONE DEADLINE,
 # computed when the operation starts:
@@ -288,7 +295,7 @@ SIGNED_WRITE_TOTAL_CAP_S = 45.0
 SIGNED_ATTEMPT_TIMEOUT_S = 20.0  # the signing helper's own default timeout
 BEARER_ATTEMPT_TIMEOUT_S = 30.0  # the bearer path's default HTTP timeout
 MIN_ATTEMPT_TIMEOUT_S = 2.0  # a retry is not started with less than this left
-_RETRYABLE_CODES = frozenset({"transport_error", "helper_timeout", "busy"})
+_RETRYABLE_CODES = frozenset({"transport_error", "helper_timeout", "busy", "response_not_json"})
 _monotonic = time.monotonic
 
 
@@ -305,20 +312,17 @@ def _retry_fits(started: float, retries_done: int) -> bool:
 
 _retry_sleep = asyncio.sleep
 
-# Signing workers: a small, FIXED pool owned by this module, with one permit per
+# Signing workers: the shared, FIXED signing pool, with one permit per
 # worker so a call is never queued behind another. A call that finds no free permit
 # fails at once with the retryable reason "busy" (it is retried inside the deadline
 # like any transient failure). A permit is released when the WORKER finishes, not when
 # the caller gives up, so the number of live workers can never exceed the pool size,
-# and both signing preparation and the helper process are killed and reaped when
-# their shared allowance expires (with OS kill/reap latency). The same approach
-# (fixed pool, permit per worker, deadline re-read when work begins, abandon flag,
-# bounded await) is used by the agent-definition loader.
-SIGNED_WORKERS = 8
-_signed_pool = concurrent.futures.ThreadPoolExecutor(
-    max_workers=SIGNED_WORKERS, thread_name_prefix="signed-write"
-)
-_signed_permits = threading.BoundedSemaphore(SIGNED_WORKERS)
+# and preparation/helper sessions are terminated on abandonment. Cleanup retains
+# its permit through actual worker completion. Direct signed requests (including
+# the loader) use this same pool; there is no nested executor or queued replay.
+SIGNED_WORKERS = _ns.SIGNED_WORKERS
+_signed_pool = _ns._signed_pool
+_signed_permits = _ns._signed_permits
 
 
 def retries_for_reason(code: str) -> int:
@@ -355,8 +359,8 @@ def signed_failure_code(exc: BaseException) -> str:
 # "expired" = the attempt's deadline passed before (or while) it ran; no write was
 # issued by a worker that saw it, and a late one is discarded. Never retried.
 _SIGNED_FAILURE_CODES = frozenset(
-    {"no_key", "helper_non_json", "helper_signer_missing", "transport_error", "helper_error",
-     "expired", "busy", "response_not_json"}
+    {"no_key", "helper_non_json", "helper_signer_missing", "transport_error", "helper_error", "helper_timeout",
+     "expired", "busy", "response_not_json", "identity_changed"}
 )
 
 
@@ -1817,6 +1821,9 @@ class IssueGateStore:
             )
             return outcome
 
+        principal_pin = _ns.PrincipalPin()
+        principal_pin.admit((str(identity["sub"]), lens_thumbprint))
+
         state = await self.load(repo, issue_number)
         if state.row_unreadable:
             # The row for this issue carried no snapshot object: its state is
@@ -1964,6 +1971,7 @@ class IssueGateStore:
                 history_written=history_written,
                 head_sha=head_sha,
                 attempt=now,
+                principal_pin=principal_pin,
             )
 
         # 1. The non-safety fields first. A failure here leaves `gate_status`
@@ -1991,6 +1999,7 @@ class IssueGateStore:
                 lens_agent=lens_agent,
                 lens_sub=lens_sub,
                 context=(repo, issue_number, gate),
+                principal_pin=principal_pin,
             )
             if failure:
                 return await _settle(
@@ -2033,6 +2042,7 @@ class IssueGateStore:
             lens_agent=lens_agent,
             lens_sub=lens_sub,
             context=(repo, issue_number, gate),
+            principal_pin=principal_pin,
         )
         if failure:
             return await _settle(failure, gate_written=True, history_written=history_written)
@@ -2152,6 +2162,7 @@ class IssueGateStore:
         lens_agent: str,
         lens_sub: str,
         deadline: float | None = None,
+        principal_pin: "_ns.PrincipalPin | None" = None,
     ) -> tuple[int, dict]:
         """One lens-signed `correct`, off the event loop, bounded by an ABSOLUTE deadline.
 
@@ -2189,7 +2200,7 @@ class IssueGateStore:
         )
         if deadline is None:
             deadline = _monotonic() + SIGNED_WRITE_TOTAL_CAP_S
-        abandoned = threading.Event()
+        abandoned = _ns._SignedCancellation()
         url = f"{self.base_url}/correct"
         body = {
             "entity_id": entity_id,
@@ -2216,6 +2227,7 @@ class IssueGateStore:
                 deadline=deadline,
                 cancelled=abandoned,
                 clock=_monotonic,
+                principal_pin=principal_pin,
             )
 
         permits = _signed_permits
@@ -2226,7 +2238,7 @@ class IssueGateStore:
             permits.release()
 
         try:
-            concurrent_future = _signed_pool.submit(run)
+            concurrent_future = _signed_pool.submit(_ns._run_in_signing_worker, run)
         except BaseException:
             permits.release()
             raise
@@ -2257,6 +2269,7 @@ class IssueGateStore:
         lens_agent: str,
         lens_sub: str,
         context: tuple[str, int, str],
+        principal_pin: "_ns.PrincipalPin | None" = None,
     ) -> str:
         """Perform one sign-off write; return "" on 2xx, else a failure class.
 
@@ -2270,6 +2283,11 @@ class IssueGateStore:
         repo, issue_number, gate = context
         started = _monotonic()
         attempt = 0
+        # A sign-off passes its prechecked pin through every field write. Other
+        # callers get one pin for this logical write. Every attempt resolves the
+        # key afresh, but a changed principal is refused before transport because
+        # the server de-duplicates an idempotency key per principal.
+        pin = principal_pin if principal_pin is not None else _ns.PrincipalPin()
         while True:
             attempt += 1
             reason, shown, retries_allowed = "", "", 0
@@ -2282,6 +2300,7 @@ class IssueGateStore:
                     lens_agent=lens_agent,
                     lens_sub=lens_sub,
                     deadline=started + SIGNED_WRITE_TOTAL_CAP_S,
+                    principal_pin=pin,
                 )
             except Exception as exc:  # noqa: BLE001 — classify, never crash
                 # The exception's CLASS and a fixed reason code, plus the size of
@@ -2345,6 +2364,7 @@ class IssueGateStore:
         history_written: bool,
         head_sha: str = "",
         attempt: str = "",
+        principal_pin: "_ns.PrincipalPin | None" = None,
     ) -> SignOffOutcome:
         """Make a failed sign-off leave the record as it found it, and say so.
 
@@ -2382,6 +2402,7 @@ class IssueGateStore:
             idempotency_suffix=idempotency_suffix,
             gate_written=gate_written,
             original_error=original_error,
+            principal_pin=principal_pin,
         )
         if history_written:
             await self._record_failed_sign_off(
@@ -2396,6 +2417,7 @@ class IssueGateStore:
                 idempotency_suffix=idempotency_suffix,
                 head_sha=head_sha,
                 attempt=attempt,
+                principal_pin=principal_pin,
             )
         return outcome
 
@@ -2413,6 +2435,7 @@ class IssueGateStore:
         idempotency_suffix: str,
         gate_written: bool,
         original_error: str,
+        principal_pin: "_ns.PrincipalPin | None" = None,
     ) -> SignOffOutcome:
         if not reread.found or reread.gate_status_unreadable:
             outcome.observed_state = (
@@ -2445,6 +2468,7 @@ class IssueGateStore:
                 lens_agent=lens_agent,
                 lens_sub=lens_sub,
                 context=(repo, issue_number, gate),
+                principal_pin=principal_pin,
             )
             # Re-read whether or not the restore reported success: a restore
             # whose transport failed may still have landed, and one that
@@ -2503,6 +2527,7 @@ class IssueGateStore:
         idempotency_suffix: str,
         head_sha: str = "",
         attempt: str = "",
+        principal_pin: "_ns.PrincipalPin | None" = None,
     ) -> None:
         """Append a `sign_off_failed` entry after this call's `signed_off` one.
 
@@ -2551,6 +2576,7 @@ class IssueGateStore:
             lens_agent=lens_agent,
             lens_sub=lens_sub,
             context=(repo, issue_number, gate),
+            principal_pin=principal_pin,
         )
         if failure:
             log.error(
