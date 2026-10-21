@@ -35,6 +35,7 @@ def test_scenario_set_covers_the_required_behaviours():
         "forced_fly_without_app_refused_not_pat",
         "opted_in_class_runs_on_fly",
         "shared_role_token_uses_aauth_key_without_shipping_bearer",
+        "shared_role_token_fly_launch_falls_back_with_correction",
         "forced_fly_budget_deferral",
         "forced_fly_disconnect_cleans_up",
         "forced_fly_timeout_cleans_up",
@@ -125,6 +126,30 @@ def test_judge_goes_red_when_key_only_job_omits_the_discarded_token_probe(
     unsigned = dataclasses.replace(trace, result_record_signed=False)
     assert any("did not sign the result record" in problem
                for problem in runner.judge(scenario, unsigned))
+
+
+def test_judge_goes_red_when_key_only_notice_is_late_or_fallback_is_uncorrected(
+        tmp_path, monkeypatch):
+    key_only = _by_id("shared_role_token_uses_aauth_key_without_shipping_bearer")
+    (tmp_path / "fly").mkdir()
+    trace = runner.run_scenario(key_only, tmp_path / "fly", monkeypatch)
+    late = dataclasses.replace(trace, dispatch_events=["launch", "key_only_notice"])
+    assert any("dispatch events" in problem for problem in runner.judge(key_only, late))
+
+    fallback = _by_id("shared_role_token_fly_launch_falls_back_with_correction")
+    (tmp_path / "local").mkdir()
+    trace = runner.run_scenario(fallback, tmp_path / "local", monkeypatch)
+    uncorrected = dataclasses.replace(
+        trace, dispatch_events=["key_only_notice", "launch"],
+        stderr_text=trace.stderr_text.replace(
+            "The Fly launch failed; this run fell back to a local run with its normal tools.", ""),
+    )
+    assert any("correction" in problem for problem in runner.judge(fallback, uncorrected))
+    false_result = dataclasses.replace(trace, envelope={**trace.envelope, "stdout": (
+        str(trace.envelope["stdout"]) + runner.fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE
+    )})
+    assert any("falsely says it ran on Fly" in problem
+               for problem in runner.judge(fallback, false_result))
 
 
 def test_judge_goes_red_when_cleanup_is_skipped(tmp_path, monkeypatch):

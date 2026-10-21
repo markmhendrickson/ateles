@@ -106,8 +106,46 @@
         "in_flight_after": 0,
         "machine_gone": true,
         "key_only_no_agent_mcp": true,
+        "dispatch_events": ["key_only_notice", "launch"],
         "result_record_aauth_key": true,
         "probe_env_contains": "LANIUS_NEOTOMA_TOKEN"
+      }
+    },
+    {
+      "id": "shared_role_token_fly_launch_falls_back_with_correction",
+      "description": "A key-only Fly job is refused before launch; the opted-in dispatch corrects its capability notice and completes locally with normal tools, without claiming a Fly result.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+        "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "create": "refused"
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "LOCAL GATE_INHERITANCE: clear",
+        "local_cli_ran": true,
+        "machines_created": 0,
+        "in_flight_after": 0,
+        "revoked_all_minted": true,
+        "dispatch_events": ["key_only_notice", "launch", "local_correction"],
+        "local_key_only_correction": true
       }
     },
     {

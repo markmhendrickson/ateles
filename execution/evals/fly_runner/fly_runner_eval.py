@@ -297,6 +297,7 @@ class Trace:
     envelopes: list = field(default_factory=list)
     exit_codes: list = field(default_factory=list)
     starts: list = field(default_factory=list)
+    dispatch_events: list[str] = field(default_factory=list)
     everything_sent: str = field(repr=False, default="")
 
 
@@ -614,6 +615,23 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     fly_runner._LOGIN_LOCKS.clear()
 
     # ── Drive the agent-facing CLI ───────────────────────────────────────────
+    dispatch_events: list[str] = []
+    real_run = executor.run
+
+    async def record_launch(job):
+        dispatch_events.append("launch")
+        return await real_run(job)
+
+    executor.run = record_launch
+
+    class NoticeStream(io.StringIO):
+        def write(self, value):
+            if fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE in value:
+                dispatch_events.append("key_only_notice")
+            if "The Fly launch failed; this run fell back to a local run" in value:
+                dispatch_events.append("local_correction")
+            return super().write(value)
+
     out, err = io.StringIO(), io.StringIO()
     provider = scenario.get("provider", "claude")
     provider_args = [] if provider == "router" else ["--provider", provider]
@@ -621,7 +639,7 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     exit_codes: list[int] = []
     try:
         for _ in range(int(scenario.get("dispatches", 1))):
-            out, err = io.StringIO(), io.StringIO()
+            out, err = io.StringIO(), NoticeStream()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 exit_codes.append(dispatch_role.main(
                     ["--role", ROLE, "--task", "Check the PR's gate inheritance.",
@@ -676,6 +694,7 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         envelopes=envelopes,
         exit_codes=exit_codes,
         starts=list(fake.starts),
+        dispatch_events=dispatch_events,
         argv_max_bytes=_longest_argument(fake.created_configs),
         claude_login_state=str(fake.machines.get("m-claude-login", {}).get("state", "")),
         claude_login_job_files_after=fly_runner._has_job_config(
@@ -766,6 +785,15 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
         problems.append("the envelope does not say which Mac usage reading was set aside")
     if "stdout_contains" in e and e["stdout_contains"] not in str(env.get("stdout", "")):
         problems.append(f"result stdout lacks {e['stdout_contains']!r}")
+    if "dispatch_events" in e and trace.dispatch_events != e["dispatch_events"]:
+        problems.append(f"dispatch events {trace.dispatch_events!r} != {e['dispatch_events']!r}")
+    if e.get("local_key_only_correction"):
+        if "The Fly launch failed; this run fell back to a local run with its normal tools." not in trace.stderr_text:
+            problems.append("local fallback correction was not emitted to stderr")
+        if fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE in str(env.get("stdout", "")):
+            problems.append("local result falsely says it ran on Fly key-only")
+        if "LANIUS_NEOTOMA_TOKEN" in trace.stdout_text + trace.stderr_text + json.dumps(env):
+            problems.append("discarded token name appeared in the local result or notice")
     if "reason_contains" in e:
         reason = f"{env.get('reason', '')} {env.get('error', '')} {env.get('stderr', '')}"
         if e["reason_contains"] not in reason:
