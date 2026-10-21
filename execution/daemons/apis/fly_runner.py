@@ -1898,6 +1898,7 @@ def build_job(
         # Every other role's PAT by name, plus the operator's canary name(s).
         *sorted(n for n in os.environ if n.endswith("_AGENT_PAT")),
         *sorted(n for n in os.environ if n.endswith("_NEOTOMA_TOKEN") and n != token_name),
+        *([token_name] if not own_token else []),
         *config.extra_probe_env_names,
     ]))  # fmt: skip
 

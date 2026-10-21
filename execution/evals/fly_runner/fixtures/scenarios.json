@@ -70,7 +70,7 @@
     },
     {
       "id": "shared_role_token_uses_aauth_key_without_shipping_bearer",
-      "description": "The role token matches the shared daemon bearer, but a valid AAuth key lets the Fly dispatch run without shipping the bearer.",
+      "description": "The role token matches the shared daemon bearer, so the Fly job ships only its AAuth key: the child launches without a Neotoma MCP server while the runner still signs its result record with that key. The discarded token name remains in the forbidden-environment probe.",
       "settings": {
         "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
         "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
@@ -104,7 +104,10 @@
         "minted": 1,
         "revoked_all_minted": true,
         "in_flight_after": 0,
-        "machine_gone": true
+        "machine_gone": true,
+        "key_only_no_agent_mcp": true,
+        "result_record_aauth_key": true,
+        "probe_env_contains": "LANIUS_NEOTOMA_TOKEN"
       }
     },
     {

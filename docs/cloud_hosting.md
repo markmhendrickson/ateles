@@ -117,6 +117,8 @@ before starting the CLI, constructs its child environment from the shared
 allowlist, and keeps signing/result-publishing authority out of the child.
 A role needs its own Neotoma identity; the shared daemon bearer is not a Fly
 fallback. Probe reports contain names and presence checks, never values.
+A key-only Fly job signs its result record with AAuth, but its child has no
+agent-side Neotoma MCP tools because it has no role bearer for the MCP config.
 
 Repository delivery additionally needs a distinct PR-opener App configuration.
 The [existing App helper](../lib/github_app_token.py) resolves that identity;

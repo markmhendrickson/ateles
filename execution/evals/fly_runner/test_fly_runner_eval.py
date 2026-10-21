@@ -109,6 +109,24 @@ def test_judge_goes_red_when_a_pat_is_used(tmp_path, monkeypatch):
     assert any("shared PAT was sent" in p for p in problems)
 
 
+def test_judge_goes_red_when_key_only_job_omits_the_discarded_token_probe(
+        tmp_path, monkeypatch):
+    scenario = _by_id("shared_role_token_uses_aauth_key_without_shipping_bearer")
+    trace = runner.run_scenario(scenario, tmp_path, monkeypatch)
+    missing_probe = dataclasses.replace(
+        trace,
+        job_specs=[{**spec, "probe_env_names": []} for spec in trace.job_specs],
+    )
+    assert any("did not probe LANIUS_NEOTOMA_TOKEN" in problem
+               for problem in runner.judge(scenario, missing_probe))
+    wrong_child = dataclasses.replace(trace, key_only_child_has_mcp=True)
+    assert any("received a Neotoma MCP config" in problem
+               for problem in runner.judge(scenario, wrong_child))
+    unsigned = dataclasses.replace(trace, result_record_signed=False)
+    assert any("did not sign the result record" in problem
+               for problem in runner.judge(scenario, unsigned))
+
+
 def test_judge_goes_red_when_cleanup_is_skipped(tmp_path, monkeypatch):
     scenario = _by_id("forced_fly_disconnect_cleans_up")
     trace = runner.run_scenario(scenario, tmp_path, monkeypatch)

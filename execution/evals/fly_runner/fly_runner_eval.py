@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import importlib.util
 import io
 import json
 import socket
@@ -283,6 +284,9 @@ class Trace:
     claude_login_state: str = ""
     claude_login_job_files_after: bool = False
     started_specs: list = field(default_factory=list)
+    job_specs: list = field(default_factory=list)
+    key_only_child_has_mcp: bool | None = None
+    result_record_signed: bool | None = None
     system_prompt_file_bytes: int = 0
     login_stop_requests: int = 0
     login_mutations: int = 0
@@ -308,6 +312,55 @@ def _stand_in_cli(tmp_path: Path) -> tuple[str, Path]:
     )
     cli.chmod(cli.stat().st_mode | stat.S_IEXEC)
     return str(cli), marker
+
+
+def _valid_eval_jwk() -> dict:
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from lib.daemon_runtime.aauth_httpsig import _b64url_nopad
+
+    numbers = ec.generate_private_key(ec.SECP256R1()).private_numbers()
+    return {
+        "kty": "EC", "crv": "P-256",
+        "x": _b64url_nopad(numbers.public_numbers.x.to_bytes(32, "big")),
+        "y": _b64url_nopad(numbers.public_numbers.y.to_bytes(32, "big")),
+        "d": _b64url_nopad(numbers.private_value.to_bytes(32, "big")),
+        "sub": f"{ROLE}@ateles-swarm",
+    }  # fmt: skip
+
+
+def _key_only_runner_contract(config: dict, tmp_path: Path) -> tuple[bool, bool]:
+    """Exercise the shipped job with the real child preparation and signer."""
+    spec = importlib.util.spec_from_file_location(
+        "fly_eval_run_job", _REPO / "deploy" / "fly-runner" / "run_job.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules["fly_eval_run_job"] = module
+    spec.loader.exec_module(module)
+    job_dir = tmp_path / "key-only-runner-job"
+    for guest_path, data in _job_files(config).items():
+        target = job_dir / Path(guest_path).relative_to("/run/job")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    job = module.load_job(job_dir)
+    home = tmp_path / "key-only-runner-home"
+    home.mkdir()
+    argv, child_env = module.prepare_child(
+        job, home,
+        {"PATH": "/usr/bin", "NEOTOMA_BEARER_TOKEN": SHARED_BEARER,
+         "LANIUS_NEOTOMA_TOKEN": SHARED_BEARER},
+    )  # fmt: skip
+    auth = module.auth_headers_for(job)(
+        "https://neotoma.eval.invalid/store", b'{"run_id":"fly-eval"}')
+    child_has_mcp = (
+        "--mcp-config" in argv
+        or "LANIUS_NEOTOMA_TOKEN" in child_env
+        or "NEOTOMA_BEARER_TOKEN" in child_env
+        or any(SHARED_BEARER in arg for arg in argv)
+    )
+    headers = {name.lower() for name in auth}
+    signed = {"signature", "signature-key"} <= headers and "authorization" not in headers
+    return child_has_mcp, signed
 
 
 def _decoded(request: httpx.Request) -> str:
@@ -365,10 +418,11 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     if scenario["identity"] == "key":
         keys = tmp_path / "keys"
         keys.mkdir()
-        (keys / f"{ROLE}.jwk.json").write_text(json.dumps({
+        jwk = (_valid_eval_jwk() if scenario["expect"].get("result_record_aauth_key") else {
             "kty": "EC", "crv": "P-256", "x": "eval-x", "y": "eval-y",
             "d": "eval-private-scalar", "sub": f"{ROLE}@ateles-swarm",
-        }))  # fmt: skip
+        })  # fmt: skip
+        (keys / f"{ROLE}.jwk.json").write_text(json.dumps(jwk))
         monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(keys))
     else:
         monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR", raising=False)
@@ -592,6 +646,9 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         ledger_view = executor.ledger.snapshot(clock.now)
     except fly_runner.FlyLedgerError:
         ledger_view = None  # a damaged ledger is what the scenario is about
+    key_only_contract = None
+    if scenario["expect"].get("result_record_aauth_key") and fake.created_configs:
+        key_only_contract = _key_only_runner_contract(fake.created_configs[0], tmp_path)
     return Trace(
         exit_code=exit_code,
         envelope=envelope,
@@ -627,6 +684,11 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         claude_login_job_files_after=fly_runner._has_job_config(
             fake.machines.get("m-claude-login", {}).get("config") or {}),
         started_specs=list(fake.start_specs),
+        job_specs=[json.loads(spec) for config in fake.created_configs
+                   if (spec := _job_files(config).get("/run/job/job.json"))]
+                  + list(fake.start_specs),  # fmt: skip
+        key_only_child_has_mcp=(key_only_contract[0] if key_only_contract else None),
+        result_record_signed=(key_only_contract[1] if key_only_contract else None),
         system_prompt_file_bytes=_job_file_bytes(fake.created_configs, "system_prompt.md"),
         login_job_files_after=fly_runner._has_job_config(
             fake.machines["m-codex-login"].get("config") or {}),
@@ -813,6 +875,25 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
         problems.append("a started job does not name the volume's Claude token file")
     if "login_starts" in e and len(trace.starts) != e["login_starts"]:
         problems.append(f"{len(trace.starts)} login machine starts, expected {e['login_starts']}")
+    if "probe_env_contains" in e and not any(
+        e["probe_env_contains"] in spec.get("probe_env_names", [])
+        for spec in trace.job_specs
+    ):
+        problems.append(f"started job did not probe {e['probe_env_contains']}")
+    if e.get("key_only_no_agent_mcp") and not any(
+        spec.get("neotoma_token_name") == "" and spec.get("neotoma_jwk_name")
+        for spec in trace.job_specs
+    ):
+        problems.append("started job was not key-only without a bearer for the child MCP config")
+    if e.get("key_only_no_agent_mcp") and trace.key_only_child_has_mcp is not False:
+        problems.append("key-only runner child received a Neotoma MCP config or token")
+    if e.get("result_record_aauth_key") and not any(
+        spec.get("neotoma_jwk_name") == fly_runner.AAUTH_JWK_JOB_NAME
+        for spec in trace.job_specs
+    ):
+        problems.append("started job had no role AAuth key for signing its result record")
+    if e.get("result_record_aauth_key") and trace.result_record_signed is not True:
+        problems.append("runner did not sign the result record with the role AAuth key")
     if "login_config_run_id" in e and trace.login_config_run_id != e["login_config_run_id"]:
         problems.append(f"login machine config belongs to {trace.login_config_run_id!r}, "
                         f"expected {e['login_config_run_id']!r}")  # fmt: skip

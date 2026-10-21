@@ -503,6 +503,7 @@ def test_per_job_machine_config_and_credential_set(fly_env, caplog):
 
 def test_mcp_and_shared_token_never_ship_when_role_has_only_a_key(fly_env):
     job = _job()
+    assert "LANIUS_NEOTOMA_TOKEN" in job.probe_env_names
     assert SHARED_BEARER not in json.dumps(job.secrets)
     assert "NEOTOMA_BEARER_TOKEN" not in job.secrets
 
@@ -626,13 +627,14 @@ def test_role_token_equal_to_shared_bearer_uses_valid_key_only(fly_env, monkeypa
     assert job.neotoma_jwk_name == fly_runner.AAUTH_JWK_JOB_NAME
     assert job.neotoma_token_name == ""
     assert set(job.secrets) == {fly_runner.AAUTH_JWK_JOB_NAME}
+    assert "LANIUS_NEOTOMA_TOKEN" in job.probe_env_names
     assert "LANIUS_NEOTOMA_TOKEN" not in job.child_credential_names
     assert SHARED_BEARER not in json.dumps(job.secrets)
     assert SHARED_BEARER not in json.dumps(job.argv)
     files = fly_runner.job_files(job, fly_runner.FlyConfig.from_env())
     file_text = "\n".join(base64.b64decode(f["raw_value"]).decode() for f in files)
     assert SHARED_BEARER not in file_text
-    assert "LANIUS_NEOTOMA_TOKEN" not in file_text
+    assert '"LANIUS_NEOTOMA_TOKEN"' in file_text
     assert SHARED_BEARER not in caplog.text
 
 
@@ -665,6 +667,7 @@ def test_own_token_is_shipped_by_name(fly_env, monkeypatch):
     job = _job()
     assert job.neotoma_token_name == "LANIUS_NEOTOMA_TOKEN"
     assert job.secrets["LANIUS_NEOTOMA_TOKEN"] == "lanius-own-token-0009"
+    assert "LANIUS_NEOTOMA_TOKEN" not in job.probe_env_names
     assert fly_runner.AAUTH_JWK_JOB_NAME in job.secrets
     assert "LANIUS_NEOTOMA_TOKEN" not in job.child_credential_names
 
