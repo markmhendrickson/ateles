@@ -2,6 +2,30 @@
   "_comment": "Public-safe synthetic scenarios for retrying a lens-signed gate write on a transient failure (canary ateles#1448). Each runs the REAL sign-off path; the transport is scripted per field and the store honours idempotency keys.",
   "scenarios": [
     {
+      "id": "a_key_replaced_after_precheck_cannot_send_the_first_signed_write",
+      "why": "the lens key changes after the precheck and before owner_history is signed; the checked principal pin refuses the first write, and settling leaves the gate pending without retry or secret-bearing output",
+      "gates": {
+        "pm": "pending"
+      },
+      "rotate_after_precheck": true,
+      "script": {},
+      "steps": [
+        {
+          "gate": "pm"
+        }
+      ],
+      "expect": {
+        "ok": [false],
+        "verified": [false],
+        "gates": {"pm": "pending"},
+        "writes_issued": 0,
+        "attempts": {},
+        "delays": [],
+        "log_contains": ["reason=identity_changed"],
+        "log_excludes": ["private detail", "thumbprint", "Bearer"]
+      }
+    },
+    {
       "id": "one_transport_error_on_a_gate_that_already_reads_signed_off_ends_verified",
       "why": "the canary failure: a re-sign of a gate that already reads signed_off failed once in transit and the gates were treated as not green. One retry with the same key now ends verified.",
       "gates": {
@@ -349,7 +373,7 @@
     },
     {
       "id": "a_landed_write_with_a_lost_response_is_not_retried_when_the_signing_principal_changed",
-      "why": "the server de-duplicates an idempotency key per principal. The first attempt landed and its response was lost; the lens's key then rotated. A retry would be signed by another principal and be a second first attempt, so it must not be sent: no idempotency key is sent twice, the failure is value-free (identity_changed), and the existing settle path, not a retry, restores the gate to pending and records the failure.",
+      "why": "the server de-duplicates an idempotency key per principal. The first gate write landed and its response was lost; the lens's key then rotated. A retry or restore under the new principal must not be sent. Settling reports the still-cleared gate as unverified, and the failure is value-free (identity_changed).",
       "gates": {
         "pm": "pending"
       },
@@ -371,7 +395,7 @@
           false
         ],
         "gates": {
-          "pm": "pending"
+          "pm": "signed_off"
         },
         "max_attempts_per_key": 1,
         "delays": [

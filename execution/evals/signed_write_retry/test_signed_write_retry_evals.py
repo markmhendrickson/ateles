@@ -46,6 +46,7 @@ RED = [
     ("fresh_key_per_attempt", "a_history_entry_that_landed_with_a_lost_response_is_not_doubled"),
     # Arch finding: the retry must not be sent under a different signing principal.
     ("no_principal_check", "a_landed_write_with_a_lost_response_is_not_retried_when_the_signing_principal_changed"),
+    ("no_principal_check", "a_key_replaced_after_precheck_cannot_send_the_first_signed_write"),
     ("no_retry", "a_response_that_is_not_json_after_a_landed_write_is_retried_with_the_same_key"),
 ]
 

@@ -30,7 +30,7 @@ import pytest
 
 import gate_waive
 from gate_waive import GATE_STATUS_FIELD, IssueGateStore, SIGN_OFF_SIGNING_FAILED
-from test_gate_sign_off_fail_closed import HEAD, _Record, _wire
+from test_gate_sign_off_fail_closed import HEAD, LENS_TP, OTHER_TP, _Record, _wire
 
 
 def _run(coro):
@@ -58,6 +58,70 @@ def _sign(store, head=HEAD, gate="pm", lens="pavo"):
 
 def _gate_keys(rec):
     return [k for f, k in rec.calls if f == GATE_STATUS_FIELD]
+
+
+def _pinned_store(monkeypatch, rec, *, rotate_after_precheck=False):
+    store = _wire(monkeypatch, rec)
+    current = {"thumbprint": LENS_TP}
+    pins = []
+    load = store.load
+
+    async def load_and_rotate(repo, issue_number):
+        state = await load(repo, issue_number)
+        if rotate_after_precheck:
+            current["thumbprint"] = OTHER_TP
+        return state
+
+    async def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None,
+                     principal_pin=None, **request_options):
+        pins.append(principal_pin)
+        if principal_pin is not None and not principal_pin.admit((sub, current["thumbprint"])):
+            raise gate_waive._ns.SignedRequestError("private key detail", "identity_changed")
+        return rec.apply(body, sub)
+
+    monkeypatch.setattr(store, "load", load_and_rotate)
+    monkeypatch.setattr(gate_waive._ns, "signed_request", signed)
+    return store, pins
+
+
+def test_key_replaced_after_precheck_refuses_first_signed_write(monkeypatch, waits, caplog):
+    rec = _Record({"pm": "pending"})
+    store, pins = _pinned_store(monkeypatch, rec, rotate_after_precheck=True)
+
+    with caplog.at_level(logging.ERROR, logger="apis.gate_waive"):
+        outcome = _sign(store)
+
+    assert not outcome.ok and not outcome.verified
+    assert outcome.error == SIGN_OFF_SIGNING_FAILED and outcome.observed_state == "pending"
+    assert rec.calls == [] and rec.gate_status["pm"] == "pending"
+    assert pins and all(pin is pins[0] for pin in pins)
+    assert pins[0].principal == ("pavo@ateles-swarm", LENS_TP)
+    assert waits[0] == []
+    assert "reason=identity_changed" in caplog.text
+    assert "private key detail" not in caplog.text
+
+
+def test_unchanged_key_uses_checked_pin_for_every_sign_off_write(monkeypatch, waits):
+    rec = _Record({"pm": "pending"})
+    store, pins = _pinned_store(monkeypatch, rec)
+
+    outcome = _run(store.sign_off("o/r", 795, "pm", "pavo", HEAD, "accipiter"))
+
+    assert outcome.ok and outcome.verified
+    assert [field for field, _ in rec.calls] == ["owner_history", "current_owner", GATE_STATUS_FIELD]
+    assert len(pins) == 3 and all(pin is pins[0] for pin in pins)
+    assert pins[0].principal == ("pavo@ateles-swarm", LENS_TP)
+
+
+def test_failed_sign_off_note_keeps_the_checked_pin(monkeypatch, waits):
+    rec = _Record({"pm": "pending"}, fail_fields=frozenset({GATE_STATUS_FIELD}))
+    store, pins = _pinned_store(monkeypatch, rec)
+
+    outcome = _sign(store)
+
+    assert not outcome.ok and rec.gate_status["pm"] == "pending"
+    assert [field for field, _ in rec.calls].count("owner_history") == 2
+    assert len(pins) == len(rec.calls) and all(pin is pins[0] for pin in pins)
 
 
 # ── the failure that blocked the canary ──────────────────────────────────────

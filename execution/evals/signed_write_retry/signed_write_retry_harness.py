@@ -62,14 +62,15 @@ class FlakyStore(base.FakeIssueStore):
         self.seen_keys: set[str] = set()
         self.attempts: dict[str, list[str]] = {}  # field -> idempotency key per attempt
         self.timeouts: list[float] = []  # the timeout each hanging attempt was given
-        self.principal = ("lens@ateles-swarm", "thumbprint-before-rotation")
+        self.principal = ("", base.LENS_TP)
 
     def transport(self, body: dict, sub: str | None, timeout: float = 20.0, clock=None,
                   principal_pin=None) -> tuple[int, dict]:
         # The real preparer reports the principal it resolved, and the shared helper
         # refuses to authorize transport when it differs from the pin. The pin class
         # is the real one; only the key resolution is scripted.
-        if principal_pin is not None and not principal_pin.admit(self.principal):
+        principal = (sub, self.principal[1])
+        if principal_pin is not None and not principal_pin.admit(principal):
             raise ns.SignedRequestError("signing principal changed (private detail)", "identity_changed")
         field, key = body["field"], body.get("idempotency_key", "")
         self.attempts.setdefault(field, []).append(key)
@@ -94,7 +95,7 @@ class FlakyStore(base.FakeIssueStore):
         if outcome == "lost" and status < 300:
             raise ns.SignedRequestError("response lost (private detail)", "transport_error")
         if outcome == "lost_rotate" and status < 300:
-            self.principal = ("lens@ateles-swarm", "thumbprint-after-rotation")
+            self.principal = (sub, "thumbprint-after-rotation")
             raise ns.SignedRequestError("response lost (private detail)", "transport_error")
         if outcome == "not_json" and status < 300:
             raise ns.SignedRequestError("body was <html>private detail</html>", "response_not_json")
@@ -123,6 +124,20 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
 
     with pytest.MonkeyPatch.context() as mp:
         issue_store = base._wire(mp, store, signer_fails=None)
+
+        if scenario.get("rotate_after_precheck"):
+            load = issue_store.load
+            first_load = True
+
+            async def load_and_rotate(repo, issue_number):
+                nonlocal first_load
+                state = await load(repo, issue_number)
+                if first_load:
+                    store.principal = ("", "thumbprint-after-rotation")
+                    first_load = False
+                return state
+
+            mp.setattr(issue_store, "load", load_and_rotate)
 
         def signed(method, url, body=None, agent_name="", timeout=20, *, sub=None,
                    principal_pin=None, **request_options):

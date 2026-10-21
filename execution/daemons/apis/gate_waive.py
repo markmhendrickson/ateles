@@ -1821,6 +1821,9 @@ class IssueGateStore:
             )
             return outcome
 
+        principal_pin = _ns.PrincipalPin()
+        principal_pin.admit((str(identity["sub"]), lens_thumbprint))
+
         state = await self.load(repo, issue_number)
         if state.row_unreadable:
             # The row for this issue carried no snapshot object: its state is
@@ -1968,6 +1971,7 @@ class IssueGateStore:
                 history_written=history_written,
                 head_sha=head_sha,
                 attempt=now,
+                principal_pin=principal_pin,
             )
 
         # 1. The non-safety fields first. A failure here leaves `gate_status`
@@ -1995,6 +1999,7 @@ class IssueGateStore:
                 lens_agent=lens_agent,
                 lens_sub=lens_sub,
                 context=(repo, issue_number, gate),
+                principal_pin=principal_pin,
             )
             if failure:
                 return await _settle(
@@ -2037,6 +2042,7 @@ class IssueGateStore:
             lens_agent=lens_agent,
             lens_sub=lens_sub,
             context=(repo, issue_number, gate),
+            principal_pin=principal_pin,
         )
         if failure:
             return await _settle(failure, gate_written=True, history_written=history_written)
@@ -2263,6 +2269,7 @@ class IssueGateStore:
         lens_agent: str,
         lens_sub: str,
         context: tuple[str, int, str],
+        principal_pin: "_ns.PrincipalPin | None" = None,
     ) -> str:
         """Perform one sign-off write; return "" on 2xx, else a failure class.
 
@@ -2276,12 +2283,11 @@ class IssueGateStore:
         repo, issue_number, gate = context
         started = _monotonic()
         attempt = 0
-        # One pin for the whole logical write. Every attempt resolves the signing
-        # key afresh inside its own preparer, but the server de-duplicates the
-        # idempotency key per principal (authority_model.md, "resolved once per
-        # invocation"), so a retry must be signed by the principal the first
-        # attempt used or it is not sent (reason `identity_changed`, not retryable).
-        pin = _ns.PrincipalPin()
+        # A sign-off passes its prechecked pin through every field write. Other
+        # callers get one pin for this logical write. Every attempt resolves the
+        # key afresh, but a changed principal is refused before transport because
+        # the server de-duplicates an idempotency key per principal.
+        pin = principal_pin if principal_pin is not None else _ns.PrincipalPin()
         while True:
             attempt += 1
             reason, shown, retries_allowed = "", "", 0
@@ -2358,6 +2364,7 @@ class IssueGateStore:
         history_written: bool,
         head_sha: str = "",
         attempt: str = "",
+        principal_pin: "_ns.PrincipalPin | None" = None,
     ) -> SignOffOutcome:
         """Make a failed sign-off leave the record as it found it, and say so.
 
@@ -2395,6 +2402,7 @@ class IssueGateStore:
             idempotency_suffix=idempotency_suffix,
             gate_written=gate_written,
             original_error=original_error,
+            principal_pin=principal_pin,
         )
         if history_written:
             await self._record_failed_sign_off(
@@ -2409,6 +2417,7 @@ class IssueGateStore:
                 idempotency_suffix=idempotency_suffix,
                 head_sha=head_sha,
                 attempt=attempt,
+                principal_pin=principal_pin,
             )
         return outcome
 
@@ -2426,6 +2435,7 @@ class IssueGateStore:
         idempotency_suffix: str,
         gate_written: bool,
         original_error: str,
+        principal_pin: "_ns.PrincipalPin | None" = None,
     ) -> SignOffOutcome:
         if not reread.found or reread.gate_status_unreadable:
             outcome.observed_state = (
@@ -2458,6 +2468,7 @@ class IssueGateStore:
                 lens_agent=lens_agent,
                 lens_sub=lens_sub,
                 context=(repo, issue_number, gate),
+                principal_pin=principal_pin,
             )
             # Re-read whether or not the restore reported success: a restore
             # whose transport failed may still have landed, and one that
@@ -2516,6 +2527,7 @@ class IssueGateStore:
         idempotency_suffix: str,
         head_sha: str = "",
         attempt: str = "",
+        principal_pin: "_ns.PrincipalPin | None" = None,
     ) -> None:
         """Append a `sign_off_failed` entry after this call's `signed_off` one.
 
@@ -2564,6 +2576,7 @@ class IssueGateStore:
             lens_agent=lens_agent,
             lens_sub=lens_sub,
             context=(repo, issue_number, gate),
+            principal_pin=principal_pin,
         )
         if failure:
             log.error(
