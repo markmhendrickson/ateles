@@ -362,7 +362,6 @@ def _prepare_signed_request(sender, resolver, agent_name, sub, keys_dir, method,
             except subprocess.TimeoutExpired as exc:
                 received, status, _ = _signed_helper_output(exc.stdout)
                 proc.kill()
-                proc.communicate()
                 sender.send(("error", "helper_timeout", received, status))
                 return
         received, status, payload = _signed_helper_output(stdout)
