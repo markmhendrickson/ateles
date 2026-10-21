@@ -3552,6 +3552,7 @@ async def _run_skill_once(
                 owns_pending_gate=owns_pending_gate,
                 codex_outer_sandboxed=codex_outer_sandboxed,
                 delivery=fly_delivery,
+                neotoma_tools_granted=bool(allowed_mcp_servers(agent_def.tools)),
             )
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
@@ -3959,6 +3960,12 @@ async def _run_skill_once(
             usage=_usage,
             ok=_dispatch_ok,
         )
+
+        if _fly_job is not None and _fly_job.neotoma_tools_unavailable:
+            _note = fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE
+            _stdout_text = f"{_stdout_text.rstrip()}\n{_note}\n"
+            _fly_note += f" {_note}"
+            log.warning("[apis] %s: %s", skill, _note)
 
         result = SkillResult(
             skill=skill,

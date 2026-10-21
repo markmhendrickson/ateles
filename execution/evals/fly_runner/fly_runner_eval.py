@@ -418,10 +418,7 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     if scenario["identity"] == "key":
         keys = tmp_path / "keys"
         keys.mkdir()
-        jwk = (_valid_eval_jwk() if scenario["expect"].get("result_record_aauth_key") else {
-            "kty": "EC", "crv": "P-256", "x": "eval-x", "y": "eval-y",
-            "d": "eval-private-scalar", "sub": f"{ROLE}@ateles-swarm",
-        })  # fmt: skip
+        jwk = _valid_eval_jwk()
         (keys / f"{ROLE}.jwk.json").write_text(json.dumps(jwk))
         monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(keys))
     else:
@@ -887,6 +884,9 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
         problems.append("started job was not key-only without a bearer for the child MCP config")
     if e.get("key_only_no_agent_mcp") and trace.key_only_child_has_mcp is not False:
         problems.append("key-only runner child received a Neotoma MCP config or token")
+    if e.get("key_only_no_agent_mcp") and fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE not in str(
+            env.get("stdout", "")):
+        problems.append("key-only Fly result did not disclose the missing Neotoma MCP tools")
     if e.get("result_record_aauth_key") and not any(
         spec.get("neotoma_jwk_name") == fly_runner.AAUTH_JWK_JOB_NAME
         for spec in trace.job_specs

@@ -311,10 +311,7 @@ def _claude_runs_per_job_unless_its_login_machine_is_tested(request, monkeypatch
 def fly_env(monkeypatch, tmp_path):
     keys = tmp_path / "keys"
     keys.mkdir()
-    (keys / "lanius.jwk.json").write_text(json.dumps({
-        "kty": "EC", "crv": "P-256", "x": "x", "y": "y", "d": "private-scalar-canary",
-        "sub": "lanius@ateles-swarm",
-    }))  # fmt: skip
+    (keys / "lanius.jwk.json").write_text(json.dumps(_valid_role_jwk()))
     for name, value in {
         "APIS_FLY_APP": "runner-app",
         "APIS_FLY_API_TOKEN": FLY_TOKEN,
@@ -334,6 +331,20 @@ def fly_env(monkeypatch, tmp_path):
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("LANIUS_NEOTOMA_TOKEN", raising=False)
     return tmp_path
+
+
+def _valid_role_jwk() -> dict[str, str]:
+    """P-256's generator point is the public point for private scalar one."""
+    def encoded(hex_value: str) -> str:
+        return base64.urlsafe_b64encode(bytes.fromhex(hex_value)).rstrip(b"=").decode()
+
+    return {
+        "kty": "EC", "crv": "P-256",
+        "x": encoded("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"),
+        "y": encoded("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"),
+        "d": encoded("00" * 31 + "01"),
+        "sub": "lanius@ateles-swarm",
+    }
 
 
 class Clock:
@@ -662,6 +673,56 @@ def test_role_token_equal_to_shared_bearer_with_invalid_key_is_refused(
     assert SHARED_BEARER not in str(exc.value)
 
 
+@pytest.mark.parametrize("key_value", [[], "x", 123, None])
+@pytest.mark.parametrize("shared_token", [False, True])
+def test_non_object_role_key_is_ineligible(fly_env, monkeypatch, key_value, shared_token):
+    if shared_token:
+        monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
+    (fly_env / "keys" / "lanius.jwk.json").write_text(json.dumps(key_value))
+    message = "equals the shared daemon bearer and no valid AAuth key" if shared_token \
+        else "AAuth key file for 'lanius' is unreadable"  # fmt: skip
+    with pytest.raises(fly_runner.FlyIneligible, match=message):
+        _job()
+
+
+@pytest.mark.parametrize("invalid", [
+    "wrong_kty", "wrong_crv", "missing_x", "missing_y", "missing_d",
+    "mismatched_d", "wrong_sub",
+])
+def test_invalid_role_key_shape_is_ineligible(fly_env, invalid):
+    jwk = _valid_role_jwk()
+    if invalid.startswith("missing_"):
+        jwk.pop(invalid.removeprefix("missing_"))
+    elif invalid == "mismatched_d":
+        pytest.importorskip("cryptography")
+        jwk["d"] = base64.urlsafe_b64encode((2).to_bytes(32, "big")).rstrip(b"=").decode()
+    elif invalid == "wrong_sub":
+        jwk["sub"] = "another@ateles-swarm"
+    else:
+        jwk[invalid.removeprefix("wrong_")] = "wrong"
+    (fly_env / "keys" / "lanius.jwk.json").write_text(json.dumps(jwk))
+    with pytest.raises(fly_runner.FlyIneligible, match="not that role's private key"):
+        _job()
+
+
+def test_generated_p256_role_key_is_accepted(fly_env):
+    ec = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ec")
+    private = ec.generate_private_key(ec.SECP256R1())
+    numbers = private.private_numbers()
+
+    def encoded(value):
+        return base64.urlsafe_b64encode(value.to_bytes(32, "big")).rstrip(b"=").decode()
+
+    jwk = {
+        "kty": "EC", "crv": "P-256", "sub": "lanius@ateles-swarm",
+        "x": encoded(numbers.public_numbers.x),
+        "y": encoded(numbers.public_numbers.y),
+        "d": encoded(numbers.private_value),
+    }
+    (fly_env / "keys" / "lanius.jwk.json").write_text(json.dumps(jwk))
+    assert _job().neotoma_jwk_name == fly_runner.AAUTH_JWK_JOB_NAME
+
+
 def test_own_token_is_shipped_by_name(fly_env, monkeypatch):
     monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
     job = _job()
@@ -940,13 +1001,45 @@ def test_seam_forced_fly_returns_the_machine_result(fly_env, seam, monkeypatch):
         result = _once(runner="fly", repository="owner/repo",
                        github_token=None, include_github_contract=True)  # fmt: skip
     assert result.ok, result.error
-    assert result.stdout == "GATE_INHERITANCE: clear\n"
+    assert result.stdout == (
+        "GATE_INHERITANCE: clear\n" + fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE + "\n"
+    )
     assert spawned == []
     assert minted == ["owner/repo"] and revoked == [MINTED]
     files = _files(json.loads(fake.calls("POST", "/machines")[0].content))
     argv = json.loads(files["/run/job/argv.json"])
     assert argv[0] == "claude" and fly_runner.MCP_CONFIG_PLACEHOLDER in argv
     assert SHARED_BEARER not in _all_request_text(fake)
+
+
+@pytest.mark.parametrize("own_token,tools_granted,disclosed", [
+    (False, True, True),
+    (True, True, False),
+    (False, False, False),
+])
+def test_key_only_neotoma_tool_loss_is_disclosed_in_result_and_log(
+        fly_env, seam, monkeypatch, caplog, own_token, tools_granted, disclosed):
+    _, fake_exec = seam
+    if own_token:
+        monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    if not tools_granted:
+        monkeypatch.setattr(
+            skill_runner, "_load_agent_def",
+            lambda role: AgentDefinition(
+                entity_id="e", name=role, prompt_markdown="You are lanius.",
+                tool_allowlist="Bash", aauth_sub=f"{role}@ateles-swarm",
+            ),
+        )
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "task result\n"})
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with caplog.at_level(logging.WARNING), \
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+    note = fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE
+    assert result.ok
+    assert (note in result.stdout) is disclosed
+    assert (note in caplog.text) is disclosed
 
 
 def test_seam_cap_refusal_returns_cooled_until(fly_env, seam, monkeypatch):
