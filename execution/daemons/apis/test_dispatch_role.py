@@ -24,7 +24,6 @@ if str(_DAEMON_DIR) not in sys.path:
 import dispatch_role  # noqa: E402
 import harness_router  # noqa: E402
 import skill_runner  # noqa: E402
-from lib.daemon_runtime import AgentDefinitionUnavailable  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 
 
@@ -87,26 +86,6 @@ def test_unknown_role_exits_nonzero_without_dispatching(
     rc = dispatch_role.main(["--role", "nosuchrole", "--task", "hi"])
     assert rc == 1
     assert called is False
-
-
-def test_unavailable_definition_preload_refuses_without_dispatch(
-    fake_repo, monkeypatch, capsys
-) -> None:
-    async def _unexpected_dispatch(*args, **kwargs):
-        raise AssertionError("dispatch reached after failed definition preload")
-
-    def _unavailable(role):
-        raise AgentDefinitionUnavailable(role, "timeout", 2)
-
-    monkeypatch.setattr(dispatch_role, "dispatch", _unexpected_dispatch)
-    monkeypatch.setattr(dispatch_role, "_load_agent_def", _unavailable)
-
-    rc = dispatch_role.main(["--role", "cicada", "--task", "x", "--json"])
-
-    assert rc == 1
-    envelope = _envelope(capsys)
-    assert envelope["ok"] is False
-    assert "agent_definition unavailable" in envelope["reason"]
 
 
 def test_dispatch_forwards_role_provider_and_cwd(monkeypatch) -> None:
@@ -199,7 +178,6 @@ def test_cli_escalation_flags_reach_run_skill_and_raise_the_tier(
 
     monkeypatch.setattr(dispatch_role, "run_skill", _capture)
     monkeypatch.setattr(dispatch_role, "_preflight", lambda *a, **k: None)
-    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda role: _stub_def())
 
     def tier(klass, *flags):
         dispatch_role.main(["--role", "r", "--task", "review", "--action-class", klass, *flags])

@@ -994,8 +994,11 @@ def main(argv: list[str] | None = None) -> int:
         emitter.emit_failure(refusal)
         return 1
 
-    # Report the admitted identity before dispatch. A definition that cannot be
-    # loaded must stop here; run_skill also checks independently before launch.
+    # Report the identity actually loaded, so an unavailable definition is
+    # visible at the point of dispatch. This preload is reporting only: work that
+    # needs no definition (the deterministic mechanical path) must still run, and
+    # run_skill refuses independently, before any model launch, when the
+    # definition cannot be loaded (DEFINITION_UNAVAILABLE_PREFIX).
     try:
         agent_def = _load_agent_def(role)
         tools = agent_def.tools
@@ -1003,13 +1006,10 @@ def main(argv: list[str] | None = None) -> int:
             f"role={role} sub={agent_def.aauth_sub or '(none)'} "
             f"tier={agent_def.tier or '(unset)'} "
             f"tools={'ALL' if tools == ['*'] else f'{len(tools)} allowlisted'} "
-            f"prompt={'loaded' if agent_def.prompt_markdown.strip() else 'EMPTY'}"
+            f"prompt={'loaded' if agent_def.prompt_markdown.strip() else 'EMPTY (degraded)'}"
         )
-    except Exception as exc:  # noqa: BLE001 — any failed preload refuses dispatch
-        reason = f"agent_definition unavailable for role={role}: {exc}"
-        print(f"dispatch_role: {reason}", file=sys.stderr)
-        emitter.emit_failure(reason)
-        return 1
+    except Exception as exc:  # noqa: BLE001 — reporting must not block dispatch
+        identity = f"role={role} (agent_definition preload failed: {exc})"
 
     print(f"dispatch_role: {identity}", file=sys.stderr)
     print(f"dispatch_role: {_headroom_note()}", file=sys.stderr)
