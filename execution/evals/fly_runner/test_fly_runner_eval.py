@@ -34,6 +34,7 @@ def test_scenario_set_covers_the_required_behaviours():
         "forced_fly_ineligible_role_refused",
         "forced_fly_without_app_refused_not_pat",
         "opted_in_class_runs_on_fly",
+        "shared_role_token_uses_aauth_key_without_shipping_bearer",
         "forced_fly_budget_deferral",
         "forced_fly_disconnect_cleans_up",
         "forced_fly_timeout_cleans_up",

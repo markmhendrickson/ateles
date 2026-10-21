@@ -1849,8 +1849,12 @@ def build_job(
     shared_bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     token_name = neotoma_token_env_name(role)
     own_token = os.environ.get(token_name, "").strip()
-    if own_token and shared_bearer and own_token == shared_bearer.strip():
-        raise FlyIneligible(f"{token_name} is the shared daemon bearer, not the role's own")
+    token_is_shared = bool(own_token and shared_bearer and own_token == shared_bearer.strip())
+    if token_is_shared:
+        own_token = ""  # The shared daemon bearer must never enter a Fly job.
+    shared_token_without_key = (
+        f"{token_name} equals the shared daemon bearer and no valid AAuth key exists for {role!r}"
+    )
     jwk_path = role_jwk_path(role)
     jwk_text = ""
     if jwk_path is not None:
@@ -1858,10 +1862,16 @@ def build_job(
             jwk_text = jwk_path.read_text(encoding="utf-8").strip()
             jwk = json.loads(jwk_text)
         except (OSError, ValueError):
+            if token_is_shared:
+                raise FlyIneligible(shared_token_without_key) from None
             raise FlyIneligible(f"the AAuth key file for {role!r} is unreadable") from None
         if str(jwk.get("sub") or "") != f"{role}@ateles-swarm" or not jwk.get("d"):
+            if token_is_shared:
+                raise FlyIneligible(shared_token_without_key)
             raise FlyIneligible(f"the AAuth key file for {role!r} is not that role's private key")
     if not own_token and not jwk_text:
+        if token_is_shared:
+            raise FlyIneligible(shared_token_without_key)
         raise FlyIneligible(
             f"role {role!r} has no Neotoma identity of its own ({token_name} or an AAuth "
             "key); the shared daemon bearer never leaves the Mac"

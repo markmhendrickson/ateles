@@ -618,10 +618,46 @@ def test_role_without_its_own_identity_is_not_eligible(fly_env, monkeypatch):
         _job()
 
 
-def test_role_token_equal_to_the_shared_bearer_is_refused(fly_env, monkeypatch):
+def test_role_token_equal_to_shared_bearer_uses_valid_key_only(fly_env, monkeypatch,
+                                                                 caplog):  # fmt: skip
     monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
-    with pytest.raises(fly_runner.FlyIneligible, match="shared daemon bearer"):
+    caplog.set_level(logging.DEBUG)
+    job = _job()
+    assert job.neotoma_jwk_name == fly_runner.AAUTH_JWK_JOB_NAME
+    assert job.neotoma_token_name == ""
+    assert set(job.secrets) == {fly_runner.AAUTH_JWK_JOB_NAME}
+    assert "LANIUS_NEOTOMA_TOKEN" not in job.child_credential_names
+    assert SHARED_BEARER not in json.dumps(job.secrets)
+    assert SHARED_BEARER not in json.dumps(job.argv)
+    files = fly_runner.job_files(job, fly_runner.FlyConfig.from_env())
+    file_text = "\n".join(base64.b64decode(f["raw_value"]).decode() for f in files)
+    assert SHARED_BEARER not in file_text
+    assert "LANIUS_NEOTOMA_TOKEN" not in file_text
+    assert SHARED_BEARER not in caplog.text
+
+
+def test_role_token_equal_to_shared_bearer_without_key_is_refused(fly_env, monkeypatch):
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")
+    with pytest.raises(fly_runner.FlyIneligible,
+                       match="equals the shared daemon bearer and no valid AAuth key") as exc:  # fmt: skip
         _job()
+    assert SHARED_BEARER not in str(exc.value)
+
+
+@pytest.mark.parametrize("key_text", [
+    '{"sub": "wrong@ateles-swarm", "d": "private-scalar"}',
+    '{"sub": "lanius@ateles-swarm", "d": ""}',
+    '{invalid-json',
+])
+def test_role_token_equal_to_shared_bearer_with_invalid_key_is_refused(
+        fly_env, monkeypatch, key_text):
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
+    (fly_env / "keys" / "lanius.jwk.json").write_text(key_text)
+    with pytest.raises(fly_runner.FlyIneligible) as exc:
+        _job()
+    assert "equals the shared daemon bearer and no valid AAuth key" in str(exc.value)
+    assert SHARED_BEARER not in str(exc.value)
 
 
 def test_own_token_is_shipped_by_name(fly_env, monkeypatch):
@@ -629,6 +665,7 @@ def test_own_token_is_shipped_by_name(fly_env, monkeypatch):
     job = _job()
     assert job.neotoma_token_name == "LANIUS_NEOTOMA_TOKEN"
     assert job.secrets["LANIUS_NEOTOMA_TOKEN"] == "lanius-own-token-0009"
+    assert fly_runner.AAUTH_JWK_JOB_NAME in job.secrets
     assert "LANIUS_NEOTOMA_TOKEN" not in job.child_credential_names
 
 

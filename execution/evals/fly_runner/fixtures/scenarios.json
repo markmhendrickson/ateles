@@ -69,6 +69,45 @@
       }
     },
     {
+      "id": "shared_role_token_uses_aauth_key_without_shipping_bearer",
+      "description": "The role token matches the shared daemon bearer, but a valid AAuth key lets the Fly dispatch run without shipping the bearer.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+        "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY KEY FALLBACK OK\n"
+        }
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "FLY KEY FALLBACK OK",
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "minted": 1,
+        "revoked_all_minted": true,
+        "in_flight_after": 0,
+        "machine_gone": true
+      }
+    },
+    {
       "id": "forced_fly_ineligible_role_refused",
       "description": "--runner fly for a role with no Neotoma identity of its own: refused with the reason; nothing runs locally or on Fly.",
       "settings": {},
