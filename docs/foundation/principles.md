@@ -251,7 +251,7 @@ scopes of one kind, or one word `scope` overlapping four ways — the exact viol
 to prevent. Where a preference and the invariant pull against each other, the invariant wins.
 
 The ruling renames nothing. `owner`, forbidden standing alone
-(`vocabulary.md#owner-five-meanings-one-word-forbidden-alone`), keeps
+(`vocabulary.md#owner-six-meanings-one-word-forbidden-alone`), keeps
 [step owner](vocabulary.md#step-owner) as the qualified compound that replaced it; the three parenthesized-object
 verb entries — [execute (a task)](vocabulary.md#execute-a-task), the entry for what is done to an action,
 and [amend (a planning record)](vocabulary.md#amend-a-planning-record) — are single-word terms carrying a
