@@ -53,7 +53,7 @@ def test_guarded_cli_requires_available_canonical_definition(monkeypatch, tmp_pa
     monkeypatch.setenv("APIS_USAGE_PROBE_ON_DISPATCH", "0")
     skill_runner._agent_def_cache.clear()
     monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **k: None)
-    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role, **kw: "")
     monkeypatch.setattr(skill_runner.model_tiering, "record_dispatch", lambda **k: "synthetic")
     monkeypatch.setattr(skill_runner.model_tiering, "record_dispatch_usage", lambda **k: None)
     requests, spawns, inputs = [], [], []

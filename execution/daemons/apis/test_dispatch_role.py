@@ -205,6 +205,9 @@ def captured_codex_dispatches(fake_repo, monkeypatch):
     """Capture real ``run_skill`` subprocess boundaries without launching Codex."""
     captured: list[dict] = []
     agent_def = _stub_def()
+    # This fixture is imported by ledger tests too: carry its external-policy
+    # fixture with it instead of depending on this module's autouse fixtures.
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda *a, **kw: "")
 
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
     monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"codex": 1.0}')
@@ -1027,3 +1030,12 @@ def test_a_cooled_result_envelope_carries_cooled_until(
     env = _envelope(capsys)
     assert env["cooled_until"] == "2026-09-29T12:30+02:00"
     assert "cooled until" in env["reason"]
+
+
+@pytest.fixture(autouse=True)
+def _verified_empty_policy_admission(monkeypatch):
+    """Keep unrelated adapter tests off live policy reads; real failure/absence
+    behavior is exercised by test_policy_authority_dispatch.py.
+    """
+    import skill_runner
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda *a, **kw: "")

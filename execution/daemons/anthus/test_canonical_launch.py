@@ -12,6 +12,7 @@ import sys
 
 import anthus
 import pytest
+from lib.daemon_runtime import AgentPolicyUnavailable
 
 
 @pytest.mark.parametrize(("role", "tools", "requested", "expected"), [
@@ -69,7 +70,7 @@ Path(os.environ['FIXTURE_RECEIPT']).write_text(json.dumps({
             pass
         def load(self):
             return definition
-        def render_policy_prompt(self):
+        def render_policy_prompt(self, **kwargs):
             return ""
     monkeypatch.setattr(anthus, "AgentLoader", Loader)
     real_exec = asyncio.create_subprocess_exec
@@ -112,6 +113,43 @@ def test_direct_launch_refuses_unadmitted_definition(monkeypatch, overrides):
     with pytest.raises(anthus.AgentDefinitionUnavailable):
         asyncio.run(anthus._spawn_agent("pavo", "ent_work", "pm", {}, definition))
     assert not children
+
+
+@pytest.mark.parametrize("failure", [("query", "timeout"), ("content", "bad_response")])
+def test_direct_launch_refuses_policy_failure_then_recovers(monkeypatch, tmp_path, failure):
+    from types import SimpleNamespace
+    definition = anthus.AgentDefinition(entity_id="ent_role", name="pavo", status="active",
+        prompt_markdown="Canonical role", tool_allowlist=["Read"])
+    children = []
+    policy = {"value": AgentPolicyUnavailable("pavo", *failure), "reads": []}
+    class Loader:
+        def __init__(self, name):
+            pass
+        def render_policy_prompt(self, **kwargs):
+            policy["reads"].append(kwargs)
+            if isinstance(policy["value"], Exception):
+                raise policy["value"]
+            return policy["value"]
+    async def child(*args, **kwargs):
+        children.append(args)
+        return SimpleNamespace(pid=123)
+    monkeypatch.setattr(anthus, "AgentLoader", Loader)
+    monkeypatch.setattr("shutil.which", lambda _: "/bin/true")
+    monkeypatch.setenv("ATELES_REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(anthus.asyncio, "create_subprocess_exec", child)
+    refused = False
+    try:
+        asyncio.run(anthus._spawn_agent("pavo", "ent_work", "pm", {}, definition))
+    except AgentPolicyUnavailable:
+        refused = True
+    assert not children, "an unreadable governing policy must not reach a child/tool"
+    assert refused
+    policy["value"] = "\nREQUIRED POLICY CANARY"
+    asyncio.run(anthus._spawn_agent("pavo", "ent_work", "pm", {}, definition))
+    assert len(children) == 1
+    argv = children[0]
+    assert "REQUIRED POLICY CANARY" in argv[argv.index("--append-system-prompt") + 1]
+    assert policy["reads"] == [{"agent_definition_id": "ent_role"}] * 2
 
 
 @pytest.mark.parametrize("mutation", ["remove_builtin_bound", "restore_ambient_allows", "restore_bypass"])

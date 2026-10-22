@@ -331,7 +331,7 @@ def test_a_dispatched_child_sees_only_the_allowed_servers(operator_home, monkeyp
     monkeypatch.setattr(skill_runner, "_load_agent_def", lambda role: AgentDefinition(
         entity_id="e", name=role, prompt_markdown="You are lanius.", tool_allowlist="*",
         aauth_sub=f"{role}@ateles-swarm"))  # fmt: skip
-    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role, **kw: "")
     monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: None)
     result = asyncio.run(skill_runner._run_skill_once(
         "lanius", "do the task", provider=provider, role="lanius"))  # fmt: skip
@@ -361,7 +361,7 @@ def _seam(monkeypatch, tmp_path, *, tools="*"):
     monkeypatch.setattr(skill_runner, "_load_agent_def", lambda role: AgentDefinition(
         entity_id="e", name=role, prompt_markdown="You are lanius.", tool_allowlist=tools,
         aauth_sub=f"{role}@ateles-swarm"))  # fmt: skip
-    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role, **kw: "")
     monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: None)
     notified = []
     monkeypatch.setattr(skill_runner, "notify_dispatch_failure",

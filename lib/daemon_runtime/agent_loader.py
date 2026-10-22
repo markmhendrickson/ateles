@@ -210,12 +210,8 @@ def fetch_governs_edges(
     edges reachable at once, same shape as `POLICY_QUERY_BODY`'s
     `/entities/query` call one level up.
 
-    Raises on transport failure — this module never swallows a fetch error
-    into an empty result (CLAUDE.md: a write/read that fails must not look
-    like an empty result); callers already have a fail-open path for
-    Neotoma being unreachable (`AgentLoader.load_active_policies`'s
-    try/except, `policy_skill_renderer`'s hook-level fail-open) and decide
-    how to degrade at that layer, not inside this fetch.
+    Raises on transport failure or a malformed/partial response. An unreadable
+    edge map must never make a scoped policy appear to be edgeless.
 
     `_request` is an injection point for a caller (`policy_skill_renderer`)
     that must stay stdlib-only and cannot import `httpx` — it passes its own
@@ -232,16 +228,37 @@ def fetch_governs_edges(
         resp.raise_for_status()
         data = resp.json()
 
+    relationships = _complete_authority_collection(data, "relationships")
     out: dict[str, set[str]] = {}
-    for rel in (data.get("relationships") or []) if isinstance(data, dict) else []:
+    for rel in relationships:
         if not isinstance(rel, dict):
-            continue
-        source = str(rel.get("source_entity_id") or "").strip()
-        target = str(rel.get("target_entity_id") or "").strip()
-        if not source or not target:
-            continue
+            raise ValueError("bad authority response")
+        source = rel.get("source_entity_id")
+        target = rel.get("target_entity_id")
+        if (not isinstance(source, str) or not source.strip()
+                or not isinstance(target, str) or not target.strip()):
+            raise ValueError("bad authority response")
+        source, target = source.strip(), target.strip()
         out.setdefault(source, set()).add(target)
     return {k: frozenset(v) for k, v in out.items()}
+
+
+def _complete_authority_collection(data: object, key: str) -> list:
+    """Validate a complete authority collection before claiming it is empty."""
+    if (not isinstance(data, dict)
+            or any(data.get(k) for k in ("error", "error_code", "errors", "detail"))):
+        raise ValueError("bad authority response")
+    rows = data.get(key)
+    if not isinstance(rows, list):
+        raise ValueError("bad authority response")
+    total = data.get("total")
+    if total is not None and (
+        isinstance(total, bool) or not isinstance(total, int) or total != len(rows)
+    ):
+        raise ValueError("partial authority response")
+    if any(data.get(k) for k in ("has_more", "truncated", "next_offset", "next_cursor")):
+        raise ValueError("partial authority response")
+    return rows
 
 
 def resolve_agent_definition_id(
@@ -489,8 +506,26 @@ class AgentDefinitionUnavailable(RuntimeError):
         return self.code != NOT_FOUND
 
 
+class AgentPolicyUnavailable(RuntimeError):
+    """A governing-policy read is indeterminate; execution must not begin.
+
+    Only fixed stage/reason tokens cross the dispatch boundary, never response
+    bodies or exception details. A successful empty read does not raise.
+    """
+
+    def __init__(self, agent_name: str, stage: str, code: str) -> None:
+        self.stage = stage
+        self.code = code
+        super().__init__(
+            f"agent_policy for {agent_name!r} is unavailable "
+            f"({stage}, {code}); the agent was not run"
+        )
+
+
 def load_failure_code(exc: BaseException) -> str:
     """Map a load exception to a fixed reason code. Never includes exception text."""
+    if isinstance(exc, AgentDefinitionUnavailable):
+        return exc.code
     if isinstance(exc, _LoadBusy):
         return "busy"
     if isinstance(exc, httpx.TimeoutException):
@@ -1107,36 +1142,42 @@ class AgentLoader:
             load_error=reason,
         )
 
-    def load_active_policies(self) -> list[dict]:
+    def load_active_policies(self, *, agent_definition_id: str | None = None) -> list[dict]:
         """
         Fetch this agent's live agent_policy entities (status active or
         provisional) from Neotoma. These include autonomously-generalized,
         agent-local policies produced by the generalizer. Returns snapshot
-        dicts; empty list if Neotoma is unreachable.
+        dicts; raises AgentPolicyUnavailable when any authority read cannot be
+        completed. Only a verified complete read can establish no policies.
 
         Provisional policies ARE returned and applied — that exposure is
         exactly what matures them. Their effect remains agent-local and
         reversible (a contradicting drift signal suspends them).
         """
-        # Need either a bearer token or per-agent signing to authenticate.
-        if not NEOTOMA_BEARER_TOKEN and not (
-            ns.via_cli_enabled()
-        ):
-            return []
+        # Open-mode instances must still be queried; no configured credential
+        # is not evidence that no governing policies exist.
         agent_sub = f"{self.agent_name}@ateles-swarm"
+        deadline = _monotonic() + LOAD_TOTAL_CAP_S
         try:
             # POST /entities/query is the canonical list route. /retrieve_entities
             # is the MCP TOOL name, not a REST path, and 404s on the hosted
             # instance — see _load_by_name and issue_spec.py for the same gotcha.
             data = self._neotoma(
-                "POST", f"{NEOTOMA_BASE_URL}/entities/query", POLICY_QUERY_BODY
+                "POST", f"{NEOTOMA_BASE_URL}/entities/query", POLICY_QUERY_BODY, deadline
             )
+            rows = _complete_authority_collection(data, "entities")
+            for row in rows:
+                if not isinstance(row, dict) or not isinstance(row.get("snapshot"), dict):
+                    raise ValueError("bad authority response")
+                snap = row["snapshot"].get("snapshot", row["snapshot"])
+                if not isinstance(snap, dict) or not isinstance(snap.get("status"), str):
+                    raise ValueError("bad authority response")
+                if snap["status"].strip().lower() not in (POLICY_LIVE_STATUSES | {"retired"}):
+                    raise ValueError("bad authority response")
+                if not isinstance(row.get("entity_id"), str) or not row["entity_id"].strip():
+                    raise ValueError("bad authority response")
         except Exception as exc:
-            log.error(
-                f"[{self.agent_name}] could not load agent_policy: {exc} — "
-                "dispatching WITHOUT this agent's learned policies"
-            )
-            return []
+            raise AgentPolicyUnavailable(self.agent_name, "query", load_failure_code(exc)) from None
 
         # Shared unwrap+status-filter — the ONE reader of agent_policy's
         # response shape, also used by policy_skill_renderer.py's session-wide
@@ -1144,31 +1185,34 @@ class AgentLoader:
         # agent) stays here, since that predicate differs from the session-
         # wide caller's union.
         live_rows = unwrap_policy_entities(data)
+        if not live_rows:
+            return []
 
         # Decision 114 (2026-09-25): resolve this agent's `agent_definition`
         # id and the batched `GOVERNS` edge map ONCE per load (not once per
         # row), then judge every row with the ONE shared predicate,
-        # `policy_binds_agent_by_edge`. Both fetches degrade to "resolve/bind
-        # nothing" on failure rather than raising — a Neotoma hiccup on the
-        # edge lookup must not take down a load that would otherwise have
-        # succeeded on the entity fetch above.
-        agent_definition_id = None
+        # `policy_binds_agent_by_edge`. A failed lookup is not an edgeless
+        # corpus. Dispatch passes its already admitted definition id, avoiding
+        # a second identity lookup; other readers must positively resolve it.
         try:
-            agent_definition_id = resolve_agent_definition_id(agent_sub, NEOTOMA_BASE_URL)
-        except Exception as exc:  # noqa: BLE001 — degrade, do not raise
-            log.warning(
-                f"[{self.agent_name}] could not resolve agent_definition id "
-                f"for {agent_sub!r}: {exc} — edge-scoped policies unresolvable "
-                "this load"
-            )
-        governs: dict[str, frozenset[str]] = {}
+            if not agent_definition_id:
+                agent_definition_id = resolve_agent_definition_id(
+                    agent_sub, NEOTOMA_BASE_URL,
+                    _request=lambda url, body, timeout: self._neotoma("POST", url, body, deadline),
+                )
+            if not agent_definition_id:
+                raise ValueError("unresolved authority principal")
+        except Exception as exc:
+            raise AgentPolicyUnavailable(
+                self.agent_name, "definition", load_failure_code(exc)
+            ) from None
         try:
-            governs = fetch_governs_edges(NEOTOMA_BASE_URL)
-        except Exception as exc:  # noqa: BLE001 — degrade, do not raise
-            log.warning(
-                f"[{self.agent_name}] could not fetch GOVERNS edges: {exc} — "
-                "treating every row as edgeless this load"
+            governs = fetch_governs_edges(
+                NEOTOMA_BASE_URL,
+                _request=lambda url, body, timeout: self._neotoma("POST", url, body, deadline),
             )
+        except Exception as exc:
+            raise AgentPolicyUnavailable(self.agent_name, "edges", load_failure_code(exc)) from None
 
         out: list[dict] = []
         scoping_populated = 0
@@ -1204,7 +1248,7 @@ class AgentLoader:
             )
         return out
 
-    def render_policy_prompt(self) -> str:
+    def render_policy_prompt(self, *, agent_definition_id: str | None = None) -> str:
         """
         Render this agent's active/provisional policies as a markdown block to
         append to the dispatch system prompt — turning the advisory consultation
@@ -1246,7 +1290,10 @@ class AgentLoader:
         imports FROM this module at import time (`policy_binds_agent_by_edge`
         et al.) — a module-level import here would be circular.
         """
-        policies = self.load_active_policies()
+        policies = (
+            self.load_active_policies(agent_definition_id=agent_definition_id)
+            if agent_definition_id else self.load_active_policies()
+        )
         if not policies:
             return ""
         try:  # package import (normal daemon runtime) with script fallback
@@ -1270,9 +1317,14 @@ class AgentLoader:
         for p in policies:
             kind = _sanitize_field(str(p.get("rule_kind", "prefer")), max_len=40) or "prefer"
             status = _sanitize_field(str(p.get("status", "active")), max_len=40) or "active"
-            raw_rule = p.get("rule") or p.get("description", "")
-            rule = _sanitize_body(str(raw_rule), max_len=_BODY_MAX, list_item_safe=True)
+            # Only applicable rows reach this loop. Their actual rule is the
+            # safety-bearing content: a missing/non-text rule, a description,
+            # or text erased by sanitizing cannot stand in for that authority.
+            raw_rule = p.get("rule")
+            if not isinstance(raw_rule, str) or not raw_rule.strip():
+                raise AgentPolicyUnavailable(self.agent_name, "content", "bad_response")
+            rule = _sanitize_body(raw_rule, max_len=_BODY_MAX, list_item_safe=True)
             if not rule:
-                continue
+                raise AgentPolicyUnavailable(self.agent_name, "content", "bad_response")
             lines.append(f"- ({kind}, {status}) {rule}")
         return "\n".join(lines)

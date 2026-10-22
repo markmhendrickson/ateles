@@ -770,22 +770,11 @@ class TestReusesAgentLoaderFetch:
         monkeypatch_target = agent_loader.AgentLoader("turdus")
         import unittest.mock as mock
 
-        def fake_httpx_post(url, **kw):
-            class _EmptyResp:
-                def raise_for_status(self):
-                    pass
+        def authority_read(method, url, *args):
+            return {"relationships": []} if url.endswith("/list_relationships") else payload
 
-                def json(self):
-                    if url.endswith("/list_relationships"):
-                        return {"relationships": []}
-                    return {"entities": []}
-
-            return _EmptyResp()
-
-        with mock.patch.object(monkeypatch_target, "_neotoma", return_value=payload):
-            with mock.patch.object(agent_loader, "NEOTOMA_BEARER_TOKEN", "tok"):
-                with mock.patch.object(agent_loader.httpx, "post", fake_httpx_post):
-                    loader_rows = monkeypatch_target.load_active_policies()
+        with mock.patch.object(monkeypatch_target, "_neotoma", side_effect=authority_read):
+            loader_rows = monkeypatch_target.load_active_policies(agent_definition_id="ent_turdus")
         loader_ids = {r["_entity_id"] for r in loader_rows}
 
         # The status filter (excluding ent_retired) must agree exactly —

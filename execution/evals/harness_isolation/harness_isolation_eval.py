@@ -175,7 +175,7 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     monkeypatch.setattr(skill_runner, "ATELES_REPO", tmp_path)
     monkeypatch.setattr(skill_runner, "_load_agent_def", lambda role: agent_def)
     monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda role: agent_def)
-    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role, **kw: "")
     monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: None)
     monkeypatch.setattr(skill_runner, "DISPATCH_FAILURE_LOG_DIR", tmp_path / "failures")
     harness_router.reset_state()

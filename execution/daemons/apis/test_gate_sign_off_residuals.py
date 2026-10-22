@@ -674,3 +674,12 @@ class TestNextRunReprovesSignedOff:
         assert "this run holds it as NOT cleared" in text
         assert "later runs re-check" in text
         assert "until a verified sign-off lands" not in text
+
+
+@pytest.fixture(autouse=True)
+def _verified_empty_policy_admission(monkeypatch):
+    """Keep unrelated adapter tests off live policy reads; real failure/absence
+    behavior is exercised by test_policy_authority_dispatch.py.
+    """
+    import skill_runner
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda *a, **kw: "")

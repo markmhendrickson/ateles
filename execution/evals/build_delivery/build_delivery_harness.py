@@ -579,6 +579,7 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
     )
     loader = MagicMock()
     loader.load.return_value = definition
+    loader.render_policy_prompt.return_value = ""  # verified empty policy fixture
     mp.setattr(skill_runner, "AgentLoader", lambda *a, **k: loader)
 
     real = skill_runner.run_skill

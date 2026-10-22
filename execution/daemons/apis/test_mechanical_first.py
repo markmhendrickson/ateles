@@ -961,3 +961,12 @@ def test_a_nonexistent_cwd_is_a_refusal_not_a_crash(tmp_path):
     missing = str(tmp_path / "nope")
     assert mf.attempt_integration(missing, "main").status == mf.REFUSED
     assert mf.run_generators(missing, ["true"]).status == mf.REFUSED
+
+
+@pytest.fixture(autouse=True)
+def _verified_empty_policy_admission(monkeypatch):
+    """Keep unrelated adapter tests off live policy reads; real failure/absence
+    behavior is exercised by test_policy_authority_dispatch.py.
+    """
+    import skill_runner
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda *a, **kw: "")
