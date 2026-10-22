@@ -5,6 +5,7 @@ are replaced. A verified empty corpus is a separate positive control.
 """
 
 import asyncio
+import copy
 
 import httpx
 import pytest
@@ -165,6 +166,34 @@ def test_no_configured_token_does_not_skip_policy_authority(admission, monkeypat
     result = once()
     assert admission["effects"] == []
     assert "agent_policy unavailable" in result.error
+
+
+@pytest.mark.parametrize("rule", [None, {}, {"text": "unusable rule"}, [], 7, False, "", "  ", "<!-- tier: A -->"])
+def test_bound_malformed_rule_text_refuses_before_provider_effects(admission, rule):
+    admission["query"] = copy.deepcopy(POLICIES)
+    admission["query"]["entities"][0]["snapshot"]["rule"] = rule
+    result = once()
+    assert admission["effects"] == []
+    assert result.policy_unavailable
+    assert "content, bad_response" in result.error
+
+
+def test_description_does_not_substitute_for_missing_governing_rule(admission):
+    admission["query"] = copy.deepcopy(POLICIES)
+    admission["query"]["entities"][0]["snapshot"].update(rule=None, description="Metadata only")
+    result = once()
+    assert result.policy_unavailable
+    assert admission["effects"] == []
+
+
+def test_malformed_rule_for_a_different_agent_does_not_block_this_role(admission):
+    admission["query"] = copy.deepcopy(POLICIES)
+    admission["query"]["entities"][0]["snapshot"]["rule"] = None
+    admission["edges"] = {"relationships": [{"source_entity_id": "ent_policy",
+                                             "target_entity_id": "ent_other"}]}
+    result = once()
+    assert not result.policy_unavailable
+    assert admission["effects"] == ["provider"]
 
 
 def test_unresolved_policy_principal_is_not_a_no_policy_answer(admission, monkeypatch):

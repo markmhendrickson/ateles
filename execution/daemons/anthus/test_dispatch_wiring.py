@@ -162,7 +162,7 @@ class _FakeLoader:
             prompt_markdown="Canonical role", tool_allowlist=["Read"],
         )
 
-    def render_policy_prompt(self):
+    def render_policy_prompt(self, **kwargs):
         return ""
 
 

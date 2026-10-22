@@ -1317,9 +1317,14 @@ class AgentLoader:
         for p in policies:
             kind = _sanitize_field(str(p.get("rule_kind", "prefer")), max_len=40) or "prefer"
             status = _sanitize_field(str(p.get("status", "active")), max_len=40) or "active"
-            raw_rule = p.get("rule") or p.get("description", "")
-            rule = _sanitize_body(str(raw_rule), max_len=_BODY_MAX, list_item_safe=True)
+            # Only applicable rows reach this loop. Their actual rule is the
+            # safety-bearing content: a missing/non-text rule, a description,
+            # or text erased by sanitizing cannot stand in for that authority.
+            raw_rule = p.get("rule")
+            if not isinstance(raw_rule, str) or not raw_rule.strip():
+                raise AgentPolicyUnavailable(self.agent_name, "content", "bad_response")
+            rule = _sanitize_body(raw_rule, max_len=_BODY_MAX, list_item_safe=True)
             if not rule:
-                continue
+                raise AgentPolicyUnavailable(self.agent_name, "content", "bad_response")
             lines.append(f"- ({kind}, {status}) {rule}")
         return "\n".join(lines)

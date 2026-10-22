@@ -43,6 +43,7 @@ from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
     AgentDefinition,
     AgentDefinitionUnavailable,
+    AgentPolicyUnavailable,
     AgentLoader,
     admit_agent_definition,
     load_agent_definition_or_exit,
@@ -298,7 +299,16 @@ async def _orchestrate_workflow_for(event) -> None:
                 AgentLoader(gate.owner_agent).load
             )
             gate_agent_def = admit_agent_definition(gate_agent_def, gate.owner_agent)
-        except AgentDefinitionUnavailable as exc:
+            # Pin governing policy before recording the dispatch too. A policy
+            # outage must leave this gate ready for retry, not recorded as a
+            # child that never launched.
+            gate_policy_prompt = await asyncio.to_thread(
+                AgentLoader(gate.owner_agent).render_policy_prompt,
+                agent_definition_id=gate_agent_def.entity_id,
+            )
+            if not isinstance(gate_policy_prompt, str):
+                raise AgentPolicyUnavailable(gate.owner_agent, "render", "bad_response")
+        except (AgentDefinitionUnavailable, AgentPolicyUnavailable) as exc:
             log.error(
                 f"[{DAEMON_NAME}] gate {gate.gate_name} → {gate.owner_agent} "
                 f"NOT dispatched on {event.entity_id}: {exc}"
@@ -336,6 +346,7 @@ async def _orchestrate_workflow_for(event) -> None:
                 gate_name=gate.gate_name,
                 snapshot=snap,
                 agent_definition=gate_agent_def,
+                policy_prompt=gate_policy_prompt,
             )
             job.finished(
                 f"spawned {gate.owner_agent} for {gate.gate_name} on {event.entity_id}"
@@ -506,6 +517,7 @@ async def _spawn_agent(
     gate_name: str,
     snapshot: dict,
     agent_definition: AgentDefinition | None = None,
+    policy_prompt: str | None = None,
 ) -> None:
     """
     Spawn an admitted canonical role with its declared tool surface. Runs in
@@ -526,6 +538,17 @@ async def _spawn_agent(
         agent_definition = await asyncio.to_thread(AgentLoader(owner_agent).load)
     agent_definition = admit_agent_definition(agent_definition, owner_agent)
     tools = agent_definition.tools
+
+    # A direct entry must satisfy the same live-policy admission as workflow
+    # dispatch. The orchestrator passes its pinned read from before its
+    # participation write; an indeterminate read raises before provider effects.
+    if policy_prompt is None:
+        policy_prompt = await asyncio.to_thread(
+            AgentLoader(owner_agent).render_policy_prompt,
+            agent_definition_id=agent_definition.entity_id,
+        )
+    if not isinstance(policy_prompt, str):
+        raise AgentPolicyUnavailable(owner_agent, "render", "bad_response")
 
     claude_bin = shutil.which("claude")
     if not claude_bin:
@@ -549,15 +572,8 @@ async def _spawn_agent(
         except OSError as exc:
             log.warning(f"[{DAEMON_NAME}] could not read skill supplement: {exc}")
 
-    # Inject this agent's learned, agent-local policies (active + provisional)
-    # into the system prompt so generalized behaviour is actually applied at
-    # dispatch — not merely available to consult.
-    try:
-        policy_block = AgentLoader(owner_agent).render_policy_prompt()
-        if policy_block:
-            skill_md = skill_md + policy_block
-    except Exception as exc:  # noqa: BLE001
-        log.warning(f"[{DAEMON_NAME}] could not load policies for {owner_agent}: {exc}")
+    if policy_prompt:
+        skill_md += policy_prompt
 
     title = snapshot.get("title", "")
     body = snapshot.get("body", "")

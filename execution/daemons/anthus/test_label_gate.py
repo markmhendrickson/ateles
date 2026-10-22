@@ -82,6 +82,9 @@ class _Loader:
     def load(self):
         return _AgentDef()
 
+    def render_policy_prompt(self, **kwargs):
+        return ""
+
 
 @pytest.fixture
 def harness(monkeypatch):
@@ -373,7 +376,7 @@ def test_a_gate_owner_with_no_definition_is_not_spawned(monkeypatch, harness):
 _CANONICAL_SPAWN_ENTRY = anthus._spawn_agent
 
 
-def _actual_gate_launch(monkeypatch, tmp_path, harness, *, status="active", tools=None):
+def _actual_gate_launch(monkeypatch, tmp_path, harness, *, status="active", tools=None, policy_error=False):
     from types import SimpleNamespace
     from lib.daemon_runtime import AgentDefinition
     import shutil
@@ -388,7 +391,10 @@ def _actual_gate_launch(monkeypatch, tmp_path, harness, *, status="active", tool
             self.name = name
         def load(self):
             return definition
-        def render_policy_prompt(self):
+        def render_policy_prompt(self, **kwargs):
+            if policy_error:
+                from lib.daemon_runtime import AgentPolicyUnavailable
+                raise AgentPolicyUnavailable("pavo", "query", "timeout")
             return ""
     skill = tmp_path / ".claude/skills/pavo/SKILL.md"
     skill.parent.mkdir(parents=True)
@@ -429,6 +435,13 @@ def test_actual_gate_entry_binds_restrictive_canonical_tools_and_prompt(monkeypa
     assert argv[argv.index("--allowed-tools") + 1] == "Read"
     assert "--dangerously-skip-permissions" not in argv
     assert any("Canonical gate owner instructions" in str(arg) for arg in argv)
+
+
+def test_policy_read_failure_is_neither_recorded_dispatched_nor_launched(monkeypatch, tmp_path, harness):
+    launched, recorded = _actual_gate_launch(monkeypatch, tmp_path, harness, policy_error=True)
+    assert not launched
+    assert not recorded
+    assert anthus._gate_states["ent_canonical_gate"]["pm"].status != "dispatched"
 
 
 @pytest.mark.parametrize("status", ["active", "planned", "proposed", "draft"])
