@@ -149,6 +149,48 @@ def test_a_restricted_neotoma_grant_restricts_the_codex_tools(operator_home):
         _cleanup(isolated)
 
 
+@pytest.mark.parametrize("gate_owner", [False, True])
+@pytest.mark.parametrize("tools", [
+    ["*"],
+    ["mcp__mcpsrv_neotoma__retrieve_entities", "mcp__mcpsrv_neotoma__correct"],
+])
+def test_codex_preapproves_only_granted_known_reads(operator_home, tmp_path, gate_owner, tools):
+    """A headless child must reach granted reads without approving any write."""
+    text = (skill_runner._codex_gate_config_text("https://neotoma.example.test", tools)
+            if gate_owner else skill_runner._isolated_codex_config_text(
+                skill_runner.allowed_mcp_servers(tools), "https://neotoma.example.test/mcp"))
+    server = tomllib.loads(text)["mcp_servers"]["mcpsrv_neotoma"]
+    assert server.get("default_tools_approval_mode") == "prompt"
+    preapproved = {name for name, config in server.get("tools", {}).items()
+                   if config.get("approval_mode") == "approve"}
+    assert "retrieve_entities" in preapproved
+    assert not preapproved & {"correct", "store", "create_relationship", "delete_entity"}
+    if "enabled_tools" in server:
+        assert preapproved <= set(server["enabled_tools"])
+    else:
+        assert preapproved == {"get_session_identity", "retrieve_entities",
+                               "retrieve_entity_by_identifier", "retrieve_entity_snapshot",
+                               "retrieve_related_entities"}
+    if gate_owner:
+        assert server["disabled_tools"] == ["correct"]
+
+
+@pytest.mark.parametrize("gate_owner", [False, True])
+def test_codex_refuses_a_write_preapproval_in_generated_config(operator_home, tmp_path,
+                                                              gate_owner):
+    tools = ["*"]
+    text = (skill_runner._codex_gate_config_text("https://neotoma.example.test", tools)
+            if gate_owner else skill_runner._isolated_codex_config_text(
+                skill_runner.allowed_mcp_servers(tools), "https://neotoma.example.test/mcp"))
+    config = tmp_path / "config.toml"
+    config.write_text(text + '\n[mcp_servers.mcpsrv_neotoma.tools.store]\napproval_mode = "approve"\n')
+    if gate_owner:
+        assert skill_runner._codex_gate_config_contract(config, "https://neotoma.example.test")
+    else:
+        with pytest.raises(RuntimeError, match="approval"):
+            skill_runner.effective_mcp_servers("codex", config)
+
+
 @pytest.mark.parametrize("provider", ["codex", "cursor"])
 def test_a_role_with_no_neotoma_tools_gets_no_server(operator_home, provider):
     isolated = _prepare(provider, ["Read", "Bash", "mcp__ateles__route_task"])
