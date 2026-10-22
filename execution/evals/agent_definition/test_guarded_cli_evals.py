@@ -24,7 +24,10 @@ import skill_runner  # noqa: E402
 from lib.daemon_runtime import agent_loader as loader  # noqa: E402
 
 
-@pytest.mark.parametrize("outcome", ["timeout", "malformed", "none", "missing_prompt", "missing_tools", "missing_status", "real"])
+@pytest.mark.parametrize("outcome", [
+    "timeout", "malformed", "none", "missing_prompt", "missing_tools",
+    "missing_status", "wrong_role", "disabled", "changed_second_read", "real",
+])
 def test_guarded_cli_requires_available_canonical_definition(monkeypatch, tmp_path, capsys, outcome):
     # Both modules hold import-time path values. Use this fixture checkout,
     # never an optional developer checkout under the test process home.
@@ -39,7 +42,6 @@ def test_guarded_cli_requires_available_canonical_definition(monkeypatch, tmp_pa
         env_extra={"ATELES_LOCAL_REVIEW_HOME": str(tmp_path), "CODEX_HOME": str(tmp_path)},
         command_wrapper=[], codex_outer_sandbox_probed=False))
     monkeypatch.setattr(runner, "refuse_if_guard_required", lambda sandbox: None)
-    monkeypatch.setattr(runner, "read_agent_prompt", lambda *a: "Available prefetched role brief")
     monkeypatch.setattr(runner, "capture_stash_ref_state", lambda path: None)
     monkeypatch.setattr(runner, "verify_stash_ref_unchanged_after_dispatch", lambda *a: None)
     monkeypatch.setattr(loader.ns, "via_cli_enabled", lambda: False)
@@ -53,20 +55,29 @@ def test_guarded_cli_requires_available_canonical_definition(monkeypatch, tmp_pa
     monkeypatch.setenv("APIS_USAGE_PROBE_ON_DISPATCH", "0")
     skill_runner._agent_def_cache.clear()
     monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **k: None)
-    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role, **kw: "")
     monkeypatch.setattr(skill_runner.model_tiering, "record_dispatch", lambda **k: "synthetic")
     monkeypatch.setattr(skill_runner.model_tiering, "record_dispatch_usage", lambda **k: None)
-    requests, spawns, inputs = [], [], []
+    requests, policy_reads, spawns, inputs = [], [], [], []
 
     def post(*a, **k):
+        if k.get("json", {}).get("entity_type") == "agent_policy":
+            policy_reads.append(True)
+            return httpx.Response(200, json={"entities": [], "total": 0},
+                                  request=httpx.Request("POST", "https://fixture.invalid"))
         requests.append(True)
         if outcome == "timeout":
             raise httpx.ReadTimeout("synthetic")
         payload = {"error": "synthetic"} if outcome == "malformed" else {"entities": []}
-        if outcome == "real" or outcome.startswith("missing_"):
+        if outcome in {"real", "wrong_role", "disabled", "changed_second_read"} or outcome.startswith("missing_"):
             snap = {"name": "pavo", "status": "active", "prompt_markdown": "Canonical role", "tool_allowlist": ["Read"]}
-            if outcome != "real":
+            if outcome.startswith("missing_"):
                 snap.pop({"missing_prompt": "prompt_markdown", "missing_tools": "tool_allowlist", "missing_status": "status"}[outcome])
+            elif outcome == "wrong_role":
+                snap["name"] = "other_role"
+            elif outcome == "disabled":
+                snap["status"] = "disabled"
+            elif outcome == "changed_second_read" and len(requests) == 2:
+                snap["prompt_markdown"] = "Changed canonical role"
             payload = {"entities": [{"entity_id": "ent_synthetic", "snapshot": snap}]}
         return httpx.Response(200, json=payload, request=httpx.Request("POST", "https://fixture.invalid"))
 
@@ -89,13 +100,22 @@ def test_guarded_cli_requires_available_canonical_definition(monkeypatch, tmp_pa
     if outcome == "real":
         assert spawns, report
         assert inputs and inputs[0].startswith(b"Canonical role")
-        assert skill_runner._agent_def_cache["pavo"].tools == ["Read"]
+        assert len(requests) == 2  # wrapper and child independently read the role
+        assert len(policy_reads) == 1
+        assert report["role_entity_id"] == "ent_synthetic"
+        assert len(report["role_fingerprint"]) == 64
+        assert "pavo" not in skill_runner._agent_def_cache
         assert report["posted"] is False
-        skill_runner._agent_def_cache.clear()
         return
     assert report["ok"] is False and report["posted"] is False
     assert requests, report
-    assert "agent_definition unavailable:" in report["reason"], report
+    assert not policy_reads
+    assert len(requests) == (3 if outcome == "timeout" else 2 if outcome == "changed_second_read" else 1)
+    if outcome == "changed_second_read":
+        assert "agent_definition unavailable:" in report["reason"], report
+    else:
+        assert "canonical reviewer role 'pavo' is unavailable:" in report["reason"], report
+    assert "agent_definition for 'pavo' is unavailable" in report["reason"], report
     assert not spawns
     assert "pavo" not in skill_runner._agent_def_cache
 

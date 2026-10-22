@@ -180,9 +180,178 @@ class TestAgentDefCache:
 
             skill_runner._load_agent_def("monedula")
             skill_runner._load_agent_def("monedula")
-            # AgentLoader should only have been instantiated once
             assert MockLoader.call_count == 1
 
+    def test_fresh_binding_ignores_and_preserves_process_cache(self) -> None:
+        stale = _make_def(name="pavo", prompt_markdown="stale")
+        fresh = _make_def(name="pavo", prompt_markdown="fresh")
+        skill_runner._agent_def_cache["pavo"] = stale
+        with patch("skill_runner.AgentLoader") as loader:
+            loader.return_value.load.return_value = fresh
+            assert skill_runner._load_agent_def(" PAVO ", fresh=True) is fresh
+        assert skill_runner._agent_def_cache == {"pavo": stale}
+
+    def test_concurrent_fresh_bindings_leave_cache_unchanged(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        stale = _make_def(name="pavo", prompt_markdown="stale")
+        fresh = _make_def(name="pavo", prompt_markdown="fresh")
+        skill_runner._agent_def_cache["pavo"] = stale
+        with patch("skill_runner.AgentLoader") as loader:
+            loader.return_value.load.return_value = fresh
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                loaded = list(pool.map(
+                    lambda _: skill_runner._load_agent_def("pavo", fresh=True), range(2)
+                ))
+        assert loaded == [fresh, fresh]
+        assert skill_runner._agent_def_cache == {"pavo": stale}
+
+    @pytest.mark.parametrize("change", [
+        {"name": "other"}, {"entity_id": ""}, {"status": "disabled"},
+        {"status": "planned"}, {"is_stub": True},
+        {"prompt_markdown": "  "}, {"tool_allowlist": []},
+    ])
+    def test_fresh_binding_refuses_invalid_role(self, change) -> None:
+        role = _make_def(name="pavo")
+        for key, value in change.items():
+            setattr(role, key, value)
+        with patch("skill_runner.AgentLoader") as loader:
+            loader.return_value.load.return_value = role
+            with pytest.raises(skill_runner.AgentDefinitionUnavailable):
+                skill_runner._load_agent_def("pavo", fresh=True)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("entity_id", "ent_other"), ("prompt_markdown", "changed\n"),
+    ("tool_allowlist", "Read, Bash"), ("aauth_sub", "other@ateles"),
+    ("agent_grant", "operator"), ("tier", "top"),
+    ("override_policy", "different"), ("last_observation_id", "obs_other"),
+])
+def test_canonical_role_fingerprint_binds_each_contract_field(field, value):
+    role = _make_def(name="pavo")
+    original = skill_runner.canonical_role_fingerprint("pavo", role)
+    setattr(role, field, value)
+    assert skill_runner.canonical_role_fingerprint("pavo", role) != original
+
+
+def test_canonical_role_fingerprint_uses_only_real_version_evidence():
+    role = _make_def(name="pavo")
+    original = skill_runner.canonical_role_fingerprint("pavo", role)
+    role.version = "local-default-changed"
+    assert skill_runner.canonical_role_fingerprint("pavo", role) == original
+    role.raw = {"snapshot": {"version": "server-revision"}}
+    assert skill_runner.canonical_role_fingerprint("pavo", role) != original
+
+
+@pytest.mark.parametrize("field,value", [
+    ("entity_id", "ent_changed"), ("prompt_markdown", "changed\n"),
+    ("tool_allowlist", ["Bash"]), ("status", "disabled"),
+    ("aauth_sub", "changed@ateles"), ("agent_grant", "operator"),
+    ("tier", "top"), ("override_policy", "changed"),
+    ("last_observation_id", "obs_changed"),
+    ("raw", {"snapshot": {"version": "changed"}}),
+])
+def test_expected_role_change_refuses_before_provider_or_policy(monkeypatch, field, value):
+    original = _make_def(name="pavo")
+    expectation = skill_runner.canonical_role_fingerprint("pavo", original)
+    changed = _make_def(name="pavo")
+    setattr(changed, field, value)
+    effects = []
+    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda role, *, fresh: changed)
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda *a, **k: effects.append("policy"))
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: effects.append("provider"))
+    result = asyncio.run(skill_runner._run_skill_once(
+        "pavo", "task", provider="claude", role="pavo",
+        expected_role_fingerprint=expectation,
+    ))
+    assert result.definition_unavailable and not result.ok
+    assert effects == []
+
+
+@pytest.mark.parametrize("expectation", ["", "bad", "A" * 64])
+def test_bad_role_expectation_refuses_before_loader(monkeypatch, expectation):
+    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda *a, **k: pytest.fail("loader called"))
+    result = asyncio.run(skill_runner._run_skill_once(
+        "pavo", "task", provider="claude", role="pavo",
+        expected_role_fingerprint=expectation,
+    ))
+    assert result.definition_unavailable
+
+
+def test_matching_fresh_role_still_reads_live_policy_for_exact_entity(monkeypatch):
+    role = _make_def(name="pavo")
+    expectation = skill_runner.canonical_role_fingerprint("pavo", role)
+    seen = []
+    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda name, *, fresh: role)
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt",
+                        lambda name, *, agent_definition_id: seen.append(agent_definition_id) or "")
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {})
+    result = asyncio.run(skill_runner._run_skill_once(
+        "pavo", "task", provider="claude", role="pavo",
+        expected_role_fingerprint=expectation,
+    ))
+    assert seen == [role.entity_id]
+    assert not result.ok
+
+
+def test_matching_fresh_role_refuses_failed_live_policy(monkeypatch):
+    role = _make_def(name="pavo")
+    expectation = skill_runner.canonical_role_fingerprint("pavo", role)
+    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda name, *, fresh: role)
+    def unavailable(*a, **k):
+        raise skill_runner.AgentPolicyUnavailable("pavo", "query", "bad_response")
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", unavailable)
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: pytest.fail("provider reached"))
+    result = asyncio.run(skill_runner._run_skill_once(
+        "pavo", "task", provider="claude", role="pavo",
+        expected_role_fingerprint=expectation,
+    ))
+    assert result.policy_unavailable and not result.ok
+
+
+def test_run_skill_forwards_role_expectation_to_provider_attempt(monkeypatch):
+    seen = []
+    async def attempt(skill, prompt, **kwargs):
+        seen.append(kwargs.get("expected_role_fingerprint"))
+        return skill_runner.SkillResult(skill, True, 0, "ok", "", provider="claude")
+    monkeypatch.setattr(skill_runner, "_run_skill_once", attempt)
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude": "/fixture/claude"})
+    monkeypatch.setattr(skill_runner, "_refresh_usage_snapshot", lambda binaries: None)
+    harness_router.record_probe_available("claude", source="test_fixture",
+                                          detail="intercepted attempt")
+    expectation = "a" * 64
+    result = asyncio.run(skill_runner.run_skill(
+        "pavo", "task", role="pavo", provider="claude",
+        expected_role_fingerprint=expectation,
+    ))
+    assert result.ok
+    assert seen == [expectation]
+
+
+def test_role_mismatch_ends_failover_without_cooldown(monkeypatch, tmp_path):
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"cursor": 1.0, "codex": 1.0}')
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json"))
+    harness_router.reset_state()
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {
+        "cursor": "/fixture/cursor", "codex": "/fixture/codex",
+    })
+    for provider in ("cursor", "codex"):
+        harness_router.record_probe_available(provider, source="test_fixture",
+                                              detail="intercepted attempt")
+    seen = []
+    async def mismatch(skill, prompt, **kwargs):
+        seen.append((kwargs["provider"], kwargs["expected_role_fingerprint"]))
+        return skill_runner.SkillResult(
+            skill, False, None, "", "", provider=kwargs["provider"],
+            definition_unavailable=True,
+        )
+    monkeypatch.setattr(skill_runner, "_run_skill_once", mismatch)
+    monkeypatch.setattr(skill_runner, "cool_down", lambda *a, **k: pytest.fail("cooldown"))
+    result = asyncio.run(skill_runner.run_skill(
+        "pavo", "task", role="pavo", expected_role_fingerprint="a" * 64,
+    ))
+    assert result.definition_unavailable
+    assert len(seen) == 1 and seen[0][1] == "a" * 64
 
 def _loader_with_no_policies():
     """Unrelated runner tests supply a verified empty rendered policy result."""

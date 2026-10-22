@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -152,6 +153,8 @@ class LaunchTrace:
 
     def __init__(self) -> None:
         self.dispatch_calls = 0
+        self.role_loads = 0
+        self.role_fingerprint = None
         self.sandbox_builds = 0
         self.worktree_removed = False
         self.report: dict | None = None
@@ -172,6 +175,7 @@ def run_launch(scenario: dict, tmp_root: Path, monkeypatch) -> LaunchTrace:
         if entry not in sys.path:
             sys.path.insert(0, entry)
     import harness_lens_runner as hlr
+    from lib.daemon_runtime import agent_loader
 
     trace = LaunchTrace()
     files = list(scenario["files"])
@@ -179,9 +183,6 @@ def run_launch(scenario: dict, tmp_root: Path, monkeypatch) -> LaunchTrace:
     def fake_create(self, *, head):
         self._created = True
         self.path.mkdir(parents=True, exist_ok=True)
-        agents = self.path / "docs" / "agents"
-        agents.mkdir(parents=True, exist_ok=True)
-        (agents / "pavo.md").write_text("# lens prompt\n", encoding="utf-8")
         for relative in files:
             target = self.path / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -210,12 +211,26 @@ def run_launch(scenario: dict, tmp_root: Path, monkeypatch) -> LaunchTrace:
 
     async def fake_dispatch(*args, **kwargs):
         trace.dispatch_calls += 1
+        trace.role_fingerprint = kwargs.get("expected_role_fingerprint")
         raise StopAtDispatch()
 
     monkeypatch.setattr(hlr.Worktree, "create", fake_create)
     monkeypatch.setattr(hlr.Worktree, "remove", fake_remove)
     monkeypatch.setattr(hlr.HarnessSandbox, "build", classmethod(tracking_build))
     monkeypatch.setattr(hlr.dispatch_role, "dispatch", fake_dispatch)
+    # The checkout under review is source only. Supply a complete, inert
+    # canonical role at the loader's external read edge; admission and the
+    # wrapper's fingerprint calculation remain real.
+    def canonical_role(self):
+        assert self.agent_name == "pavo"
+        trace.role_loads += 1
+        return agent_loader.AgentDefinition(
+            entity_id="ent_eval_pavo", name="pavo", status="active",
+            prompt_markdown="Synthetic canonical review role.", tool_allowlist=["Read"],
+            raw={"snapshot": {"revision": "eval-1"}},
+        )
+
+    monkeypatch.setattr(agent_loader.AgentLoader, "load", canonical_role)
     monkeypatch.setattr(hlr, "check_headroom", lambda provider: 1.0)
     monkeypatch.setattr(
         hlr,
@@ -266,9 +281,15 @@ def judge_launch(scenario: dict, trace: LaunchTrace) -> list[str]:
             problems.append("a refused launch posted something")
         if not scenario["dry_run"] and trace.sandbox_builds != 0:
             problems.append("a sandbox was built before the refusal")
+        if trace.role_loads != (1 if scenario["dry_run"] else 0):
+            problems.append("refusal crossed the canonical role read boundary")
     else:
         if trace.dispatch_calls != 1:
             problems.append(f"expected exactly one dispatch, got {trace.dispatch_calls}")
+        if trace.role_loads != 1 or not isinstance(trace.role_fingerprint, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", trace.role_fingerprint
+        ):
+            problems.append("launch missed the fresh canonical role/fingerprint")
     return problems
 
 
