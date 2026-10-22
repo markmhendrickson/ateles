@@ -1808,22 +1808,102 @@ def test_child_instruction_after_agent_prompt_forbids_github_publication(
 
 
 @pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize("failure_code", ["not_found", "bad_response"])
 def test_run_one_refuses_missing_canonical_role_without_dispatch(
-    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox, dry_run
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox, dry_run,
+    failure_code,
 ):
     _install_minimal_lens_worktree(monkeypatch, target)
+    removed = []
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: removed.append(self.path))
     def missing(role, *, fresh):
-        raise skill_runner.AgentDefinitionUnavailable(role, "not_found", 1)
+        raise skill_runner.AgentDefinitionUnavailable(role, failure_code, 1)
     monkeypatch.setattr(hlr, "_load_agent_def", missing)
     async def unexpected(*a, **k):
         raise AssertionError("provider reached without canonical role")
     monkeypatch.setattr(hlr.dispatch_role, "dispatch", unexpected)
-    with pytest.raises(skill_runner.AgentDefinitionUnavailable):
-        asyncio.run(hlr.run_one(
-            target, provider="codex", post=False, dry_run=dry_run,
-            repo_worktree_name="ateles", scratch_root=tmp_path,
-            brief_path=brief_file, timeout=None,
-        ))
+    monkeypatch.setattr(hlr, "post_verdict", lambda **k: pytest.fail("publication reached"))
+    monkeypatch.setattr(skill_runner, "_provider_command",
+                        lambda *a, **k: pytest.fail("provider command constructed"))
+    report = asyncio.run(hlr.run_one(
+        target, provider="codex", post=False, dry_run=dry_run,
+        repo_worktree_name="ateles", scratch_root=tmp_path,
+        brief_path=brief_file, timeout=None,
+    ))
+    assert report["ok"] is False
+    assert report["provider"] == "codex"
+    assert report["lens"] == target.lens
+    assert report["agent"] == target.agent
+    assert failure_code in report["refusal_reason"] == report["reason"]
+    assert report["no_model_call_made"] is True
+    assert report["posted"] is False
+    assert len(removed) == 1
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_invalid_canonical_fingerprint_refuses_without_dispatch(
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox, dry_run,
+):
+    _install_minimal_lens_worktree(monkeypatch, target)
+    monkeypatch.setattr(hlr, "canonical_role_fingerprint", lambda *a: "invalid")
+    async def unexpected(*args, **kwargs):
+        pytest.fail("provider dispatch reached")
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", unexpected)
+    report = asyncio.run(hlr.run_one(
+        target, provider="codex", post=False, dry_run=dry_run,
+        repo_worktree_name="ateles", scratch_root=tmp_path,
+        brief_path=brief_file, timeout=None,
+    ))
+    assert report["ok"] is False
+    assert "bad_response" in report["reason"]
+    assert report["no_model_call_made"] is True
+    assert report["posted"] is False
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize("compare", [False, True])
+def test_missing_canonical_role_cli_json_preserves_provider_refusals(
+    monkeypatch, tmp_path, capsys, brief_file, mock_ready_sandbox,
+    dry_run, compare,
+):
+    _install_minimal_lens_worktree(monkeypatch, None)
+    removed = []
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: removed.append(self.path))
+    monkeypatch.setattr(
+        hlr, "_load_agent_def",
+        lambda role, *, fresh: (_ for _ in ()).throw(
+            skill_runner.AgentDefinitionUnavailable(role, "not_found", 1)
+        ),
+    )
+    async def unexpected(*args, **kwargs):
+        pytest.fail("provider dispatch reached")
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", unexpected)
+    monkeypatch.setattr(hlr, "post_verdict", lambda **k: pytest.fail("publication reached"))
+    monkeypatch.setattr(skill_runner, "_provider_command",
+                        lambda *a, **k: pytest.fail("provider command constructed"))
+    args = [
+        "--repo", "o/r", "--pr", "1", "--head", SAMPLE_HEAD,
+        "--lens", "pm", "--agent", "pavo", "--brief", str(brief_file),
+        "--json",
+    ]
+    args += ["--compare", "claude,codex"] if compare else ["--provider", "codex"]
+    if dry_run:
+        args.append("--dry-run")
+
+    rc = hlr.main(args)
+    report = json.loads(capsys.readouterr().out)
+    assert rc == (0 if dry_run else 1)
+    results = report["results"] if compare else {"codex": report}
+    assert set(results) == ({"claude", "codex"} if compare else {"codex"})
+    for provider, result in results.items():
+        assert result["ok"] is False
+        assert result["provider"] == provider
+        assert result["lens"] == "pm"
+        assert result["agent"] == "pavo"
+        assert "not_found" in result["refusal_reason"] == result["reason"]
+        assert result["no_model_call_made"] is True
+        assert result["posted"] is False
+    assert len(removed) == len(results)
 
 
 def test_wrapper_to_provider_attempt_rejects_role_changed_between_fresh_reads(

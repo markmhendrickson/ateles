@@ -314,6 +314,10 @@ def test_run_skill_forwards_role_expectation_to_provider_attempt(monkeypatch):
         seen.append(kwargs.get("expected_role_fingerprint"))
         return skill_runner.SkillResult(skill, True, 0, "ok", "", provider="claude")
     monkeypatch.setattr(skill_runner, "_run_skill_once", attempt)
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude": "/fixture/claude"})
+    monkeypatch.setattr(skill_runner, "_refresh_usage_snapshot", lambda binaries: None)
+    harness_router.record_probe_available("claude", source="test_fixture",
+                                          detail="intercepted attempt")
     expectation = "a" * 64
     result = asyncio.run(skill_runner.run_skill(
         "pavo", "task", role="pavo", provider="claude",
@@ -328,6 +332,12 @@ def test_role_mismatch_ends_failover_without_cooldown(monkeypatch, tmp_path):
     monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"cursor": 1.0, "codex": 1.0}')
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json"))
     harness_router.reset_state()
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {
+        "cursor": "/fixture/cursor", "codex": "/fixture/codex",
+    })
+    for provider in ("cursor", "codex"):
+        harness_router.record_probe_available(provider, source="test_fixture",
+                                              detail="intercepted attempt")
     seen = []
     async def mismatch(skill, prompt, **kwargs):
         seen.append((kwargs["provider"], kwargs["expected_role_fingerprint"]))

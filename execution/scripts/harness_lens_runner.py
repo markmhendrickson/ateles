@@ -278,7 +278,8 @@ import harness_router  # noqa: E402
 from harness_router import headroom_resolution  # noqa: E402
 from review_panel import lens_by_name  # noqa: E402
 from skill_runner import (  # noqa: E402
-    SkillResult, _load_agent_def, canonical_role_fingerprint,
+    AgentDefinitionUnavailable, SkillResult, _load_agent_def,
+    canonical_role_fingerprint,
 )
 
 try:
@@ -552,7 +553,7 @@ def load_canonical_role(agent: str) -> tuple[str, str, str, str | None]:
     agent_def = _load_agent_def(agent, fresh=True)
     fingerprint = canonical_role_fingerprint(agent, agent_def)
     if not isinstance(fingerprint, str) or not re.fullmatch(r'[0-9a-f]{64}', fingerprint):
-        raise RuntimeError('canonical role fingerprint unavailable')
+        raise AgentDefinitionUnavailable(agent, 'bad_response', 1)
     snapshot = agent_def.raw.get('snapshot', {}) if isinstance(agent_def.raw, dict) else {}
     revision = snapshot.get('revision') if isinstance(snapshot, dict) else None
     return agent_def.prompt_markdown, agent_def.entity_id, fingerprint, revision
@@ -2530,6 +2531,21 @@ def post_verdict(*, repo: str, pr: int, verdict_text: str) -> str:
 # ── Single-provider run -----------------------------------------------------------
 
 
+def _canonical_role_refusal(
+    target: LensTarget, provider: str, error: AgentDefinitionUnavailable,
+) -> dict:
+    reason = (
+        f"canonical reviewer role {target.agent!r} is unavailable: {error}; "
+        "check its active agent_definition and retry"
+    )
+    return {
+        "ok": False, "provider": provider, "lens": target.lens,
+        "agent": target.agent, "role": target.agent,
+        "reason": reason, "refusal_reason": reason,
+        "no_model_call_made": True, "posted": False,
+    }
+
+
 async def run_one(
     target: LensTarget,
     *,
@@ -2586,7 +2602,10 @@ async def run_one(
                 review_worktree=worktree.path,
                 verdict_path=verdict_path,
             )
-            agent_prompt, role_id, role_fingerprint, role_revision = load_canonical_role(target.agent)
+            try:
+                agent_prompt, role_id, role_fingerprint, role_revision = load_canonical_role(target.agent)
+            except AgentDefinitionUnavailable as error:
+                return _canonical_role_refusal(target, provider, error)
             task_text = (
                 render_lens_task(target, brief_path)
                 + "\n\n---\n\n"
@@ -2634,7 +2653,10 @@ async def run_one(
         refusal = refuse_if_guard_required(sandbox)
         if refusal:
             return {"ok": False, "provider": provider, "reason": refusal}
-        agent_prompt, role_id, role_fingerprint, role_revision = load_canonical_role(target.agent)
+        try:
+            agent_prompt, role_id, role_fingerprint, role_revision = load_canonical_role(target.agent)
+        except AgentDefinitionUnavailable as error:
+            return _canonical_role_refusal(target, provider, error)
         task_text = (
             render_lens_task(target, brief_path)
             + "\n\n---\n\n"
