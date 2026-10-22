@@ -19,6 +19,73 @@ def cleanup_error(exc, *, boundary_error=None):
     return {"type": kind, "errno": number if type(number) is int else None}
 
 
+def capture_original_cleanup(root, cleanup, delivery, monkeypatch, causes):
+    """Observe fixture cleanup failures before the existing boundary wraps them.
+
+    The original validator, deletion functions and exception behavior remain
+    in place. Only fixed metadata is retained; paths and exception text are not.
+    """
+    guard = delivery.check_work_root
+    guard_body = getattr(guard, "__wrapped__", None)
+    if not callable(guard_body):
+        raise AssertionError("cleanup guard observation is unavailable")
+    listdir = delivery.os.listdir
+    remove = delivery._remove
+
+    def record(phase, exc):
+        if len(causes) >= 3:
+            return
+        category = getattr(exc, "category", None)
+        status = getattr(exc, "status", None)
+        causes.append({
+            "phase": phase,
+            **cleanup_error(exc, boundary_error=delivery.RepoWorkError),
+            "category": category if type(category) is str and category in {
+                "work_root_refused", "work_failed"} else None,
+            "status": status if type(status) is str and status in {
+                "os_error", "not_started", "timed_out", "exit_nonzero",
+                "killed_by_signal", "no_time"} else None,
+        })
+
+    def observed_guard(path):
+        try:
+            return guard_body(path)
+        except (delivery.RepoWorkError, OSError, ValueError, TypeError, UnicodeError) as exc:
+            if path == root:
+                record("guard", exc)
+            raise
+
+    def observed_listdir(path):
+        try:
+            return listdir(path)
+        except OSError as exc:
+            if Path(path) == root:
+                record("list", exc)
+            raise
+
+    def observed_remove(path):
+        try:
+            return remove(path)
+        except (delivery.RepoWorkError, OSError, ValueError, TypeError, UnicodeError) as exc:
+            if Path(path).parent == root:
+                record("remove", exc)
+            raise
+
+    with monkeypatch.context() as scoped:
+        # Reuse the SAME production decorator around the SAME validator body:
+        # observation happens inside its normalization, not instead of it.
+        scoped.setattr(delivery, "check_work_root",
+                       delivery._boundary(delivery.WORK_ROOT_REFUSED)(observed_guard))
+        scoped.setattr(delivery.os, "listdir", observed_listdir)
+        scoped.setattr(delivery, "_remove", observed_remove)
+        try:
+            return cleanup(root)
+        except (delivery.RepoWorkError, OSError, ValueError, TypeError, UnicodeError) as exc:
+            if not causes:
+                record("cleanup", exc)
+            raise
+
+
 def cleanup_details(root, *, cleanup_errors=()):
     """Bound every assertion probe and inventory behind value-free evidence.
 
