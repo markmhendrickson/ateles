@@ -31,7 +31,7 @@ for path in (ROOT, ROOT / "execution/scripts", ROOT / "execution/daemons/apis"):
 import harness_lens_runner as runner  # noqa: E402
 import model_tiering  # noqa: E402
 import skill_runner  # noqa: E402
-from lib.daemon_runtime.agent_loader import AgentDefinition  # noqa: E402
+from lib.daemon_runtime import agent_loader  # noqa: E402
 
 HEAD = "a" * 40
 MUTATIONS = ("none", "no_validation", "drop_model", "drop_action_class")
@@ -109,10 +109,13 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
     brief = tmp_path / "brief.md"
     brief.write_text("Review this synthetic fixture; write only the requested verdict.\n")
     obs = {"dispatch_calls": [], "events": [], "provider_calls": [], "definition_loads": [],
+           "definition_fingerprints": [],
+           "policy_reads": [],
            "worktree_preparations": [], "sandbox_builds": []}
     stdout, stderr = io.StringIO(), io.StringIO()
 
     with pytest.MonkeyPatch.context() as mp:
+        skill_runner._agent_def_cache.clear()
         def no_http(*args, **kwargs):
             raise AssertionError("unexpected external HTTP in an offline eval")
 
@@ -158,13 +161,25 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         mp.setattr(active_runner.dispatch_role, "ATELES_REPO", ROOT)
         mp.setattr(skill_runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
         mp.setattr(active_runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
-        def definition(role):
-            obs["definition_loads"].append(role)
-            return AgentDefinition(name=role, prompt_markdown="Synthetic review role.", tool_allowlist=[])
+        def definition(self):
+            assert self.agent_name == "pavo"
+            obs["definition_loads"].append(self.agent_name)
+            agent_def = agent_loader.AgentDefinition(
+                entity_id="ent_eval_pavo", name="pavo", status="active",
+                prompt_markdown="Synthetic canonical review role.", tool_allowlist=["Read"],
+                raw={"snapshot": {"revision": "eval-1"}},
+            )
+            obs["definition_fingerprints"].append(
+                skill_runner.canonical_role_fingerprint(self.agent_name, agent_def))
+            return agent_def
 
-        mp.setattr(skill_runner, "_load_agent_def", definition)
-        mp.setattr(active_runner.dispatch_role, "_load_agent_def", skill_runner._load_agent_def)
-        mp.setattr(skill_runner, "_load_active_policy_prompt", lambda role, **kw: "")
+        mp.setattr(agent_loader.AgentLoader, "load", definition)
+        def policy_query(self, method, url, body, deadline):
+            assert method == "POST" and body["entity_type"] == "agent_policy"
+            obs["policy_reads"].append(self.agent_name)
+            return {"entities": [], "total": 0}
+
+        mp.setattr(agent_loader.AgentLoader, "_neotoma", policy_query)
         mp.setattr(skill_runner, "_write_harness_event", lambda **kw: obs["events"].append(kw))
         mp.setattr(model_tiering, "configured_action_policy", lambda: {"lens_review:arch": "top"})
         mp.setattr(model_tiering, "configured_vendor_binding", lambda: BINDING)
@@ -173,9 +188,6 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
             obs["worktree_preparations"].append(head)
             assert head == HEAD
             worktree.path.mkdir(parents=True)
-            agents = worktree.path / "docs/agents"
-            agents.mkdir(parents=True)
-            (agents / "pavo.md").write_text("Synthetic canonical prompt fixture.\n")
             worktree._created = True
 
         def sandbox(cls, provider, scratch, **kw):
@@ -213,7 +225,8 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
             elif mutation == "drop_action_class":
                 kw.pop("action_class", None)
             obs["dispatch_calls"].append({k: kw.get(k) for k in (
-                "provider", "model", "action_class", "local_review", "seated_reviewer", "task_entity_id"
+                "provider", "model", "action_class", "local_review", "seated_reviewer", "task_entity_id",
+                "expected_role_fingerprint",
             )})
             return await real_dispatch(role, task, **kw)
 
@@ -301,6 +314,19 @@ def check(scenario, obs):
             failures.append(f"{key} {obs[key]!r}, expected {exp[key]!r}")
     if len(obs["provider_calls"]) != exp["launches"]:
         failures.append(f"provider launches {len(obs['provider_calls'])}, expected {exp['launches']}")
+    if (scenario.get("entrypoint", "lens_cli") == "lens_cli"
+            and exp["exit_code"] == 0 and not exp.get("reader_refusal")):
+        expected_reads = 1 if "--dry-run" in scenario["args"] else 2 * exp["launches"]
+        if len(obs["definition_loads"]) != expected_reads:
+            failures.append(f"canonical fresh reads {len(obs['definition_loads'])}, expected {expected_reads}")
+        if len(obs["policy_reads"]) != exp["launches"]:
+            failures.append("independent live policy read count differs from provider attempts")
+        fingerprints = obs["definition_fingerprints"]
+        if len(set(fingerprints)) != 1 or any(
+            call["expected_role_fingerprint"] != fingerprints[0]
+            for call in obs["dispatch_calls"]
+        ):
+            failures.append("wrapper/child role fingerprint binding differs")
     if "dispatches" in exp and len(obs["dispatch_calls"]) != exp["dispatches"]:
         failures.append(f"dispatches {len(obs['dispatch_calls'])}, expected {exp['dispatches']}")
     if "models" in exp and [c["model"] for c in obs["provider_calls"]] != exp["models"]:
