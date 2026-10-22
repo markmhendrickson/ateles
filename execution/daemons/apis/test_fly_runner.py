@@ -952,7 +952,7 @@ def seam(monkeypatch, tmp_path):
         lambda role: AgentDefinition(entity_id="e", name=role, prompt_markdown="You are lanius.",
                                      tool_allowlist="*", aauth_sub=f"{role}@ateles-swarm"),
     )  # fmt: skip
-    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role: "")
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda role, **kw: "")
     monkeypatch.setattr(skill_runner, "_write_harness_event", lambda **kw: None)
     spawned = []
 

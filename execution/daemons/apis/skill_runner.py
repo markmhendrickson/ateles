@@ -66,7 +66,8 @@ from lib.credential_scrub import (  # noqa: E402
     is_generation_credential,
 )
 from lib.daemon_runtime import (  # noqa: E402
-    AgentDefinition, AgentDefinitionUnavailable, AgentLoader, admit_agent_definition,
+    AgentDefinition, AgentDefinitionUnavailable, AgentPolicyUnavailable,
+    AgentLoader, admit_agent_definition,
 )
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 from foundation import (  # noqa: E402
@@ -887,14 +888,18 @@ def _load_agent_def(role: str) -> AgentDefinition:
     return agent_def
 
 
-def _load_active_policy_prompt(role: str) -> str:
-    """Render the role's live Neotoma policy without caching it locally."""
+def _load_active_policy_prompt(role: str, *, agent_definition_id: str | None = None) -> str:
+    """Read live policy on every admission; an unreadable corpus refuses execution."""
     try:
-        rendered = AgentLoader(role).render_policy_prompt()
-        return rendered if isinstance(rendered, str) else ""
-    except Exception as exc:  # noqa: BLE001 — policy outage must not kill dispatch
-        log.warning(f"[apis] live policy unavailable for role {role!r}: {exc}")
-        return ""
+        rendered = AgentLoader(role).render_policy_prompt(agent_definition_id=agent_definition_id)
+        if not isinstance(rendered, str):
+            raise ValueError("bad policy rendering")
+        return rendered
+    except AgentPolicyUnavailable:
+        raise
+    except Exception as exc:
+        from lib.daemon_runtime.agent_loader import load_failure_code
+        raise AgentPolicyUnavailable(role, "render", load_failure_code(exc)) from None
 
 
 # ── Review-verdict vocabulary (ateles#938 — one source, defined once) ─────────
@@ -1751,6 +1756,9 @@ class SkillResult:
     # whole dispatch (no failover to another provider, no cooldown), because every
     # provider would hit the same missing definition; the task is retried later.
     definition_unavailable: bool = False
+    # Same admission failure semantics for unreadable governing policies: no
+    # child, no provider cooldown/failover, retry after the read is repaired.
+    policy_unavailable: bool = False
     remote_run_id: str = ""
     remote_machine_state: str = ""
     # A configuration the operator must repair before this dispatch can run
@@ -1782,6 +1790,7 @@ class SkillResult:
 # not be loaded. Fixed text: callers and tests match on it, and it carries no
 # response content.
 DEFINITION_UNAVAILABLE_PREFIX = "agent_definition unavailable"
+POLICY_UNAVAILABLE_PREFIX = "agent_policy unavailable"
 
 
 _SHARED_NEOTOMA_BEARER_NAMES = ("NEOTOMA_BEARER_TOKEN", "NEOTOMA_BEARER_TOKEN_PROD")
@@ -2755,11 +2764,11 @@ async def _run_skill_once(
 
     ``work_class`` (ateles task ent_71387d9c1d1d3d1eef9ecc01 — lean local
     prompt): when ``provider == local_provider.LOCAL_PROVIDER``, this replaces
-    the full agent_definition + live-policy system prompt with
+    the full agent_definition system prompt with
     ``local_provider.build_lean_prompt`` — role summary, the work class's own
-    hard rules, and the task's SKILL.md, nothing else. This keeps the local
-    prompt well under the local context ceiling regardless of how large the
-    frontier prompt (agent_definition + agent_policy) grows. It has no effect
+    hard rules, and the task's SKILL.md. Governing policies are still appended;
+    if that exceeds the local context ceiling the ceiling check refuses the
+    local attempt rather than omitting those policies. It has no effect
     on any other provider: a Claude/Codex/Cursor dispatch is built exactly as
     before, full stop, whether or not ``work_class`` is passed. After a local
     run, ``local_provider.verify_postcondition`` checks the work class's
@@ -2821,6 +2830,21 @@ async def _run_skill_once(
             skill, False, None, "", "", error=msg, provider=provider,
             definition_unavailable=True,
         )
+
+    # Policy is authority too. Read it before provider admission or any runner,
+    # even for the local adapter; cached definitions never cache policy reads.
+    try:
+        policy_prompt = await asyncio.to_thread(
+            _load_active_policy_prompt, _role, agent_definition_id=agent_def.entity_id
+        )
+    except AgentPolicyUnavailable as exc:
+        msg = (
+            f"{POLICY_UNAVAILABLE_PREFIX}: {exc} — nothing was dispatched; "
+            "repair the load, the task is retried"
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider,
+                           policy_unavailable=True)
 
     binary = _provider_binaries().get(provider)
     if binary is None:
@@ -3015,13 +3039,13 @@ async def _run_skill_once(
         )
 
     # ── Build system prompt (Stage 1 + Stage 5) ────────────────────────────────
-    # claude-local gets the LEAN prompt (role + work-class hard rules + task),
-    # never the full agent_definition + live-policy rendering: that full
-    # prompt is sized for a frontier context window and does not fit a local
-    # one (ateles task ent_71387d9c1d1d3d1eef9ecc01). Every other provider is
-    # built exactly as before — this branch changes nothing for them.
+    # claude-local keeps its lean role/work-class prompt rather than the full
+    # frontier definition. Governing policies still apply; if they exceed its
+    # window, the existing ceiling guard refuses instead of dropping authority.
     if provider == local_provider.LOCAL_PROVIDER:
         system_prompt = local_provider.build_lean_prompt(work_class)
+        if policy_prompt:
+            system_prompt += "\n\n" + policy_prompt
         # `degraded` must reflect whether agent_def actually loaded (a stub
         # from AgentLoader's load-failure fallback has empty prompt_markdown
         # — see lib/daemon_runtime/agent_loader.py's `_stub()`), the same
@@ -3032,10 +3056,6 @@ async def _run_skill_once(
         # further down (`if not degraded and agent_def.aauth_sub:`).
         degraded = not (agent_def.prompt_markdown or "").strip()
     else:
-        # Fetch policy at dispatch time: unlike the stable agent definition,
-        # active rules may change between tasks and must not inherit the
-        # definition cache.
-        policy_prompt = await asyncio.to_thread(_load_active_policy_prompt, _role)
         system_prompt, degraded = build_system_prompt(
             agent_def,
             skill_md,
@@ -4802,11 +4822,11 @@ async def _run_provider_attempts(
         # even when an infrastructure message resembles a provider failure.
         if result.remote_outcome_unknown:
             return result
-        # The role's definition could not be loaded: nothing ran, and every other
+        # The role's definition or policy could not be loaded: nothing ran, and every other
         # provider would hit the same failure. Ends the dispatch BEFORE any
         # classification of its text, so it is never read as provider capacity and
         # never cools a provider down.
-        if result.definition_unavailable:
+        if result.definition_unavailable or result.policy_unavailable:
             return result
         # A launched Fly delivery may have pushed: whatever its status, it
         # ends the dispatch here too. Never failed over to another provider.
