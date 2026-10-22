@@ -250,7 +250,42 @@ CODEX_GATE_REQUIRED_READ_TOOLS: tuple[str, ...] = tuple(
 CODEX_GATE_DENIED_TOOLS: tuple[str, ...] = tuple(
     tool.removeprefix(CODEX_NEOTOMA_TOOL_PREFIX) for tool in GATE_OWNER_DENIED_TOOLS
 )
+# Explicit, semantically read-only tools, never a prefix or a server wildcard.
+# Codex's headless approval policy cannot answer an MCP prompt. Approve only
+# these reads when the existing role allowlist already exposes them; all
+# other tools retain prompt approval, including granted writes.
+CODEX_PREAPPROVED_READ_TOOLS = frozenset({
+    "get_session_identity", "retrieve_entities", "retrieve_entity_by_identifier",
+    "retrieve_entity_snapshot", "retrieve_related_entities",
+})
 GATE_OWNER_DENY_CAPABLE_PROVIDERS: tuple[str, ...] = ("claude", "codex")
+
+
+def _codex_read_approvals(enabled: tuple[str, ...] | list[str] | None) -> dict:
+    reads = CODEX_PREAPPROVED_READ_TOOLS
+    if enabled is not None:
+        reads = reads.intersection(enabled)
+    return {tool: {"approval_mode": "approve"} for tool in sorted(reads)}
+
+
+def _append_codex_read_approvals(lines: list[str], server: str,
+                               enabled: tuple[str, ...] | None) -> None:
+    lines.append('default_tools_approval_mode = "prompt"')
+    for tool in _codex_read_approvals(enabled):
+        lines.extend(["", f"[mcp_servers.{server}.tools.{tool}]",
+                      'approval_mode = "approve"'])
+
+
+def _codex_read_approval_error(server: dict) -> str | None:
+    if server.get("default_tools_approval_mode") != "prompt":
+        return "Codex MCP default approval must remain prompt"
+    enabled = server.get("enabled_tools")
+    if enabled is not None and (not isinstance(enabled, list)
+                               or not all(isinstance(t, str) for t in enabled)):
+        return "Codex MCP approval allowlist is not a string list"
+    if server.get("tools", {}) != _codex_read_approvals(enabled):
+        return "Codex MCP approval must preapprove exactly the granted known reads"
+    return None
 
 
 @dataclass(frozen=True)
@@ -300,6 +335,7 @@ def _codex_gate_config_text(base_url: str, agent_tools: list[str]) -> str:
     if enabled_tools is not None:
         lines.append(f"enabled_tools = {json.dumps(list(enabled_tools))}")
     lines.append(f"disabled_tools = {json.dumps(list(CODEX_GATE_DENIED_TOOLS))}")
+    _append_codex_read_approvals(lines, CODEX_NEOTOMA_SERVER_ID, enabled_tools)
     return "\n".join(lines) + "\n"
 
 
@@ -351,7 +387,7 @@ def _codex_gate_config_contract(config_path: Path, base_url: str) -> str | None:
                 "Codex gate-owner enabled_tools omits required reads: "
                 + ", ".join(sorted(missing_reads))
             )
-    return None
+    return _codex_read_approval_error(server)
 
 
 def _prepare_codex_gate_owner_config(
@@ -564,6 +600,7 @@ def _isolated_codex_config_text(servers: dict[str, tuple[str, ...] | None], url:
                   "required = true"]  # fmt: skip
         if enabled is not None:
             lines.append(f"enabled_tools = {json.dumps(list(enabled))}")
+        _append_codex_read_approvals(lines, server, enabled)
     return "\n".join(lines) + "\n"
 
 
@@ -582,6 +619,11 @@ def effective_mcp_servers(provider: str, config_path: Path) -> set[str]:
         servers = parsed["mcpServers"] if "mcpServers" in parsed else {}
     if not isinstance(servers, dict):
         raise RuntimeError("the generated MCP server table is not a table")
+    if provider == "codex":
+        for server in servers.values():
+            error = _codex_read_approval_error(server)
+            if error:
+                raise RuntimeError(error)
     return set(servers)
 
 
