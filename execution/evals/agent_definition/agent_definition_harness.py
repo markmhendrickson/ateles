@@ -130,6 +130,8 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
 
         mp.setattr(al, "_sleep", _sleep, raising=False)
         mp.setattr(al, "_monotonic", lambda: vclock["now"], raising=False)
+        # This eval counts definition reads; policies are an independent authority fixture.
+        mp.setattr(skill_runner, "_load_active_policy_prompt", lambda role, **kw: "")
         skill_runner._agent_def_cache.clear()
         import concurrent.futures
         import threading as _threading
