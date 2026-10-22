@@ -228,7 +228,8 @@ refused for a different thing (`vocabulary.md#replay`). Registered as ruled in
 - Installing an application on an instance is a series of ordinary governance writes, each gated on its own.
 - No commissioned install unit and no install-specific authority exist.
 - An upgrade is the reissue to each instance of the writes that are the same on every instance; per-instance
-  entities are written afresh and never carried.
+  entities are written afresh and never carried (the restriction is carried from the environment issue's gap list,
+  not part of the option ruled).
 
 **Installation has no unit of its own.** Every part an application is composed of already has a governed way in:
 a declaration is a governance write the action gate judges, a binding or a profile is a context entity written
@@ -240,16 +241,18 @@ The alternative, a single commissioned unit in the shape of
 `planning_model.md#commissioning-a-planning-record-drives-one-dependency-ready-frontier`, would approve the set
 once and dependency-order its parts, at the price of a concept the gate does not need to judge a write.
 
-**What a new instance needs, in dependency order.** Each line names the write and where its rule lives; *reissued*
+**What a new instance needs, in dependency order.** The order is the dependency order of the writes and not a run
+order: a later write may be made as soon as the writes it depends on exist. Each line names the write and where its rule lives; *reissued*
 marks a write that is the same on every instance and so travels in an upgrade, and *afresh* marks a per-instance
 entity written on each instance under its own grants and never carried.
 
 1. **The instance and its bootstrap, outside the record:** the instance itself, its address, the sign-in client
    registration, and secrets. `deployment_configuration` names them for deploys
    (`adapters.md#where-a-swarm-is-deployed-and-what-its-deployment-names`). Afresh.
-2. **The tenant and the owner seat:** the client's tenant, the `operator` entity of its owner, and the
-   `ownership_grant` that names the owner seat
-   (`authority_model.md#the-acts-the-design-reserves-to-the-operator-belong-to-the-instances-owner-seat-never-to-every-operator`).
+2. **The tenant and the instance owner:** the client's tenant and the `operator` entity of its first instance
+   owner, whose `instance_owner` mark is written by the bootstrap that creates the instance, outside the record,
+   never by a reissue, and recorded as a finding
+   (`authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`).
    Afresh.
 3. **Bundle enablement,** each pinned to a version or content hash (`#where-each-part-lives`). Reissued.
 4. **The staff:** one `operator` per person, its sign-in credential bound by a `principal_binding`, and the grants
@@ -259,8 +262,10 @@ entity written on each instance under its own grants and never carried.
    `console_module` entities (`#how-per-instance-customisation-composes`). Afresh.
 6. **Bindings for each external system,** with the direction field per business record class where a source is
    being cut over from (`adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event`). Afresh.
-7. **Policy:** the `action_policy` values, such as the one for `send_external_comms`, and the `priority_rubric`.
-   Reissued where the value is the same on every instance.
+7. **Policy.** Reissued: the blast classification of action classes (`low_blast_action_types[]`,
+   `high_blast_action_types[]`) and `always_checkpoint_boundaries[]`, which are the same on every instance. Afresh:
+   the values that vary per client, such as `confidence_threshold`, `consent_tolerance`, `payee_caps[]`, whether
+   sending is switched on for `send_external_comms`, and the `priority_rubric`.
 8. **Workflow declarations,** seeded as drafts from the reference designs, proven in the demo environment, then
    activated (`workflows.md`, `work_model.md#whether-a-newly-declared-workflow-is-proven-before-it-binds-production-work`).
    Reissued.
@@ -274,7 +279,7 @@ entity written on each instance under its own grants and never carried.
 **An upgrade is a reissue of the instance-independent writes.** The writes marked *reissued* above reach the next
 instance as the same writes, in order, through that instance's own gate, exactly as a governed change is promoted
 between environments (`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order`). Per-instance entities (bindings, profiles, module layouts, grants,
-credentials, addresses, and secrets) are never carried: a client's settings and addressing do not leak into
+credentials, addresses, secrets, and the instance owner mark) are never carried: a client's settings and addressing do not leak into
 another client's instance, and a development address does not reach production. An instance at a different bundle
 version receives the set as written, each enablement pinned; a write that fails there stops the reissue at that
 write and raises its checkpoint on that instance, and the writes after it are not applied.

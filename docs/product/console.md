@@ -16,9 +16,9 @@ at `apps/task-dashboard/` as it stands on `origin/main`.
 **Status:** specification. Nothing here is built. The existing application is described below as what
 exists, not as what conforms.
 
-**Composition per instance:** how this program is composed from an instance's entities and where its parts
-live is stated in [`docs/foundation/application.md`](../foundation/application.md); this specification has not yet
-been amended to admit it.
+**Composition per instance:** [`docs/foundation/application.md`](../foundation/application.md) says how this
+program is composed from each instance's entities and where its parts live. This specification does not yet
+reflect that and is due an amendment.
 
 ---
 

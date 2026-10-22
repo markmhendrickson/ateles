@@ -98,7 +98,7 @@ could not read is the same record the swarm's every other decision needs.
 - [What owning confers: the required seat](#what-owning-confers-the-required-seat).
 - [Whether one operator's several instances of the record are one record or several](#whether-one-operators-several-instances-of-the-record-are-one-record-or-several) — ruled, decision 76: several records, one identity per instance, an explicit binding that fails closed when ambiguous, and a stated non-merge rule.
 - [A client's staff member is an operator of the instance, scoped by grants](#a-clients-staff-member-is-an-operator-of-the-instance-scoped-by-grants) — ruled, decision 146: no new principal kind.
-- [The acts the design reserves to the operator belong to the instance's owner seat, never to every operator](#the-acts-the-design-reserves-to-the-operator-belong-to-the-instances-owner-seat-never-to-every-operator) — stated with decision 146.
+- [The acts the design reserves to the operator are the instance owner's alone, and no grant extends them](#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them) — ruled, decision 158.
 
 A principal is any actor authority is attributed to: a human (an operator) or an agent. A principal is an
 entity in the record, so an ownership or delegation edge has somewhere to point (prior art: ReBAC as a data
@@ -341,8 +341,8 @@ instance owner's.
 **The rules in this section.**
 
 - A staff member is an `operator` with identity per person and reach from grants.
-- Nothing a staff operator may do comes from the type alone; the acts the design reserves to the operator belong
-  to the instance's owner seat (the next section).
+- Nothing a staff operator may do comes from the type alone; the acts the design reserves to the operator are the
+  instance owner's alone (the next section).
 - An approver is resolved from the instance's operator set, and an empty set holds rather than widens.
 
 **What the ruling states.**
@@ -363,15 +363,15 @@ ruled.**
 
 3. **Decision 47 holds per person.** The principal that raised a checkpoint does not resolve it. A checkpoint
    that the instance's operator-facing agent raises is resolved by a staff operator who is not the principal
-   that agent counts as, under the counting rule. The marked self-resolution exception is the owner seat's only
-   (the next section).
+   that agent counts as, under the counting rule. The marked self-resolution exception is the instance owner's
+   only (the next section).
 4. **An approver is resolved from the instance's operator set.** Where a channel or an application must name who
    is asked, it is resolved through the roster and the grants to the operators who hold the right to resolve
    that class of checkpoint, never to a single configured approver. A reply addressed to one approver of several
    is then a defect in the resolution, not a design limit. **An empty set holds.** Where no operator holds the
    right, the existing no-approver rule applies unchanged: a checkpoint that awaits nobody is not raised as one
    that awaits everybody, the raiser holds the step and records the missing approver as a finding, and the hold
-   is bounded like every hold; the set never widens to every operator, and never falls through to the owner seat
+   is bounded like every hold; the set never widens to every operator, and never falls through to the instance owner
    (`#approval`).
 
 **Why this and not a distinct approver kind.** A second kind of human principal would have to be answered across
@@ -391,55 +391,79 @@ each staff operator as their own interest. The planted refusals this ruling call
 approver set is empty widening to every operator, a reply routed to one configured approver, and a write
 attributed to the shared account value; they are added to `conformance_suite.md` in a later change.
 
-### The acts the design reserves to the operator belong to the instance's owner seat, never to every operator
+### The acts the design reserves to the operator are the instance owner's alone, and no grant extends them
 
-**Stated with decision 146 (2026-10-19), as the reconciliation it requires.** Registered under that decision in
-`conformance.md#the-register-of-open-design-decisions`. Decision 146 makes a client's staff member an
-`operator`, and the design says "the operator" in several places where it reserves an act. Read as the type,
-each such reservation would hand the act to every staff member, and no grant could narrow it, because a grant
-narrows what a type admits and not an act the design keys on the type. The reconciliation is one rule.
+**Ruled (decision 158, 2026-10-22, the operator's): the acts the design reserves to the operator are held by
+the instance's owner or owners only. A staff operator never holds them, and no grant can extend any of them to
+anyone. The rule that the waiver is not delegable stands unchanged. This amends decision 47's self-resolution
+exception from "the operator" to "the instance owner".** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. A client who wants someone else to hold these acts makes
+that person an owner of the instance. The ruling was taken over the alternatives of owner plus named grants and of
+leaving the question open.
+
+**Why a ruling was needed.** Decision 146 makes a client's staff member an `operator`, and the design says "the
+operator" in several places where it reserves an act. Read as the type, each such reservation would hand the act
+to every staff member, and no grant could narrow it, because a grant narrows what a type admits and not an act
+the design keys on the type.
 
 **The rules in this section.**
 
-- Wherever the design reserves an act to the operator, it reserves it to the owner seat of the instance.
-- Another operator holds a reserved act only by an explicit grant that names the act and the person.
-- The marked self-resolution of decision 47 is the owner seat's only.
+- Wherever the design reserves an act to the operator, it reserves it to the instance owner.
+- No grant extends a reserved act to anyone; the only way to hold one is to be an instance owner.
+- The marked self-resolution of decision 47 is the instance owner's only, with no grant path.
 
-**The owner seat.** The owner seat of an instance is held by the operator or operators the instance names as
-accountable for its governance configuration, by the `ownership_grant` that `#what-owning-confers-the-required-seat`
-describes. On a solo instance it is the one operator. Absence of a naming is an instance with no owner seat, and
-the reserved acts are then refused to everyone (decision 41's default-deny), not conferred on whoever signs in.
+**The instance owner.** An instance owner is an `operator` that carries the `instance_owner` mark, a field of
+the `operator` entity. The name and the field are provisional until the record's registry takes them. The mark is
+not an `ownership_grant`, and the two must not be confused: decision 46 rules that owning an object confers the
+required seat on checkpoints about that object and nothing else, and the record conventions allow at most one
+`ownership_grant` per registered type, so neither the meaning nor the cardinality fits an instance-level owner.
+Owning any other object, by `ownership_grant`, confers no reserved act. An instance owner is an operator and not a
+new principal kind (decision 146).
 
-**The reserved acts** are the ones the design keys on the operator, each stated where it lives:
+- **Several owners.** An instance with several owners is expressed by the mark on several `operator` entities.
+  Each holds every reserved act independently; no quorum is added.
+- **No owner.** An instance on which no operator carries the mark refuses every reserved act, by decision 41's
+  default-deny, and never confers them on whoever signs in.
+- **Who writes the mark.** The first designation on a new instance is written by the bootstrap that creates the
+  instance, outside the record, and never by a reissue (`vocabulary.md#reissue`); it is the one write with no
+  prior owner to gate it, so its authority is the bootstrap's and it is recorded as a finding when made. Any later
+  designation or removal is a reserved governance write by an instance owner. Removing the last owner is refused.
 
-- writing a `waived` verdict (`gates_and_workflows.md#declaration-batch-projection`);
-- resolving a checkpoint on an `operator_only` action (`#approval`);
-- the marked self-resolution of a checkpoint the resolver raised (`#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`);
-- approving a governance write in a class reserved to the operator, the high-tier and `NEVER` classes
-  (`work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`).
+**The reserved acts and their holders.** The ruling is the rule above. The table below is the classification of
+the acts found in the foundation by a sweep for acts keyed on the operator; the classification of each row is
+derived, is not exhaustive, and is open to the operator's correction. An act the design reserves to the operator
+and this table does not list is the instance owner's by the rule.
 
-A veto, like a yes or a no, is the act of a required approver, and is the staff member's wherever their grant
-makes them one; it is not reserved.
+| Act | Where stated | Holder |
+|---|---|---|
+| Writing a `waived` verdict | `gates_and_workflows.md#declaration-batch-projection` | instance owner only; not delegable |
+| The marked self-resolution of a checkpoint the resolver raised | `#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked` | instance owner only |
+| Resolving a checkpoint on an `operator_only` action | `#approval` | instance owner only |
+| Approving a governance write in a class reserved to the operator (the high-tier and `NEVER` classes), including an intake rule, a planning mission amendment, and a policy value the design holds reserved such as a per-payee cap | `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` | instance owner only |
+| Out-of-band provisioning: minting or widening a credential, joining a workspace, widening a grant, designating or removing an instance owner | `#grants`, `adapters.md#per-agent-credentials-where-the-system-issues-them-a-shared-credential-where-it-does-not` | instance owner only |
+| Invoking the operator's halt | `failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken` | any operator whose grant admits it; a stop is the fail-safe direction |
+| Resolving an ordinary checkpoint (yes, no, or veto), including one on a payment | `#approval` | any operator whose grant makes them a required approver |
 
-**Another operator holds a reserved act only by an explicit grant.** The owner seat may extend one reserved act
-to one named operator by a grant that names the act; the grant is a governance write and is itself reserved.
-Nothing extends an act by default, by role, or by being an `operator` of the instance.
+**Self-resolution is the instance owner's only.** Decision 47's exception is argued from the solo owner's
+governance writes, which only the owner can resolve. It carries to the instance owner and no further, and no
+grant carries it. A staff operator who is the raiser of a checkpoint under the counting rule is refused resolving
+it, marked or not. Authoring a draft is not raising its checkpoint, because the gate raises it
+(`#an-application-resolves-checkpoints-and-holds-no-approval-state-of-its-own`), so a staff operator approving
+the edit they wrote is not self-resolution and is not reserved.
 
-**Self-resolution is the owner seat's only.** Decision 47's exception is argued from the solo owner's
-governance writes, which only the owner can resolve. It carries to the owner seat and no further. A staff
-operator who raised a checkpoint, including by an edit that causes one to be raised (see below), is refused
-resolving it, marked or not.
+**Cost accepted.** A client whose staff must hold a reserved act makes that person an instance owner, which gives
+them every reserved act: no narrower holder exists. The design's many sentences saying "the operator" are read as
+the instance owner without being rewritten here; the definitions that state a reserved act (the waiver,
+decision 47, and the `operator` entry) say so explicitly, and a sentence elsewhere is read against them. **What
+would reopen it:** an act that a client needs a non-owner to hold, which would be argued as a narrower holder and
+not as a grant.
 
-**Cost accepted.** The design's many sentences saying "the operator" are read as the owner seat without being
-rewritten here; the three definitions that state a reserved act (the waiver, decision 47, and the `operator`
-entry) say so explicitly, and a sentence elsewhere is read against them. **What would reopen it:** an act the
-design keys on the operator that a staff operator must hold without a named grant, which would be argued as an
-addition to the list.
-
-**Matrix.** No row is added here. The planted refusals are a staff operator, holding no reserving grant, writing
-a `waived` verdict; resolving a checkpoint on an `operator_only` action; resolving a checkpoint they raised, with
-the `self_resolved` mark; and approving a reserved-class governance write; each admitted for the owner seat and
-for an operator holding a grant that names the act. They are added to `conformance_suite.md` in a later change.
+**Matrix.** No row is added here. The planted refusals are a staff operator who is not an instance owner writing a
+`waived` verdict, resolving a checkpoint on an `operator_only` action, resolving a checkpoint they raised with the
+`self_resolved` mark, approving a reserved-class governance write, and designating an instance owner; a grant that
+names a reserved act being admitted; an `ownership_grant` on another object conferring a reserved act; an
+instance with no owner admitting a reserved act; the last owner's removal being admitted; and an instance owner
+mark arriving in a reissue. They are added to `conformance_suite.md` in a later change.
 
 ## Grants
 
@@ -1424,7 +1448,7 @@ one exception — the operator may resolve a checkpoint the operator raised, and
 self-resolved on the record.** Registered as ruled in `conformance.md#the-register-of-open-design-decisions`.
 A resolution is authorized against `AWAITS` and refused where the resolver, under the counting rule
 (`#the-counting-rule-an-agent-counts-as-its-bound-principal`), is the principal `RAISED_BY` names — an agent
-bound to the operator raising a checkpoint the operator resolves is the operator resolving its own. The exception is the owner seat's alone, and a staff operator is refused it (`#the-acts-the-design-reserves-to-the-operator-belong-to-the-instances-owner-seat-never-to-every-operator`). The
+bound to the operator raising a checkpoint the operator resolves is the operator resolving its own. **Amended (decision 158, 2026-10-22, the operator's): the exception is the instance owner's alone and not every operator's, no grant extends it, and a staff operator is refused it** (`#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`). The
 operator's resolution of the operator's own checkpoint is admitted only where it carries the `self_resolved`
 mark (`data_model.md#concepts`); a self-resolution written without the mark is refused, as every other
 principal's is refused with or without one.
@@ -1523,7 +1547,7 @@ screen.**
   raising its checkpoint, so the raiser-does-not-resolve rule (decision 47) does not stop a staff operator from
   approving their own edit: the checkpoint's raiser counts as the principal the operator-facing agent is bound
   to, and the editor is a different principal. The reserved self-resolution exception is not involved
-  (`#the-acts-the-design-reserves-to-the-operator-belong-to-the-instances-owner-seat-never-to-every-operator`).
+  (`#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`).
 - **What the staff member sees and does when their edit fails the lint.** The findings are shown inline against
   the draft they wrote. No approval is offered, and the draft is not sent. The staff member may correct it and
   submit a further new draft, which is lint-checked in turn, or hand it back to the step the declaration names

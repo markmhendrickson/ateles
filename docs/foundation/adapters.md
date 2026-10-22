@@ -2137,7 +2137,7 @@ instance (decision 91). No shared role holds a credential that reaches further t
 **Whose tenant a client instance is.** A client instance owned by another organisation is a tenant of its own, an
 isolation boundary distinct from the operator's (`multi_tenant.md#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject`).
 The shared development and review roles reach it only by grants whose `match_tenant` is that client's tenant, given
-by the instance's owner seat; they are tenant-bound grants, never a cross-tenant capability, and a shared role
+by an instance owner; they are tenant-bound grants, never a cross-tenant capability, and a shared role
 without such a grant is denied there (decision 80).
 
 **Where the runtime runs.** The runtime is a deployment of the swarm's own software (decision 90): it names its
@@ -2151,7 +2151,7 @@ maintenance per client. One shared swarm serving many records (decision 76) is t
 client's delivery would share one failure domain, which contradicts the ruling. **Cost accepted:** the
 runtime's code reaches each instance by a deployment of its own, so an instance's runtime can lag the
 shared source; the deployment-freshness obligations that govern any deployed checkout apply to it unchanged;
-and every client instance needs its own tenant-bound grants for the shared roles, which its owner seat gives.
+and every client instance needs its own tenant-bound grants for the shared roles, which an instance owner gives.
 **What would reopen it:** a client whose isolation requirement exceeds a separate failure domain (their own
 review and development roles), which is the full-swarm alternative argued for that client.
 
@@ -2172,7 +2172,9 @@ instance.** The ruling words this as replaying the writes; the design's word is 
 - An environment (development, demo, production, or any other the operator names) is an instance of the
   record, and no environment flag or dimension exists inside the record.
 - A governed change proven in one environment reaches the next by reissue of the same writes, in order, never by
-  hand, and only writes that are the same on every instance are reissued.
+  hand.
+- Only writes that are the same on every instance are reissued (carried from the issue's gap list, not part of
+  the option ruled).
 - A process bound to one environment cannot reach another's external systems, credentials, or accounts.
 
 **The question.** A client deployment runs three environments, each with its own instance of the record and
@@ -2188,7 +2190,8 @@ accounts for every external system), its own grants, and its own data. Demo data
 a record. This is the several-records posture of decision 76 applied to a lifecycle, not to sensitivity: the
 instances do not merge, and an identity that spans them is one per instance.
 
-**Rule 2: promotion is reissue, of instance-independent writes only.** A governance write is written once,
+**Rule 2: promotion is reissue, of instance-independent writes only.** The restriction to instance-independent
+writes is stated alongside the ruling, from the issue's gap list, and is not part of the option ruled. A governance write is written once,
 reviewed, and proven in the environment where it is first taken. It reaches the next environment as **the same
 write, reissued in order**, through the target instance's own gate as a governance write on that deployment's
 controlling instance. It is never copied by hand and never edited in transit, so what was proven is what lands.
@@ -2200,8 +2203,8 @@ controlling instance. It is never copied by hand and never edited in transit, so
   credentials, addresses, and secrets) are written afresh on each instance under that instance's own grants. A
   reissue that contains one is refused at the target, on the ground that it is not instance-independent, and the
   refusal needs no knowledge of any other instance.
-- **Order and dedup.** The order is the order the writes were first taken, because a later write may read an
-  earlier one. The dedup basis is the write's idempotency key scoped to the target instance, so a reissue that
+- **Order and dedup.** The order is the order the writes were first taken, read from the source instance's own
+  record of when each was written there, because a later write may read an earlier one. The dedup basis is the write's idempotency key scoped to the target instance, so a reissue that
   reaches an instance twice lands once.
 - **Failure.** A write that fails on a target stops the reissue at that write and raises its checkpoint there,
   and the writes after it are not applied.

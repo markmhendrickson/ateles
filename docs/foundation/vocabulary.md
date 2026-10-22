@@ -619,7 +619,7 @@ swallowed. Written as one word (a verdict); the act of writing one is to sign of
 **Conclusion values:** `signed` (the step's [condition](#condition) is met), a blocking conclusion (it is not,
 and the step's `on_fail` says which earlier step opens again), and `waived` (the [operator](#operator) [principal](#principal) closed
 an unsigned required step, carrying the reason). `waived` is the only conclusion a principal other than the
-step owner may write, and only the operator principal holding the instance's owner seat may write it — the right is not delegable
+step owner may write, and only an [instance owner](#instance-owner) may write it — the right is not delegable
 ([`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection)).
 **[Waiver scope](#waiver-scope):** one [batch](#batch)'s unsigned required steps, one `waived` verdict **per step**, each
 naming its step and carrying its reason — so a waived step is queryable as waived rather than recorded as a
@@ -1661,12 +1661,26 @@ locale, preferences — and carries none of them. [Credentials](#credential) bin
 many-to-one, as they do to any principal.
 An operator's reach is what its [grants](#grant) admit; a client's staff member is an operator of the instance they
 work in with narrower grants, and no other kind of human principal exists (decision 146). Where the design reserves
-an act to "the operator", it reserves it to the instance's owner seat, never to every operator
-(`authority_model.md#the-acts-the-design-reserves-to-the-operator-belong-to-the-instances-owner-seat-never-to-every-operator`).
+an act to "the operator", it reserves it to the [instance owner](#instance-owner), never to every operator and never by a grant
+(`authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`).
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
 **Never:** "admin"; "forker".
 **Not for:** user when authority is meant; `operator_profile` for the principal (it is the descriptive
 record beside it).
+
+### instance owner
+**Definition:** an [operator](#operator) that carries the `instance_owner` mark and so holds the acts the design
+reserves to the operator: writing a `waived` [verdict](#verdict), the marked self-resolution of a [checkpoint](#checkpoint) the resolver
+raised, resolving a checkpoint on an `operator_only` [action](#action), approving a reserved-class [governance write](#governance-write), and
+out-of-band provisioning.
+An instance may have several, each holding every reserved act independently; an instance with none refuses them
+all. No [grant](#grant) extends a reserved act to a non-owner, and a client who wants someone else to hold one
+makes that person an owner. It is not [ownership](#ownership) of an object, which confers the required seat on
+that object's checkpoints and nothing else, and not a new kind of [principal](#principal).
+**See:** [`authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`](authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them).
+**Never:** —
+**Not for:** owner seat for an instance owner (an owner seat is the principal an object's `ownership_grant` names); a
+[step owner](#step-owner); the book-of-business owner of `multi_tenant.md`.
 
 ### agent
 **Definition:** a non-human [principal](#principal) defined by an `agent` entity and acting as a bound principal.
@@ -2064,7 +2078,7 @@ they appear in a document, a schema, a prompt, or an error message.
 
 ## Owner: five meanings, one word forbidden alone
 
-`owner` on its own is forbidden. Sources use it for five things (C10); each has its own term:
+`owner` on its own is forbidden. Sources use it for five things (C10), and decision 158 adds a sixth, the [instance owner](#instance-owner); each has its own term:
 
 | Meaning | Term | Field |
 |---|---|---|
@@ -2072,6 +2086,7 @@ they appear in a document, a schema, a prompt, or an error message.
 | the step a batch is at | **current step** | derived from the batch's step states; projected as `current_owner` |
 | the implementer a blocking finding's remedy is routed to | **routed agent** | none; the remedy is a task entering intake, and the step owner keeps the verdict (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`) |
 | the operator with the book of business for a customer | **book-of-business owner** | `multi_tenant.md` section 5 |
+| the operator who holds the acts the design reserves to the operator on an instance | **instance owner** | the `instance_owner` mark on the `operator` entity |
 | named accountability for a workflow, domain, or queue | **ownership** (above) | `ownership_grant` |
 
 The [principal](#principal) holding a [task](#task)'s [lease](#lease) is its lease holder, never its owner; the principal an
