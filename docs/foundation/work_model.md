@@ -587,7 +587,7 @@ kinds of record after the set exists is not provisioning, and the operator's own
 bootstrap is gated like any other — held, resolved by the operator, and marked as a self-resolution (decision 43,
 ruled in both halves,
 `conformance_suite.md#what-the-bootstrap-set-is-and-whether-the-operators-later-governance-writes-are-gated`;
-decision 47, `authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`).
+decision 47, `authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked`).
 **A workflow too broken to open a step is an unreadable workflow**, which is a defined
 state: no step of it is opened or claimed, its batch's tasks are escalated with one checkpoint (reason
 `unreadable_workflow`), and nothing proceeds on an empty sequence

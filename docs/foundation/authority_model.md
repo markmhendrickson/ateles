@@ -399,7 +399,8 @@ anyone. The rule that the waiver is not delegable stands unchanged. This amends 
 exception from "the operator" to "the instance owner".** Registered as ruled in
 `conformance.md#the-register-of-open-design-decisions`. A client who wants someone else to hold these acts makes
 that person an owner of the instance. The ruling was taken over the alternatives of owner plus named grants and of
-leaving the question open.
+leaving the question open. Two later rulings of the same date settle rows of the classification below: decision
+159 (who may invoke and who may lift a halt) and decision 160 (per-payee caps).
 
 **Why a ruling was needed.** Decision 146 makes a client's staff member an `operator`, and the design says "the
 operator" in several places where it reserves an act. Read as the type, each such reservation would hand the act
@@ -411,6 +412,8 @@ the design keys on the type.
 - Wherever the design reserves an act to the operator, it reserves it to the instance owner.
 - No grant extends a reserved act to anyone; the only way to hold one is to be an instance owner.
 - The marked self-resolution of decision 47 is the instance owner's only, with no grant path.
+- The `instance_owner` mark is admitted at the record: only a principal that already carries it sets or clears
+  it, apart from the bootstrap's first write.
 
 **The instance owner.** An instance owner is an `operator` that carries the `instance_owner` mark, a field of
 the `operator` entity. The name and the field are provisional until the record's registry takes them. The mark is
@@ -420,29 +423,76 @@ required seat on checkpoints about that object and nothing else, and the record 
 Owning any other object, by `ownership_grant`, confers no reserved act. An instance owner is an operator and not a
 new principal kind (decision 146).
 
+*The mechanism in this section, from here to the end of the admission rule, is stated so that the rule is
+checkable. It is derived and is not part of the option ruled; that includes "no quorum", "the last mark cannot be
+cleared", and the recording of findings.*
+
 - **Several owners.** An instance with several owners is expressed by the mark on several `operator` entities.
   Each holds every reserved act independently; no quorum is added.
 - **No owner.** An instance on which no operator carries the mark refuses every reserved act, by decision 41's
   default-deny, and never confers them on whoever signs in.
-- **Who writes the mark.** The first designation on a new instance is written by the bootstrap that creates the
-  instance, outside the record, and never by a reissue (`vocabulary.md#reissue`); it is the one write with no
-  prior owner to gate it, so its authority is the bootstrap's and it is recorded as a finding when made. Any later
-  designation or removal is a reserved governance write by an instance owner. Removing the last owner is refused.
+- **Fit with decision 43.** The first mark is a field of the `operator` entity, which is the second record of the
+  thirteen-record bootstrap set, written and read back with it. It adds no fourteenth kind of record to that closed
+  set.
 
-**The reserved acts and their holders.** The ruling is the rule above. The table below is the classification of
-the acts found in the foundation by a sweep for acts keyed on the operator; the classification of each row is
-derived, is not exhaustive, and is open to the operator's correction. An act the design reserves to the operator
-and this table does not list is the instance owner's by the rule.
+**The admission rule, at the record.** `operator` is not one of the eight closed governance types, so the
+engine-only write, the action gate, and the inertness of a synced observation that make a governance write bind
+do not reach the mark, and the design does not lengthen that closed list. The mark is instead guarded by a rule
+admitted at the record itself, in the shape decision 47 gave `self_resolved`, reconciled once at the write
+and enforced where the record decides (decision 97):
+
+- **Who may write it.** A write that sets, clears, or transfers `instance_owner` is admitted only when the writing
+  principal carries the mark in the record as of the write, read at the write. The one exception is the
+  bootstrap's first write on an instance that has no mark.
+- **Where it never arrives.** An observation arriving by sync, a reissue (`vocabulary.md#reissue`), a merge, a
+  split, or a `principal_binding` write never sets, clears, or transfers the mark; an observation of that kind is
+  recorded and takes no effect on it.
+- **The last mark.** Clearing the last mark is refused.
+- **Other paths to an owner's identity.** A `principal_binding` that binds a credential to an owner's `operator`
+  entity is out-of-band provisioning, an instance owner's act. A merge, split, delete, or erasure of an `operator`
+  entity that carries the mark is admitted only to an instance owner, and never while that entity carries the last
+  mark; ownership is transferred first.
+- **The first designation and recovery.** The first mark on a new instance is written by the bootstrap that
+  creates the instance, outside the record, and never by a reissue. It is the one write with no prior owner to
+  gate it, so its authority is the bootstrap's. Recovery of an ownerless instance, for example when every owner
+  credential has expired, is the same bootstrap-level act outside the record and never an act inside it. Each is
+  recorded as a finding, written by the credential that performs the bootstrap or the recovery (the run credential
+  the minimal record set binds at its third record), as its first write after the mark, and read back.
+
+**Why a record-level rule and not a governance type.** The alternative was to hold the designation on an existing
+governance type so that it inherits engine-only write, gating, and inert sync. None fits: `agent_grant` is the form
+a grant takes and the ruling is that no grant carries a reserved act, and `swarm_roster` resolves roles to agents,
+not to human principals. The admission rule reuses the enforcement at the record that decision 97 already rules and
+the reconcile-at-the-write shape that decision 47 already uses, and it adds no type and no handler. It is a
+record-level admission rule on a field, and it is not a governance write.
+
+**The reserved acts and their holders.** The ruling is the rule above. The table is the classification of the acts
+found in the foundation by a sweep for acts keyed on the operator. The classification of each row is derived, is
+not exhaustive, and is open to the operator's correction, except where a row cites a decision that rules it. An
+act the design reserves to the operator and the table does not list is the instance owner's by the rule.
 
 | Act | Where stated | Holder |
 |---|---|---|
 | Writing a `waived` verdict | `gates_and_workflows.md#declaration-batch-projection` | instance owner only; not delegable |
-| The marked self-resolution of a checkpoint the resolver raised | `#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked` | instance owner only |
+| The marked self-resolution of a checkpoint the resolver raised | `#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked` | instance owner only |
 | Resolving a checkpoint on an `operator_only` action | `#approval` | instance owner only |
-| Approving a governance write in a class reserved to the operator (the high-tier and `NEVER` classes), including an intake rule, a planning mission amendment, and a policy value the design holds reserved such as a per-payee cap | `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` | instance owner only |
-| Out-of-band provisioning: minting or widening a credential, joining a workspace, widening a grant, designating or removing an instance owner | `#grants`, `adapters.md#per-agent-credentials-where-the-system-issues-them-a-shared-credential-where-it-does-not` | instance owner only |
-| Invoking the operator's halt | `failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken` | any operator whose grant admits it; a stop is the fail-safe direction |
-| Resolving an ordinary checkpoint (yes, no, or veto), including one on a payment | `#approval` | any operator whose grant makes them a required approver |
+| Approving a governance write in a class reserved to the operator (the high-tier and `NEVER` classes), including an intake rule and a planning mission amendment | `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` | instance owner only |
+| Setting or changing a per-payee payment cap | `payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record` | instance owner only (decision 160, ruled 2026-10-22) |
+| Lifting a halt | `failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken` | instance owner only (decision 159, ruled 2026-10-22) |
+| Out-of-band provisioning: minting or widening a credential, binding a credential to an owner's `operator` entity, joining a workspace, widening a grant, designating or removing an instance owner | `#grants`, `adapters.md#per-agent-credentials-where-the-system-issues-them-a-shared-credential-where-it-does-not` | instance owner only |
+| Invoking a halt | `failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken` | any operator whose grants admit it; not a reserved act (decision 159, ruled 2026-10-22) |
+| Resolving an ordinary checkpoint (yes, no, or veto), including one on a payment | `#approval` | any operator whose grants make them a required approver; for a payment, granted per class and never implied by a general resolve grant |
+
+**The last two rows are not reserved acts, which is why a grant can admit them.** A halt only ever restricts, so
+inviting it needs no reservation, while lifting it resumes work and is reserved. The rule that no grant extends a
+reserved act therefore holds without exception: every act a grant can admit is, by that fact, not a reserved act.
+
+**How the design's "the operator resolves" is read.** Where the corpus says the operator resolved a checkpoint,
+it means an operator whose grants make them a required approver for that class, except for the reserved acts in
+the table above, where it means an instance owner. Payment approval is granted to a staff operator per class of
+checkpoint, as an explicit grant for that class, and is never implied by a general grant to resolve checkpoints.
+The cap-permitting checkpoint, the waiver, and the `self_resolved` mark are the instance owner's wherever the
+schema or the payments document tests the resolver.
 
 **Self-resolution is the instance owner's only.** Decision 47's exception is argued from the solo owner's
 governance writes, which only the owner can resolve. It carries to the instance owner and no further, and no
@@ -460,10 +510,14 @@ not as a grant.
 
 **Matrix.** No row is added here. The planted refusals are a staff operator who is not an instance owner writing a
 `waived` verdict, resolving a checkpoint on an `operator_only` action, resolving a checkpoint they raised with the
-`self_resolved` mark, approving a reserved-class governance write, and designating an instance owner; a grant that
-names a reserved act being admitted; an `ownership_grant` on another object conferring a reserved act; an
-instance with no owner admitting a reserved act; the last owner's removal being admitted; and an instance owner
-mark arriving in a reissue. They are added to `conformance_suite.md` in a later change.
+`self_resolved` mark, approving a reserved-class governance write, setting a per-payee cap, lifting a halt, and
+designating an instance owner; a staff operator holding a plain write grant on `operator` setting the mark on
+themselves; the mark arriving by sync, reissue, merge, split, or a `principal_binding` write; a `principal_binding`
+onto an owner's entity written by a non-owner; a merge, split, delete, or erasure of the last owner's entity; the
+last owner's mark being cleared; a grant that names a reserved act being admitted; an `ownership_grant` on another
+object conferring a reserved act; an instance with no owner admitting a reserved act; an instance owner mark
+arriving in a reissue; and a staff operator approving a payment checkpoint on a general resolve grant with no grant
+for the payment class. They are added to `conformance_suite.md` in a later change.
 
 ## Grants
 
@@ -1404,7 +1458,7 @@ using C's state under D's policy, and every hop is reconstructible.
 
 - A required approver is a principal, a role the roster resolves, or the principal an `ownership_grant` names on an entity the subject concerns.
 - A resolution on an `operator_only` action is the operator's decision, never the confirmation that the effect happened.
-- [The raiser of a checkpoint does not resolve it, and the operator's self-resolution is marked](#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked).
+- [The raiser of a checkpoint does not resolve it, and the instance owner's self-resolution is marked](#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked).
 - [An application resolves checkpoints and holds no approval state of its own](#an-application-resolves-checkpoints-and-holds-no-approval-state-of-its-own).
 
 An approval is an explicit yes, no, or veto by a required principal on a `checkpoint`, whose subject is
@@ -1441,7 +1495,7 @@ the swarm may not reach; `approved` records that decision, and what confirms the
 the operator's report written as one (`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`). Principle 2 holds for the operator as for
 any principal.
 
-### The raiser of a checkpoint does not resolve it, and the operator's self-resolution is marked
+### The raiser of a checkpoint does not resolve it, and the instance owner's self-resolution is marked
 
 **Ruled (decision 47, 2026-09-06, with 43): the principal that raised a checkpoint may not resolve it, with
 one exception — the operator may resolve a checkpoint the operator raised, and the resolution is marked
@@ -1449,7 +1503,7 @@ self-resolved on the record.** Registered as ruled in `conformance.md#the-regist
 A resolution is authorized against `AWAITS` and refused where the resolver, under the counting rule
 (`#the-counting-rule-an-agent-counts-as-its-bound-principal`), is the principal `RAISED_BY` names — an agent
 bound to the operator raising a checkpoint the operator resolves is the operator resolving its own. **Amended (decision 158, 2026-10-22, the operator's): the exception is the instance owner's alone and not every operator's, no grant extends it, and a staff operator is refused it** (`#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`). The
-operator's resolution of the operator's own checkpoint is admitted only where it carries the `self_resolved`
+instance owner's resolution of a checkpoint they raised is admitted only where it carries the `self_resolved`
 mark (`data_model.md#concepts`); a self-resolution written without the mark is refused, as every other
 principal's is refused with or without one.
 

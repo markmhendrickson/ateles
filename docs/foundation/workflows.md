@@ -1475,7 +1475,7 @@ proposal at `judge` or `amend`.
 `gates_and_workflows.md#declaration-batch-projection` defined a stage as a contiguous named group of steps
 and gave each declared step a `phase` field. No rule reads either: no gate, conclusion, fast path,
 `applies_when`, successor, or checkpoint keys on a stage, and where a batch is is already its current step
-(`vocabulary.md#owner-five-meanings-one-word-forbidden-alone`). The grouping was stated in two homes — the
+(`vocabulary.md#owner-six-meanings-one-word-forbidden-alone`). The grouping was stated in two homes — the
 prose line and the declaration's field — with no mechanism behind either, the shape principle 9 names, and
 the second option considered is the one that holds: keep the Stages line as authored prose, so the grouping
 has one home, and drop the field, since the declaration should carry nothing no rule reads.
@@ -1492,7 +1492,7 @@ question that was never about that word's other use.
 **Cost accepted.** `gates_and_workflows.md#declaration-batch-projection` and `vocabulary.md#step` (and any
 declared-step field list) drop `phase` from the fields a step carries; a workflow's grouping into stages is
 authored prose only, read by a person and not resolved by any rule, and a reader who wants "where a batch
-is" reads its current step, per `vocabulary.md#owner-five-meanings-one-word-forbidden-alone`, exactly as
+is" reads its current step, per `vocabulary.md#owner-six-meanings-one-word-forbidden-alone`, exactly as
 before this ruling.
 
 **What this leaves open.** The *Stages* prose itself — whether its wording, granularity, or presence per

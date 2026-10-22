@@ -1236,7 +1236,7 @@ operator's own governance write after bootstrap passes the same point
 (`conformance_suite.md#what-the-bootstrap-set-is-and-whether-the-operators-later-governance-writes-are-gated`),
 so the operator's path runs through the engine's grant and never around it — the operator's task produces
 the action, the gate holds it, the operator resolves it as a marked self-resolution (decision 47,
-`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`),
+`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked`),
 and the engine writes. Had 43 gone the other way the operator's credential would hold a second grant over the
 governance types, and the sole writer would not be sole.
 
@@ -1717,7 +1717,7 @@ and a timeout is a terminal state that never continues
 free-text field, so the queue is read from the record. The raiser and the resolver are distinct roles on
 the object, and the same principal does not hold both, save the operator resolving a checkpoint the operator
 raised, which is marked as a self-resolution (decision 47,
-`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`). One decision queue, one
+`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked`). One decision queue, one
 resolution protocol: a checkpoint on a task is presented and resolved exactly as a checkpoint on an
 action is (principle 6).
 

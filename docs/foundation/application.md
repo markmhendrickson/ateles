@@ -12,7 +12,7 @@ Amendment history: `revisions.md#applicationmd`.
 **Derived from:**
 
 - the operator's rulings of 2026-10-18, 2026-10-19, and 2026-10-20 on the application question and its
-  sub-questions, decisions 145 to 157 in `conformance.md#the-register-of-open-design-decisions`;
+  sub-questions, decisions 145 to 160 in `conformance.md#the-register-of-open-design-decisions`;
 - the 2026-07-09 placement rule for the four layers: substrate in the record's public repository, generic
   use-case skills in the record's bundles, swarm operations in this repository, proprietary vertical logic in a
   company's own repository;

@@ -178,7 +178,7 @@ held is refused at the write (decision 44).
 [`conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`](conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step).
 **Never:** "claimant" (retired: say lease holder).
 **Not for:** "claim fields" for the lease (the task carries none); "lock" for a lease (a lock outlives its holder); "heartbeat" for the lease (the heartbeat
-renews the lease; it is not the lease); owner standing alone, for the lease holder or for anything else — the word carries five meanings
+renews the lease; it is not the lease); owner standing alone, for the lease holder or for anything else — the word carries six meanings
 and always takes its qualifier (step owner, plan owner, grant owner, business owner, current owner, routed
 owner); holder without the lease in front of it.
 
@@ -1779,7 +1779,7 @@ A timeout is a terminal state that never continues. The principal that raised a 
 resolve it; the one exception is the [operator](#operator) resolving a checkpoint the operator raised, admitted
 with the `self_resolved` mark and refused without it (decision 47).
 **See:** [`authority_model.md#approval`](authority_model.md#approval),
-[`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`](authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked).
+[`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked`](authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked).
 **Never:** "silent continuation".
 **Not for:** resolved without who; verdict for an approval (that closes a step); an unmarked self-resolution.
 
@@ -2076,7 +2076,7 @@ they appear in a document, a schema, a prompt, or an error message.
 | a step, on a condition its owner cannot yet judge | **holds**, under a held lease, with a finding naming the condition; the hold **ends** by verdict, checkpoint, or lapse | "is paused", "is waiting", "is blocked" (a task with an open checkpoint on it is held by it; `blocked` as a status is retired) |
 | a batch, on closing | its tasks **enter** one successor, or the batch closes with none | "flows into", "triggers" the next workflow |
 
-## Owner: five meanings, one word forbidden alone
+## Owner: six meanings, one word forbidden alone
 
 `owner` on its own is forbidden. Sources use it for five things (C10), and decision 158 adds a sixth, the [instance owner](#instance-owner); each has its own term:
 
