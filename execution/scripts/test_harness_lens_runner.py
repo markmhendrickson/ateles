@@ -180,7 +180,7 @@ def mock_ready_sandbox(monkeypatch, tmp_path):
                 if provider == "cursor"
                 else {"ATELES_LOCAL_REVIEW_HOME": str(root)}
             ),
-            command_wrapper=["/usr/bin/sandbox-exec", "-f", str(root / "profile.sb")],
+            command_wrapper=[str(hlr.TRUSTED_MACOS_SANDBOX_EXEC), "-f", str(root / "profile.sb")],
             credential_read_denied=True,
             credential_binding_protected=True,
             user_config_write_denied=True,
@@ -1910,7 +1910,20 @@ def test_wrapper_to_provider_attempt_rejects_role_changed_between_fresh_reads(
     monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):
     """Use real dispatch and run_skill forwarding; intercept before provider argv."""
+    original_is_file = Path.is_file
+    monkeypatch.setattr(
+        Path,
+        "is_file",
+        lambda path: False if path == Path("/usr/bin/sandbox-exec") else original_is_file(path),
+    )
+    fixture_launcher = tmp_path / "sandbox-exec"
+    fixture_launcher.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    fixture_launcher.chmod(0o755)
+    monkeypatch.setattr(hlr, "TRUSTED_MACOS_SANDBOX_EXEC", fixture_launcher)
+    monkeypatch.setattr(skill_runner, "TRUSTED_MACOS_SANDBOX_EXEC", fixture_launcher)
     _install_minimal_lens_worktree(monkeypatch, target)
+    removed = []
+    monkeypatch.setattr(hlr.Worktree, "remove", lambda self: removed.append(self.path))
     wrapper_role = AgentDefinition(
         entity_id="ent_pavo", name="pavo", status="active",
         prompt_markdown="Wrapper role\n", tool_allowlist=["Read"],
@@ -1919,13 +1932,30 @@ def test_wrapper_to_provider_attempt_rejects_role_changed_between_fresh_reads(
         entity_id="ent_pavo", name="pavo", status="active",
         prompt_markdown="Changed role\n", tool_allowlist=["Read"],
     )
-    monkeypatch.setattr(hlr, "_load_agent_def", lambda role, *, fresh: wrapper_role)
-    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda role, *, fresh: attempt_role)
+    wrapper_loads = []
+    attempt_loads = []
+
+    def load_wrapper_role(role, *, fresh):
+        wrapper_loads.append((role, fresh))
+        return wrapper_role
+
+    def load_attempt_role(role, *, fresh):
+        attempt_loads.append((role, fresh))
+        return attempt_role
+
+    monkeypatch.setattr(hlr, "_load_agent_def", load_wrapper_role)
+    monkeypatch.setattr(skill_runner, "_load_agent_def", load_attempt_role)
     monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"codex": "/usr/bin/false"})
     monkeypatch.setattr(skill_runner, "_load_active_policy_prompt",
                         lambda *a, **k: pytest.fail("policy reached after role change"))
     monkeypatch.setattr(skill_runner, "_provider_command",
                         lambda *a, **k: pytest.fail("provider argv constructed"))
+    monkeypatch.setattr(skill_runner, "_write_harness_event",
+                        lambda *a, **k: pytest.fail("audit event written"))
+    monkeypatch.setattr(skill_runner.asyncio, "create_subprocess_exec",
+                        lambda *a, **k: pytest.fail("synthetic launcher executed"))
+    monkeypatch.setattr(hlr, "post_verdict",
+                        lambda *a, **k: pytest.fail("publication reached"))
     report = asyncio.run(hlr.run_one(
         target, provider="codex", post=False, dry_run=False,
         repo_worktree_name="ateles", scratch_root=tmp_path,
@@ -1933,6 +1963,11 @@ def test_wrapper_to_provider_attempt_rejects_role_changed_between_fresh_reads(
     ))
     assert not report["ok"]
     assert "agent_definition unavailable" in report["reason"]
+    assert "bad_response" in report["reason"]
+    assert report["posted"] is False
+    assert wrapper_loads == [("pavo", True)]
+    assert attempt_loads == [("pavo", True)]
+    assert len(removed) == 1
 
 
 def test_network_delivery_denial_with_valid_local_verdict_reaches_parent_gate(
