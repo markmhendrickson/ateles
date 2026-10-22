@@ -219,6 +219,9 @@ import mechanical_first  # noqa: E402
 from skill_runner import (  # noqa: E402
     ATELES_REPO,
     SkillResult,
+    ReasoningEffort,
+    REASONING_EFFORTS,
+    validate_reasoning_effort,
     _load_agent_def,
     run_skill,
 )
@@ -262,6 +265,7 @@ async def dispatch(
     github_token: str | None = None,
     action_class: str | None = None,
     model: str | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
     integration_base: str | None = None,
     integration_mode: str = mechanical_first.MODE_REBASE,
@@ -330,12 +334,17 @@ async def dispatch(
     resolution outright. Neither is required — an orchestrating session's
     one-off dispatch that names no ``action_class`` runs exactly as before.
 
+    ``reasoning_effort`` is an optional explicit Codex request, independent
+    of model selection. It requires a pinned ``provider="codex"`` so an
+    unsupported fallback cannot silently discard it. Omission adds no setting.
+
     ``integration_base`` / ``integration_mode`` (work class ``rebase``) and
     ``regenerate_commands`` (work class ``regenerate_generated_files``) opt the
     dispatch into the deterministic-first path: see ``mechanical_first``. Without
     them every class runs on the model path exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    reasoning_effort = validate_reasoning_effort(reasoning_effort, provider=provider)
     run_kwargs = dict(
         role=role,
         task_entity_id=task_entity_id,
@@ -354,6 +363,8 @@ async def dispatch(
         escalation_signals=escalation_signals,
         model=model,
     )
+    if reasoning_effort is not None:
+        run_kwargs["reasoning_effort"] = reasoning_effort
     if runner is not None:
         run_kwargs["runner"] = runner
     if repository:
@@ -785,6 +796,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--reasoning-effort", choices=REASONING_EFFORTS, default=None,
+        help="Explicit per-call Codex reasoning effort; requires --provider codex. "
+        "Omission preserves the provider default; does not select a model.",
+    )
+    parser.add_argument(
         "--rebase-onto",
         metavar="BASE",
         help=(
@@ -904,6 +920,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.role:
         return _usage_failure(emitter, "--role is required (or use --list-roles)")
+
+    try:
+        validate_reasoning_effort(args.reasoning_effort, provider=args.provider)
+    except ValueError as exc:
+        return _usage_failure(emitter, str(exc))
 
     role = args.role.strip().lower()
     emitter.role = role
@@ -1041,6 +1062,7 @@ def main(argv: list[str] | None = None) -> int:
                 action_class=args.action_class,
                 escalation_signals=_signals_from_args(args),
                 model=args.model,
+                **({"reasoning_effort": args.reasoning_effort} if args.reasoning_effort is not None else {}),
                 integration_base=args.rebase_onto,
                 integration_mode=args.integration or mechanical_first.MODE_REBASE,
                 regenerate_commands=args.regenerate_cmd,
