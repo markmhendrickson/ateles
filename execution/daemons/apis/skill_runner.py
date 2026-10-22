@@ -913,7 +913,7 @@ def _notify_dropped_allowlist_rules(
 _agent_def_cache: dict[str, AgentDefinition] = {}
 
 
-def _load_agent_def(role: str) -> AgentDefinition:
+def _load_agent_def(role: str, *, fresh: bool = False) -> AgentDefinition:
     """Load (and cache) an AgentDefinition for the given role name.
 
     Raises ``AgentDefinitionUnavailable`` when the definition cannot be loaded
@@ -923,11 +923,59 @@ def _load_agent_def(role: str) -> AgentDefinition:
     A local SKILL.md does not supply authority for a missing canonical role.
     Absence markers are refused even if a lower loader returns one.
     """
+    if fresh:
+        requested = role.strip().lower() if isinstance(role, str) else ''
+        if not requested:
+            raise AgentDefinitionUnavailable(str(role), 'invalid_name', 1)
+        agent_def = admit_agent_definition(AgentLoader(requested).load(), requested)
+        if (not isinstance(agent_def.name, str)
+                or agent_def.name.strip().lower() != requested
+                or not isinstance(agent_def.entity_id, str)
+                or not agent_def.entity_id.strip()
+                or not isinstance(agent_def.status, str)
+                or agent_def.status.strip().lower() != 'active'
+                or agent_def.is_stub):
+            raise AgentDefinitionUnavailable(requested, 'bad_response', 1)
+        return agent_def
     if role in _agent_def_cache:
         return admit_agent_definition(_agent_def_cache[role], role)
     agent_def = admit_agent_definition(AgentLoader(role).load(), role)
     _agent_def_cache[role] = agent_def
     return agent_def
+
+
+def canonical_role_fingerprint(role: str, agent_def: AgentDefinition) -> str:
+    """Hash the admitted role contract for two fresh reads of one dispatch.
+
+    This is an equality check, not a signature or an atomic server lease.
+    AgentDefinition.version has a local default; only raw source evidence can
+    contribute a revision.
+    """
+    snapshot = agent_def.raw.get('snapshot', {}) if isinstance(agent_def.raw, dict) else {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    original_tools = agent_def.tool_allowlist
+    if isinstance(original_tools, tuple):
+        original_tools = list(original_tools)
+    payload = {
+        'role': role.strip().lower(),
+        'name': agent_def.name.strip().lower(),
+        'entity_id': agent_def.entity_id,
+        'status': agent_def.status.strip().lower(),
+        'is_stub': agent_def.is_stub,
+        'prompt_markdown': agent_def.prompt_markdown,
+        'tool_allowlist': original_tools,
+        'tools': agent_def.tools,
+        'agent_grant': agent_def.agent_grant,
+        'aauth_sub': agent_def.aauth_sub,
+        'tier': agent_def.tier,
+        'override_policy': agent_def.override_policy,
+        'source_version': snapshot.get('version'),
+        'source_revision': snapshot.get('revision'),
+        'last_observation_id': agent_def.last_observation_id or None,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
 
 
 def _load_active_policy_prompt(role: str, *, agent_definition_id: str | None = None) -> str:
@@ -2663,6 +2711,7 @@ async def _run_skill_once(
     *,
     provider: str,
     role: str | None = None,
+    expected_role_fingerprint: str | None = None,
     task_entity_id: str = "",
     agent_session_id: str = "",
     timeout: int | None = None,
@@ -2861,7 +2910,14 @@ async def _run_skill_once(
 
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
     try:
-        agent_def = await asyncio.to_thread(_load_agent_def, _role)
+        if expected_role_fingerprint is not None:
+            if not isinstance(expected_role_fingerprint, str) or not re.fullmatch(r'[0-9a-f]{64}', expected_role_fingerprint):
+                raise AgentDefinitionUnavailable(_role, 'bad_response', 1)
+            agent_def = await asyncio.to_thread(_load_agent_def, _role, fresh=True)
+            if canonical_role_fingerprint(_role, agent_def) != expected_role_fingerprint:
+                raise AgentDefinitionUnavailable(_role, 'bad_response', 1)
+        else:
+            agent_def = await asyncio.to_thread(_load_agent_def, _role)
     except AgentDefinitionUnavailable as exc:
         msg = (
             f"{DEFINITION_UNAVAILABLE_PREFIX}: {exc} — nothing was dispatched; "
@@ -4338,6 +4394,7 @@ async def run_skill(
     prompt: str,
     *,
     role: str | None = None,
+    expected_role_fingerprint: str | None = None,
     task_entity_id: str = "",
     agent_session_id: str = "",
     timeout: int | None = None,
@@ -4475,6 +4532,7 @@ async def run_skill(
             prompt,
             provider=selected,
             role=role,
+            expected_role_fingerprint=expected_role_fingerprint,
             task_entity_id=task_entity_id,
             timeout=timeout,
             env_extra=env_extra,

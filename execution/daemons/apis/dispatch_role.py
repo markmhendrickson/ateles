@@ -268,6 +268,7 @@ async def dispatch(
     regenerate_commands: list[str] | None = None,
     runner: str | None = None,
     repository: str = "",
+    expected_role_fingerprint: str | None = None,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -353,6 +354,7 @@ async def dispatch(
         action_class=action_class,
         escalation_signals=escalation_signals,
         model=model,
+        expected_role_fingerprint=expected_role_fingerprint,
     )
     if runner is not None:
         run_kwargs["runner"] = runner

@@ -118,6 +118,19 @@ def test_dispatch_forwards_role_provider_and_cwd(monkeypatch) -> None:
     assert seen["prompt"] == "do the thing"
 
 
+def test_dispatch_forwards_expected_role_fingerprint(monkeypatch) -> None:
+    seen = []
+    async def capture(skill, prompt, **kwargs):
+        seen.append(kwargs.get("expected_role_fingerprint"))
+        return SkillResult(skill, True, 0, "out", "", provider="codex")
+    monkeypatch.setattr(dispatch_role, "run_skill", capture)
+    expectation = "a" * 64
+    result = asyncio.run(dispatch_role.dispatch(
+        "pavo", "task", provider="codex", expected_role_fingerprint=expectation,
+    ))
+    assert result.ok and seen == [expectation]
+
+
 def test_dispatch_forwards_action_class_and_model(monkeypatch) -> None:
     """CLI surface (operator ruling 2026-09-29, model_tiering.py): --action-class
     and --model reach run_skill unchanged, the same way --provider/--cwd do
