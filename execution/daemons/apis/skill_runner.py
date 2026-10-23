@@ -49,7 +49,7 @@ import tempfile
 import time
 import tomllib
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -82,6 +82,7 @@ from harness_router import (  # noqa: E402
     MAC_READING_SOURCES,
     ProviderAdmission,
     configured_providers,
+    resolve_provider_admission,
     cool_down,
     cooled_until_all,
     cooling_providers,
@@ -4515,6 +4516,58 @@ async def run_skill(
     exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    if action_class and action_class.startswith(model_tiering.LENS_REVIEW_PREFIX):
+        identity_error = model_tiering.review_identity_error(skill, action_class)
+        if role not in (None, skill):
+            identity_error = "review role does not match the canonical agent"
+        if identity_error:
+            return SkillResult(skill, False, None, "", "", error=identity_error)
+        candidates = (
+            [provider] if provider is not None else
+            list(provider_admissions) if provider_admissions is not None else
+            [provider_admission.requested_provider] if provider_admission is not None else
+            configured_providers()
+        )
+        current = {
+            candidate: resolve_provider_admission(
+                candidate, action_class=action_class,
+                signals=escalation_signals, required_policy=True,
+            )
+            for candidate in candidates
+        }
+        if provider_admission is not None:
+            expected = current.get(provider_admission.requested_provider)
+            if expected is None or provider_admission != (
+                replace(expected, resolved_model=model, explicit_model_override=True)
+                if provider_admission.explicit_model_override and model else expected
+            ):
+                return SkillResult(skill, False, None, "", "", error="stale review admission")
+        if provider_admissions is not None:
+            for candidate, admitted in provider_admissions.items():
+                expected = current[candidate]
+                if admitted != (
+                    replace(expected, resolved_model=model, explicit_model_override=True)
+                    if admitted.explicit_model_override and model else expected
+                ):
+                    return SkillResult(skill, False, None, "", "", error="stale review admissions")
+        if provider_admission is None and provider_admissions is None:
+            if provider is not None:
+                provider_admission = current[provider]
+                if provider_admission.admitted and model is not None:
+                    provider_admission = replace(
+                        provider_admission, resolved_model=model,
+                        explicit_model_override=True,
+                    )
+            else:
+                provider_admissions = {
+                    candidate: replace(
+                        admitted, resolved_model=model,
+                        explicit_model_override=True,
+                    ) if model else admitted
+                    for candidate, admitted in current.items() if admitted.admitted
+                }
+                if not provider_admissions:
+                    return SkillResult(skill, False, None, "", "", error="strict review admission refused")
     if provider_admissions is not None:
         if provider is not None or provider_admission is not None or not provider_admissions:
             return SkillResult(skill, False, None, "", "", error="invalid unpinned lens admissions")

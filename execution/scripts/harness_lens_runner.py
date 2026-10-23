@@ -2586,6 +2586,13 @@ async def run_one(
         return {"ok": False, "provider": provider, "reason": reason,
                 "refusal_reason": reason, "no_model_call_made": True, "posted": False}
     expected_action_class = dispatch_role.model_tiering.lens_review_class(canonical_lens)
+    identity_error = dispatch_role.model_tiering.review_identity_error(
+        target.agent, expected_action_class
+    )
+    if identity_error:
+        return {"ok": False, "provider": provider, "reason": identity_error,
+                "refusal_reason": identity_error, "no_model_call_made": True,
+                "posted": False}
     if action_class is not None and action_class != expected_action_class:
         reason = (
             f"review lens {canonical_lens!r} requires action class "

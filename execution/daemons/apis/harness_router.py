@@ -1540,7 +1540,10 @@ def resolve_provider_admission(
             f"provider {normalized!r} is not active in {policy.source}",
         )
 
-    action_policy = model_tiering.configured_action_policy()
+    try:
+        action_policy = model_tiering.configured_action_policy(strict=True)
+    except model_tiering.ModelPolicyUnavailable as exc:
+        return decision(False, "configuration_error", f"action policy: {exc}")
     if action_class not in action_policy:
         return decision(
             False,
@@ -1551,7 +1554,14 @@ def resolve_provider_admission(
     resolved_tier = model_tiering.resolve_tier(
         action_class, policy=action_policy, signals=signals
     )
-    binding = model_tiering.configured_vendor_binding()
+    try:
+        binding = model_tiering.configured_vendor_binding(strict=True)
+    except model_tiering.ModelPolicyUnavailable as exc:
+        return decision(
+            False, "configuration_error", f"required vendor binding: {exc}",
+            tier=resolved_tier.tier, tier_source=resolved_tier.source,
+            escalation_reasons=resolved_tier.escalation_reasons,
+        )
     if not binding:
         return decision(
             False,

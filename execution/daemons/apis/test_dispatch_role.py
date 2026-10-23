@@ -40,6 +40,16 @@ def _isolated_provider_policy(monkeypatch, tmp_path):
         "APIS_PROVIDER_POLICY_PLIST", str(tmp_path / "missing-apis.plist")
     )
     monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "missing-usage.json"))
+    monkeypatch.delenv("APIS_ACTION_POLICY_FILE", raising=False)
+    monkeypatch.delenv("APIS_VENDOR_BINDING_FILE", raising=False)
+    monkeypatch.setattr(
+        dispatch_role.model_tiering, "_DEFAULT_ACTION_POLICY_PATH",
+        tmp_path / "missing-action-policy.json",
+    )
+    monkeypatch.setattr(
+        dispatch_role.model_tiering, "_DEFAULT_VENDOR_BINDING_PATH",
+        tmp_path / "missing-vendor-binding.json",
+    )
 
 
 @pytest.fixture
@@ -385,8 +395,11 @@ def test_cli_action_class_reaches_real_child_argv(
 
 
 def test_cli_qa_admission_pins_the_vendor_bound_model_on_the_real_child_argv(
-    captured_codex_dispatches, monkeypatch
+    captured_codex_dispatches, fake_repo, monkeypatch
 ) -> None:
+    skill = fake_repo / ".claude" / "skills" / "phoenicurus" / "SKILL.md"
+    skill.parent.mkdir()
+    skill.write_text("# synthetic QA role\n", encoding="utf-8")
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
     monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
     monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:qa": "mid"}')
@@ -395,7 +408,7 @@ def test_cli_qa_admission_pins_the_vendor_bound_model_on_the_real_child_argv(
     rc = dispatch_role.main(
         [
             "--role",
-            "pavo",
+            "phoenicurus",
             "--task",
             "review",
             "--provider",

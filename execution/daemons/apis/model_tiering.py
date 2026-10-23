@@ -177,7 +177,13 @@ def _higher_tier(a: str, b: str) -> str:
     return a if _tier_index(a) >= _tier_index(b) else b
 
 
-def _read_json_config(env_var: str, file_env_var: str, default_path: Path) -> dict:
+class ModelPolicyUnavailable(ValueError):
+    """A declared model policy source cannot authorize a strict dispatch."""
+
+
+def _read_json_config(
+    env_var: str, file_env_var: str, default_path: Path, *, strict: bool = False
+) -> dict:
     """File-then-env JSON read, matching ``harness_router.configured_headroom``
     and ``local_provider``'s config precedence exactly: an operator can change
     either without restarting Apis, and a stale file always wins over env so a
@@ -191,27 +197,38 @@ def _read_json_config(env_var: str, file_env_var: str, default_path: Path) -> di
     configured_path = os.environ.get(file_env_var, "").strip()
     path = Path(configured_path).expanduser() if configured_path else default_path
     file_raw = ""
+    if strict and configured_path and not path.is_file():
+        raise ModelPolicyUnavailable("declared model policy file is unavailable")
     if path.is_file():
         try:
             file_raw = path.read_text(encoding="utf-8").strip()
         except OSError:
-            pass
+            if strict:
+                raise ModelPolicyUnavailable("model policy file is unreadable") from None
     env_raw = os.environ.get(env_var, "").strip()
     # Labelled explicitly (not inferred by comparing values) so identical
     # malformed content in the file and the env var still names the file
     # first, correctly, rather than misattributing based on a value match.
     for raw, label in ((file_raw, f"file {path}"), (env_raw, env_var)):
         if not raw:
+            if strict and label.startswith("file ") and path.is_file():
+                raise ModelPolicyUnavailable("model policy file is empty")
             continue
         try:
             parsed = json.loads(raw)
         except (TypeError, ValueError):
+            if strict:
+                raise ModelPolicyUnavailable("model policy JSON is malformed") from None
             log.warning(
                 f"[apis] model_tiering: malformed JSON in {label}; ignoring"
             )
             continue
-        if isinstance(parsed, dict):
+        if isinstance(parsed, dict) and (parsed or not strict):
             return parsed
+        if strict:
+            raise ModelPolicyUnavailable("model policy mapping is unusable")
+    if strict:
+        raise ModelPolicyUnavailable("model policy source is absent")
     return {}
 
 
@@ -238,14 +255,15 @@ def vendor_binding_source() -> str:
     )
 
 
-def configured_action_policy() -> dict[str, str]:
+def configured_action_policy(*, strict: bool = False) -> dict[str, str]:
     """Return the action-class -> min_tier map, normalized to known tiers.
 
     An entry naming an unrecognized tier is dropped (logged), never coerced —
     a typo'd tier name must not silently become the weakest tier.
     """
     raw = _read_json_config(
-        _ACTION_POLICY_ENV, _ACTION_POLICY_FILE_ENV, _DEFAULT_ACTION_POLICY_PATH
+        _ACTION_POLICY_ENV, _ACTION_POLICY_FILE_ENV, _DEFAULT_ACTION_POLICY_PATH,
+        strict=strict,
     )
     out: dict[str, str] = {}
     for action_class, tier in raw.items():
@@ -258,10 +276,12 @@ def configured_action_policy() -> dict[str, str]:
                 f"names unrecognized tier {tier!r}; ignoring this entry "
                 f"(unresolved classes fail to {DEFAULT_TIER!r})"
             )
+    if strict and not out:
+        raise ModelPolicyUnavailable("action policy mapping is unusable")
     return out
 
 
-def configured_vendor_binding() -> dict[str, dict[str, str]]:
+def configured_vendor_binding(*, strict: bool = False) -> dict[str, dict[str, str]]:
     """Return {provider: {tier: model_id}}, lower-cased on both axes.
 
     Shape matches ``local_provider``'s ``vendor_binding``-shaped config
@@ -271,7 +291,8 @@ def configured_vendor_binding() -> dict[str, dict[str, str]]:
     single "enabled" gate: a provider simply has whatever tiers it has.
     """
     raw = _read_json_config(
-        _VENDOR_BINDING_ENV, _VENDOR_BINDING_FILE_ENV, _DEFAULT_VENDOR_BINDING_PATH
+        _VENDOR_BINDING_ENV, _VENDOR_BINDING_FILE_ENV, _DEFAULT_VENDOR_BINDING_PATH,
+        strict=strict,
     )
     out: dict[str, dict[str, str]] = {}
     for provider, tiers in raw.items():
@@ -286,6 +307,8 @@ def configured_vendor_binding() -> dict[str, dict[str, str]]:
                 resolved[tier_name] = model_name
         if resolved:
             out[provider_name] = resolved
+    if strict and not out:
+        raise ModelPolicyUnavailable("vendor binding mapping is unusable")
     return out
 
 
@@ -516,6 +539,24 @@ DISPATCH_ACTION_CLASSES: tuple[str, ...] = (
 def lens_review_class(lens: str) -> str:
     """Action class for one lens's review (or spec section, or fix guidance)."""
     return f"{LENS_REVIEW_PREFIX}{lens.strip().lower()}"
+
+
+def review_identity_error(agent: str, action_class: str | None) -> str:
+    """Bind a review class to its canonical panel or issue-spec agent."""
+    if not action_class or not action_class.startswith(LENS_REVIEW_PREFIX):
+        return ""
+    # Both registries are the existing owners of their agent/lens assignments.
+    # Import here so ordinary model-tier reads do not load review machinery.
+    from review_panel import lens_by_name
+    from issue_spec import SECTION_BY_LENS
+
+    lens = action_class[len(LENS_REVIEW_PREFIX):]
+    panel = lens_by_name(lens)
+    section = SECTION_BY_LENS.get(lens)
+    expected = {item.agent for item in (panel, section) if item is not None}
+    if not expected or agent not in expected:
+        return "review role does not match the canonical action class"
+    return ""
 
 
 def repair_action_class(blocking_lenses: "set[str] | frozenset[str]") -> str:

@@ -346,6 +346,9 @@ async def dispatch(
     them every class runs on the model path exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    identity_error = model_tiering.review_identity_error(role, action_class)
+    if identity_error:
+        return SkillResult(role, False, None, "", "", error=identity_error)
     provider_admissions: dict[str, ProviderAdmission] | None = None
     if (
         provider_admission is None
