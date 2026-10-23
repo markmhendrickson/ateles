@@ -135,11 +135,11 @@ not a documentation one. Registered in `conformance.md#the-register-of-open-desi
 | action policy | `action_policy` | `low_blast_action_types[]`, `high_blast_action_types[]`; `confidence_threshold`; `recurrence_count`; `always_checkpoint_boundaries[]`; `permission_scope`; `consent_tolerance` per action class (the change to an action's consented figures that may be taken without a new checkpoint; absent reads as zero — `payments.md#tolerance-is-an-action_policy-value-and-its-default-is-zero`; it governs the take-time change of a payment's figures only, and a payment's release without a checkpoint compares the amount exactly); `payee_caps[]` (per payee: a reference to the payee's `payment_profile`, a currency, and the largest amount one payment to that payee may be for and be taken without a checkpoint; counted as a cap only when the write that put it there was permitted by a checkpoint an instance owner resolved `approved` (setting or changing a cap is the instance owner's only, decision 160), read from the permitting action and never from the writer, which is the engine; absent, zero, unpermitted, or unreadable means no cap, so every payment to that payee waits on a checkpoint — `payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`); `recoveries` (for every class listed in either tier, the class its recovery is taken under, or `forward_only`, or `none`; a policy write listing a class with no entry is refused — `failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken`); `lapse_cap` (the per-task lapse count at which `repeated_lapse` is raised; undeclared raises none — `failure_posture.md#repeated-lapse-raises-a-checkpoint`); `quorum` and `disjoint_roles[]` per action class (the count of awaited principals a resolution needs, and the role pairs on one checkpoint that must resolve to distinct principals; absent, every awaited principal and every named pair — `authority_model.md#the-thresholds-home-is-the-action_policy-per-class`); `metered_resources[]` per action class (the resources a class's actions are counted against a budget term in; absent, none — the permission stays the gate's, and a metered class with no budget term written resolves to `NEVER` — `authority_model.md#budget-is-a-scope-term-that-attenuates`) | — | blast radius for a class (a governance class with no value resolves to `NEVER` — `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other`); whether a series has graduated; whether a re-quoted action is within tolerance; whether a payment is within its payee's cap; whether a checkpoint's resolutions meet the class's structural checks; which resources a class's actions are counted in | — | `operator_only` as a policy value (it is `NEVER` ahead of any policy); a tolerance the design supplies; a cap the design supplies |
 | intake rule | `intake_rule` | `subject_types[]` (entity types; never a work-model record type, a rule naming one refused at the write — decision 36, `work_model.md#whether-an-intake-rule-may-key-on-the-work-models-own-records`); `change_kinds[]` (`created`, `updated`, `corrected`); `predicate` (over the entity's fields after the change); `provenance_predicate` (system, instance, writer); `task_title`, `task_description` (the text the created task carries, naming the entity that fired it); `ceiling`, `window`; `ended_at` (a rule is ended by correction, never deleted) | — (the tasks it created carry provenance naming the rule and the change; no edge) | the tasks a rule created, by provenance; fires and drops per window; whether a rule is live | — | a last-evaluated cursor; a fired count the evaluator maintains; a successor, a workflow, a step, an action class, or an `assigned_to` for the created task (intake's); a batch it opens (the created task's intake batch opens on creation, as every task's does — `work_model.md#an-intake-rule-turns-a-described-change-in-the-record-into-a-task-and-nothing-else`) |
 | agent session | `agent_session` | `runner_id`; `host`, `checkout`, `branch`, `head`; `started_at`, `last_seen_at`; on a daemon's session, one observation per declared window carrying the window, the coverage of the polls or deliveries made in it, and the dispositions counted — the write a successful empty poll makes (`adapters.md#what-the-adapter-does-with-every-event`) | `REFERS_TO` → task | active (with the lease); silent (no window observation past the declared window, while the record is reachable — `failure_posture.md#the-rules`, rule 2) | — | a history of runners; the session's transcript or reasoning; a copy of what the step read (`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`) |
-| agent | `agent` | `name`, `prompt_markdown`, `context_entity_types[]`, version | `principal_binding` ← credential, **two edges** where the agent acts in a human's interest and not one: its AAuth edge ends at this `agent` (attribution, A-for-B) and its acts-as edge at the `operator` (the edge decision 48's counting rule reads), told apart by `credential_kind` — see the `principal` row and `#relationships`; `LEASE` → task or batch | — | — | the lease holder as a field on the task |
+| agent | `agent` | `name`, `prompt_markdown`, `context_entity_types[]`, version | **two** `principal_binding` edges where the agent acts in a human's interest: its presented AAuth credential binds to this `agent` (attribution, A-for-B), and this `agent` → the `operator` is its traversal-only acts-as binding (`credential_kind: acts_as`, no presented value). An acts-as edge from an agent to an agent is refused; agent-to-agent authority uses `delegation_edge`. `LEASE` → task or batch | — | — | the lease holder as a field on the task; an acts-as credential presentation; an agent-to-agent acts-as chain |
 | agent behavioural rule | `agent_policy` | `rule` (the rule itself, in the imperative — what an agent is to do or not do; the field a reader applies, and the one a rule with only a `description` does not have); `rule_kind` (**closed**: `mandatory`, or `advisory`. Absence, or a value outside the two, reads as `mandatory` — the restrictive branch, because this is the field carrying the safety meaning (`principles.md`, principle 5) and a rule whose bindingness is unstated is one no reader may weaken); `scope` (**closed**: `global`, `swarm`, or `agent`; a free-text scope is a scope nothing can filter on, and where the scope is `agent` the target is `agent_sub` and never `scope`); `agent_sub` (the one field that scopes a rule to an agent, naming the `agent` the rule binds — the `sub` its `principal_binding` carries; a rule of `scope: agent` with no `agent_sub` is refused at the write, and a rule of any other scope with one is refused too); `domain` (the subject the rule is about, for grouping rules a reader selects together — never an agent identifier, which is `agent_sub`'s); `status` (`active`, `provisional`, or `retired`); `effective_from`, `effective_until` (dates; a rule bound to a **condition** rather than a date takes no value here — its end is stated below); `supersedes` → the rule this one replaces; `rationale` (why the rule exists, so a later reader can judge whether it still holds) | `SUPERSEDES` → `agent_policy` (the rule it replaces, which stays readable as what was ruled then); `REFERS_TO` ← finding (the standing finding whose institutionalization wrote it — `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`); `REFERS_TO` → task (the task whose closing ends the rule, for a rule bound to a condition rather than a date — decision 111, stated below) | the rules in force for an agent at a time (its `agent_sub` rules and every rule of wider scope, `status` `active` or `provisional`, `effective_from` past and `effective_until` absent or future, that no later rule supersedes); whether two rules in force at one scope state the same subject and disagree on `rule_kind` — a conflict a reader of either alone cannot see, so it is derived and refused rather than left to the reader | the rendered `.claude/skills/` and `docs/agents/` mirrors (`conformance.md#direction-of-truth-per-class-of-record`) | an operator's name, figure, or locale (operator-specific content is a `task_policy` — `gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`); an agent identifier in `domain` or `scope`; a maturation or drift-signal record serialized into a prose field (it is an observation, or it is a field the registry declares); a `enabled` flag beside `status`; a copy of the rule in a harness memory file, which is a cache and never its home |
 | roster | `swarm_roster` | `declaration_scope` (the scope the roster is for — `workflow` and this type are the two per-scope governance types, and the key is the declaration scope and never the planning record at the `project` level, decision 70, `planning_model.md#project-names-a-planning-level-the-scoping-key-on-a-declaration-is-a-different-term`); `roles` (role → the `agent` filling it, one agent per role; the role names are the implementation's own, the design fixing none — `workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`; the map every `owner_role` on a workflow's `steps[]` is resolved against, at claim and at declaration — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`) | `REFERS_TO` → `agent` (one edge per filled role, carrying the role on the edge; the map's values are edges and not name strings, so a renamed or retired agent cannot leave a role resolving to nothing — `conformance.md`'s rule that a rename leaves no reference behind) | which agent fills a role in a scope; whether every `owner_role` a declaration names resolves (an unresolved role, or a role resolving to an agent with no runner, raises `unspawnable_assignee` at declaration and again at claim — one reason class at both points, `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); the roles an agent fills, read back along the edges | — | an agent's credential, harness preference, or model tier (the `agent_grant` and the `vendor_binding` carry those — `adapters.md#where-the-binding-is-declared-no-new-home-is-needed`); a per-role channel or delivery preference (the `vendor_binding`'s, decision 35); an operator's identity (the `operator` principal); a second agent on one role, or a role with no agent held as an empty value rather than absent |
 | adapter | `agent` (a daemon; `adapters.md`) | `name`; the `system` it adapts | `principal_binding` → principal; provenance on every write it makes (the adapter, the system, the delivery id) | which artifacts it tracks (by `system`) | — | a per-artifact map of satisfied steps; an event log beside the artifact's observations; a workflow it reads |
-| principal | `operator` (human) or `agent` (non-human) | identity only — the type exists to be a principal, plus on an `operator` the provisional `instance_owner` mark that holds the acts reserved to the operator (`authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`); the identifier's form is `multi_tenant.md` section 7 | `principal_binding` ← credential (edge-keyed; no credential entity; many-to-one: one edge per credential carrying `credential_kind`, `credential_value`, `credential_issuer`, `expires_at` — e.g. `store_user_id` / host login to the `operator`; AAuth `sub`+`iss` to the `agent` that presented it, the principal that credential identifies. An agent that acts in a human's interest holds a **second** `principal_binding`, its acts-as binding, whose endpoint is the `operator` — the edge decision 48's counting rule names. The two are the same edge type, told apart by `credential_kind`, and both are required: the first attributes the write to the agent (A-for-B), the second makes two agents under one operator one interest); `ownership_grant` ← object; `delegation_edge` → principal | authority chain; whether a write resolves to a principal at all | — | a login string, an address, or a magic value standing in for the principal; a separate credential entity; `operator_profile` (the descriptive record beside the `operator`, carrying no authority edges); locale or preferences on the principal; a stored credit (a read model over attribution — `authority_model.md#credit-is-a-read-model-over-attribution`) |
+| principal | `operator` (human) or `agent` (non-human) | identity only — the type exists to be a principal, plus on an `operator` the provisional `instance_owner` mark (`authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`); the identifier's form is `multi_tenant.md` section 7 | `principal_binding` has two admitted shapes: a presented credential (edge-keyed; no credential entity; one edge per credential carrying `credential_kind`, `credential_value`, `credential_issuer`, `expires_at`) → the principal it identifies; and an `agent` → `operator` acts-as binding carrying only `credential_kind: acts_as`, traversed after credential resolution and never presented. An `operator` may not source an acts-as binding, and an `agent` may not target an `agent` with one; agent-to-agent authority uses `delegation_edge`. `ownership_grant` ← object; `delegation_edge` → principal | authority chain; whether a write resolves to a principal at all; which operator's interest an agent acts in | — | a login string, an address, or a magic value standing in for the principal; a separate credential entity; a presented acts-as credential; an operator-sourced or agent-targeted acts-as edge; `operator_profile` (the descriptive record beside the `operator`, carrying no authority edges); locale or preferences on the principal; a stored credit (a read model over attribution — `authority_model.md#credit-is-a-read-model-over-attribution`) |
 | grant | `agent_grant` | `sub`, `iss`; `capabilities[]` (operation × entity types × repositories, and the tools a principal may invoke — `migration.md#where-a-skills-harness-mechanics-live`; a governance type on the engine's grant alone — `gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`; the right to propose an initiative as the `task` write capability constrained to the initiative class — `authority_model.md#what-stops-is-a-task-the-owner-seat-confirms-it-through-the-checkpoint-and-proposing-is-a-grant-capability`); `param_constraints` (per-tool parameter constraints; a field allowlist on a write capability — `authority_model.md#grants`; a budget, the bound on a resource a capability may consume, attenuating down a delegation chain — `authority_model.md#budget-is-a-scope-term-that-attenuates`); `expires_at` | — | permit, deny, or indeterminate for one request; what has been consumed against a budget (a read over confirmed actions) | — | a wildcard for a human; a harness preference or a model tier (a `vendor_binding`'s capability slot for the harness); a balance or a consumed amount; a governance type on any grant but the engine's |
 | delegation | relationship `delegation_edge` | `scope` (a subset of the delegator's; a budget among its terms — `authority_model.md#budget-is-a-scope-term-that-attenuates`); `expires_at` | delegator → delegate | authority chain; attenuation | — | a prose note on a task; a stored balance |
 | console module | `console_module` (a context entity on the instance; its default ships in a bundle) | the module's name; its `blocks[]`, each naming the record types or metrics it reads and the view that renders them; its order and whether it is shown (`application.md#module-layout`, decision 154) | — | which modules and blocks an instance shows, resolved as the instance's entity first and the bundle's default second | — | a copy of what a block reads; an approval state; a per-client program; a source of truth (the module holds none) |
@@ -166,12 +166,173 @@ not a documentation one. Registered in `conformance.md#the-register-of-open-desi
 | `CHECKPOINTS` | checkpoint → action or task | the held subject | the decision queue; what resumes on resolution (the action is taken or refused; the task is re-claimed or closed) |
 | `AWAITS` / `RESOLVED_BY` / `RAISED_BY` | checkpoint → principal | whose decision is needed (a role named by the raiser is resolved to principals through the roster when the checkpoint is raised; the edge never targets a role — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); who gave it; who raised it | quorum, separation of duties, the queue's scoping |
 | `REFERS_TO` | task → artifact, or → a record entity it concerns (a finding it was produced from, or a planning record it bears on and is not under, among them); action → artifact, or → the planning record an `amend_<level>` action amends, or → the records the gate read at its take (a payment's five conditions); verdict → artifact, or → a record entity it read, or → `session_digest` (the session that produced it — decision 40, required where the signer is an agent and a digest exists, permitted otherwise); finding → batch (the work it judges); improvement proposal → batch (the run it was raised on); agent session → task; `agent_policy` → task (the task whose closing ends a rule bound to a real-world condition — decision 111) | the source concerns, acts on, or was judged on the target | intake's `link` step, which attaches what the task names and nothing on relevance alone (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`); the anchors hydration resolves a step's reads from, grown by the context a step writes back; the task an adapter creates for intake, to the artifact it concerns; an action's target; a verdict's evidence and the read set it judged on, reproducible as of `signed_at`, and the session that produced it, resolved as of the same time; the tasks a finding produced, and the scope each was made at against the finding's own; a condition-bound rule's pending end, read from the task the edge names |
-| `principal_binding` | credential (edge-keyed; no credential entity) → principal | binds one presented credential to the principal it identifies; one edge per credential; fields: `credential_kind`, `credential_value`, `credential_issuer`, `expires_at`; an AAuth credential resolves to the `agent` that presented it; the human operator is reached through that agent's separate acts-as `principal_binding`, a second edge of this type whose endpoint is the `operator` (decision 48's counting rule reads that endpoint, so two agents under one operator are one interest); operator credentials resolve directly to the operator | credential-to-principal resolution (match live edges on kind+value[+issuer] → principal endpoint; several live matches valid only when they target the same principal); attribution (the AAuth edge, resolving to the agent, is what records a write as A-for-B rather than as the operator); the agent's acts-as principal, read from the acts-as edge; rotation dual-admit when several live edges with different credential values resolve to the same principal |
+| `principal_binding` | presented credential (edge-keyed; no credential entity) → principal; or `agent` → `operator` for acts-as | A presented-credential edge carries `credential_kind`, `credential_value`, `credential_issuer`, and `expires_at`, one edge per credential; an AAuth credential resolves to the `agent` that presented it, and operator credentials resolve directly to the operator. An acts-as edge carries only `credential_kind: acts_as`; it is traversal-only and non-presentable, from agent to operator exactly. Agent → agent acts-as is refused and uses `delegation_edge` instead; operator-sourced acts-as is refused | credential-to-principal resolution matches only presented-credential edges on kind+value[+issuer] → principal endpoint; attribution comes from the AAuth edge; after an agent resolves, traversal of its acts-as edge yields the operator whose interest decision 48 counts; several live matching presented bindings are valid only when they target the same principal; rotation dual-admit applies only to presented-credential edges |
 | `ownership_grant` | object → principal | named accountability | who is asked when the object needs a decision — the required seat on any checkpoint whose subject concerns the object, and nothing more (`authority_model.md#what-owning-confers-the-required-seat`) |
 | `delegation_edge` | principal → principal | scoped, time-bounded transfer of rights | the authority chain; attenuation (a budget in `scope` narrows down the chain — `authority_model.md#budget-is-a-scope-term-that-attenuates`) |
+| `GOVERNS` | `agent_policy` → `agent` | applicability of an agent-scoped rule to its governed agent (decision 114); admission and migration belong to G25, outside the original-creation ledger | the rules applicable to an agent; no authority is conferred by this edge |
 
 <!-- /rendered -->
 
+## Proposed first-flow instance cycle-policy fixture
+
+`first-flow-cycle-policy-v1` is versioned **input for the first-flow instance**, not a globally selected
+registration, a migration, or a claim about that instance's effective registry. It supplies explicit
+`acyclic` booleans for the 18 original-bootstrap relationship types and the later `GOVERNS` type,
+including types with zero edges. The table is a 19-type **target effective-registration census**,
+not a claim that the instance's actual G25 vocabulary read already contains 19 rows and not a
+19-type original-bootstrap write set. Fixture completeness is checked first at 18 original
+readbacks, then at 19 after the separate `GOVERNS` readback. Decision 102 requires a declaration;
+the values below are a
+scoped proposal under G25/#921 ownership.
+
+| Fixture audit field | Proposed first-flow value / admission condition |
+|---|---|
+| `fixture_version` | `1`; audit metadata only. A later policy change takes a new fixture version and another G25 compatibility review. This field is not sent to `register_relationship_type`. |
+| `target_instance_id` | Selected and recorded by the G25 owner before use; deliberately unbound in this source proposal. The selected endpoint and credential determine the target. This field is not sent to `register_relationship_type`. |
+| expected policy per type | The table below pins `relationship_type` and an explicit `acyclic` boolean. The G25 owner selects and records the required `scope` (`user` or `global`) for each type before preflight; advisory fields are compared only if separately pinned. No caller-chosen registry version is part of the fixture or request. |
+| observed `registry_version` per type | Audit evidence issued by the server: capture it from qualified preflight or the qualified registration effect. Compare it with the final effective readback; never send it in a registration request. |
+
+Before original bootstrap step 1, the G25 owner pins the target instance and per-type scope,
+then obtains a complete authorized registration preflight for the 18 closed original types,
+including zero-edge types. **Known absence** requires proof across the selected scope's
+effective resolution, relevant user and global registrations, inactive registrations,
+retained history, canonical type identity and shadowing. A partial, unavailable or
+ambiguous read is unknown/HOLD, never known absence. No unrelated scope read, history
+interface or grant is authorized by this fixture. A present effective registration must
+match the expected type, scope and explicit `acyclic` declaration; a missing or malformed
+declaration is a mismatch/HOLD even when the type has no edges. Historical seed counts do
+not establish current effective registration.
+
+Reconciliation of a present mismatch is a separately admitted, append-only G25 policy
+migration outside decision 43's closed original-bootstrap ledger. Before any replacement,
+prove the presenting principal, active exact `register_relationship_type` grant, selected
+scope and any required global permission, and compatibility of existing edges with the
+proposed policy. Preserve the complete prior semantic definition, every unrelated declared
+field, opaque user and registry metadata, and immutable prior-row history and provenance.
+Unknown or unavailable state HOLDS before a replacement, version change or downstream
+effect; the absence of a field in a limited read is not proof of an empty stored value.
+The qualified record-owned path must prove complete-state preservation and read it back.
+Its implementation, authority, architecture and security review, and parity across the
+natural exposed surfaces are separate prerequisites. This fixture selects no new API,
+grant, scope, raw database access or parallel registry mechanism.
+
+Preflight classifies a proposed write; it grants no durable right to write. For known
+absence, the record owner must atomically prove continued absence across the complete
+authorized effective-resolution domain **at the append**. For a present mismatch, it
+must atomically compare the proved current effective head and resolution state with the
+then-current state, preserving the complete prior state only while that proof holds.
+Both qualifications cover relevant user/global scope and shadowing, inactive/history
+state, canonical identity, activation and deactivation, and every writer that can change
+the effective result. A version comparison alone is insufficient where effective state
+can change outside it. Conflict, uncertainty, or a stale proof HOLDS with **no new
+registry version, source row, event or graph effect**; recovery requires fresh complete
+authorized preflight and, where needed, fresh preservation proof. A record-owned atomic
+transaction, conditional operation or enforced exclusion window must cover the entire
+preflight-to-append interval and all relevant writers and resolution changes. Any chosen
+mechanism must prove its coverage, lifetime and no-effect refusal at every entrance.
+An empty or disposable instance is not proof of exclusivity. These conditions govern
+both original registrations and the later separately grant-gated `GOVERNS` registration.
+Until the qualified at-write contract and complete-state proof are installed and verified,
+both branches HOLD.
+
+Only after that atomic proof and the presenting-principal, exact-grant, selected-scope,
+existing-edge compatibility, and explicit-policy checks may the qualified path append.
+Preserve the prior semantic definition, every unrelated declared field, and opaque
+user/registry metadata in the new effective row. The new row receives its **own**
+server-issued identity, version, and time and names the **actual authenticated creator**;
+do not copy the old creator, identity, version, or timestamps into new-row provenance.
+The old row and its creator/provenance remain immutable in retained history. Capture
+the new server-issued `registry_version`; verify the effective type, scope, state,
+every declared definition field, policy, and same version through G25, and verify
+complete replacement semantics, truthful new provenance, and immutable prior-row
+history through the qualified independent path. A new version or creator is not
+itself preservation loss. A historical global seed does not prove that the
+selected user's effective registration matches, and a user-scoped replacement
+does not repair other users' effective rows. Unknown or malformed policy,
+incompatible edges, unauthorized scope, conflict, or failed proof/readback HOLDS;
+this migration neither repairs an absent built-in through client registration nor
+implies a grant. After successful full readback, rerun the **entire** 18-type
+first-flow preflight, including zero-edge types; a migration receipt is not
+bootstrap evidence.
+Classify each type in that phase as (a) present and matching its expected type, scope and explicit
+`acyclic` value, with a nonempty server-issued `registry_version`, (b) known absent after a complete
+authorized scope/effective-resolution and inactive/history read, or (c) mismatched, inactive,
+malformed or unknown because the read is incomplete or its meaning
+cannot be established. Matching types need no registration append, but the preflight's
+matching row and version cannot authorize a later graph effect. Only known-absent types
+may attempt the **separately admitted G25 registration path after at-write absence
+qualification**. Its declared wire request carries
+`relationship_type`, the selected `scope`, and the table's explicit `acyclic` boolean; it may
+carry only G25-declared advisory fields when pinned. `fixture_version`, `target_instance_id`,
+and `registry_version` remain audit metadata, never request fields. A mismatch, malformed
+declaration or unknown state HOLDS for G25 reconciliation before registration or graph writes.
+For a newly admitted registration, capture the server-issued `registry_version` from the response
+and match it to that type's effective vocabulary readback. For an existing matching registration,
+retain the `registry_version` observed in preflight and compare it to final readback. Once the
+known-absent original registrations are complete, read back the effective type, scope, explicit
+`acyclic` value and stable server-issued `registry_version` of **exactly those 18** rows before
+the original bootstrap's graph writes. Missing or changed version, changed policy, remaining
+absence, or incomplete read HOLDS that original bootstrap phase. At each subsequent
+first-flow relationship-write sink, including an original-bootstrap edge and the later
+`GOVERNS` edge, the record must atomically resolve the **then-effective** selected-scope
+registration and its complete explicit admitted policy, check the phase's admitted
+principal and edge-write authority without inventing a pre-bootstrap grant, check
+decision-102 cycle and other applicable edge invariants,
+and commit the graph effect under the same qualification. A registration, activation,
+deactivation, case-identity/shadow, policy, grant, or graph change between preflight and
+effect cannot be hidden by a cached list or version. Unknown, malformed, unauthorized,
+or unavailable state refuses with no graph effect and requires fresh qualified
+preflight. A changed but compatible effective registration may proceed only when this
+sink's fresh qualification proves it admitted; the old preflight cannot do so.
+This is a shared record-owned guard at the actual write entrances, not a new client-side
+writer or a blanket change to unrelated G25 registrations. Its installation must be
+verified on the selected target; source checks and readback alone are not runtime proof.
+Do not substitute a backend default, silently overwrite or migrate an existing type, or install an alternative
+writer guard to make a mismatch pass. This source fixture itself admits no registration.
+
+Only **after every original bootstrap record and readback is complete**, demonstrate the
+presenting admitted principal, its exact active `register_relationship_type` grant and selected
+scope, then perform a separate G25 preflight for `GOVERNS`. A matching effective registration
+with compatible scope, explicit policy and server-issued version needs no registration
+append, but its later edge still needs the current shared graph-sink qualification. A known-absent
+registration may proceed only after that same authority and compatibility check, the
+complete authorized effective-resolution/inactive/history absence preflight above, and
+atomic still-absent qualification at the append. Register through G25's
+declared request fields above, capture the server-issued `registry_version`, and read back the
+effective type, scope, explicit policy and same version. An unknown, mismatched or malformed
+registration, an absent or inactive grant, unresolved scope, or failed readback HOLDS before any
+`agent_policy` `GOVERNS` edge. The complete fixture then has 19 effective rows, but the nineteenth
+was not required for any original bootstrap row. The source does not establish a concrete runtime
+principal or grant for this phase and supplies no exception, alternative writer, or second ledger.
+
+| Relationship type | Proposed `acyclic` | First-flow meaning / separate constraint |
+|---|---|---|
+| `PART_OF` | `true` | Containment and the planning ascent terminate; one upward parent is a separate invariant. |
+| `DEPENDS_ON` | `true` | Same-type dependencies terminate; the shared writer also refuses mixed `PART_OF`/`DEPENDS_ON`/`ADDRESSED_BY` loops at write and attach. |
+| `SUPERSEDES` | `true` | Replacement history reaches an earlier decision. |
+| `DUPLICATE_OF` | `true` | Duplicate chains reach the task carrying work; symmetric discovery does not write reciprocal edges. |
+| `FOLLOWS` | `true` | Batch succession and recurring-task history have origins. |
+| `delegation_edge` | `true` | Delegation ancestry and budget attenuation terminate. |
+| `ADDRESSED_BY` | `false` | Task-to-batch membership; its mixed dependency loop still needs the writer walk. |
+| `LEASE` | `false` | Time-bounded principal claim on a task or batch step. |
+| `CLOSES` | `false` | Verdict-to-batch result. |
+| `SIGNED_BY` | `false` | Verdict-to-principal attribution. |
+| `PRODUCES` | `false` | Task-to-action or batch-to-artifact provenance. |
+| `CHECKPOINTS` | `false` | Checkpoint-to-held-subject link. |
+| `AWAITS` | `false` | Checkpoint-to-required-principal seat. |
+| `RESOLVED_BY` | `false` | Checkpoint-to-resolving principal. |
+| `RAISED_BY` | `false` | Checkpoint-to-raising principal. |
+| `REFERS_TO` | `false` | Heterogeneous reference; reciprocal physical edges can be valid. |
+| `principal_binding` | `false` | The separately proposed versioned credential-key shape uses a **physical principal self-edge**; an acyclic check would reject it. Logical `acts_as` is independently limited to one authenticated `agent` → `operator` hop and never follows that self-edge. This declaration does not select the physical storage/writer proposal. |
+| `ownership_grant` | `false` | Object-to-accountable-principal seat, including a principal object; ownership confers no capability. |
+| `GOVERNS` | `false` | `agent_policy`-to-`agent` applicability, not hierarchy; G25 admits this separately from the closed original-creation ledger. |
+
+The per-type check observes only a single physical relationship type. It cannot prove mixed dependency
+acyclicity, the acts-as endpoint/one-hop rule, or an authorization decision. The four proposed stricter
+chain declarations require a compatibility read of already effective registrations; a seeded type without
+`acyclic: true` is **not** permission to default the proposal to `false`. If a binding existing rule
+forbids one of these values, hold and report that exact contradiction to G25 rather than choose a second
+mechanism here. A source check of this table proves only source completeness, not registration safety.
 ## Whether a rule's end is a date, a condition, or a task
 
 **Ruled (decision 111, 2026-09-25, the operator's): a rule whose end is a real-world condition names the
@@ -233,18 +394,22 @@ closable, ownable, tracked — which nothing in the live corpus or the `agent_po
 
 ## Whether acyclicity is a property of a relationship type or of the graph
 
-**Open.** Registered in `conformance.md#the-register-of-open-design-decisions`. The design reads acyclicity
-as a **per-type** property and says so twice.
+**Ruled (decision 102, 2026-09-21): acyclicity is a required declaration on every relationship type at
+registration.** A type declares either that its own edges must remain acyclic or that cycles are admitted.
+The registry refuses a type whose declaration is absent, malformed, or unrecognized; absence never means
+unconstrained. For a type declaring acyclicity, the record checks that type's edges before every write and
+refuses the edge that would close a cycle. Registered in
+`conformance.md#the-register-of-open-design-decisions`. The design had already read acyclicity as a
+**per-type** property and said so twice.
 `work_model.md#a-batch-may-depend-on-a-task-it-created` states that the record refuses a `DEPENDS_ON` write
 that would close a cycle among its own edges, that `PART_OF` and `DEPENDS_ON` are "its hierarchical
 relationship types", and that a loop through `ADDRESSED_BY` "is invisible to that per-type check" — which is
 why the writer's own walk is the second check rather than a redundancy.
 `planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward` relies on the same reading to
 bound the ascent, so that the walk upward from any task is a path that ends. Both cite the check as a
-property of the record the design relies on rather than rebuilds. **What neither states, and what this
-decision registers, is whether that per-type reading is the design's requirement or the design's assumption
-about the record it happened to be written against** — and therefore what the check does when a new
-relationship type is registered.
+property of the record the design relies on rather than rebuilds. The ruling makes that reading the
+design's requirement rather than an assumption about one implementation, and makes registration the point
+where a new type must state which branch it takes.
 
 **The seam has been noticed once and closed on a different question.** Contradiction X-15
 (`conformance_suite.md#contradictions-a-state-one-test-requires-and-another-forbids`) put the record's
@@ -278,42 +443,36 @@ hand-kept copies of the same closed set. What this row owes is the requirement, 
 design needs a check to do, and what a conformance row would hold red until it does. The specification that
 implements it belongs to the record's own repository, alongside G25's.
 
-**The candidates.**
+**The candidates and their disposition.**
 
-1. **Per-type, declared at registration.** A registered relationship type declares whether it is acyclic,
+1. **Taken — per-type, declared at registration.** A registered relationship type declares whether it is acyclic,
    and the check runs for the types that declare it. This is what the corpus already reads the record as
    doing, so it makes an assumption into a requirement rather than changing a rule; it keeps the guard where
    `PART_OF` and `DEPENDS_ON` genuinely need it, which is where the two sections above rely on it; and it
    extends type registration rather than standing a second mechanism beside it, which is what invariant 6
-   asks. What it has to say is where the declaration lives — a property of the registered type, which is
-   what `data_model.md#concepts` would then carry a column for — and what a type that declares nothing
-   defaults to, which principle 5 makes the load-bearing half of the answer rather than a detail.
+   asks. The declaration lives on the registered type. A type that declares nothing is refused; this is
+   the load-bearing default principle 5 requires, rather than an implementation detail.
 
-2. **No check; acyclicity is the caller's concern.** The cheapest, and the design does not need it to be
+2. **Rejected — no check; acyclicity is the caller's concern.** The cheapest, and the design does not need it to be
    wrong to reject it: the writer's walk that `work_model.md` already requires for the cross-type case
    would become the whole mechanism, which is a coherent position and is the one the design already takes
    for every loop the per-type check cannot see. What it drops is a guard two sections currently lean on to
    bound a walk, so an answer here has to say what bounds the ascent instead.
 
-3. **Universal, and the design's edges conform.** Rejected on its face if `FOLLOWS` is genuinely a chain,
+3. **Rejected — universal, and the design's edges conform.** Rejected on its face if `FOLLOWS` is genuinely a chain,
    but the row states it rather than assuming it, because the assumption is the thing being tested: the
    design reads `FOLLOWS` as a sequence and has never had to write one that closes, so "conform" may cost
    nothing on the edges the design has and cost on an edge it has not yet named. What this candidate has to
    say is which of the thirteen it constrains and whether any of those constraints is one the design would
    have chosen on its own.
 
-**What any answer has to survive.** Principle 1 is the sharpest, and it bears on the answer twice. A check
-that runs on some write paths and not others is not a control in this design's sense — it reports on the
-paths it covers — so an answer that keeps the check has to say whether making it bind is part of the answer
-or a separate defect, and an answer that removes it has to name what fails when a cycle is written. The
-design's own precedent is that the writer is the enforcement point where the record's per-type check cannot
-see the loop, which is `work_model.md`'s cross-type walk and is the shape decision 56 ruled for governance
-writes: the one writer that holds the grant checks before it writes. Principle 5 governs the default: a
-type whose acyclicity is unstated resolves to the restrictive branch or to the permissive one, and this is
-the field carrying the safety meaning, so the answer states which. And an unbounded walk over a deep graph
-is a cost paid at every write, which makes a declared depth bound a candidate term of any answer rather
-than an implementation detail — with the design's own rule that a bound reached resolves to a refusal and
-never to a permissive default, as `#record-conventions` already requires of a degraded read.
+**Why the ruling binds.** Principle 1 is the sharpest: the check is made at the record's relationship-write
+path for every edge of a type declaring acyclicity, so a caller cannot route around it; where the separate
+cross-type walk is needed, the one writer holding the grant remains its enforcement point. Principle 5
+governs both defaults: an absent declaration is a refused registration, and a cycle check that cannot
+complete refuses the write rather than admitting an edge on an unknown result. A depth bound is an
+implementation parameter of that check, but reaching it has the same refusal outcome and never a
+permissive default, as `#record-conventions` already requires of a degraded read.
 
 **What this does not reach.** Which relationship types the vocabulary holds is G25 and belongs to the
 record's repository; this question is what a check does with the types the vocabulary comes to hold,
@@ -390,6 +549,11 @@ runs through a second type, which stays true whether the per-type check is decla
   first concurrent writer is the one who discovers that. A field with several concurrent writers is
   written through the correction path, which re-reads and merges; a whole-field store clobbers whatever
   landed in between.
+- **A registered relationship type declares whether its own edges are acyclic.** The declaration is
+  required even where it says cycles are admitted; omission, malformed values, and unknown values refuse
+  registration. For a type declaring acyclicity, the record refuses the relationship write that would
+  close a cycle, and an unreadable or bounded-out check refuses rather than admitting on uncertainty
+  (`#whether-acyclicity-is-a-property-of-a-relationship-type-or-of-the-graph`, decision 102).
 - **Schema versions.** Every entity type is registered with a version, and a verdict pins the
   `agent` version it was made under; a write that names a field the registered version does not
   declare is not silently accepted as that field.

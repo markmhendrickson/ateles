@@ -1628,16 +1628,21 @@ principal itself.
 **Not for:** identity for the principal; account for a credential.
 
 ### principal binding
-**Definition:** the [edge](#edge) recorded as `principal_binding`, from a presented
-[credential](#credential) to the [principal](#principal) it identifies — one edge per credential, carrying
-`credential_kind`, `credential_value`, `credential_issuer`, and `expires_at` (decision 101).
-An [agent](#agent)'s binding to the principal whose interest it acts in is **one instance of this edge and
-not a second kind** — but it is a distinct *edge* from the one binding the agent's own AAuth credential,
-and an agent acting in a human's interest holds both, told apart by `credential_kind`. The AAuth edge
-carries `credential_kind: aauth_sub` with that agent's `sub` and `iss` and ends at the **agent**, the
-principal that credential identifies; the acts-as edge ends at the **[operator](#operator)**. This pair is
-what joins the two credential systems — an AAuth `sub` binds to the agent that presented it and reaches the
-human principal only through that agent's separate acts-as binding.
+**Definition:** the [edge](#edge) recorded as `principal_binding`, in one of two admitted shapes. A
+presented [credential](#credential) → the [principal](#principal) it identifies is one edge per credential,
+carrying `credential_kind`, `credential_value`, `credential_issuer`, and `expires_at` (decision 101). An
+[agent](#agent) → [operator](#operator) acts-as binding is a second edge of the same relationship type,
+carrying only `credential_kind: acts_as`; it is traversed after the agent's presented credential resolves
+and is never itself presented (decision 107). The AAuth edge carries `credential_kind: aauth_sub` with the
+agent's `sub` and `iss` and ends at the **agent**, the principal that credential identifies; the acts-as
+edge ends at the **operator**. This pair joins the two credential systems without making the acts-as
+relationship a credential. A complete traversal after valid credential resolution must yield exactly one
+current agent → operator link; zero current, multiple current, unreadable current or malformed current
+links stop without a fallback principal. A properly ended historical link does not invalidate the one
+valid current link; an ended-only diagnosis needs separately admitted history inspection. No traversal
+link carries credential value, issuer or expiry. Agent → agent acts-as is
+forbidden in favour of [delegation](#delegation), and an operator may not source an acts-as edge
+(decisions 108 and 109).
 It carries one rule the design turns on: **for a [quorum](#quorum) or a
 [separation-of-duties](#separation-of-duties) check, an agent counts as the principal its acts-as binding
 names** — one interest, so two agents bound to one [operator](#operator) cannot satisfy a check meant to
@@ -1649,7 +1654,8 @@ itself, A-for-B, which its AAuth edge is what makes resolvable.
 **Not for:** a separate credential entity standing beside the binding (decision 101 rules the credential
 edge-keyed, so the edge carries the credential's fields and no entity holds it); the binding for
 [delegation](#delegation) (a delegation is granted and expires, a binding is
-what the agent is); the binding for `vendor_binding` (that binds a [role](#role) to a model and harness,
+what the agent is); a presented acts-as credential; an agent → agent or operator-sourced acts-as edge; the
+binding for `vendor_binding` (that binds a [role](#role) to a model and harness,
 and carries no [authority](#authority)).
 
 ### operator
@@ -2005,7 +2011,12 @@ checkpoint.
 
 ### edge
 **Definition:** a typed, directed relationship between two entities in the record, carrying its own
-timestamps and fields.
+timestamps and fields. A relationship type must be registered and [read back](#read-back) before an edge of
+that type is written. The current registry may include types admitted after the original bootstrap:
+`GOVERNS` is the separate nineteenth first-flow fixture type, admitted through G25 only after
+the closed 18-type bootstrap has completed its readbacks, and before its first `agent_policy` edge.
+Its presence in the current vocabulary does not make it a step-1 bootstrap write or give the
+presenting [principal](#principal) a registration grant.
 **See:** [`data_model.md#relationships`](data_model.md#relationships).
 **Never:** —
 **Not for:** link for an edge in schema text (a link is a URL); field for what an edge carries.

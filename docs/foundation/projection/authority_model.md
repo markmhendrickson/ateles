@@ -5,7 +5,7 @@
 
 Every rule `authority_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`authority_model.md`](../authority_model.md) and are not repeated here (decision 66).
 
-28 rules.
+30 rules.
 
 ## [The tuple](../authority_model.md#the-tuple)
 
@@ -64,3 +64,5 @@ Every rule `authority_model.md` owns, one entry each: the rule's own statement f
 - **AU-25** — the same table, row 4: `Indeterminate` (binding source unreadable/partial) — the relationship store is unreachable, timed out, or the read is incomplete; the enforcement point treats it as `Deny` and the third value is kept in diagnostics rather than coerced to a plain `Deny` in the recorded decision *[M (same red-by-design status as AU-22)]*
 - **AU-26** — the same table, row 5: `Deny` (ambiguous/conflicting) — two or more live matching edges target different principals; fail closed, never pick the first edge *[M (same red-by-design status as AU-22)]*
 - **AU-27** — the same table, row 6: `Deny` (malformed presentation) — the presented credential is missing a required key part (`credential_kind` / `credential_value` / issuer when the kind requires one), or the kind is unrecognized *[M (same red-by-design status as AU-22)]*
+- **AU-29** — (decisions 107–109): `acts_as` is traversal-only, agent → operator exactly; it carries no presented value; agent → agent uses `delegation_edge`; an operator never sources acts-as *[M — removing the presentation-kind exclusion or either endpoint check turns this row red]*
+- **AU-32** — post-resolution acts-as traversal: a complete current read with exactly one valid A→operator edge yields interest only even with properly ended history; zero current, multiple current identities, malformed current, and incomplete current read refuse under their stated `Deny` or retained `Indeterminate`; ended-only diagnosis needs separate admitted history inspection *[M — design row; runtime effect and cross-surface tests follow separately admitted resolver/contract work, not this source proposal]*

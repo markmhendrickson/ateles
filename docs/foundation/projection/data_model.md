@@ -5,7 +5,7 @@
 
 Every rule `data_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`data_model.md`](../data_model.md) and are not repeated here (decision 66).
 
-28 rules.
+31 rules.
 
 ## [Concepts](../data_model.md#concepts)
 
@@ -49,3 +49,12 @@ Every rule `data_model.md` owns, one entry each: the rule's own statement from `
 ## [Rendering](../data_model.md#rendering)
 
 - **DM-25** — the rule this heading states *[M (contract; existence is `status.md`'s)]*
+
+## [Whether acyclicity is a property of a relationship type or of the graph](../data_model.md#whether-acyclicity-is-a-property-of-a-relationship-type-or-of-the-graph)
+
+- **DM-31** — (decision 102): every relationship type declares acyclic or cycles-admitted at registration; absence, malformed values, and unknown values are refused; an acyclic type is checked before every relationship write, and unknown check state denies *[M — the missing-declaration and skipped-write-check mutants are planted positives]*
+
+## [Proposed first-flow instance cycle-policy fixture](../data_model.md#proposed-first-flow-instance-cycle-policy-fixture)
+
+- **DM-32** — the scoped 19-type census splits 18 original readbacks from later grant-gated `GOVERNS`; complete authorized preflight classifies matching, known absent, mismatch, inactive and unknown, while registration and graph effects require current record-owned qualification *[M — source contract only; record-owned implementation and effect-level parity remain gated]*
+- **DM-32a** — the same: present-mismatch replacement binds complete semantic and opaque-state proof to the then-current effective head in an atomic preserving append; each first-flow branch and graph entrance uses record-owned qualification; new-row provenance is truthful and old history immutable *[M — record-owned atomicity, complete-state proof, authority and cross-surface effect tests remain separately gated]*

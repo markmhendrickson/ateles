@@ -5,7 +5,7 @@
 
 Every rule `planning_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`planning_model.md`](../planning_model.md) and are not repeated here (decision 66).
 
-17 rules.
+18 rules.
 
 ## [The hierarchy is edges, and a task has one line upward](../planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward)
 
@@ -50,3 +50,7 @@ Every rule `planning_model.md` owns, one entry each: the rule's own statement fr
 - **PM-15** — the same: continuous planning is the recurring control loop and forever-recurring delivery work blocks terminal completion until its declared final occurrence lands *[M]*
 - **PM-16** — the same: completion requires descendant effect evidence for every `completion_criteria[]`; checkpoints are not evidence; discovered out-of-scope work needs an amendment before admission *[M]*
 - **PM-17** — the same: safe resumption re-derives control, dependencies, leases, confirmations, and idempotency keys; stop is proved completion or confirmed cancellation *[M]*
+
+## [Every planning record belongs to an instance, and swarm-operations planning belongs to the controlling instance](../planning_model.md#every-planning-record-belongs-to-an-instance-and-swarm-operations-planning-belongs-to-the-controlling-instance)
+
+- **PM-18** — (decision 99): every planning record belongs to one instance; swarm-operations planning in a multi-instance deployment is created in its controlling instance; none means refusal, never a global record *[M]*
