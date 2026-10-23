@@ -83,7 +83,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -108,6 +108,7 @@ class ProviderPolicy:
     usage_gated_providers: tuple[str, ...]
     source: str
     error: str = ""
+    daemon_environment: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,13 @@ _PROVIDER_POLICY_PLIST_ENV = "APIS_PROVIDER_POLICY_PLIST"
 _DEFAULT_PROVIDER_POLICY_PLIST = (
     Path.home() / "Library" / "LaunchAgents" / "com.ateles.apis.plist"
 )
+_daemon_runtime_context = False
+
+
+def establish_daemon_runtime_context() -> None:
+    """Mark this process as Apis itself; children never inherit this marker."""
+    global _daemon_runtime_context
+    _daemon_runtime_context = True
 
 
 def _provider_csv(
@@ -233,7 +241,22 @@ def provider_policy(*, required: bool = False) -> ProviderPolicy:
     """
     active_present = "APIS_HARNESS_PROVIDERS" in os.environ
     gated_present = "APIS_USAGE_GATED_PROVIDERS" in os.environ
+    explicit_path = os.environ.get(_PROVIDER_POLICY_PLIST_ENV)
+    if required and explicit_path is not None and (
+        not explicit_path.strip() or explicit_path != explicit_path.strip()
+    ):
+        return ProviderPolicy(
+            (), (), _PROVIDER_POLICY_PLIST_ENV,
+            "declared daemon policy location is blank or has surrounding whitespace",
+        )
     path = _provider_policy_plist_path()
+    if required and (explicit_path is not None or not _daemon_runtime_context) and (
+        path is None or not path.is_file()
+    ):
+        return ProviderPolicy(
+            (), (), f"launchd plist {path}" if path else "runtime provider policy",
+            "declared daemon policy file is unavailable",
+        )
     # The installed daemon policy is authoritative when it is available.
     # A standalone shell may inherit a complete but older policy pair.
     plist_policy: ProviderPolicy | None = None
@@ -270,6 +293,18 @@ def provider_policy(*, required: bool = False) -> ProviderPolicy:
                             source, strict=required,
                         )
                     )
+                    if not missing and plist_policy is not None:
+                        plist_policy = replace(
+                            plist_policy,
+                            daemon_environment={
+                                key: env[key]
+                                for key in (
+                                    "APIS_ACTION_POLICY_FILE",
+                                    "APIS_VENDOR_BINDING_FILE",
+                                )
+                                if key in env
+                            },
+                        )
         except (OSError, plistlib.InvalidFileException, TypeError, ValueError) as exc:
             plist_policy = ProviderPolicy(
                 (), (), source,
@@ -319,6 +354,12 @@ def provider_policy(*, required: bool = False) -> ProviderPolicy:
                 "process environment provider policy conflicts with the installed "
                 f"daemon policy in {plist_policy.source}",
             )
+        if required and plist_policy is not None:
+            return replace(
+                process_policy, daemon_environment=plist_policy.daemon_environment
+            )
+        if required and _daemon_runtime_context:
+            return process_policy
         return process_policy
 
     if plist_policy is not None:
@@ -1509,9 +1550,11 @@ def resolve_provider_admission(
 
     normalized = provider.strip().lower()
     policy = provider_policy(required=required_policy)
+    action_source = model_tiering.action_policy_source()
+    binding_source = model_tiering.vendor_binding_source()
     policy_source = (
-        f"{policy.source}; action_policy={model_tiering.action_policy_source()}; "
-        f"vendor_binding={model_tiering.vendor_binding_source()}"
+        f"{policy.source}; action_policy={action_source}; "
+        f"vendor_binding={binding_source}"
     )
 
     def decision(
@@ -1559,7 +1602,21 @@ def resolve_provider_admission(
         )
 
     try:
-        action_policy = model_tiering.configured_action_policy(strict=True)
+        if required_policy and policy.daemon_environment is not None:
+            action_path, binding_path = model_tiering.daemon_model_policy_paths(
+                policy.daemon_environment
+            )
+            action_source = f"file {action_path}"
+            binding_source = f"file {binding_path}"
+            policy_source = (
+                f"{policy.source}; action_policy={action_source}; "
+                f"vendor_binding={binding_source}"
+            )
+        else:
+            action_path = binding_path = None
+        action_policy = model_tiering.configured_action_policy(
+            strict=True, authoritative_path=action_path
+        )
     except model_tiering.ModelPolicyUnavailable as exc:
         return decision(False, "configuration_error", f"action policy: {exc}")
     if action_class not in action_policy:
@@ -1567,13 +1624,15 @@ def resolve_provider_admission(
             False,
             "configuration_error",
             f"required action class {action_class!r} is absent or malformed in "
-            f"{model_tiering.action_policy_source()}; provider={normalized}",
+            f"{action_source}; provider={normalized}",
         )
     resolved_tier = model_tiering.resolve_tier(
         action_class, policy=action_policy, signals=signals
     )
     try:
-        binding = model_tiering.configured_vendor_binding(strict=True)
+        binding = model_tiering.configured_vendor_binding(
+            strict=True, authoritative_path=binding_path
+        )
     except model_tiering.ModelPolicyUnavailable as exc:
         return decision(
             False, "configuration_error", f"required vendor binding: {exc}",
@@ -1585,7 +1644,7 @@ def resolve_provider_admission(
             False,
             "configuration_error",
             f"required vendor binding is absent or malformed in "
-            f"{model_tiering.vendor_binding_source()}; provider={normalized}; "
+            f"{binding_source}; provider={normalized}; "
             f"tier={resolved_tier.tier}",
             tier=resolved_tier.tier,
             tier_source=resolved_tier.source,
@@ -1599,7 +1658,7 @@ def resolve_provider_admission(
         return decision(
             False,
             "configuration_error",
-            f"{exc}; policy_source={model_tiering.vendor_binding_source()}; "
+            f"{exc}; policy_source={binding_source}; "
             f"provider={normalized}; tier={resolved_tier.tier}",
             tier=resolved_tier.tier,
             tier_source=resolved_tier.source,
@@ -1611,7 +1670,7 @@ def resolve_provider_admission(
             "configuration_error",
             f"vendor binding resolved no model; provider={normalized}; "
             f"tier={resolved_tier.tier}; "
-            f"policy_source={model_tiering.vendor_binding_source()}",
+            f"policy_source={binding_source}",
             tier=resolved_tier.tier,
             tier_source=resolved_tier.source,
             escalation_reasons=resolved_tier.escalation_reasons,
@@ -1622,7 +1681,7 @@ def resolve_provider_admission(
             False,
             "configuration_error",
             f"{reserved}; provider={normalized}; tier={resolved_tier.tier}; "
-            f"policy_source={model_tiering.vendor_binding_source()}",
+            f"policy_source={binding_source}",
             tier=resolved_tier.tier,
             tier_source=resolved_tier.source,
             model=resolved_model,

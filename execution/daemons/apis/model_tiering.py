@@ -57,6 +57,7 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -182,7 +183,8 @@ class ModelPolicyUnavailable(ValueError):
 
 
 def _read_json_config(
-    env_var: str, file_env_var: str, default_path: Path, *, strict: bool = False
+    env_var: str, file_env_var: str, default_path: Path, *, strict: bool = False,
+    authoritative_path: Path | None = None,
 ) -> dict:
     """File-then-env JSON read, matching ``harness_router.configured_headroom``
     and ``local_provider``'s config precedence exactly: an operator can change
@@ -194,8 +196,12 @@ def _read_json_config(
     fall through to a lower-priority environment value.
     """
     configured_path = os.environ.get(file_env_var, "").strip()
-    path = Path(configured_path).expanduser() if configured_path else default_path
+    path = authoritative_path or (
+        Path(configured_path).expanduser() if configured_path else default_path
+    )
     file_raw = ""
+    if strict and authoritative_path is not None and not path.is_file():
+        raise ModelPolicyUnavailable("authoritative model policy file is unavailable")
     if strict and configured_path and not path.is_file():
         raise ModelPolicyUnavailable("declared model policy file is unavailable")
     if path.is_file():
@@ -231,6 +237,40 @@ def _read_json_config(
     return {}
 
 
+def daemon_model_policy_paths(
+    daemon_environment: Mapping[str, object] | None,
+) -> tuple[Path, Path]:
+    """Bind a guarded dispatch to the daemon's declared model-file locations."""
+    if daemon_environment is None:
+        raise ModelPolicyUnavailable("daemon model policy source is unestablished")
+    paths = []
+    for key, default in (
+        (_ACTION_POLICY_FILE_ENV, _DEFAULT_ACTION_POLICY_PATH),
+        (_VENDOR_BINDING_FILE_ENV, _DEFAULT_VENDOR_BINDING_PATH),
+    ):
+        declared = daemon_environment.get(key)
+        if declared is None:
+            expected = default
+        elif not isinstance(declared, str) or not declared.strip() or declared != declared.strip():
+            raise ModelPolicyUnavailable(f"daemon {key} location is malformed")
+        else:
+            expected = Path(declared).expanduser()
+            if not expected.is_absolute():
+                raise ModelPolicyUnavailable(f"daemon {key} location is not absolute")
+        inherited = os.environ.get(key)
+        if inherited is not None:
+            if not inherited.strip() or inherited != inherited.strip():
+                raise ModelPolicyUnavailable(f"process {key} location is malformed")
+            if not Path(inherited).expanduser().is_absolute():
+                raise ModelPolicyUnavailable(f"process {key} location is not absolute")
+            if Path(inherited).expanduser() != expected:
+                raise ModelPolicyUnavailable(
+                    f"process {key} location conflicts with daemon policy"
+                )
+        paths.append(expected)
+    return paths[0], paths[1]
+
+
 def _json_config_source(env_var: str, file_env_var: str, default_path: Path) -> str:
     """Name the source the matching config reader will try first."""
     configured_path = os.environ.get(file_env_var, "").strip()
@@ -254,7 +294,9 @@ def vendor_binding_source() -> str:
     )
 
 
-def configured_action_policy(*, strict: bool = False) -> dict[str, str]:
+def configured_action_policy(
+    *, strict: bool = False, authoritative_path: Path | None = None
+) -> dict[str, str]:
     """Return the action-class -> min_tier map, normalized to known tiers.
 
     An entry naming an unrecognized tier is dropped (logged), never coerced —
@@ -262,7 +304,7 @@ def configured_action_policy(*, strict: bool = False) -> dict[str, str]:
     """
     raw = _read_json_config(
         _ACTION_POLICY_ENV, _ACTION_POLICY_FILE_ENV, _DEFAULT_ACTION_POLICY_PATH,
-        strict=strict,
+        strict=strict, authoritative_path=authoritative_path,
     )
     out: dict[str, str] = {}
     for action_class, tier in raw.items():
@@ -280,7 +322,9 @@ def configured_action_policy(*, strict: bool = False) -> dict[str, str]:
     return out
 
 
-def configured_vendor_binding(*, strict: bool = False) -> dict[str, dict[str, str]]:
+def configured_vendor_binding(
+    *, strict: bool = False, authoritative_path: Path | None = None
+) -> dict[str, dict[str, str]]:
     """Return {provider: {tier: model_id}}, lower-cased on both axes.
 
     Shape matches ``local_provider``'s ``vendor_binding``-shaped config
@@ -291,7 +335,7 @@ def configured_vendor_binding(*, strict: bool = False) -> dict[str, dict[str, st
     """
     raw = _read_json_config(
         _VENDOR_BINDING_ENV, _VENDOR_BINDING_FILE_ENV, _DEFAULT_VENDOR_BINDING_PATH,
-        strict=strict,
+        strict=strict, authoritative_path=authoritative_path,
     )
     out: dict[str, dict[str, str]] = {}
     for provider, tiers in raw.items():

@@ -142,6 +142,13 @@ def _default_full_headroom(monkeypatch, tmp_path):
     )
     monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(action_policy))
     monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(vendor_binding))
+    with provider_policy.open("wb") as handle:
+        plistlib.dump({"EnvironmentVariables": {
+            "APIS_HARNESS_PROVIDERS": "claude,codex,cursor",
+            "APIS_USAGE_GATED_PROVIDERS": "claude,codex,cursor",
+            "APIS_ACTION_POLICY_FILE": str(action_policy),
+            "APIS_VENDOR_BINDING_FILE": str(vendor_binding),
+        }}, handle)
     # The router also folds the live plan-usage snapshot
     # (~/.config/ateles/harness-usage.json) into configured_headroom(); a
     # host whose real snapshot shows a provider exhausted would otherwise
@@ -1439,6 +1446,8 @@ def test_standalone_qa_uses_launchd_policy_and_bound_codex_model_above_pace(
                 "EnvironmentVariables": {
                     "APIS_HARNESS_PROVIDERS": "codex,cursor",
                     "APIS_USAGE_GATED_PROVIDERS": "claude",
+                    "APIS_ACTION_POLICY_FILE": os.environ["APIS_ACTION_POLICY_FILE"],
+                    "APIS_VENDOR_BINDING_FILE": os.environ["APIS_VENDOR_BINDING_FILE"],
                 }
             },
             handle,
@@ -1504,13 +1513,24 @@ def test_standalone_qa_uses_launchd_policy_and_bound_codex_model_above_pace(
     }
 
 
-@pytest.mark.parametrize("policy_case", ["missing", "malformed", "partial"])
+@pytest.mark.parametrize(
+    "policy_case",
+    ["missing", "malformed", "partial", "blank_path", "whitespace_path", "model_location"],
+)
 def test_standalone_refuses_required_policy_errors_before_worktree_or_dispatch(
     monkeypatch, tmp_path, target, brief_file, policy_case
 ):
     policy_path = Path(os.environ["APIS_PROVIDER_POLICY_PLIST"])
     if policy_case == "missing":
         policy_path.unlink()
+    elif policy_case == "blank_path":
+        monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", "   ")
+    elif policy_case == "whitespace_path":
+        monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(policy_path) + " ")
+    elif policy_case == "model_location":
+        other = tmp_path / "other-action.json"
+        other.write_text('{"lens_review:pm": "top"}', encoding="utf-8")
+        monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(other))
     elif policy_case == "malformed":
         policy_path.write_bytes(b"not a plist")
     else:
@@ -1552,7 +1572,8 @@ def test_standalone_refuses_required_policy_errors_before_worktree_or_dispatch(
     assert report["posted"] is False
     assert report["provider_admission"]["reason_code"] == "configuration_error"
     assert report["provider_admission"]["requested_provider"] == "codex"
-    assert str(policy_path) in report["provider_admission"]["policy_source"]
+    if policy_case not in ("blank_path", "whitespace_path"):
+        assert str(policy_path) in report["provider_admission"]["policy_source"]
 
 
 def test_dry_run_claude_provider_uses_outer_sandbox_and_pins_cwd_to_the_worktree(
@@ -2372,14 +2393,26 @@ def test_invalid_verdict_text_is_withheld_from_the_report(
     assert report["verdict_text_withheld"] is True
 
 
+def _use_codex_only_daemon_policy(monkeypatch) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "codex")
+    path = Path(os.environ["APIS_PROVIDER_POLICY_PLIST"])
+    with path.open("wb") as handle:
+        plistlib.dump({"EnvironmentVariables": {
+            "APIS_HARNESS_PROVIDERS": "codex",
+            "APIS_USAGE_GATED_PROVIDERS": "codex",
+            "APIS_ACTION_POLICY_FILE": os.environ["APIS_ACTION_POLICY_FILE"],
+            "APIS_VENDOR_BINDING_FILE": os.environ["APIS_VENDOR_BINDING_FILE"],
+        }}, handle)
+
+
 def test_router_preserved_delivery_denial_reaches_parent_gate(
     monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):
     """Exercise the real router result shape observed in the live PM run."""
     _install_minimal_lens_worktree(monkeypatch, target)
     harness_router.reset_state()
-    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
-    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "codex")
+    _use_codex_only_daemon_policy(monkeypatch)
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
 
     async def _dispatch(role, task, **kwargs):
@@ -2436,8 +2469,7 @@ def test_router_mixed_delivery_and_capacity_refuses_valid_local_artifact(
 ):
     _install_minimal_lens_worktree(monkeypatch, target)
     harness_router.reset_state()
-    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
-    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "codex")
+    _use_codex_only_daemon_policy(monkeypatch)
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
 
     async def _dispatch(role, task, **kwargs):
@@ -2579,8 +2611,7 @@ def test_mixed_delivery_diagnostics_never_reach_parent_recovery_or_publication(
 ):
     _install_minimal_lens_worktree(monkeypatch, target)
     harness_router.reset_state()
-    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
-    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "codex")
+    _use_codex_only_daemon_policy(monkeypatch)
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
     delivery = (
         "fatal: unable to access 'https://github.com/o/r/': "

@@ -48,7 +48,7 @@ def test_explicit_fly_review_reaches_bound_child_while_local_review_refuses(
     monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:qa": "mid"}')
     monkeypatch.setenv("APIS_VENDOR_BINDING", '{"claude": {"mid": "sonnet-review"}}')
     monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "no-usage"))
-    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(tmp_path / "no-plist"))
+    monkeypatch.delenv("APIS_PROVIDER_POLICY_PLIST", raising=False)
     monkeypatch.setattr(skill_runner, "_refresh_usage_snapshot", lambda *_: None)
     monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude": "/bin/claude"})
     child_calls = []
@@ -106,6 +106,26 @@ def test_unpinned_run_skill_reports_malformed_plist_before_child(
     assert child_calls == []
 
 
+def test_run_skill_refuses_missing_declared_policy_before_child(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(harness_router, "_daemon_runtime_context", False)
+    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(tmp_path / "absent.plist"))
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+
+    async def child(*args, **kwargs):
+        raise AssertionError("child must not start")
+
+    monkeypatch.setattr(skill_runner, "_run_skill_once", child)
+    result = asyncio.run(skill_runner.run_skill(
+        "phoenicurus", "review", action_class="lens_review:qa"
+    ))
+
+    assert not result.ok
+    assert "daemon policy file is unavailable" in result.error
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
@@ -113,6 +133,7 @@ def test_unpinned_run_skill_reports_malformed_plist_before_child(
 def _claude_only_test_router(monkeypatch, tmp_path):
     """Keep legacy command-shape tests pinned to the Claude adapter."""
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
     monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"claude": 1.0}')
     monkeypatch.setenv(
         "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing-headroom.json")

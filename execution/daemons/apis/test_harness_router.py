@@ -22,9 +22,7 @@ import harness_router  # noqa: E402
 def _reset_router(monkeypatch, tmp_path):
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex,cursor")
     monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude,codex,cursor")
-    monkeypatch.setenv(
-        "APIS_PROVIDER_POLICY_PLIST", str(tmp_path / "missing-apis.plist")
-    )
+    monkeypatch.delenv("APIS_PROVIDER_POLICY_PLIST", raising=False)
     monkeypatch.delenv("APIS_HARNESS_HEADROOM", raising=False)
     monkeypatch.delenv("APIS_HARNESS_MIN_HEADROOM", raising=False)
     monkeypatch.delenv("APIS_HARNESS_COOLDOWN_SECONDS", raising=False)
@@ -57,6 +55,156 @@ def _strict_model_policy(monkeypatch, tmp_path, *, model: str = "terra-review") 
     monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(vendor_binding))
     monkeypatch.delenv("APIS_ACTION_POLICY", raising=False)
     monkeypatch.delenv("APIS_VENDOR_BINDING", raising=False)
+
+
+def _standalone_daemon_policy(monkeypatch, tmp_path) -> tuple[Path, Path, Path]:
+    """Declare an independent daemon source, including both model locations."""
+    monkeypatch.setattr(harness_router, "_daemon_runtime_context", False)
+    action = tmp_path / "daemon-action.json"
+    action.write_text('{"lens_review:qa": "mid"}', encoding="utf-8")
+    binding = tmp_path / "daemon-binding.json"
+    binding.write_text('{"codex": {"mid": "daemon-model"}}', encoding="utf-8")
+    plist = tmp_path / "daemon.plist"
+    with plist.open("wb") as handle:
+        plistlib.dump({"EnvironmentVariables": {
+            "APIS_HARNESS_PROVIDERS": "codex",
+            "APIS_USAGE_GATED_PROVIDERS": "",
+            "APIS_ACTION_POLICY_FILE": str(action),
+            "APIS_VENDOR_BINDING_FILE": str(binding),
+        }}, handle)
+    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(plist))
+    monkeypatch.delenv("APIS_HARNESS_PROVIDERS", raising=False)
+    monkeypatch.delenv("APIS_USAGE_GATED_PROVIDERS", raising=False)
+    monkeypatch.delenv("APIS_ACTION_POLICY_FILE", raising=False)
+    monkeypatch.delenv("APIS_VENDOR_BINDING_FILE", raising=False)
+    return plist, action, binding
+
+
+@pytest.mark.parametrize("declared", ["", "   ", "missing", "trailing "])
+def test_standalone_declared_provider_source_must_be_readable_and_exact(
+    monkeypatch, tmp_path, declared
+) -> None:
+    plist, _, _ = _standalone_daemon_policy(monkeypatch, tmp_path)
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "")
+    path = str(tmp_path / "missing.plist") if declared == "missing" else (
+        str(plist) + " " if declared == "trailing " else declared
+    )
+    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", path)
+
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    assert not admission.admitted
+    assert admission.reason_code == "configuration_error"
+    assert "daemon policy" in admission.reason
+
+
+@pytest.mark.parametrize("key", ["APIS_ACTION_POLICY_FILE", "APIS_VENDOR_BINDING_FILE"])
+@pytest.mark.parametrize("declared", ["blank", "missing", "whitespace", "conflicting"])
+def test_standalone_model_sources_are_bound_to_daemon_locations(
+    monkeypatch, tmp_path, key, declared
+) -> None:
+    plist, action, binding = _standalone_daemon_policy(monkeypatch, tmp_path)
+    if declared == "blank":
+        value = "  "
+    elif declared == "missing":
+        value = str(tmp_path / "missing.json")
+    elif declared == "whitespace":
+        value = str(action if key == "APIS_ACTION_POLICY_FILE" else binding) + " "
+    else:
+        alternate = tmp_path / ("alternate-action.json" if key == "APIS_ACTION_POLICY_FILE" else "alternate-binding.json")
+        alternate.write_text(
+            '{"lens_review:qa": "mid", "lens_review:pm": "top"}' if key == "APIS_ACTION_POLICY_FILE"
+            else '{"codex": {"mid": "alternate-model"}}', encoding="utf-8"
+        )
+        value = str(alternate)
+    monkeypatch.setenv(key, value)
+
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    assert not admission.admitted, plist
+    assert admission.reason_code == "configuration_error"
+    assert key in admission.reason
+
+
+def test_standalone_reads_declared_model_files_without_inherited_locations(
+    monkeypatch, tmp_path
+) -> None:
+    _standalone_daemon_policy(monkeypatch, tmp_path)
+
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    assert admission.admitted
+    assert admission.resolved_tier == "mid"
+    assert admission.resolved_model == "daemon-model"
+
+
+@pytest.mark.parametrize("key", ["APIS_ACTION_POLICY_FILE", "APIS_VENDOR_BINDING_FILE"])
+@pytest.mark.parametrize("declared", ["blank", "missing", "whitespace"])
+def test_standalone_refuses_unusable_daemon_model_declaration(
+    monkeypatch, tmp_path, key, declared
+) -> None:
+    plist, action, binding = _standalone_daemon_policy(monkeypatch, tmp_path)
+    policy = plistlib.loads(plist.read_bytes())
+    policy["EnvironmentVariables"][key] = (
+        "  " if declared == "blank" else
+        str(tmp_path / "absent.json") if declared == "missing" else
+        str(action if key == "APIS_ACTION_POLICY_FILE" else binding) + " "
+    )
+    plist.write_bytes(plistlib.dumps(policy))
+
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    assert not admission.admitted
+    assert admission.reason_code == "configuration_error"
+
+
+def test_standalone_rejects_inherited_model_location_when_daemon_uses_default(
+    monkeypatch, tmp_path
+) -> None:
+    plist, action, _ = _standalone_daemon_policy(monkeypatch, tmp_path)
+    policy = plistlib.loads(plist.read_bytes())
+    del policy["EnvironmentVariables"]["APIS_ACTION_POLICY_FILE"]
+    plist.write_bytes(plistlib.dumps(policy))
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(action))
+
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    assert not admission.admitted
+    assert "APIS_ACTION_POLICY_FILE" in admission.reason
+
+
+def test_standalone_uses_daemon_default_model_locations_when_undeclared(
+    monkeypatch, tmp_path
+) -> None:
+    import model_tiering
+
+    plist, action, binding = _standalone_daemon_policy(monkeypatch, tmp_path)
+    policy = plistlib.loads(plist.read_bytes())
+    del policy["EnvironmentVariables"]["APIS_ACTION_POLICY_FILE"]
+    del policy["EnvironmentVariables"]["APIS_VENDOR_BINDING_FILE"]
+    plist.write_bytes(plistlib.dumps(policy))
+    monkeypatch.setattr(model_tiering, "_DEFAULT_ACTION_POLICY_PATH", action)
+    monkeypatch.setattr(model_tiering, "_DEFAULT_VENDOR_BINDING_PATH", binding)
+
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    assert admission.admitted
+    assert admission.resolved_model == "daemon-model"
+    assert f"action_policy=file {action}" in admission.policy_source
+    assert f"vendor_binding=file {binding}" in admission.policy_source
 
 
 def test_equal_headroom_round_robins_across_three_providers() -> None:

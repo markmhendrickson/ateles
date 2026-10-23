@@ -36,9 +36,7 @@ from skill_runner import SkillResult  # noqa: E402
 def _isolated_provider_policy(monkeypatch, tmp_path):
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "claude,codex,cursor")
     monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude,codex,cursor")
-    monkeypatch.setenv(
-        "APIS_PROVIDER_POLICY_PLIST", str(tmp_path / "missing-apis.plist")
-    )
+    monkeypatch.delenv("APIS_PROVIDER_POLICY_PLIST", raising=False)
     monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "missing-usage.json"))
     monkeypatch.delenv("APIS_ACTION_POLICY_FILE", raising=False)
     monkeypatch.delenv("APIS_VENDOR_BINDING_FILE", raising=False)
@@ -286,6 +284,26 @@ def test_unpinned_review_names_malformed_policy_instead_of_no_provider(
     assert not result.ok
     assert "plist root is not a map" in result.error
     assert str(path) in result.error
+
+
+def test_dispatch_role_refuses_unestablished_source_before_child(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(harness_router, "_daemon_runtime_context", False)
+    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(tmp_path / "absent.plist"))
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "")
+
+    async def child(*args, **kwargs):
+        raise AssertionError("child must not start")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", child)
+    result = asyncio.run(dispatch_role.dispatch(
+        "phoenicurus", "review", action_class="lens_review:qa"
+    ))
+
+    assert not result.ok
+    assert "daemon policy file is unavailable" in result.error
 
 
 def test_dispatch_action_class_and_model_default_to_none(monkeypatch) -> None:
@@ -903,6 +921,14 @@ def test_standalone_plist_and_zero_usage_headroom_reach_bound_child_argv(
     )
     monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(action_policy))
     monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(vendor_binding))
+    with policy_path.open("wb") as handle:
+        plistlib.dump({"EnvironmentVariables": {
+            "APIS_HARNESS_PROVIDERS": "codex,cursor",
+            "APIS_USAGE_GATED_PROVIDERS": "claude",
+            "APIS_ACTION_POLICY_FILE": str(action_policy),
+            "APIS_VENDOR_BINDING_FILE": str(vendor_binding),
+        }}, handle)
+    monkeypatch.setattr(harness_router, "_daemon_runtime_context", False)
     now = time.time()
     harness_router.record_usage(
         "codex",
