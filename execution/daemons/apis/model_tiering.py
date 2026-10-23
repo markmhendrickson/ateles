@@ -189,10 +189,9 @@ def _read_json_config(
     either without restarting Apis, and a stale file always wins over env so a
     forgotten export cannot silently override a maintained file.
 
-    Malformed or unreadable input degrades to ``{}`` (unresolved), never
-    raises — same posture as every other Apis policy reader. Unlike headroom,
-    an empty result here does NOT mean "permissive default": callers resolve
-    an unresolved class to ``DEFAULT_TIER``, not to "no floor".
+    Legacy reads degrade malformed or unreadable input to ``{}`` (unresolved).
+    Strict review admission raises on a declared, unusable source before it can
+    fall through to a lower-priority environment value.
     """
     configured_path = os.environ.get(file_env_var, "").strip()
     path = Path(configured_path).expanduser() if configured_path else default_path
@@ -236,7 +235,7 @@ def _json_config_source(env_var: str, file_env_var: str, default_path: Path) -> 
     """Name the source the matching config reader will try first."""
     configured_path = os.environ.get(file_env_var, "").strip()
     path = Path(configured_path).expanduser() if configured_path else default_path
-    if path.is_file():
+    if configured_path or path.is_file():
         return f"file {path}"
     if os.environ.get(env_var, "").strip():
         return env_var

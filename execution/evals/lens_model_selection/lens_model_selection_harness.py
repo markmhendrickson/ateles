@@ -87,6 +87,13 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
     active_runner = runner
     lens = scenario.get("lens", "pm")
     agent = runner.lens_by_name(lens).agent
+    entrypoint = scenario.get("entrypoint", "lens_cli")
+    action_class = scenario.get("action_class", "lens_review:arch")
+    review_agent = (
+        runner.lens_by_name(action_class.removeprefix("lens_review:")).agent
+        if entrypoint in {"dispatch_cli", "dispatch", "run_skill", "run_once"}
+        else agent
+    )
     verdict = (
         f"<!-- review:arch commit={HEAD} -->\n"
         "**🤖 Waxwing — Ateles swarm, architecture reviewer**\n"
@@ -123,6 +130,13 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
            "definition_fingerprints": [],
            "policy_reads": [],
            "worktree_preparations": [], "sandbox_builds": []}
+    (tmp_path / "action-policy.json").write_text(
+        json.dumps({"lens_review:pm": "mid", "lens_review:arch": "top"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "vendor-binding.json").write_text(
+        json.dumps(BINDING), encoding="utf-8",
+    )
     stdout, stderr = io.StringIO(), io.StringIO()
 
     with pytest.MonkeyPatch.context() as mp:
@@ -145,6 +159,7 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         # Isolated fixture configuration; never consult operator capacity/files.
         for key, value in {
             "PAVO_NEOTOMA_TOKEN": "eval-only-pavo-neotoma-token",
+            "WAXWING_NEOTOMA_TOKEN": "eval-only-waxwing-neotoma-token",
             "NEOTOMA_BASE_URL": "https://eval.invalid",
             "CODEX_HOME": str(codex_login),
             "APIS_HARNESS_PROVIDERS": "codex,cursor",
@@ -188,10 +203,10 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         mp.setattr(skill_runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
         mp.setattr(active_runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
         def definition(self):
-            assert self.agent_name == agent
+            assert self.agent_name == review_agent
             obs["definition_loads"].append(self.agent_name)
             agent_def = agent_loader.AgentDefinition(
-                entity_id=f"ent_eval_{agent}", name=agent, status="active",
+                entity_id=f"ent_eval_{review_agent}", name=review_agent, status="active",
                 prompt_markdown="Synthetic canonical review role.", tool_allowlist=["Read"],
                 raw={"snapshot": {"revision": "eval-1"}},
             )
@@ -272,7 +287,7 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
                     model = scenario.get("model")
                     action_class = scenario.get("action_class", "lens_review:arch")
                     if entry == "dispatch_cli":
-                        direct_args = ["--role", "pavo", "--task", task,
+                        direct_args = ["--role", review_agent, "--task", task,
                                        "--provider", provider, "--cwd", str(tmp_path),
                                        "--action-class", action_class, "--task-entity-id", "ent_eval_task", "--json"]
                         if "model" in scenario:
@@ -304,10 +319,10 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
                                       command_wrapper=ready.command_wrapper,
                                       codex_outer_sandboxed=provider == "codex")
                         if entry == "dispatch":
-                            call = active_runner.dispatch_role.dispatch("pavo", task, **kwargs)
+                            call = active_runner.dispatch_role.dispatch(review_agent, task, **kwargs)
                         elif entry in {"run_skill", "run_once"}:
                             fn = skill_runner.run_skill if entry == "run_skill" else skill_runner._run_skill_once
-                            call = fn("pavo", task, role="pavo", **kwargs)
+                            call = fn(review_agent, task, role=review_agent, **kwargs)
                         else:
                             raise AssertionError(f"unknown eval entrypoint: {entry}")
                         result = asyncio.run(call)

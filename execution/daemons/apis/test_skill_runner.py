@@ -49,6 +49,16 @@ def _claude_only_test_router(monkeypatch, tmp_path):
     monkeypatch.setenv(
         "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing-headroom.json")
     )
+    monkeypatch.delenv("APIS_ACTION_POLICY_FILE", raising=False)
+    monkeypatch.delenv("APIS_VENDOR_BINDING_FILE", raising=False)
+    monkeypatch.setattr(
+        skill_runner.model_tiering, "_DEFAULT_ACTION_POLICY_PATH",
+        tmp_path / "missing-action-policy.json",
+    )
+    monkeypatch.setattr(
+        skill_runner.model_tiering, "_DEFAULT_VENDOR_BINDING_PATH",
+        tmp_path / "missing-vendor-binding.json",
+    )
     monkeypatch.delenv("APIS_ALLOW_METERED_HARNESS", raising=False)
     harness_router.reset_state()
     yield

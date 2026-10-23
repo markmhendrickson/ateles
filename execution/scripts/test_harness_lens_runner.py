@@ -4277,6 +4277,37 @@ def test_run_one_rejects_a_foreign_lens_class_before_worktree_or_child(
     assert effects == {"worktree": 0, "child": 0}
 
 
+def test_run_one_rejects_explicit_foreign_agent_before_preparation(
+    monkeypatch, tmp_path, target, brief_file
+):
+    target = hlr.LensTarget(
+        repo=target.repo, pr=target.pr, head=target.head,
+        lens="pm", agent="falco",
+    )
+    effects = {"worktree": 0, "child": 0}
+
+    def create(self, *, head):
+        effects["worktree"] += 1
+        raise AssertionError("foreign agent reached worktree setup")
+
+    async def dispatch(*args, **kwargs):
+        effects["child"] += 1
+        raise AssertionError("foreign agent reached child dispatch")
+
+    monkeypatch.setattr(hlr.Worktree, "create", create)
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", dispatch)
+    report = asyncio.run(hlr.run_one(
+        target, provider="codex", post=False, dry_run=False,
+        repo_worktree_name="ateles", scratch_root=tmp_path,
+        brief_path=brief_file, timeout=None,
+    ))
+
+    assert not report["ok"]
+    assert report["no_model_call_made"] is True
+    assert "canonical action class" in report["reason"]
+    assert effects == {"worktree": 0, "child": 0}
+
+
 def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
     monkeypatch, tmp_path, brief_file
 ):

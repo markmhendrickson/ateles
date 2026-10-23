@@ -277,11 +277,12 @@ def test_cli_escalation_flags_reach_run_skill_and_raise_the_tier(
     monkeypatch.setattr(dispatch_role, "_preflight", lambda *a, **k: None)
 
     def tier(klass, *flags):
-        dispatch_role.main(["--role", "r", "--task", "review", "--action-class", klass, *flags])
+        role = "waxwing" if klass == "lens_review:arch" else "pavo"
+        dispatch_role.main(["--role", role, "--task", "review", "--action-class", klass, *flags])
         return model_tiering.resolve_tier(klass, signals=seen[-1]["escalation_signals"])
 
     pm = "lens_review:pm"
-    dispatch_role.main(["--role", "r", "--task", "t", "--action-class", pm])
+    dispatch_role.main(["--role", "pavo", "--task", "t", "--action-class", pm])
     assert seen[-1]["escalation_signals"] is None
     assert tier(pm).tier == "mid"
     # Ruling `small_rereview_rounds_run_mid`: a small pm re-review stays mid,
@@ -421,6 +422,259 @@ def test_cli_qa_admission_pins_the_vendor_bound_model_on_the_real_child_argv(
     assert rc == 0
     cmd = captured_codex_dispatches[0]["cmd"]
     assert cmd[cmd.index("--model") + 1] == "terra-review"
+
+
+def test_cli_rejects_foreign_review_role_before_child(
+    captured_codex_dispatches, monkeypatch
+) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:qa": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex": {"mid": "terra-review"}}')
+
+    result = asyncio.run(dispatch_role.dispatch(
+        "pavo", "review", provider="codex", action_class="lens_review:qa",
+    ))
+
+    assert not result.ok
+    assert "canonical action class" in result.error
+    assert captured_codex_dispatches == []
+
+
+@pytest.mark.parametrize(
+    ("role", "action_class"),
+    [("falco", "lens_review:pm"), ("pavo", "lens_review:unknown")],
+)
+def test_direct_review_rejects_unbound_identity_before_child(
+    captured_codex_dispatches, monkeypatch, role, action_class
+) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:pm": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex": {"mid": "terra-review"}}')
+
+    result = asyncio.run(skill_runner.run_skill(
+        "pavo", "review", role=role, provider="codex",
+        action_class=action_class,
+    ))
+
+    assert not result.ok
+    assert "canonical" in result.error
+    assert captured_codex_dispatches == []
+
+
+@pytest.mark.parametrize(
+    ("agent", "lens", "tier"),
+    [
+        ("pavo", "pm", "mid"), ("waxwing", "arch", "top"),
+        ("accipiter", "ux", "mid"), ("phoenicurus", "qa", "mid"),
+        ("falco", "security", "top"), ("cicada", "eng", "mid"),
+        ("buteo", "legal", "mid"), ("corvus", "content", "mid"),
+    ],
+)
+def test_direct_review_call_binds_canonical_agent_to_real_child_model(
+    captured_codex_dispatches, fake_repo, monkeypatch, agent, lens, tier
+) -> None:
+    skill = fake_repo / ".claude" / "skills" / agent / "SKILL.md"
+    skill.parent.mkdir(exist_ok=True)
+    skill.write_text("# synthetic review role\n", encoding="utf-8")
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_ACTION_POLICY", json.dumps({f"lens_review:{lens}": tier}))
+    monkeypatch.setenv(
+        "APIS_VENDOR_BINDING",
+        '{"codex": {"mid": "terra-review", "top": "sol-review"}}',
+    )
+
+    result = asyncio.run(skill_runner.run_skill(
+        agent, "review", action_class=f"lens_review:{lens}",
+    ))
+
+    assert result.ok, result.error
+    assert len(captured_codex_dispatches) == 1
+    cmd = captured_codex_dispatches[0]["cmd"]
+    assert cmd[cmd.index("--model") + 1] == (
+        "sol-review" if tier == "top" else "terra-review"
+    )
+
+
+@pytest.mark.parametrize("binding", ["{}", '{"codex": {"mid": "astra-review"}}'])
+def test_direct_review_refuses_unbound_or_reserved_automatic_model_before_child(
+    captured_codex_dispatches, monkeypatch, binding
+) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:pm": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", binding)
+
+    result = asyncio.run(skill_runner.run_skill(
+        "pavo", "review", action_class="lens_review:pm",
+    ))
+
+    assert not result.ok
+    assert captured_codex_dispatches == []
+
+
+@pytest.mark.parametrize(
+    ("source", "contents"),
+    [
+        ("APIS_ACTION_POLICY_FILE", "{"),
+        ("APIS_ACTION_POLICY_FILE", "[]"),
+        ("APIS_ACTION_POLICY_FILE", "{}"),
+        ("APIS_ACTION_POLICY_FILE", '{"lens_review:pm": "unrecognized"}'),
+        ("APIS_VENDOR_BINDING_FILE", "{"),
+        ("APIS_VENDOR_BINDING_FILE", "[]"),
+        ("APIS_VENDOR_BINDING_FILE", "{}"),
+        ("APIS_VENDOR_BINDING_FILE", '{"codex": {"mid": ""}}'),
+    ],
+)
+def test_declared_bad_model_policy_cannot_fall_through_to_valid_env(
+    captured_codex_dispatches, monkeypatch, tmp_path, source, contents
+) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:pm": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex": {"mid": "terra-review"}}')
+    declared = tmp_path / "declared.json"
+    declared.write_text(contents, encoding="utf-8")
+    monkeypatch.setenv(source, str(declared))
+
+    result = asyncio.run(skill_runner.run_skill(
+        "pavo", "review", provider="codex", action_class="lens_review:pm",
+    ))
+
+    assert not result.ok
+    assert "policy" in result.error or "binding" in result.error
+    assert captured_codex_dispatches == []
+
+
+@pytest.mark.parametrize("source", ["APIS_ACTION_POLICY_FILE", "APIS_VENDOR_BINDING_FILE"])
+def test_missing_declared_model_policy_cannot_use_environment_fallback(
+    captured_codex_dispatches, monkeypatch, tmp_path, source
+) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:pm": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex": {"mid": "terra-review"}}')
+    monkeypatch.setenv(source, str(tmp_path / "declared-but-missing.json"))
+
+    result = asyncio.run(skill_runner.run_skill(
+        "pavo", "review", provider="codex", action_class="lens_review:pm",
+    ))
+
+    assert not result.ok
+    assert "unavailable" in result.error
+    assert captured_codex_dispatches == []
+
+
+def test_changed_vendor_binding_invalidates_a_supplied_review_admission(
+    captured_codex_dispatches, monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"lens_review:pm": "mid"}', encoding="utf-8")
+    binding = tmp_path / "binding.json"
+    binding.write_text('{"codex": {"mid": "terra-original"}}', encoding="utf-8")
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(policy))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(binding))
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:pm"
+    )
+    assert admission.admitted
+    binding.write_text('{"codex": {"mid": "terra-changed"}}', encoding="utf-8")
+
+    result = asyncio.run(skill_runner.run_skill(
+        "pavo", "review", provider="codex", action_class="lens_review:pm",
+        provider_admission=admission,
+    ))
+
+    assert not result.ok
+    assert result.error == "stale review admission"
+    assert captured_codex_dispatches == []
+
+
+@pytest.mark.parametrize("source", ["APIS_ACTION_POLICY_FILE", "APIS_VENDOR_BINDING_FILE"])
+def test_unreadable_declared_model_policy_refuses_before_child(
+    captured_codex_dispatches, monkeypatch, tmp_path, source
+) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:pm": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex": {"mid": "terra-review"}}')
+    declared = tmp_path / "declared-policy.json"
+    declared.write_text(
+        '{"lens_review:pm": "mid"}' if source == "APIS_ACTION_POLICY_FILE"
+        else '{"codex": {"mid": "terra-review"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(source, str(declared))
+    original_read = Path.read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == declared:
+            raise PermissionError("synthetic refusal")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    result = asyncio.run(skill_runner.run_skill(
+        "pavo", "review", provider="codex", action_class="lens_review:pm",
+    ))
+
+    assert not result.ok
+    assert "unreadable" in result.error
+    assert captured_codex_dispatches == []
+
+
+@pytest.mark.parametrize("change_binding", [False, True])
+def test_direct_review_failover_rechecks_each_candidate_before_native_child(
+    captured_codex_dispatches, monkeypatch, tmp_path, change_binding
+) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"cursor": 1.0, "codex": 1.0}')
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"lens_review:pm": "mid"}', encoding="utf-8")
+    binding = tmp_path / "binding.json"
+    binding.write_text(
+        '{"cursor": {"mid": "cursor-review"}, '
+        '"codex": {"mid": "terra-review"}}', encoding="utf-8",
+    )
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(policy))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(binding))
+    monkeypatch.setattr(
+        skill_runner, "_provider_binaries",
+        lambda: {"claude": None, "cursor": "/bin/cursor-agent", "codex": "/bin/codex"},
+    )
+    real_once = skill_runner._run_skill_once
+
+    async def first_candidate_fails(*args, **kwargs):
+        if kwargs["provider"] == "cursor":
+            if change_binding:
+                binding.write_text(
+                    '{"cursor": {"mid": "cursor-review"}, '
+                    '"codex": {"mid": "changed-review"}}', encoding="utf-8",
+                )
+            return SkillResult(
+                "pavo", False, None, "", "usage limit reached",
+                error="cursor launch failed: capacity", provider="cursor",
+            )
+        return await real_once(*args, **kwargs)
+
+    monkeypatch.setattr(skill_runner, "_run_skill_once", first_candidate_fails)
+    result = asyncio.run(skill_runner.run_skill(
+        "pavo", "review", action_class="lens_review:pm",
+    ))
+
+    assert result.attempted_providers == ("cursor", "codex")
+    if change_binding:
+        assert not result.ok
+        assert captured_codex_dispatches == []
+    else:
+        assert result.ok, result.error
+        assert len(captured_codex_dispatches) == 1
+        cmd = captured_codex_dispatches[0]["cmd"]
+        assert cmd[cmd.index("--model") + 1] == "terra-review"
 
 
 def test_unpinned_lens_admits_only_bound_candidates_at_the_child_boundary(

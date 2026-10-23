@@ -4516,6 +4516,10 @@ async def run_skill(
     exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    if provider_admissions is not None and (
+        provider is not None or provider_admission is not None
+    ):
+        return SkillResult(skill, False, None, "", "", error="invalid unpinned lens admissions")
     if action_class and action_class.startswith(model_tiering.LENS_REVIEW_PREFIX):
         identity_error = model_tiering.review_identity_error(skill, action_class)
         if role not in (None, skill):
@@ -4544,7 +4548,9 @@ async def run_skill(
                 return SkillResult(skill, False, None, "", "", error="stale review admission")
         if provider_admissions is not None:
             for candidate, admitted in provider_admissions.items():
-                expected = current[candidate]
+                expected = current.get(candidate)
+                if expected is None:
+                    return SkillResult(skill, False, None, "", "", error="stale review admissions")
                 if admitted != (
                     replace(expected, resolved_model=model, explicit_model_override=True)
                     if admitted.explicit_model_override and model else expected
@@ -4658,6 +4664,21 @@ async def run_skill(
         )
         if provider_admissions is not None and selected_admission is None:
             return SkillResult(skill, False, None, "", "", error="unadmitted lens provider", provider=selected)
+        if action_class and action_class.startswith(model_tiering.LENS_REVIEW_PREFIX):
+            admitted = selected_admission or provider_admission
+            if admitted is None or admitted.requested_provider != selected:
+                return SkillResult(skill, False, None, "", "", error="unadmitted review provider", provider=selected)
+            fresh = resolve_provider_admission(
+                selected, action_class=action_class,
+                signals=escalation_signals, required_policy=True,
+            )
+            expected = (
+                replace(fresh, resolved_model=admitted.resolved_model,
+                        explicit_model_override=True)
+                if admitted.explicit_model_override and fresh.admitted else fresh
+            )
+            if admitted != expected or not fresh.admitted:
+                return SkillResult(skill, False, None, "", "", error="stale review admission", provider=selected)
         selected_tier = precomputed_tier
         if selected_admission is not None:
             selected_tier = (
