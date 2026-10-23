@@ -21,7 +21,7 @@ from pathlib import Path
 FOUNDATION_DIR = Path("docs/foundation")
 
 INTAKE_SECTION_SHA256 = (
-    "d8d8e27147fbef3d4ddaef9451bd96e0c43dc512680b9ccd3f2eb31f342f67d9"
+    "c97d72261321231c1bda9163898fc38052e6cbbf1a2be48f5d4dcea81874dc4e"
 )
 BATCH_FORMATION_SECTION_SHA256 = (
     "3c9318488e76d1245b2867e0d868dcff6b558b03c81fa425b1147b71bb8d1b38"
@@ -143,13 +143,15 @@ AGGREGATE_PARENT_MODEL_CLAUSE = (
     "batch carries tasks that are executed, which an aggregate parent never is."
 )
 AGGREGATE_PARENT_MODEL_PARAGRAPH = (
-    "Children `PART_OF` an aggregate parent (at most one parent). Parent completion "
-    "is derived from children's terminal states. Children go through workflows "
-    "independently. "
+    "Children `PART_OF` an aggregate parent (at most one parent). Children go "
+    "through workflows independently. "
     + AGGREGATE_PARENT_MODEL_CLAUSE
     + " This is the deliberate exception to the workflow-entry creation rule; "
     "every child and every other workflow-entering peer task still opens its intake "
-    "batch atomically at creation."
+    "batch atomically at creation. Parent completion is derived: every child is "
+    "terminal and landed, and where the parent is under a planning record its "
+    "effect evidence satisfies the applicable `completion_criteria[]`. A terminal "
+    "child count alone cannot close its parent."
 )
 AGGREGATE_PARENT_ASCENT_PARAGRAPH = (
     "**A task's one `PART_OF` edge targets its parent task or a planning record, and "
@@ -162,9 +164,11 @@ AGGREGATE_PARENT_ASCENT_PARAGRAPH = (
     "`planning_model.md#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration`). "
     "A task with no planning record above it is unplanned, a derived read and never a "
     "status, and it is admitted through intake like any task. Completion at every "
-    "level above the task is the parent's rule applied again: derived from the "
-    "descendants' terminal states, never stored "
-    "(`planning_model.md#downward-state-is-derived-upward-content-is-authored-as-entities`)."
+    "level above the task is the parent's rule applied again: derived from "
+    "descendant terminal-and-landed state plus the planning record's criterion "
+    "evidence, never stored "
+    "(`planning_model.md#downward-state-is-derived-upward-content-is-authored-as-entities`, "
+    "`planning_model.md#commissioning-a-planning-record-drives-one-dependency-ready-frontier`)."
 )
 AGGREGATE_PARENT_MODEL_SECTION = (
     AGGREGATE_PARENT_MODEL_PARAGRAPH + "\n\n" + AGGREGATE_PARENT_ASCENT_PARAGRAPH
@@ -414,6 +418,13 @@ def _is_ordered_subsequence(needle: str, haystack: str) -> bool:
 
 
 def _heading_is_ambiguous(candidate: str, protected: str) -> bool:
+    # This separate, ruled section on created workflows contains the letters of
+    # "intake" only across unrelated words. Keep the conservative alias guard
+    # for every other title, including decorated or interleaved intake aliases.
+    if protected == "intake" and candidate == (
+        "A workflow is created for the task no declaration fits, and improved by every task it carries"
+    ):
+        return False
     protected_projection = _heading_projection(protected)
     return _is_ordered_subsequence(
         protected_projection, _heading_projection(candidate)

@@ -25,6 +25,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -81,8 +82,13 @@ def _stderr_tail(proc: subprocess.Popen) -> str:
 
 
 def _start_server() -> subprocess.Popen:
-    env = {**os.environ, "NEOTOMA_BEARER_TOKEN": ""}
-    return subprocess.Popen(
+    denial_store = tempfile.TemporaryDirectory(prefix="ateles-mcp-denials-")
+    env = {
+        **os.environ,
+        "NEOTOMA_BEARER_TOKEN": "",
+        "APIS_CHECKPOINT_DENIAL_DIR": denial_store.name,
+    }
+    proc = subprocess.Popen(
         [sys.executable, str(SERVER)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -91,6 +97,17 @@ def _start_server() -> subprocess.Popen:
         text=True,
         bufsize=1,
     )
+    proc._checkpoint_denial_store = denial_store
+    return proc
+
+
+def _stop_server(proc: subprocess.Popen) -> None:
+    proc.kill()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    proc._checkpoint_denial_store.cleanup()
 
 
 def test_initialize_and_tools_list():
@@ -130,15 +147,12 @@ def test_initialize_and_tools_list():
             "get_swarm_roster", "route_task", "list_checkpoints", "resolve_checkpoint",
             # Read-only swarm observability (see server.py).
             "get_gate_status", "list_pipeline_queue", "get_dispatch_health",
+            "get_task_timeline", "watch_swarm",
         }, names
         route_task = next(t for t in tools if t["name"] == "route_task")
         assert route_task["inputSchema"]["required"] == ["task_description"]
     finally:
-        proc.kill()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
+        _stop_server(proc)
 
 
 def test_tool_call_degrades_gracefully_without_token():
@@ -176,11 +190,7 @@ def test_tool_call_degrades_gracefully_without_token():
         payload = json.loads(content)
         assert "error" in payload, f"expected graceful error, got {payload}"
     finally:
-        proc.kill()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
+        _stop_server(proc)
 
 
 def _run_all() -> int:

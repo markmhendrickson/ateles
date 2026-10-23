@@ -53,6 +53,32 @@ def enc_file(name: str) -> Path:
     return SECRETS_DIR / f"{name}.sops.enc"
 
 
+# Agent signing keys (AAuth JWKs and legacy PEM-in-JSON files). The plaintext
+# files under keys/ are gitignored; their age-encrypted copies under
+# keys/encrypted/ are committed. See secrets_keys.py.
+KEYS_DIR = Path(
+    os.environ.get("ATELES_PRIVATE_KEYS_DIR", str(SECRETS_BASE / "keys"))
+).expanduser()
+ENC_KEYS_DIR = KEYS_DIR / "encrypted"
+ENC_KEY_SUFFIX = ".sops.json"
+
+
+def enc_key_file(plain: Path) -> Path:
+    """Path to the encrypted copy of a key file: keys/encrypted/<stem>.sops.json.
+
+    ``apus.jwk.json`` -> ``encrypted/apus.jwk.sops.json``; the ``.json`` suffix
+    is replaced, so the name still says which plaintext file it restores.
+    """
+    return ENC_KEYS_DIR / (plain.name[: -len(".json")] + ENC_KEY_SUFFIX)
+
+
+def plain_key_file(enc: Path) -> Path:
+    """Inverse of :func:`enc_key_file`."""
+    if not enc.name.endswith(ENC_KEY_SUFFIX):
+        raise ValueError(f"not an encrypted key file name: {enc.name}")
+    return KEYS_DIR / (enc.name[: -len(ENC_KEY_SUFFIX)] + ".json")
+
+
 # ---------------------------------------------------------------------------
 # Manifest
 # ---------------------------------------------------------------------------
@@ -199,3 +225,57 @@ def sops_decrypt_dotenv(src: Path) -> dict[str, str]:
     if result.returncode != 0:
         raise RuntimeError(f"sops decrypt failed for {src.name}: {result.stderr.strip()}")
     return parse_dotenv(result.stdout)
+
+
+def sops_encrypt_file_binary(src: Path, dest: Path) -> None:
+    """Encrypt ``src`` byte-for-byte to ``dest`` (sops binary mode, JSON envelope).
+
+    Binary mode keeps the whole file as one encrypted value, so decrypting
+    restores the exact original bytes (a JSON-mode round trip can reformat,
+    which would make a hash check meaningless). The rule is matched against
+    the DEST name via --filename-override, pinned to ateles-private's
+    .sops.yaml. The ciphertext is written by this process; the plaintext is
+    never passed through stdout.
+    """
+    cmd = [sops_path(), "--encrypt", "--input-type", "binary",
+           "--output-type", "json", "--filename-override", str(dest)]
+    config = SECRETS_BASE / ".sops.yaml"
+    if config.exists():
+        cmd += ["--config", str(config)]
+    cmd.append(str(src))
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=30, env=_sops_env(),
+    )
+    if result.returncode != 0:
+        # sops stderr names files and rules, never plaintext
+        raise RuntimeError(f"sops encrypt failed for {src.name}: {result.stderr.strip()}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(result.stdout)
+
+
+def sops_decrypt_file_binary(src: Path) -> bytes:
+    """Decrypt a binary-mode sops file and return the original bytes. Offline."""
+    result = subprocess.run(
+        [sops_path(), "--decrypt", "--input-type", "json",
+         "--output-type", "binary", str(src)],
+        capture_output=True, timeout=30, env=_sops_env(),
+    )
+    if result.returncode != 0:
+        err = result.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(f"sops decrypt failed for {src.name}: {err}")
+    return result.stdout
+
+
+def write_private_file(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` with mode 0600 from the moment it exists."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()

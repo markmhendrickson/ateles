@@ -245,11 +245,16 @@ with no verdict written.
 2. **#561, open.** Delegation does not attenuate: the delegate runs on its own full standing grant;
    `agent_grant` has no `scope`, `expiry`, or `delegated_by`; the chain is prose,
    `a2a_executor.py:190` appending `— delegated via A2A by: <caller>` to the task description.
-3. **#669, open; fixed at the loader, not at the caller.** `agent_loader.py` marks a failed load
-   `is_stub=True` and still returns `tool_allowlist="*"`, its docstring saying callers must check. No
-   dispatch caller does: `git grep '\.is_stub'` under `execution/daemons/apis` and `lib/daemon_runtime`
-   finds only `signer.is_stub` (2026-09-03). A timed-out load still dispatches an agent with no
-   instructions and wildcard tools, cached for the process lifetime.
+3. **#669, fixed at the loader.** A definition that cannot be loaded now fails closed:
+   `AgentLoader.load()` retries a transient failure briefly and then raises `AgentDefinitionUnavailable`
+   (a fixed reason code, no response text) instead of returning a stand-in with an empty prompt and
+   `tool_allowlist="*"`. The dispatcher refuses the dispatch (`SkillResult.definition_unavailable`, no
+   spawn, no provider cooldown, nothing cached); daemons exit at startup. Unregistered roles also
+   refuse. A found record must declare a nonempty prompt, status and tool set; missing or malformed
+   authority does not become a wildcard. The library's explicit `allow_undefined=True` returns only
+   an inert absence marker with no tools, never dispatch authority. A signed HTTP response remains
+   final even when its body cannot be parsed; only pre-response helper failures retain bearer
+   fallback. Known legacy planned/proposed/draft status warnings remain (2026-10-16).
 4. **`a2a_gateway.authorize_caller()`, no issue.** Returns `(True, "grant_check_unavailable_advisory")`
    when the checker raises (`a2a_gateway.py:280`).
 5. **`mcp_tool_grant_proxy/proxy.py`, no issue.** `enforce()` returns `(True, "")` when `agent_sub` is
@@ -1612,7 +1617,7 @@ is.
 
 **Scenario (j).** "a batch record opens for it, and the product its step owner claims each step in turn"
 was the residue of two renames over "the product lens claims each step in turn" (revision 19 retired
-`lens`; the intake steps are the `pm` step owner's, `workflows.md#roles-named-in-this-document`). It now
+`lens`; the intake steps are the `pm` step owner's, `workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`). It now
 reads "the `pm` step owner claims each step in turn — a lease on the step, and a sign-off to close it".
 
 **A named agent in generic definitions.** `vocabulary.md#operator-facing-agent` and
@@ -4330,3 +4335,81 @@ condition). `status.md` grows by this entry alone. **Decision 73 stays open** an
 **Checks on this revision:** the vocabulary check reports 0 Never hits (106 Never items, 81 Not-for), the
 anchor check 0 broken links, `link_vocabulary_terms.py --check` every linkable first mention linked,
 `render_reading_projection.py --check` 20 files matching the matrix, and `test_foundation.py` 112 passed.
+
+## Revision 124 (2026-09-25): harness carriers — where the checkout stands against `harness_carriers.md`
+
+Read on 2026-09-25 against `origin/main` at `18d15c6e`, from GitHub (`gh`), and from the record for the two
+task entities named. Each line says what was read; an open issue is not evidence a defect is live. This is
+the design-versus-checkout accounting `harness_carriers.md` defers here.
+
+- **MCP server instructions: within the design.** The server's `instructions` carry a static block plus a
+  pointer under a 1,200-character budget with a refuse-rather-than-truncate guard (`INSTRUCTIONS_BUDGET_CHARS`
+  in `execution/mcp/ateles/server.py`, PR #1255, merged 2026-09-25). A stdio probe of the deployment
+  checkout's launcher measured 1,106 characters the same day (#1253 closing comment).
+- **Where the server runs from: fixed on the host, not in the repository.** #1253 was closed by repointing
+  the host's harness configuration at the deployment checkout. Its second proposed fix — extending the
+  startup freshness check to the MCP server — is not in the checkout: neither `server.py` nor
+  `run_ateles_mcp.sh` references `checkout_drift` or `checkout_identity`. A second host, or a reinstall,
+  reintroduces the defect unless the install path sets the launcher.
+- **Rule index by session-start hook: in review, and re-measured since its first commit.** PR #1268 (open,
+  review required) adds the live renderer and the hook, wired at repository level only; user-level wiring is
+  a manual step its body describes. Its first commit's live measurement against real Neotoma prod rendered
+  12,633 characters against its own 8,000-character budget, over budget, which at that point meant the hook
+  would print the one-line could-not-load notice on merge. A same-PR follow-up then added tiered rendering
+  (tiers A, B, C), and a re-render of the same live corpus against the tiered renderer measured **tier B,
+  about 5,093 characters** — the full 50-rule index reaching sessions, not the fail-open notice. A later
+  follow-up in the same PR narrowed session scoping to the single session principal rather than the union of
+  every named agent, which may lower the rendered row count further, but **no fresh live measurement exists
+  at that head (34016a7)** — #1268's own PR body says so plainly rather than inventing a number. Treat the
+  12,633-char figure as the pre-tiering measurement, not the current behavior; see #1268's PR body for the
+  current figures (#1261, #1254). The operator-approved-only trust gate the design requires is ruled on the
+  plan (#1270, `rule_trust_operator_approved_only`) and follows #1268; #1270 is open.
+- **Session-start context by hook: truncated.** The role-definition hook's output (about 16.3 KB) exceeds
+  the harness cap and reaches the session as a 2 KB preview (#1254, open). The hook reads a static file from
+  the checkout rather than rendering from the record (plan decision
+  `rule_delivery_is_a_resolution_problem_not_a_payload_problem`).
+- **Bundle rung: absent.** The repository ships no bundle manifest of any format; the first rung
+  `harness_carriers.md#targeting` assigns Claude Code is assembled by hand today (server registration,
+  opening sessions in a checkout for its repository-level hooks and skills).
+- **Integration rung: absent.** The Ateles MCP server speaks stdio only, so no consumer application's
+  integration directory can reach it; Claude chat and ChatGPT have no Ateles path.
+- **Local-file rung: absent.** No generated `AGENTS.md` or Cursor rules file exists for the harnesses that
+  get one; `CLAUDE.md` is hand-authored and is not a rendering of the record.
+- **Installer: absent.** The `ateles` command has `init`, `doctor`, and `provision` (the last a dry-run
+  planner) and no verb that detects a harness and installs its rung; the matrix is prose, not data an
+  installer reads (operator scope addition on #1262). `docs/install.md` records the manual path per harness.
+- **Launch path, per-tool deny.** Of the three command-line adapters the swarm starts, only the Claude Code
+  adapter can deny one MCP tool; a run owning a pending review step is refused on the other two
+  (`execution/daemons/apis/skill_runner.py`).
+- **Protocol era.** The server speaks the legacy era. The dual-era upgrade is task
+  `ent_2ef66f349c8c1c670ead1582` (pending, high), queued behind Neotoma's task
+  `ent_0b2da0b1a2d228ce3d981525` (neotoma#2070).
+- **Keying.** `harness_carriers.md` is not keyed: it owns no conformance-suite row, so the reading
+  projection would carry nothing for it. Key it when a suite row cites one of its anchors.
+
+## Revision 128 (2026-09-26): Codex reaches the hook rung through a measured user-scope install
+
+Read on 2026-09-26 against `origin/main` at `bb38fb9b`, Codex CLI 0.153.4, Ateles #981, merged PRs #1290,
+#1295, and #1301, and the live foundation tasks `ent_e8ead74a5d4ae9ef81791ecd` and
+`ent_8ef6743f00b589400259f6b5`.
+
+- **User-scope rule delivery binds.** A controlled run installed the repository definition into an isolated
+  Codex home, served one synthetic `agent_policy` row from a loopback endpoint, and omitted its opaque
+  identifier from the user prompt. Codex reported `SessionStart` and `UserPromptSubmit` completed, and the
+  model returned the identifier delivered only through session-start stdout. No live user configuration or
+  production rule row was changed by the measurement.
+- **The repository artifact reuses the existing source and mechanism.** `.codex/hooks.json` wires Codex to
+  the same live rule-index and delta renderers and the same pre-action guard scripts used by Claude Code;
+  `execution/scripts/install_codex_hooks.py` resolves those commands to one checkout and merges only the
+  Ateles handlers into a user hook file. It neither copies rule text nor manufactures Codex's trust
+  decision.
+- **The proof is effect-based.** `execution/scripts/test_codex_rule_hooks.py` was first observed failing
+  with no hook definition, no `apply_patch` guard route, and no installer. It now executes the configured
+  commands against a synthetic local corpus: session start, prompt delta, subagent start, installed hooks
+  from outside a repository, a denied stash, and a denied patch into a sibling shared clone. The existing
+  hook regression slice remains green (129 tests).
+- **The remaining boundary is explicit.** Repository-local hook discovery produced no hook events in the
+  controlled client invocation; the proven installer therefore targets user scope, and an operator must
+  still review and trust the definition in Codex before it affects ordinary sessions. The larger compaction,
+  scenario, daemon, Cursor, and cross-harness evaluation remains task `ent_8ef6743f00b589400259f6b5`; this
+  pass does not duplicate it.

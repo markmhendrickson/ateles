@@ -42,7 +42,7 @@ Expected agent involvement (12):
 | 6 | social_draft | Corvus | `[corvus] social_post_draft:` |
 | 6 | devrel_docs | Regulus | `[regulus] docs_diff_or_no_change_note:` |
 
-The artifact-header convention (`[<agent>] <artifact_type>:`) is how Anthus recognizes a gate as satisfied. Each agent's SKILL.md should produce a comment with this header.
+The artifact-header convention (`[<agent>] <artifact_type>:`) is how Anthus recognizes a gate as satisfied. Each agent's SKILL.md should produce a comment with this header. **Apis direct-task completion** and **Anthus gate satisfaction** parse the same header grammar — see `docs/agent_execution_runbook.md#direct-task-artifact-completion`.
 
 ## Operator-driven procedure
 

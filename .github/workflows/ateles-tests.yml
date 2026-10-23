@@ -13,12 +13,25 @@ on:
       - "ateles/**"
       - ".claude/hooks/**"
       - "execution/daemons/apis/**"
+      # The Fly runner's own modules are tested from execution/daemons/apis/,
+      # so a change to them alone must re-run this lane.
+      - "deploy/fly-runner/**"
+      # The runner-image suite also checks the superseded daemon runbook's
+      # provisioning stop (#1008); removing it must trigger the blocking lane.
+      - "deploy/cloud/**"
+      - "execution/local_llm/**"
       - "execution/daemons/test_*.py"
       - "execution/daemons/cotinga/**"
       - "execution/daemons/cyphorhinus/**"
       - "execution/daemons/phoenicurus-release/**"
       - "execution/daemons/monedula/**"
       - "execution/daemons/anthus/**"
+      # Formica and neotoma-agent are gated by ATELES_SWARM_REQUIRE_LABEL; their
+      # tests live in execution/daemons/test_triage_lane_label_gate.py (shared
+      # step below) and the Apis entry-path scan, so edits to either daemon must
+      # trigger this lane.
+      - "execution/daemons/formica/**"
+      - "execution/daemons/neotoma-agent/**"
       - "execution/daemons/piculet/**"
       - "execution/daemons/sylvia/**"
       - "execution/daemons/tyto/**"
@@ -26,9 +39,21 @@ on:
       - "execution/mcp/**"
       - "lib/daemon_runtime/**"
       - "lib/approval/**"
+      - "lib/capabilities/**"
       - "lib/transcript_clarity.py"
       - "lib/test_transcript_clarity.py"
+      - "lib/github_app_token.py"
+      - "lib/test_github_app_token.py"
       - "execution/scripts/**"
+      # The scripts fixture imports the complete-profile preparation core.
+      - "execution/lib/instance_profile_guard.py"
+      - "execution/lib/instance_auth_profile_guard.py"
+      - "execution/lib/instance_auth_profile_adapter.py"
+      - "execution/lib/instance_auth_profile_preflight.py"
+      # Rule-delivery evals: the offline harness tests import the real
+      # policy_skill_renderer (already covered by lib/daemon_runtime/**), so a
+      # renderer change that alters what a channel delivers re-runs them.
+      - "execution/evals/**"
       - "pyproject.toml"
       - "uv.lock"
       - "scripts/linters/check_agent_roster.py"
@@ -42,7 +67,10 @@ on:
       - "scripts/linters/test_claude_verification_discipline.py"
       - "scripts/linters/test_*.py"
       - "docs/agents/**"
-      - ".github/workflows/ateles-tests.yml"
+      # Any workflow edit: execution/scripts/test_public_rule_sources.py
+      # fails on a PR-triggered job that needs a self-hosted runner (ateles#1333),
+      # so adding such a job must re-run this lane.
+      - ".github/workflows/**"
   workflow_dispatch:
 
 permissions:
@@ -76,6 +104,32 @@ jobs:
       # execution/daemons/apis/** changes.
       - name: Run swarm daemon (apis) tests
         run: uv run --extra dev python -m pytest execution/daemons/apis/ -q
+      # The Fly runner's repository delivery, run for real as root with the
+      # agent as uid 10001, in a container from the runner image's base (the
+      # same Python and git). Skipped in the step above, which is not root.
+      - name: Run Fly runner repository-delivery container test
+        run: |
+          docker run --rm \
+            -v "$PWD/deploy/fly-runner/repo_delivery.py:/r/deploy/fly-runner/repo_delivery.py:ro" \
+            -v "$PWD/execution/daemons/apis/test_fly_repo_delivery_container.py:/r/execution/daemons/apis/test_fly_repo_delivery_container.py:ro" \
+            -v "$PWD/execution/daemons/apis/test_fly_repo_delivery.py:/r/execution/daemons/apis/test_fly_repo_delivery.py:ro" \
+            -v "$PWD/execution/daemons/apis/fly_cleanup_test_support.py:/r/execution/daemons/apis/fly_cleanup_test_support.py:ro" \
+            -v "$PWD/execution/daemons/apis/test_fly_cleanup_assertion_output.py:/r/execution/daemons/apis/test_fly_cleanup_assertion_output.py:ro" \
+            -w /r python:3.12-slim-bookworm sh -c '
+              set -e
+              apt-get update -qq >/dev/null
+              apt-get install -y -qq --no-install-recommends git >/dev/null
+              pip install -q pytest==8.3.3
+              out=$(python -m pytest -p no:cacheprovider -c /dev/null --rootdir /r -q -rs \
+                execution/daemons/apis/test_fly_repo_delivery_container.py \
+                execution/daemons/apis/test_fly_cleanup_assertion_output.py)
+              echo "$out"
+              echo "$out" | grep -q "3 passed"'
+      # The claude-local provider's loopback normalizer (ollama_shim.py). Its
+      # own step so a shim regression is attributable, and added with the suite
+      # so it is not another committed-but-uncollected lane (#584, #524, #727).
+      - name: Run local LLM shim tests
+        run: uv run --extra dev python -m pytest execution/local_llm/ -q
       - name: Run phoenicurus-release daemon tests
         run: uv run --extra dev python -m pytest execution/daemons/phoenicurus-release/ -q
       - name: Run monedula daemon tests
@@ -113,8 +167,15 @@ jobs:
         run: uv run --extra dev python -m pytest execution/daemons/turdus/ -q
       - name: Run shared approval lib tests
         run: uv run --extra dev python -m pytest lib/approval/ -q
+      # ateles#1189: the media-generation capability client (fail-closed spend
+      # cap, credential isolation). Its own step so the effect tests that guard
+      # the billing boundary are attributable and never an uncollected lane.
+      - name: Run capability client lib tests
+        run: uv run --extra dev python -m pytest lib/capabilities/ -q
       - name: Run transcript clarity lib tests
         run: uv run --extra dev python -m pytest lib/test_transcript_clarity.py -q
+      - name: Run GitHub App token helper tests
+        run: uv run --extra dev python -m pytest lib/test_github_app_token.py -q
       # ateles#524 (qa lens, PR #527 round 2): execution/scripts/ has its own
       # test_*.py files (SOPS token fallback, Loxia review, agent-doc render,
       # transcription) but no lane ran them — this closes that gap. Also
@@ -122,6 +183,11 @@ jobs:
       # scripts/lint.sh bare-python regression eval.
       - name: Run execution/scripts tests
         run: uv run --extra dev python -m pytest execution/scripts/ -q
+      # Rule-delivery eval harness, offline half (no model calls): channel
+      # payloads, fixture Neotoma, sandbox guard, and that every outcome check
+      # can go red. The live matrix runs on demand (runner.py), not in CI.
+      - name: Run rule-delivery eval harness tests
+        run: uv run --extra dev python -m pytest execution/evals/ -q
       # ateles#727 / #731 (qa lens): CLAUDE.md Verification discipline effect
       # test was committed but collected by no lane — same defect class as
       # roster-in-lint.sh-only, anthus (#584/#596), execution/scripts (#524/#527).

@@ -251,7 +251,7 @@ scopes of one kind, or one word `scope` overlapping four ways — the exact viol
 to prevent. Where a preference and the invariant pull against each other, the invariant wins.
 
 The ruling renames nothing. `owner`, forbidden standing alone
-(`vocabulary.md#owner-five-meanings-one-word-forbidden-alone`), keeps
+(`vocabulary.md#owner-six-meanings-one-word-forbidden-alone`), keeps
 [step owner](vocabulary.md#step-owner) as the qualified compound that replaced it; the three parenthesized-object
 verb entries — [execute (a task)](vocabulary.md#execute-a-task), the entry for what is done to an action,
 and [amend (a planning record)](vocabulary.md#amend-a-planning-record) — are single-word terms carrying a
@@ -308,9 +308,8 @@ the two should find the design's position named rather than inferred.
 **Where the human sits.** *The Human Inversion* (Part 1) narrows to "humans at the ends, AI in the middle"
 — foundation and review. This design's two ends are not symmetric. The foundation end is the operator's
 alone: "the reservation is per action class, it lives in the policy, and it is the operator's to write"
-(`work_model.md`). The review end is staffed by agents — `pm`, `ux`, `arch`, `pr_review`, `qa`, and `legal`
-are [review steps](vocabulary.md#review-step), and nothing distinguishes one from a working step but what
-its owner does. The human's presence at review is the [checkpoint](vocabulary.md#checkpoint) and the
+(`work_model.md`). The review end is staffed by agents — in the reference workflows (example names), `ux`, `arch`, `pr_review`, `qa`, and `legal`
+are [review steps](vocabulary.md#review-step), each declared `review`. The human's presence at review is the [checkpoint](vocabulary.md#checkpoint) and the
 [finding](vocabulary.md#finding): the operator's input on reviewed work is itself a finding, judged on the
 same severity and standing axes as any other (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`).
 So an agent-staffed review step is not an accident this design tolerates — it is what "humans at the ends"
@@ -357,7 +356,7 @@ quantity of them as good or bad. Each thing that pulls the operator in is judged
 necessity, and the corpus already distinguishes the classes that pass. A return is **necessary** when only a
 principal can supply what the swarm lacks: an action the policy places in the never-set, where `NEVER`
 short-circuits ahead of confidence and ahead of any recurrence graduation
-(`gates_and_workflows.md#confidence-and-three-blast-tiers`); a capability the grant does not name, where
+(`gates_and_workflows.md#confidence-and-three-blast-tiers`), except a `payment` released on its own parameters (decision 144); a capability the grant does not name, where
 denial is `capability_denied` and the checkpoint it raises is a request and never a grant
 (`authority_model.md#grants`); an input the record cannot resolve, of which `undetermined_scope` is the
 design's own stated case — a scope put to the operator rather than guessed

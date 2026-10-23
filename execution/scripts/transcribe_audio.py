@@ -2427,28 +2427,226 @@ _TRANSCRIPTION_REQUIRED_FIELDS = (
 )
 
 
-def _verify_transcription_storage(entity_id, expected, source_id=None):
-    """Verify the stored record and provenance before reporting completion."""
+# The payload itself. A store whose transcript cannot be read back has not
+# landed, so this is verified even if the schema lookup says it is undeclared —
+# an undeclared transcript is a broken schema, not a field to skip.
+_TRANSCRIPTION_ALWAYS_VERIFIED_FIELDS = ("transcription_text",)
+
+# Recorded when the audio is too large for the remote transport and the
+# transcription is stored without it. Read back like any other field it sets.
+_ATTACHMENT_STATUS_FIELDS = ("audio_attachment_status", "audio_attachment_note")
+
+
+def _declared_transcription_fields() -> set[str] | None:
+    """Field names the live ``transcription`` schema declares, or None if unknown.
+
+    Neotoma routes an undeclared field to ``raw_fragments`` and leaves it out of
+    the snapshot, so a read-back that demands it fails on every store even when
+    the store landed (2026-09-25: five provenance fields undeclared on
+    ``transcription`` 1.3.0 made Tyto re-store every voice memo every five
+    minutes). ``None`` means the lookup failed; the caller then verifies every
+    field, which fails closed rather than silently narrowing the check.
+    """
+    data = _neotoma_cli_json(["schemas", "get", "--entity-type", "transcription"])
+    if not isinstance(data, dict):
+        return None
+    schema = data.get("schema", data)
+    if not isinstance(schema, dict):
+        return None
+    fields = schema.get("fields")
+    if not isinstance(fields, dict):
+        fields = (schema.get("schema_definition") or {}).get("fields")
+    if not isinstance(fields, dict) or not fields:
+        return None
+    return set(fields)
+
+
+def _fields_to_verify(expected: dict, declared: set[str] | None) -> list[str]:
+    """Required fields the snapshot can be expected to carry.
+
+    With the schema known, a required field the schema does not declare is
+    reported on stderr (it was stored, but only as a raw fragment) and skipped;
+    the transcript itself is always verified.
+    """
+    wanted = list(_TRANSCRIPTION_REQUIRED_FIELDS) + [
+        field for field in _ATTACHMENT_STATUS_FIELDS if field in expected
+    ]
+    if declared is None:
+        return wanted
+    undeclared = [
+        field for field in wanted
+        if field not in declared and field not in _TRANSCRIPTION_ALWAYS_VERIFIED_FIELDS
+    ]
+    if undeclared:
+        print(
+            "Warning: transcription schema does not declare "
+            + ", ".join(undeclared)
+            + "; stored as raw fragments and not read back from the snapshot. "
+            "Declare them on the schema to verify them.",
+            file=sys.stderr,
+            flush=True,
+        )
+    return [field for field in wanted if field not in undeclared]
+
+
+def _verify_transcription_storage(entity_id, expected, source_id=None, declared_fields=None):
+    """Verify the stored record and provenance before reporting completion.
+
+    ``declared_fields`` is the live schema's field set; pass ``None`` to verify
+    every required field regardless (the fail-closed default).
+    """
     result = _neotoma_cli_json(["entities", "get", entity_id]) or {}
     record = result.get("entity", result)
     snapshot = record.get("snapshot") or {}
-    missing = [field for field in _TRANSCRIPTION_REQUIRED_FIELDS
+    missing = [field for field in _fields_to_verify(expected, declared_fields)
                if field not in snapshot or snapshot[field] != expected[field]]
     if missing:
         raise RuntimeError("Transcription ingestion incomplete: read-back mismatch for "
                            + ", ".join(missing))
     if source_id:
-        result = _neotoma_cli_json([
-            "observations", "list", "--entity-id", entity_id,
-            "--source-id", source_id, "--limit", "1",
-        ]) or {}
-        if not any(row.get("source_id") == source_id and row.get("entity_id") == entity_id
-                   for row in result.get("observations", [])):
-            raise RuntimeError("Transcription ingestion incomplete: missing audio source linkage")
+        # The audio is its own source. `ingest --source-file` stores it beside
+        # the structured payload but creates no observation tying it to the
+        # entity (the entity's observations cite the JSON source), so an
+        # observation-link check can never pass on this write path — it was
+        # masked only because the field read-back above failed first. Verify
+        # what the write actually produced: the source exists and holds these
+        # exact bytes.
         result = _neotoma_cli_json(["sources", "get", source_id]) or {}
         source = result.get("source", result)
         if source.get("content_hash") != expected["audio_content_sha256"]:
             raise RuntimeError("Transcription ingestion incomplete: audio source hash mismatch")
+
+
+def _find_existing_transcription(content_hash: str | None, resolved_audio: Path) -> str | None:
+    """Entity id of a ``transcription`` already stored for these bytes, or None.
+
+    Matches on content first, then on the absolute path — rows written while
+    ``audio_content_sha256`` was undeclared carry it only as a raw fragment, so
+    the content lookup can miss them while the path lookup still hits.
+    """
+    for identifier, by_field in (
+        (content_hash, "audio_content_sha256"),
+        (str(resolved_audio), "audio_file_path"),
+    ):
+        if not identifier:
+            continue
+        data = _neotoma_cli_json(
+            [
+                "entities", "search",
+                "--identifier", identifier,
+                "--entity-type", "transcription",
+                "--by", by_field,
+                "--limit", "1",
+            ]
+        ) or {}
+        for row in data.get("entities") or []:
+            entity_id = row.get("entity_id") or row.get("id")
+            if entity_id:
+                return entity_id
+    return None
+
+
+def _find_audio_source(audio_name: str, content_hash: str) -> str | None:
+    """Id of a stored source holding exactly these audio bytes, or None.
+
+    Searched by filename and confirmed by content hash: the audio source is
+    not linked to the transcription entity by any observation (see
+    ``_verify_transcription_storage``), so the entity cannot lead to it.
+    """
+    data = _neotoma_cli_json(
+        ["sources", "list", "--search", audio_name, "--limit", "20"]
+    ) or {}
+    for source in data.get("sources") or []:
+        if source.get("content_hash") == content_hash and source.get("id"):
+            return source["id"]
+    return None
+
+
+def _recover_prior_transcription_write(
+    expected: dict,
+    resolved_audio: Path,
+    *,
+    attachment_expected: bool,
+) -> str:
+    """Resolve and verify the entity an earlier attempt stored under this key.
+
+    ``ERR_IDEMPOTENCY_MISMATCH`` on a content-keyed store means a prior write
+    for these exact audio bytes already landed with a different payload — in
+    practice a retry on a later day, since the payload carries today's date.
+    Re-sending can never succeed, so the prior write is the durable record:
+    find it, and read back the fields that identify it as this recording.
+    The transcript text is required to be present, not equal — the earlier
+    attempt's transcript is the one that was stored.
+
+    Raises ``RuntimeError`` carrying ``ERR_IDEMPOTENCY_MISMATCH`` when no
+    matching entity can be found, which the daemon treats as permanent.
+    """
+    content_hash = expected["audio_content_sha256"]
+    entity_id = _find_existing_transcription(content_hash, resolved_audio)
+    if not entity_id:
+        raise RuntimeError(
+            "Neotoma store failed: ERR_IDEMPOTENCY_MISMATCH and no stored "
+            "transcription matches this audio; the prior write under this "
+            "content key cannot be resolved"
+        )
+    result = _neotoma_cli_json(["entities", "get", entity_id]) or {}
+    record = result.get("entity", result)
+    snapshot = record.get("snapshot") or {}
+    problems = []
+    if not str(snapshot.get("transcription_text") or "").strip():
+        problems.append("transcription_text")
+    identity_ok = snapshot.get("audio_content_sha256") == content_hash or (
+        snapshot.get("audio_file_path") == str(resolved_audio)
+    )
+    if not identity_ok:
+        problems.append("audio_content_sha256/audio_file_path")
+    if "file_size_bytes" in snapshot and snapshot["file_size_bytes"] != expected["file_size_bytes"]:
+        problems.append("file_size_bytes")
+    if problems:
+        raise RuntimeError(
+            "Transcription ingestion incomplete: prior write read-back mismatch for "
+            + ", ".join(problems)
+        )
+    if attachment_expected and not _find_audio_source(resolved_audio.name, content_hash):
+        raise RuntimeError(
+            "Transcription ingestion incomplete: prior write has no stored audio source"
+        )
+    print(
+        f"Recovered prior transcription write {entity_id} after ERR_IDEMPOTENCY_MISMATCH",
+        file=sys.stderr,
+        flush=True,
+    )
+    return entity_id
+
+
+# Neotoma's CLI refuses a remote upload whose base64 body would exceed the
+# server's 10 MiB JSON cap: floor(10 MiB * 0.72) raw bytes (neotoma
+# src/cli/index.ts, MAX_UPLOADABLE_BYTES). A file over it can never be attached
+# over the hosted transport, so retrying only repeats the refusal.
+_DEFAULT_REMOTE_UPLOAD_MAX_BYTES = int(10 * 1024 * 1024 * 0.72)
+
+
+def _remote_upload_max_bytes() -> int:
+    raw = os.environ.get("NEOTOMA_REMOTE_UPLOAD_MAX_BYTES", "").strip()
+    try:
+        return int(raw) if raw else _DEFAULT_REMOTE_UPLOAD_MAX_BYTES
+    except ValueError:
+        return _DEFAULT_REMOTE_UPLOAD_MAX_BYTES
+
+
+def _neotoma_target_is_localhost() -> bool:
+    """True only when the store target is known to be a loopback API.
+
+    An unknown target is treated as remote: the CLI uploads bytes to anything
+    that is not localhost, so remote is the case whose size limit applies.
+    """
+    url = _neotoma_prod_base_url() or os.environ.get("NEOTOMA_BASE_URL", "").strip()
+    if not url:
+        return False
+    from urllib.parse import urlparse
+
+    host = (urlparse(url).hostname or "").lower()
+    return host in {"localhost", "127.0.0.1", "::1"}
 
 
 def save_transcription(
@@ -2619,6 +2817,29 @@ def save_transcription(
                 raise RuntimeError(
                     "Transcription ingestion incomplete: requested audio exceeds attachment limit"
                 )
+            remote_limit = _remote_upload_max_bytes()
+            if wav_bytes > remote_limit and not _neotoma_target_is_localhost():
+                # The hosted transport cannot carry these bytes (the CLI
+                # refuses before any HTTP call), and it never will on retry.
+                # Store the transcript without the audio and record why, so
+                # the omission is a visible, verified field rather than a
+                # retry loop (2026-09-25: two-minute .qta memos retried every
+                # five minutes for a week).
+                attach_wav = False
+                attachment_requested = False
+                entity["audio_attachment_status"] = "omitted_exceeds_remote_upload_limit"
+                entity["audio_attachment_note"] = (
+                    f"audio is {wav_bytes} bytes; the remote upload limit is "
+                    f"{remote_limit} bytes, so the transcription was stored "
+                    "without the audio attachment"
+                )
+                print(
+                    f"Audio {audio_path.name} is {wav_bytes} bytes, over the remote "
+                    f"upload limit of {remote_limit} bytes; storing the transcription "
+                    "without the audio attachment.",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     idem = idempotency_key or _transcription_idempotency_key(audio_path)
     file_idem = file_idempotency_key or _transcription_file_idempotency_key(audio_path)
@@ -2684,26 +2905,37 @@ def save_transcription(
     raw = (proc.stdout or "").strip()
     if proc.returncode != 0 or not raw:
         err = (proc.stderr or "").strip() or raw or f"exit {proc.returncode}"
-        raise RuntimeError(f"Neotoma store failed: {err}")
+        if "ERR_IDEMPOTENCY_MISMATCH" not in err:
+            raise RuntimeError(f"Neotoma store failed: {err}")
+        entity_id = _recover_prior_transcription_write(
+            entity,
+            resolved_audio,
+            attachment_expected=attach_wav,
+        )
+    else:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Neotoma store returned non-JSON: {raw[:500]}") from e
 
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Neotoma store returned non-JSON: {raw[:500]}") from e
+        structured = payload.get("structured") or {}
+        rows = structured.get("entities") or payload.get("entities") or []
+        if not rows:
+            raise RuntimeError(f"Neotoma store missing entities in response: {raw[:800]}")
 
-    structured = payload.get("structured") or {}
-    rows = structured.get("entities") or payload.get("entities") or []
-    if not rows:
-        raise RuntimeError(f"Neotoma store missing entities in response: {raw[:800]}")
+        entity_id = rows[0].get("entity_id")
+        if not entity_id:
+            raise RuntimeError(f"Neotoma store missing entity_id: {raw[:800]}")
 
-    entity_id = rows[0].get("entity_id")
-    if not entity_id:
-        raise RuntimeError(f"Neotoma store missing entity_id: {raw[:800]}")
-
-    source_id = (payload.get("unstructured") or {}).get("source_id")
-    if attachment_requested and (not attach_wav or not source_id):
-        raise RuntimeError("Transcription ingestion incomplete: audio attachment missing")
-    _verify_transcription_storage(entity_id, entity, source_id if attach_audio_file else None)
+        source_id = (payload.get("unstructured") or {}).get("source_id")
+        if attachment_requested and (not attach_wav or not source_id):
+            raise RuntimeError("Transcription ingestion incomplete: audio attachment missing")
+        _verify_transcription_storage(
+            entity_id,
+            entity,
+            source_id if attach_wav else None,
+            declared_fields=_declared_transcription_fields(),
+        )
     print(f"NEOTOMA_TRANSCRIPTION_ENTITY_ID={entity_id}", flush=True)
 
     contacts = [c for c in (relate_contact_entity_ids or []) if c.startswith("ent_")]

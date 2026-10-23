@@ -67,6 +67,7 @@ class _RecordingHandler:
             due_date="",
             calendar_keywords=[name],
             label=name,
+            amount_eur=60,
         )
 
     def matches(self, events):
@@ -92,6 +93,12 @@ def sent_messages(tmp_path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
         monedula, "fetch_due_payment_tasks", lambda *a, **k: [], raising=False
     )
     monkeypatch.setattr(monedula, "fetch_yesterday_events", lambda: [])
+    # Force Telegram break-glass so existing gate tests stay on that path
+    # (ateles#1178 made email the automatic default when Telegram is absent).
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", "telegram")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "42")
 
     sent: list[str] = []
     monkeypatch.setattr(
@@ -317,6 +324,15 @@ def test_channel_error_409_blocks_payment_and_escalates(
         ),
     )
 
+    # Consent-failure alert must go through `_notify` only — not a parallel
+    # telegram_send sibling that bypasses the dedupe journal (ateles#1128).
+    notify_calls: list[tuple] = []
+    monkeypatch.setattr(
+        monedula,
+        "_notify",
+        lambda msg, priority="info", **k: notify_calls.append((msg, priority, k)),
+    )
+
     ok = monedula.main()
 
     # (a) no execute
@@ -330,9 +346,14 @@ def test_channel_error_409_blocks_payment_and_escalates(
     assert "monedula_consent_channel_failure" in entity["tags"]
     assert entity["source_agent"] == "monedula@ateles-swarm"
     assert entity["status"] == "open"
-    # (e) log must not reuse the decline string — check the actual message sent
+    # (e) must not reuse the decline string on Telegram; alert is via `_notify`
     assert not any(m.startswith("⏭️ Monedula: skipped all payments") for m in sent_messages)
-    assert any("consent channel failed" in m.lower() for m in sent_messages)
+    assert not any("consent channel failed" in m.lower() for m in sent_messages)
+    consent_notifies = [
+        c for c in notify_calls if "consent channel failed" in c[0].lower()
+    ]
+    assert len(consent_notifies) == 1
+    assert consent_notifies[0][1] == "blocker"
 
 
 def test_timeout_blocks_payment_and_escalates(
@@ -356,6 +377,115 @@ def test_timeout_blocks_payment_and_escalates(
     assert "monedula_consent_channel_failure" in escalation_posts[0][0]["tags"]
 
 
+def test_consent_channel_failure_notify_carries_dedupe_key_and_email_eligible(
+    monkeypatch: pytest.MonkeyPatch,
+    sent_messages: list[str],
+    escalation_posts: list[tuple[dict, str]],
+) -> None:
+    """ateles#1178: consent-channel-failure alert is actionable + email_eligible.
+
+    Still carries the stable dedupe key ``monedula:consent_channel_failed``.
+    Body must not be sole content "see escalation" — includes pending summary,
+    reason, no-payment-moved, recovery hint.
+    """
+    handler = _RecordingHandler("therapy")
+    handler.profile = types.SimpleNamespace(
+        one_off=False,
+        due_date="",
+        calendar_keywords=["therapy"],
+        label="Studio Example",
+        amount_eur=60,
+    )
+    _install_handlers(monkeypatch, [handler])
+    monkeypatch.setattr(
+        monedula,
+        "telegram_poll_approval",
+        lambda *a, **k: monedula.TelegramPollResult(kind="timeout"),
+    )
+
+    notify_calls: list[tuple] = []
+    monkeypatch.setattr(
+        monedula,
+        "_notify",
+        lambda msg, priority="info", **k: notify_calls.append((msg, priority, k)),
+    )
+
+    ok = monedula.main()
+
+    assert ok is False
+    consent_calls = [
+        c for c in notify_calls if "consent channel failed" in c[0].lower()
+    ]
+    assert len(consent_calls) == 1
+    msg, priority, kwargs = consent_calls[0]
+    assert priority == "blocker"
+    assert kwargs.get("dedupe_key") == monedula._CONSENT_CHANNEL_DEDUPE_KEY
+    assert kwargs.get("email_eligible") is True
+    assert "No payment moved" in msg or "no payment moved" in msg.lower()
+    assert "Studio Example" in msg or "therapy" in msg
+    assert "see escalation" not in msg.lower() or "Recovery" in msg
+
+
+def test_consent_channel_failure_body_is_actionable(
+    monkeypatch: pytest.MonkeyPatch,
+    sent_messages: list[str],
+) -> None:
+    handler = _RecordingHandler("therapy")
+    handler.profile = types.SimpleNamespace(
+        one_off=False,
+        due_date="",
+        calendar_keywords=["therapy"],
+        label="Studio Example",
+        amount_eur=60,
+    )
+    _install_handlers(monkeypatch, [handler])
+    monkeypatch.setattr(
+        monedula,
+        "telegram_poll_approval",
+        lambda *a, **k: monedula.TelegramPollResult(kind="channel_error"),
+    )
+    notify_calls: list[tuple] = []
+    monkeypatch.setattr(
+        monedula,
+        "_notify",
+        lambda msg, priority="info", **k: notify_calls.append((msg, priority, k)),
+    )
+    monedula.main()
+    msg = notify_calls[0][0]
+    assert "Studio Example" in msg
+    assert "60" in msg
+    assert "No payment moved" in msg
+    assert "Recovery" in msg or "recovery" in msg.lower()
+    assert notify_calls[0][2].get("email_eligible") is True
+    assert "see escalation." not in msg.lower().rstrip(".") or "Recovery" in msg
+
+
+def test_consent_channel_dedupe_key_is_cleared_on_a_genuine_reply(
+    monkeypatch: pytest.MonkeyPatch,
+    sent_messages: list[str],
+) -> None:
+    """A real reply proves the channel works again — the dedupe key for the
+    resolved condition must be released so a FUTURE timeout reports again
+    instead of staying silently suppressed by a stale key."""
+    handler = _RecordingHandler("therapy")
+    _install_handlers(monkeypatch, [handler])
+    monkeypatch.setattr(
+        monedula,
+        "telegram_poll_approval",
+        lambda *a, **k: monedula.TelegramPollResult(kind="reply", text="no"),
+    )
+
+    cleared: list[str] = []
+    monkeypatch.setattr(
+        monedula, "_clear_notify_dedupe", lambda key: cleared.append(key)
+    )
+
+    ok = monedula.main()
+
+    assert ok is True
+    assert monedula._CONSENT_CHANNEL_DEDUPE_KEY in cleared
+
+
 def test_neotoma_store_failure_still_blocks_and_notifies(
     monkeypatch: pytest.MonkeyPatch, sent_messages: list[str]
 ) -> None:
@@ -371,7 +501,9 @@ def test_neotoma_store_failure_still_blocks_and_notifies(
 
     notified: list[tuple] = []
     monkeypatch.setattr(
-        monedula, "_notify", lambda msg, priority="info": notified.append((msg, priority))
+        monedula,
+        "_notify",
+        lambda msg, priority="info", **k: notified.append((msg, priority)),
     )
 
     ok = monedula.main()

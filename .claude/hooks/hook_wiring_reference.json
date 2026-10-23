@@ -8,6 +8,16 @@
     ],
     [
       "PreToolUse",
+      "credential_read_guard.py",
+      "Bash|Read|Grep|Glob"
+    ],
+    [
+      "PreToolUse",
+      "gh_identity_guard.py",
+      "Edit|Write|NotebookEdit|Bash"
+    ],
+    [
+      "PreToolUse",
       "git_stash_guard.py",
       "Edit|Write|NotebookEdit|Bash"
     ],
@@ -15,6 +25,16 @@
       "PreToolUse",
       "gmail_send_gate.py",
       "Edit|Write|NotebookEdit|Bash"
+    ],
+    [
+      "PreToolUse",
+      "refuse_task_chip.py",
+      "^mcp__ccd_session__spawn_task$"
+    ],
+    [
+      "PreToolUse",
+      "rule_injection_gate.py",
+      "Edit|Write|NotebookEdit|Bash|mcp__mcpsrv_neotoma__correct|mcp__mcpsrv_neotoma__store"
     ],
     [
       "PreToolUse",
@@ -33,6 +53,11 @@
     ],
     [
       "SessionStart",
+      "session_rule_index.py",
+      "startup|resume|clear|compact"
+    ],
+    [
+      "SessionStart",
       "session_start.py",
       "startup|resume|clear|compact"
     ],
@@ -44,6 +69,11 @@
     [
       "Stop",
       "stop_finalizer.py",
+      ""
+    ],
+    [
+      "UserPromptSubmit",
+      "session_rule_delivery.py",
       ""
     ],
     [

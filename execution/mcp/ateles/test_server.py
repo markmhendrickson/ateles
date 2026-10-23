@@ -16,9 +16,10 @@ Run: python execution/mcp/ateles/test_server.py
 
 from __future__ import annotations
 
-import json
-import os
+import asyncio
+import base64
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -26,9 +27,75 @@ from unittest.mock import patch
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
-import httpx
+import httpx  # noqa: E402
 
-import server as srv
+import server as srv  # noqa: E402
+
+
+_TEST_RESOLVER_JKT = "A" * 43
+_DUMMY_RESOLVER_HEADERS = {
+    "signature-key": "caller-proof",
+    "signature-input": "caller-proof",
+    "signature": "caller-proof",
+    "content-digest": "caller-proof",
+    "content-type": "application/json",
+}
+
+
+def _resolver_proof(
+    *,
+    sub: str = "ateles@ateles-swarm",
+    checkpoint_id: str = "ent_cp1",
+    action: str = "approve",
+    ttl_sec: int = 120,
+    now: int | None = None,
+) -> tuple[dict[str, str], str]:
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from lib.daemon_runtime.aauth_httpsig import (
+        HttpSigSigner,
+        jwk_thumbprint,
+        public_part_of,
+    )
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    private_numbers = private_key.private_numbers()
+    numbers = private_numbers.public_numbers
+
+    def b64(value: int) -> str:
+        return base64.urlsafe_b64encode(value.to_bytes(32, "big")).rstrip(b"=").decode()
+
+    private_jwk = {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": b64(numbers.x),
+        "y": b64(numbers.y),
+        "d": b64(private_numbers.private_value),
+        "kid": "resolver-test-key",
+    }
+    status = "approved" if action == "approve" else "rejected"
+    body = srv._correction_body(
+        checkpoint_id,
+        "checkpoint_brief",
+        "status",
+        status,
+        f"resolve-checkpoint-{checkpoint_id}-{status}",
+    )
+    signer = HttpSigSigner(
+        private_jwk=private_jwk,
+        sub=sub,
+        iss=srv.CHECKPOINT_RESOLVER_ISSUER,
+        kid="resolver-test-key",
+        ttl_sec=ttl_sec,
+    )
+    headers = signer.sign_headers(
+        method="POST",
+        url=f"{srv.NEOTOMA_BASE_URL.rstrip('/')}/correct",
+        body=srv._canonical_body_bytes(body),
+        content_type="application/json",
+        now=now,
+    )
+    return headers, jwk_thumbprint(public_part_of(private_jwk))
 
 
 def _set_token(module, value: str) -> None:
@@ -326,91 +393,284 @@ class TestRouteTask(unittest.TestCase):
         self.assertEqual(result["matched_agent"], "vanellus")
 
 
-class TestResolveCheckpoint(unittest.TestCase):
+class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
 
-    def test_invalid_action(self):
-        result = srv._resolve_checkpoint("ent_123", "maybe")
+    def setUp(self):
+        authority = patch(
+            "server._checkpoint_resolver_authority",
+            return_value=("ateles@ateles-swarm", _TEST_RESOLVER_JKT, "tenant-a"),
+        )
+        authenticated = patch(
+            "server._authenticate_checkpoint_resolver",
+            return_value={"sub": "ateles@ateles-swarm"},
+        )
+        readback = patch(
+            "lib.daemon_runtime.gating.read_authenticated_checkpoint_resolution",
+            return_value={"principal_sub": "ateles@ateles-swarm"},
+        )
+        authority.start()
+        authenticated.start()
+        readback.start()
+        self.addCleanup(authority.stop)
+        self.addCleanup(authenticated.stop)
+        self.addCleanup(readback.stop)
+
+    @patch("server._get")
+    async def test_missing_authenticated_resolver_context_cannot_resolve(
+        self, mock_get
+    ):
+        mock_get.return_value = {
+            "entity_type": "checkpoint_brief",
+            "snapshot": {
+                "status": "awaiting_operator",
+                "task_entity_id": "ent_task_1",
+            },
+        }
+
+        result = await srv._resolve_checkpoint(
+            "ent_cp1", "approve", resolver_aauth_headers={}
+        )
+
+        self.assertIn("error", result)
+        self.assertIn("authenticated resolver", result["error"])
+
+    @patch("server._correct")
+    @patch("server._get")
+    async def test_wrong_authenticated_resolver_cannot_write_resolution(
+        self, mock_get, mock_correct
+    ):
+        mock_get.return_value = {
+            "entity_type": "checkpoint_brief",
+            "snapshot": {
+                "status": "awaiting_operator",
+                "task_entity_id": "ent_task_1",
+            },
+        }
+        with patch(
+            "server._authenticate_checkpoint_resolver", return_value=None
+        ):
+            result = await srv._resolve_checkpoint(
+                "ent_cp1", "approve", resolver_aauth_headers=_DUMMY_RESOLVER_HEADERS
+            )
+
+        self.assertIn("error", result)
+        self.assertIn("mismatched", result["error"])
+        mock_correct.assert_not_called()
+
+    async def test_invalid_action(self):
+        result = await srv._resolve_checkpoint("ent_123", "maybe")
         self.assertIn("error", result)
         self.assertIn("must be 'approve' or 'reject'", result["error"])
 
     @patch("server._get")
-    def test_not_found(self, mock_get):
+    async def test_not_found(self, mock_get):
         mock_get.return_value = None
-        result = srv._resolve_checkpoint("ent_fake", "approve")
+        result = await srv._resolve_checkpoint("ent_fake", "approve")
         self.assertIn("error", result)
         self.assertIn("not found", result["error"])
 
     @patch("server._get")
-    def test_already_resolved(self, mock_get):
+    async def test_already_resolved(self, mock_get):
         mock_get.return_value = {
+            "entity_type": "checkpoint_brief",
             "snapshot": {"status": "approved", "task_entity_id": "ent_task_1"},
         }
-        result = srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint(
+            "ent_cp1", "approve", _DUMMY_RESOLVER_HEADERS
+        )
         self.assertIn("error", result)
         self.assertIn("not 'awaiting_operator'", result["error"])
 
     @patch("server._get")
-    def test_already_dispatched_replay(self, mock_get):
+    async def test_already_dispatched_replay(self, mock_get):
         mock_get.return_value = {
+            "entity_type": "checkpoint_brief",
             "snapshot": {
                 "status": "awaiting_operator",
                 "resolved_dispatched": True,
                 "task_entity_id": "ent_task_1",
             },
         }
-        result = srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint(
+            "ent_cp1", "approve", _DUMMY_RESOLVER_HEADERS
+        )
         self.assertIn("error", result)
         self.assertIn("already dispatched", result["error"])
 
     @patch("server._get")
-    def test_dispatched_string_coercion(self, mock_get):
+    async def test_dispatched_string_coercion(self, mock_get):
         mock_get.return_value = {
+            "entity_type": "checkpoint_brief",
             "snapshot": {
                 "status": "awaiting_operator",
                 "resolved_dispatched": "true",
                 "task_entity_id": "ent_task_1",
             },
         }
-        result = srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint("ent_cp1", "approve")
         self.assertIn("error", result)
         self.assertIn("already dispatched", result["error"])
 
+    @patch("server._consume_checkpoint_resolution")
     @patch("server._correct")
     @patch("server._get")
-    def test_approve_success(self, mock_get, mock_correct):
-        mock_get.return_value = {
-            "snapshot": {
-                "status": "awaiting_operator",
-                "task_entity_id": "ent_task_1",
+    async def test_approve_success(self, mock_get, mock_correct, mock_consume):
+        mock_get.side_effect = [
+            {
+                "entity_type": "checkpoint_brief",
+                "snapshot": {
+                    "status": "awaiting_operator",
+                    "task_entity_id": "ent_task_1",
+                    "gate_action": "checkpoint_plan_approval",
+                    "user_id": "tenant-a",
+                },
             },
-        }
+            {
+                "entity_type": "checkpoint_brief",
+                "snapshot": {
+                    "status": "approved",
+                    "task_entity_id": "ent_task_1",
+                    "gate_action": "checkpoint_plan_approval",
+                    "user_id": "tenant-a",
+                },
+            },
+            {
+                "entity_type": "checkpoint_brief",
+                "snapshot": {
+                    "status": "approved",
+                    "resolved_dispatched": True,
+                    "task_entity_id": "ent_task_1",
+                    "gate_action": "checkpoint_plan_approval",
+                    "user_id": "tenant-a",
+                },
+            },
+            {
+                "entity_type": "task",
+                "snapshot": {
+                    "status": "routed",
+                    "blocked_reason": "",
+                    "user_id": "tenant-a",
+                },
+            },
+        ]
         mock_correct.return_value = True
+        mock_consume.return_value = True
 
-        result = srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint(
+            "ent_cp1", "approve", _DUMMY_RESOLVER_HEADERS
+        )
         self.assertEqual(result["new_status"], "approved")
-        self.assertIn("dispatcher will re-dispatch", result["action_taken"])
+        self.assertIn("task re-dispatched", result["action_taken"])
         mock_correct.assert_called_once()
+        mock_consume.assert_awaited_once()
 
+    @patch("server._consume_checkpoint_resolution")
     @patch("server._correct")
     @patch("server._get")
-    def test_reject_marks_task_declined(self, mock_get, mock_correct):
-        mock_get.return_value = {
-            "snapshot": {
-                "status": "awaiting_operator",
-                "task_entity_id": "ent_task_1",
-            },
-        }
+    async def test_approve_does_not_confirm_failure_or_held_states(
+        self, mock_get, mock_correct, mock_consume
+    ):
         mock_correct.return_value = True
+        mock_consume.return_value = True
 
-        result = srv._resolve_checkpoint("ent_cp1", "reject")
+        for status in (
+            "failed",
+            "blocked",
+            "awaiting_approval",
+            "awaiting_input",
+            "declined",
+            "superseded",
+        ):
+            with self.subTest(status=status):
+                mock_get.side_effect = [
+                    {
+                        "entity_type": "checkpoint_brief",
+                        "snapshot": {
+                            "status": "awaiting_operator",
+                            "task_entity_id": "ent_task_1",
+                            "gate_action": "checkpoint_plan_approval",
+                        },
+                    },
+                    {
+                        "entity_type": "checkpoint_brief",
+                        "snapshot": {
+                            "status": "approved",
+                            "task_entity_id": "ent_task_1",
+                            "gate_action": "checkpoint_plan_approval",
+                        },
+                    },
+                    {
+                        "entity_type": "checkpoint_brief",
+                        "snapshot": {
+                            "status": "approved",
+                            "resolved_dispatched": True,
+                            "task_entity_id": "ent_task_1",
+                            "gate_action": "checkpoint_plan_approval",
+                        },
+                    },
+                    {
+                        "entity_type": "task",
+                        "snapshot": {"status": status, "blocked_reason": ""},
+                    },
+                ]
+
+                result = await srv._resolve_checkpoint(
+                    "ent_cp1", "approve", _DUMMY_RESOLVER_HEADERS
+                )
+
+                self.assertNotIn("re-dispatched", result["action_taken"])
+
+    @patch("server._consume_checkpoint_resolution")
+    @patch("server._correct")
+    @patch("server._get")
+    async def test_reject_marks_task_declined(
+        self, mock_get, mock_correct, mock_consume
+    ):
+        mock_get.side_effect = [
+            {
+                "entity_type": "checkpoint_brief",
+                "snapshot": {
+                    "status": "awaiting_operator",
+                    "task_entity_id": "ent_task_1",
+                },
+            },
+            {
+                "entity_type": "checkpoint_brief",
+                "snapshot": {
+                    "status": "rejected",
+                    "task_entity_id": "ent_task_1",
+                },
+            },
+            {
+                "entity_type": "checkpoint_brief",
+                "snapshot": {
+                    "status": "rejected",
+                    "resolved_dispatched": True,
+                    "task_entity_id": "ent_task_1",
+                },
+            },
+            {"entity_type": "task", "snapshot": {"status": "declined"}},
+        ]
+        mock_correct.return_value = True
+        mock_consume.return_value = True
+
+        result = await srv._resolve_checkpoint(
+            "ent_cp1", "reject", _DUMMY_RESOLVER_HEADERS
+        )
         self.assertEqual(result["new_status"], "rejected")
         self.assertIn("task marked declined", result["action_taken"])
-        self.assertEqual(mock_correct.call_count, 2)
+        mock_correct.assert_called_once()
+        self.assertEqual(
+            mock_correct.call_args.kwargs["resolver_aauth_headers"],
+            _DUMMY_RESOLVER_HEADERS,
+        )
+        mock_consume.assert_awaited_once()
 
     @patch("server._correct")
     @patch("server._get")
-    def test_correct_failure(self, mock_get, mock_correct):
+    async def test_correct_failure(self, mock_get, mock_correct):
         mock_get.return_value = {
+            "entity_type": "checkpoint_brief",
             "snapshot": {
                 "status": "awaiting_operator",
                 "task_entity_id": "ent_task_1",
@@ -418,9 +678,103 @@ class TestResolveCheckpoint(unittest.TestCase):
         }
         mock_correct.return_value = False
 
-        result = srv._resolve_checkpoint("ent_cp1", "approve")
+        result = await srv._resolve_checkpoint(
+            "ent_cp1", "approve", _DUMMY_RESOLVER_HEADERS
+        )
         self.assertIn("error", result)
         self.assertIn("failed to correct", result["error"])
+
+
+class TestCheckpointResolverAuthentication(unittest.TestCase):
+
+    def test_verifier_process_does_not_load_resolver_private_keys(self):
+        source = Path(srv.__file__).read_text()
+        self.assertNotIn("load_http_sig_signer", source)
+        self.assertNotIn("ATELES_PRIVATE_KEYS_DIR", source)
+        self.assertNotIn("checkpoint_resolution import", source)
+
+    def test_required_principal_can_authenticate_exact_resolution(self):
+        headers, jkt = _resolver_proof()
+        body = srv._canonical_body_bytes(
+            srv._correction_body(
+                "ent_cp1",
+                "checkpoint_brief",
+                "status",
+                "approved",
+                "resolve-checkpoint-ent_cp1-approved",
+            )
+        )
+        claims = srv._authenticate_checkpoint_resolver(
+            headers,
+            body=body,
+            required_principal_sub="ateles@ateles-swarm",
+            required_principal_jkt=jkt,
+        )
+
+        self.assertIsNotNone(claims)
+        self.assertEqual(claims["sub"], "ateles@ateles-swarm")
+
+    def test_wrong_principal_key_or_body_binding_is_rejected(self):
+        valid_headers, valid_jkt = _resolver_proof()
+        wrong_sub_headers, wrong_sub_jkt = _resolver_proof(
+            sub="other@ateles-swarm"
+        )
+        body = srv._canonical_body_bytes(
+            srv._correction_body(
+                "ent_cp1",
+                "checkpoint_brief",
+                "status",
+                "approved",
+                "resolve-checkpoint-ent_cp1-approved",
+            )
+        )
+        cases = (
+            (wrong_sub_headers, body, "ateles@ateles-swarm", wrong_sub_jkt),
+            (valid_headers, body, "ateles@ateles-swarm", "B" * 43),
+            (
+                valid_headers,
+                body.replace(b'"approved"', b'"rejected"'),
+                "ateles@ateles-swarm",
+                valid_jkt,
+            ),
+        )
+        for headers, signed_body, required_sub, required_jkt in cases:
+            with self.subTest(required_sub=required_sub, required_jkt=required_jkt):
+                self.assertIsNone(
+                    srv._authenticate_checkpoint_resolver(
+                        headers,
+                        body=signed_body,
+                        required_principal_sub=required_sub,
+                        required_principal_jkt=required_jkt,
+                    )
+                )
+
+    def test_expired_future_or_excessive_lifetime_is_rejected(self):
+        body = srv._canonical_body_bytes(
+            srv._correction_body(
+                "ent_cp1",
+                "checkpoint_brief",
+                "status",
+                "approved",
+                "resolve-checkpoint-ent_cp1-approved",
+            )
+        )
+        now = int(time.time())
+        cases = (
+            _resolver_proof(now=now - 301),
+            _resolver_proof(now=now + 31),
+            _resolver_proof(now=now, ttl_sec=301),
+        )
+        for headers, jkt in cases:
+            with self.subTest(signature_input=headers["signature-input"]):
+                self.assertIsNone(
+                    srv._authenticate_checkpoint_resolver(
+                        headers,
+                        body=body,
+                        required_principal_sub="ateles@ateles-swarm",
+                        required_principal_jkt=jkt,
+                    )
+                )
 
 
 class TestGracefulDegradation(unittest.TestCase):
@@ -463,7 +817,7 @@ class TestGracefulDegradation(unittest.TestCase):
 
     def test_resolve_checkpoint_without_token(self):
         srv.NEOTOMA_BEARER_TOKEN = ""
-        result = srv._resolve_checkpoint("ent_123", "approve")
+        result = asyncio.run(srv._resolve_checkpoint("ent_123", "approve"))
         self.assertIn("error", result)
 
 
@@ -712,6 +1066,43 @@ class TestNeotomaEndpoints(unittest.TestCase):
         self.assertEqual(body["field"], "status")
         self.assertEqual(body["idempotency_key"], "idem-1")
 
+    @patch("server._post")
+    def test_checkpoint_resolution_forwards_callers_authenticated_proof(
+        self, mock_post
+    ):
+        mock_post.return_value = {"ok": True}
+        ok = srv._correct(
+            "ent_cp",
+            "checkpoint_brief",
+            "status",
+            "approved",
+            "idem-approval",
+            resolver_aauth_headers=_DUMMY_RESOLVER_HEADERS,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            mock_post.call_args.kwargs["extra_headers"], _DUMMY_RESOLVER_HEADERS
+        )
+        self.assertEqual(
+            mock_post.call_args.kwargs["encoded_body"],
+            srv._canonical_body_bytes(mock_post.call_args.args[1]),
+        )
+
+    @patch("server._post")
+    def test_checkpoint_resolution_refuses_empty_caller_proof(self, mock_post):
+        self.assertFalse(
+            srv._correct(
+                "ent_cp",
+                "checkpoint_brief",
+                "status",
+                "approved",
+                "idem-approval",
+                resolver_aauth_headers={},
+            )
+        )
+        mock_post.assert_not_called()
+
     def test_single_entity_fetch_uses_entities_id_path(self):
         with patch("server._request", return_value={}) as mock_request:
             srv._get("/entities/ent_abc")
@@ -802,7 +1193,11 @@ class TestToolSchemas(unittest.TestCase):
     # Read-only swarm observability. resolve_checkpoint stays the ONLY mutating
     # tool: see the self-certification boundary note in server.py — a session
     # must not be able to advance its own gate.
-    OBSERVABILITY_TOOLS = {"get_gate_status", "list_pipeline_queue", "get_dispatch_health"}
+    OBSERVABILITY_TOOLS = {
+        "get_gate_status", "list_pipeline_queue", "get_dispatch_health",
+        # ateles#1275 slice 1: per-task timeline and change feed, read-only.
+        "get_task_timeline", "watch_swarm",
+    }
 
     def test_tools_defined(self):
         self.assertEqual(len(srv.TOOLS), len(self.ACTION_TOOLS | self.OBSERVABILITY_TOOLS))
@@ -821,7 +1216,10 @@ class TestToolSchemas(unittest.TestCase):
         for name in self.OBSERVABILITY_TOOLS:
             fn = srv.TOOL_HANDLERS[name]
             chain = inspect.getsource(fn)
-            for impl in ("_get_gate_status", "_list_pipeline_queue", "_get_dispatch_health"):
+            for impl in (
+                "_get_gate_status", "_list_pipeline_queue", "_get_dispatch_health",
+                "_get_task_timeline", "_watch_swarm", "_watch_poll", "_watch_baseline",
+            ):
                 if impl in chain:
                     chain += inspect.getsource(getattr(srv, impl))
             self.assertNotIn("_correct(", chain, f"{name} must not write to Neotoma")
@@ -848,10 +1246,11 @@ class TestToolSchemas(unittest.TestCase):
         rt = next(t for t in srv.TOOLS if t.name == "route_task")
         self.assertIn("task_description", rt.inputSchema["required"])
 
-    def test_resolve_checkpoint_requires_both_params(self):
+    def test_resolve_checkpoint_requires_all_authority_params(self):
         rc = next(t for t in srv.TOOLS if t.name == "resolve_checkpoint")
         self.assertIn("checkpoint_id", rc.inputSchema["required"])
         self.assertIn("action", rc.inputSchema["required"])
+        self.assertIn("resolver_aauth_headers", rc.inputSchema["required"])
 
     def test_all_handlers_registered(self):
         for tool in srv.TOOLS:
@@ -1009,3 +1408,166 @@ class TestSwarmObservability(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInstructionsStayWithinTheSharedClientBudget:
+    """Foundation phase E2, task 3 — the SESSION transport. CORRECTED
+    2026-09-25 (ateles#1243, ateles#1254).
+
+    PR #1184 made this render the full `agent_policy` corpus into the MCP
+    `instructions` field. Measured evidence (ateles#1243) showed that field is
+    capped at roughly 2,048 characters ACROSS ALL CONNECTED SERVERS COMBINED,
+    truncated SILENTLY by the client — and the rendered corpus on `main`
+    measured 17,996 characters, about 9x the shared budget. So the corpus
+    never reached a session; whatever survived truncation did.
+
+    RED against that `main` behaviour (reproduced below in
+    `TestInstructionsBudgetRedGreen`): forwarding a ~60-rule mock corpus
+    (~300 chars/rule) into the field produced ~15,000+ characters, far over
+    any reasonable per-server share of the 2,048 cap.
+
+    GREEN, this fix: the field carries only the fixed static rules plus one
+    short pointer sentence to Neotoma's `agent_policy` records. The corpus
+    text itself is never forwarded, so its size cannot affect this field's
+    size at all — nothing here should reopen a path where it could.
+    """
+
+    def _patch_loader(self, monkeypatch, block=None, raises: Exception | None = None):
+        import lib.daemon_runtime.agent_loader as al
+
+        if raises is not None:
+            def boom(self):
+                raise raises
+            monkeypatch.setattr(al.AgentLoader, "render_policy_prompt", boom)
+        else:
+            monkeypatch.setattr(
+                al.AgentLoader, "render_policy_prompt", lambda self: block or ""
+            )
+
+    def test_rule_text_on_the_record_is_never_forwarded_verbatim(self, monkeypatch):
+        # The defect this fix closes: rule TEXT reaching the field at all,
+        # regardless of size. A nonce standing in for a live rule must NOT
+        # appear in the rendered output — only the pointer sentence should.
+        nonce = "NONCE-e2-session-transport-7f3a91"
+        self._patch_loader(
+            monkeypatch, f"\n\n## Active agent policies (apply these)\n- (mandatory, active) {nonce}"
+        )
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert nonce not in out, "rule text reached the instructions field — this is the defect being fixed"
+        assert "agent_policy" in out, "the pointer sentence to Neotoma must still be present"
+
+    def test_static_operating_rules_are_present(self, monkeypatch):
+        self._patch_loader(monkeypatch, "")
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert "Dispatch, don't do inline" in out
+        assert "Checkpoint protocol" in out
+
+    def test_pointer_names_neotoma_and_applies_when(self, monkeypatch):
+        self._patch_loader(monkeypatch, "")
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert "Neotoma" in out
+        assert "agent_policy" in out
+        assert "applies_when" in out
+
+    def test_output_always_fits_the_configured_budget(self, monkeypatch):
+        self._patch_loader(monkeypatch, "")
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert len(out) <= srv.INSTRUCTIONS_BUDGET_CHARS
+
+    def test_an_unreachable_record_still_serves_static_rules_and_pointer(
+        self, monkeypatch
+    ):
+        self._patch_loader(monkeypatch, raises=RuntimeError("neotoma unreachable"))
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert "Dispatch, don't do inline" in out
+        assert "agent_policy" in out
+
+    def test_an_unreachable_record_is_logged_not_silent(self, monkeypatch, caplog):
+        self._patch_loader(monkeypatch, raises=RuntimeError("neotoma unreachable"))
+        with caplog.at_level("ERROR"):
+            srv.render_server_instructions("ateles@ateles-swarm")
+        assert any("could not resolve agent_policy" in r.message for r in caplog.records)
+
+    def test_huge_corpus_from_the_record_does_not_grow_the_output(self, monkeypatch):
+        # 60 rules of ~300 chars — the shape ateles#1243 measured (median 221,
+        # longest 1,166 chars) — must not move the rendered size at all, since
+        # the corpus text is no longer forwarded.
+        huge = "\n\n## Active agent policies (apply these)\n" + "\n".join(
+            f"- (advisory, active) Rule {i} " + ("x" * 280) for i in range(60)
+        )
+        self._patch_loader(monkeypatch, huge)
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert len(out) <= srv.INSTRUCTIONS_BUDGET_CHARS
+
+    def test_a_budget_overflow_falls_back_to_static_rules_and_logs_a_warning(
+        self, monkeypatch, caplog
+    ):
+        # Simulate a future edit pushing the fixed text itself over budget —
+        # the guard must fail loudly to the static rules, never truncate
+        # mid-rule the way ateles#1243 documented the client doing.
+        monkeypatch.setattr(srv, "RULE_INDEX_POINTER", "x" * (srv.INSTRUCTIONS_BUDGET_CHARS + 1))
+        self._patch_loader(monkeypatch, "")
+        with caplog.at_level("WARNING"):
+            out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert out == srv.SERVER_INSTRUCTIONS
+        assert any("exceed the" in r.message for r in caplog.records)
+
+
+class TestInstructionsBudgetRedGreen:
+    """Standalone reproduction of the red/green pair for this fix, isolated
+    from the class above so it can be pointed at pre-fix code by hand (revert
+    `render_server_instructions` to forward `block` and this goes red).
+
+    Mocks a corpus of ~60 rules at ~300 chars each — the shape measured on
+    `main` in ateles#1243 (53 rules, 17,996 chars total, median 221 chars,
+    longest 1,166) — and asserts the rendered `instructions` field stays
+    within the shared client budget regardless.
+    """
+
+    def test_mock_60_rule_corpus_stays_within_budget(self, monkeypatch):
+        import lib.daemon_runtime.agent_loader as al
+
+        mock_corpus = "\n\n## Active agent policies (apply these)\n" + "\n".join(
+            f"- (advisory, active) Rule {i}: " + ("padding text " * 20)
+            for i in range(60)
+        )
+        assert len(mock_corpus) > 10_000, "mock corpus should reproduce the real overflow shape"
+
+        monkeypatch.setattr(al.AgentLoader, "render_policy_prompt", lambda self: mock_corpus)
+        out = srv.render_server_instructions("ateles@ateles-swarm")
+        assert len(out) <= srv.INSTRUCTIONS_BUDGET_CHARS, (
+            f"rendered instructions ({len(out)} chars) exceed the "
+            f"{srv.INSTRUCTIONS_BUDGET_CHARS}-char budget — this is the exact "
+            "failure mode ateles#1243 measured on main (17,996 chars against "
+            "a ~2,048-char shared client cap)"
+        )
+
+
+# ── get_dispatch_health: label gate surfacing ───────────────────────────────
+#
+# ATELES_SWARM_REQUIRE_LABEL (bootstrap mode / canary lane, swarm_dispatch.py)
+# must be surfaced here so "nothing is being reviewed" reads as the label gate
+# working as designed rather than as a broken dispatcher.
+
+
+class TestDispatchHealthLabelGate:
+    def test_unset_reports_gate_inactive(self, monkeypatch):
+        monkeypatch.delenv("ATELES_SWARM_REQUIRE_LABEL", raising=False)
+        result = srv._get_dispatch_health()
+        assert result["label_gate_active"] is False
+        assert result["label_gate_label"] is None
+
+    def test_set_reports_gate_active_with_label(self, monkeypatch):
+        monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", "swarm-canary")
+        result = srv._get_dispatch_health()
+        assert result["label_gate_active"] is True
+        assert result["label_gate_label"] == "swarm-canary"
+        assert "swarm-canary" in result["interpretation"]
+
+    def test_set_empty_string_reports_gate_inactive(self, monkeypatch):
+        # Whitespace-only / empty-string env values must not read as "active
+        # with an empty label" — same treatment as fully unset.
+        monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", "   ")
+        result = srv._get_dispatch_health()
+        assert result["label_gate_active"] is False
+        assert result["label_gate_label"] is None

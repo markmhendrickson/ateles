@@ -63,8 +63,11 @@ class _Notifier:
     def __init__(self):
         self.sent: list[str] = []
 
-    def send(self, message, priority=None, handler=None):
+    def send(self, message, priority=None, handler=None, **kwargs):
         self.sent.append(message)
+
+    def clear_dedupe(self, key):
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -212,6 +215,14 @@ def test_gate_override_does_not_reopen_a_terminal_task(writes, briefs, spawns):
     The guard must sit above it.
     """
     _dispatch("ent_override_1", _task("done"), trigger="approved", gate_override=True)
+    assert writes == []
+    assert briefs == []
+    assert spawns == []
+
+
+def test_verified_effect_is_reserved_for_reconciliation(writes, briefs, spawns):
+    """A task whose effect already returned must not re-enter the executor."""
+    _dispatch("ent_verified_1", _task("verified"), trigger="watchdog_retry")
     assert writes == []
     assert briefs == []
     assert spawns == []

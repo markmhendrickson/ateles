@@ -19,6 +19,10 @@ They differ for a linked worktree → allowed.
 
 Covered:
   - Edit / Write / NotebookEdit whose file path is inside a sibling main clone.
+  - Codex ``apply_patch`` calls whose patch names a file inside a sibling main
+    clone. Codex reports the tool as ``apply_patch`` and carries the patch in
+    ``tool_input.command``; the adapter is kept here with the existing guard so
+    both harnesses enforce one mechanism rather than two policy copies.
   - Bash whose command contains a git *mutation* (commit, checkout -b, switch -c,
     reset, merge, rebase, cherry-pick, apply, stash pop/apply, branch -f, push
     to the shared clone, clean, rm --cached). Compound commands (`&&`, `;`,
@@ -49,7 +53,6 @@ session. A file edit carries no prefix and has no override; target a worktree.
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -146,6 +149,26 @@ OVERRIDE_ENV = "ATELES_ALLOW_SHARED_REPO_WRITES"
 # carries-forward failure this class of guard exists to close. This is the same
 # reasoning, and the same mechanism, as `gmail_send_gate.py` in this directory.
 _OVERRIDE_PREFIX = re.compile(rf"^(?:env\s+)?{OVERRIDE_ENV}=1\b")
+
+# Codex carries an apply_patch payload as one string under
+# ``tool_input.command``. Each operation header names the path it will touch;
+# ``Move to`` names an additional target. Paths are captured to end-of-line so
+# spaces remain part of the path rather than silently shortening the target.
+_APPLY_PATCH_PATH_RE = re.compile(
+    r"^\*\*\* (?:Add|Update|Delete) File:\s*(?P<path>.+?)\s*$"
+    r"|^\*\*\* Move to:\s*(?P<move>.+?)\s*$",
+    re.MULTILINE,
+)
+
+
+def _apply_patch_paths(command: str) -> list[str]:
+    """Return every path an ``apply_patch`` payload says it will mutate."""
+    if not isinstance(command, str):
+        return []
+    return [
+        match.group("path") or match.group("move")
+        for match in _APPLY_PATCH_PATH_RE.finditer(command)
+    ]
 
 
 def _is_permitted_worktree_call(segment: str) -> bool:
@@ -414,6 +437,9 @@ def main() -> int:
                 for seg in segments
             ):
                 return 0
+    elif tool == "apply_patch":
+        if not _apply_patch_paths(ti.get("command", "")):
+            return 0
     elif tool not in ("Edit", "Write", "NotebookEdit"):
         return 0
 
@@ -423,6 +449,11 @@ def main() -> int:
         reason = check_path_target(
             ti.get("file_path") or ti.get("notebook_path") or "", ateles
         )
+    elif tool == "apply_patch":
+        for raw_path in _apply_patch_paths(ti.get("command", "")):
+            reason = check_path_target(raw_path, ateles)
+            if reason:
+                break
     elif tool == "Bash":
         reason = check_bash(ti.get("command", ""), ateles)
 

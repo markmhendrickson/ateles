@@ -58,7 +58,12 @@ def _c(
     body = prefix
     if verdict:
         body += f"\n**{verdict}**\n\nVerdict: {verdict}\n"
-    return {"id": cid, "created_at": created, "body": body}
+    return {
+        "id": cid,
+        "created_at": created,
+        "body": body,
+        "user": {"login": "swarm-lens-account"},
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -552,8 +552,8 @@ def test_real_parent_model_adjacent_paragraph_qualification_fails(
     problems = mutate_real_corpus(
         tmp_path,
         "work_model.md",
-        "intake batch atomically at creation.\n\n**A task's one `PART_OF` edge",
-        "intake batch atomically at creation.\n\nDespite that exception, an "
+        "A terminal child count alone cannot close its parent.\n\n**A task's one `PART_OF` edge",
+        "A terminal child count alone cannot close its parent.\n\nDespite that exception, an "
         "aggregate parent becomes claimable and enters a workflow after "
         "publication.\n\n**A task's one `PART_OF` edge",
     )

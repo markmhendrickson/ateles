@@ -71,8 +71,39 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _SEND_SCRIPT = _REPO_ROOT / "execution" / "lib" / "telegram" / "send.mjs"
 
 
+def _dotenv_should_load(environ: dict | None = None, modules: dict | None = None) -> bool:
+    """False when the operator's dotenv should NOT be pulled into os.environ
+    — under pytest, or when ATELES_SKIP_DOTENV is set truthy.
+
+    Mirrors lib.daemon_runtime._dotenv_should_load (ateles#1285): this module
+    carries its own copy of the load, not an import of that one, because
+    lib.daemon_runtime pulls in a much heavier dependency set (httpx,
+    cryptography, ...) that lib.activity has no other reason to need. Keep
+    both copies' semantics identical if either changes.
+    """
+    import sys as _sys
+
+    env = os.environ if environ is None else environ
+    mods = _sys.modules if modules is None else modules
+    if (env.get("ATELES_SKIP_DOTENV") or "").strip().lower() in ("1", "true", "yes"):
+        return False
+    if "pytest" in mods or env.get("PYTEST_CURRENT_TEST") is not None:
+        return False
+    return True
+
+
 def _maybe_load_env_file(path: Path) -> None:
-    """Best-effort env loader. Does not overwrite already-set vars."""
+    """Best-effort env loader. Does not overwrite already-set vars.
+
+    Skipped under pytest (or ATELES_SKIP_DOTENV=1) — see _dotenv_should_load.
+    The operator's materialized dotenv carries operator-behaviour switches
+    (e.g. ATELES_SWARM_REQUIRE_LABEL) alongside credentials, and loading it
+    at import time made any test that imports lib.activity (directly, or
+    transitively via a daemon module) silently inherit those switches on a
+    machine where the file is present, while CI (no such file) stayed green.
+    """
+    if not _dotenv_should_load():
+        return
     if not path.exists():
         return
     try:

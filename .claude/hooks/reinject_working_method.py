@@ -34,7 +34,9 @@ its own failure mode; keep this to what compaction actually eats.
 
 Fail-open: stdlib only, any error exits 0. Never block a session resume.
 """
+
 import sys
+
 
 REMINDER = """\
 [working-method] Context was just compacted. Standing instructions from the \
@@ -51,10 +53,16 @@ was heard is how the operator catches it.
 3. REPORT STATUS UNPROMPTED — what moved, what is blocked, and ONE recommended \
 next step per workstream so the operator can say whether to stop that \
 workstream for now.
+3a. REPORT AT THE OPERATOR'S ALTITUDE. Lead with the medium-or-higher-level \
+picture in plain terms: which workstreams moved, what it means, what is next. \
+File paths, entity ids, SHAs and test counts appear only where they change a \
+decision, in a clause — never as the spine of the report. The detail belongs \
+in the issue, PR or commit message.
 4. NAME AND LINK THE TASKS. Name the `task` entities any work corresponds to \
 and link each by id into the Ateles app, so the operator can open them.
 5. PROCEED ON YOUR RECOMMENDATION rather than stopping to ask. If you asked \
-something and it went unanswered, re-surface it each turn until answered.
+something and it went unanswered, re-surface it in each reply to the operator \
+until answered.
 
 Full role definition: `.claude/skills/ateles/SKILL.md`. Repo-wide constraints \
 are in CLAUDE.md, which Claude Code re-injects from disk on its own."""

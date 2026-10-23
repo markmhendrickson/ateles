@@ -1013,7 +1013,7 @@ for exactly that reason (below).
 | # | What the adapter must demonstrate | What checks it, rather than the author asserting it |
 |---|---|---|
 | 1 | **Every delivery it can receive resolves to one of the four outcomes or to `dropped` with a reason.** Its document enumerates the external system's own event list, not the subset the swarm subscribes to, each row marked handled, deliberately ignored, or unhandled | The disposition rule itself, which is a **counter**, not a promise: an event outside the mapping resolves to `dropped` with reason `unmapped`, is counted per window and announced off-record. Coverage is therefore a number that should be zero and rises on its own when the enumeration is wrong (`github.md#the-property-that-makes-this-a-control-and-not-a-list`). An adapter whose drop counter is not wired has not satisfied this obligation, because nothing then distinguishes it from an adapter with nothing to do |
-| 2 | **Its identity rule resolves actors through the credential binding and nowhere else**, and it can produce, for its system, the enumeration of which credential kind binds to a principal | A negative test the adapter must fail on: a conclusion-shaped delivery from a credential that binds to no principal, and one from a principal who does not own the open step, each yield an **observation** and never a verdict (`authority_model.md#principals`). The check is that the test exists and goes red when the fallthrough is reintroduced — principle 4's revert test, applied to the one rule whose failure fabricates authority |
+| 2 | **Its identity rule resolves actors through the credential binding and nowhere else**, and it can produce, for its system, the enumeration of which credential kind binds to a principal; and it **records the resolved actor at delivery** — the agent or the operator principal it resolves to; `external` only where the resolver returns `Deny (no binding)`; `unresolved` for every other outcome, `Deny (expired-only)` and `Indeterminate` among them — on every observation that creates an artifact's record or creates or moves its `head`, an action confirmation included, never re-resolved later | A negative test the adapter must fail on: a conclusion-shaped delivery from a credential that binds to no principal, and one from a principal who does not own the open step, each yield an **observation** and never a verdict (`authority_model.md#principals`). The check is that the test exists and goes red when the fallthrough is reintroduced — principle 4's revert test, applied to the one rule whose failure fabricates authority. The recorded actor is checked the same way: a head-moving delivery written with no actor, or one whose actor is re-resolved at the verdict write, makes the builder-never-reviews refusal read a wrong author set, and so does one from a credential whose binding has expired or ended recorded `external` where it must be `unresolved` (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`) |
 | 3 | **Its dedup key is the external system's own delivery id inbound, and the action's `dedup_key` outbound** | A redelivery of one captured delivery produces exactly one write, asserted by reading the record back; and an outbound action whose key is already confirmed is refused. Both are read-backs of the record, not of the adapter's return codes (principle 2). Where the system issues no stable delivery id, that is a finding stated in the document, not a key the adapter invents |
 | 4 | **Every observation it writes carries source, sourced time, and coverage**, and it maintains no freshness field of its own | The absence check runs in the other direction and is the sharper one: the adapter holds **no** sync log, no last-seen cursor table, no local artifact cache (**What the record supplies**, above). A schema or a table that would need a process to stay true is the failure, caught in the pull request that introduces it, because principle 11 makes it reviewable by inspection rather than by intuition |
 | 5 | **Every write carrying a decision is read back before the delivery is acknowledged**, and during a halt it writes nothing, acknowledges nothing, and lets the system redeliver | Exercised against an unreachable record: the adapter must leave the delivery unacknowledged rather than acknowledge and drop it (`failure_posture.md`, rules 1 and 4). An adapter that acknowledges what it could not write turns an outage into silent data loss, which is the one failure the redelivery mechanism exists to prevent and the one this test catches |
@@ -1254,9 +1254,22 @@ on one credential cannot hold different grants on that system — the finer inst
 becomes unavailable exactly where it was wanted.
 
 **Cost accepted.** N secrets per system that supports them, each provisioned, staged through a dual-admit
-rotation, and audited; and the provisioning is operator-only and out of band, so an agent that needs a
-credential it does not have raises `capability_denied` and waits rather than borrowing one
-(`authority_model.md#grants`).
+rotation, and audited. For a per-agent credential a code host or a comparable system issues to identify
+the agent that presents it, provisioning is operator-only and out of band, end to end — the operator mints
+it, and every rotation of it too, and an agent that needs one it does not have raises `capability_denied`
+and waits rather than borrowing one (`authority_model.md#grants`). Two narrower cases carve out of this,
+each with a different amount of it still the operator's (operator ruling, 2026-09-26). Where a provider
+mints a key naming the swarm as the caller rather than a per-agent identity, the operator mints it — that
+much is unchanged — but everything after minting, including every later rotation, is the swarm's, staged
+through the same dual-admit rotation as before. And the swarm's own credential is the other case
+(`#aauth-is-the-internal-credential-not-a-second-identity-system`): where the swarm is both issuer and
+consumer of the credential — an agent's signing key, a shared secret internal to the record — the swarm
+provisions and rotates it unattended from the start, through the staged rotation `authority_model.md#grants`
+already requires and the live verification and rollback that section now adds for a swarm-run rotation;
+what the rotation did is written to the record for the operator to read, rather than approved before it
+runs. A root secret — the age key, the store's own mnemonic, the password-manager root — is provisioned by
+the operator regardless of which side issued it, since nothing below it can attest to its own replacement
+(`authority_model.md#where-a-credential-comes-from-and-what-happens-when-that-source-cannot-be-read`).
 
 **What would reopen it.** An external system that issues per-agent credentials but whose issuance is rate-
 limited or priced per identity such that one credential per agent is not obtainable — which would argue for
@@ -1380,6 +1393,9 @@ adapter's wherever the socket is.
 - [Whether one binding type or two names an external system's instance](#whether-one-binding-type-or-two-names-an-external-systems-instance).
 - [Whether the host a daemon runs on is an external system](#whether-the-host-a-daemon-runs-on-is-an-external-system).
 - [Whether a second instance of the record is an external system](#whether-a-second-instance-of-the-record-is-an-external-system).
+- [The direction of truth for a business record class is a field of its source's binding, and moving it is a one-way event](#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event).
+- [A client instance runs a minimal runtime of its own, and its delivery never depends on swarm coordination](#a-client-instance-runs-a-minimal-runtime-of-its-own-and-its-delivery-never-depends-on-swarm-coordination).
+- [An environment is a separate instance of the record, and promotion reissues the same governed writes in order](#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order).
 
 Whether one process hosts both is an implementation choice; the design's requirement is that they meet
 only in the record. An adapter is a daemon in the sense of `work_model.md#the-four-execution-mechanisms`:
@@ -1558,6 +1574,96 @@ configuration however the host's adapter reaches it.
 bootstrap's step 13) each read it as the addressing type this rule names, and no row reads a deployment's
 configuration. A row that tested a deployment would be the deployment side's first, and belongs with the
 deployment rules rather than with the adapters' admission obligations.
+
+### The direction of truth for a business record class is a field of its source's binding, and moving it is a one-way event
+
+**Ruled (decision 151, 2026-10-19, the operator's): the direction of truth for a business record class lives
+on that source's `vendor_binding`, with a one-way cutover event, and writes that contradict the current
+direction are held until the cutover.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`.
+
+**The rules in this section.**
+
+- Each class of business record on an instance has one authoritative side at a time.
+- The side is a field of the binding for the source, and moving it is a recorded, one-way cutover event.
+- A write that contradicts the current direction is held, and a direction that cannot be read holds every
+  write to the class.
+- A held write is applied at the cutover only if the row it was made against is unchanged, and otherwise it is
+  returned to its writer.
+
+**The question.** Client businesses arrive with their records in spreadsheets: invoice books, company lists,
+price lists, policies. An application first loads them as a mirror reloaded from the source, and later makes
+the record authoritative. Between the two states an in-application edit to a mirrored row is either
+overwritten by the next reload or makes the reload refuse. The table at
+`conformance.md#direction-of-truth-per-class-of-record` covers the swarm's own classes of record, and
+`migration.md` covers carrying an instance's record into the design's types. Neither covers moving authority
+over a class of **business** records, meaning the records a client's business keeps (invoices, companies,
+receivables, price lists, policies) as against the swarm's own, from an external source to the record.
+
+**Rule 1: one authoritative side per class at a time.** For each class of business record an instance holds
+and an external system also holds, exactly one side is authoritative: the **source** (the record is a mirror,
+reloaded from it) or the **record** (the source is a legacy copy, read once at the cutover and never again as
+truth). The other side is wrong until corrected, in the words of the table above. This is principle 11 applied
+to an interval the design had not named: a second source that goes stale.
+
+**Rule 2: the direction is a field of the source's binding.** The binding that names the source also says
+whether it still governs: a `direction` per business record class it covers, with the values *source* and
+*record*, and the **cutover observation** that moved it from the first to the second. No new type is added.
+The binding is read by every writer to the class: the application's write path, which checks it before any
+edit to a row of the class, and the reload, which checks it before overwriting. A reader of one binding
+therefore answers both "where does this class come from" and "may it be edited here".
+
+**Rule 3: the cutover is a recorded, one-way event.** It is written once, as an observation on the binding
+naming the class, who made it, and when, through the gate as a governance act of the instance. The design has
+no reverse event. Returning authority to a source that was cut over from is a different act, argued on its own,
+because the record has by then accepted writes the source never saw.
+
+**Rule 4: a write that contradicts the direction is held, and an unreadable direction holds everything.** While
+the source governs, an in-application write to a mirrored row is held, and the reload proceeds. After the
+cutover, a reload from the source is held, and in-application writes proceed. *Held* here means not applied to
+the record and not discarded: it is recorded with the reason, and the writer is told which direction currently
+governs. Where the direction cannot be read (the field is absent, unrecognized, or malformed, or the binding
+does not resolve) the write path and the reload both hold every write to the class. This is fail-closed on the
+field that carries the safety meaning (principle 5).
+
+**Why the binding and not the migration document.** The migration is a one-time move and covers the move; it
+has no mechanism that holds writes in the interval, and an interval that holds no writes is the case that
+actually occurred. Per-application code re-solves the problem in every deployment, which is the fork test's
+failure. The binding is already what the adapter reads to address the source, so the direction sits where the
+reader of the source already looks.
+
+**Cost accepted.** The binding gains a per-class field and an observation, and a class has to be declared
+before its first reload so that the field exists to be read. **What would reopen it:** a business record class
+whose authority is split by row or by field rather than by class, which would argue for the direction on a
+finer unit.
+
+**Matrix.** No row is added here. The planted refusals this ruling calls for are an in-application write
+to a source-governed class, a reload into a record-governed class, and a write while the direction is
+unreadable; they are added to `conformance_suite.md` in a later change.
+
+#### A held write is applied at a cutover only if the row it was made against is unchanged, and otherwise returned to its writer
+
+**Ruled (decision 157, 2026-10-20, the operator's): when a cutover lands, a held write is applied only if the row
+it was made against is unchanged since; otherwise it is returned to its writer.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. A held write carries the read it was made against, the
+same read-before-write check the application already makes on every edit. At the cutover each held write is
+compared with the row as the final reload left it. Unchanged, and the write is applied as written. Changed, and
+it is returned to the writer, who sees what moved and may make it again against the current row. A held write is
+never applied blind, because the source may have changed the row in the final reload and applying over that is
+the overwrite the hold exists to prevent, and it is never silently discarded, because a discard with no word to
+the writer is a drop with no reason.
+
+**How it is applied.** The apply is admitted under the writer's grant as read at the apply, not as read when the
+write was made, so a write held while its writer's grant was narrowed or revoked is refused and returned. The
+comparison and the apply are one atomic step, so nothing changes between them.
+
+**Cost accepted:** a writer may be asked to redo an edit the final reload overtook. **What would reopen it:** a
+held write whose staleness cannot be read from the row it was made against.
+
+**Matrix.** No row is added here. The planted refusals this ruling calls for are a held write applied over a row
+that changed since it was made; a held write dropped without its writer being told; a held write applied under a
+grant that has since been revoked; and a comparison and apply that are not one step; they are added to
+`conformance_suite.md` in a later change.
 
 ### Whether the host a daemon runs on is an external system
 
@@ -1985,6 +2091,152 @@ relative-to-a-deployment answer in rule 2 the common case rather than the corner
 **Matrix.** The host adapter's admission rows are unchanged: nothing here adds an action class. A
 deployment naming several instances and no controlling one is a fail-closed resolution of the same shape
 decision 76's binding already carries, read where that binding is read.
+
+### A client instance runs a minimal runtime of its own, and its delivery never depends on swarm coordination
+
+**Ruled (decision 148, 2026-10-19, the operator's): each instance an application serves has a minimal runtime
+of its own, made of its adapters, the action gate, the step runners for its declared workflows, and the
+operator-facing agent. The swarm's development and review roles stay shared.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. The operator ruled for a client's customer-service
+deployment that the client's staff work a live queue every day, and that an outage in swarm coordination must
+not stop their mail.
+
+**The rules in this section.**
+
+- An application's delivery depends on the record, its adapters, the action gate, the step runners for its
+  declared workflows, and the operator-facing agent, and on nothing else.
+- The swarm's development and review roles act on the instance only through governed writes.
+- Each instance's runtime is a deployment that names its own instance and is named by that instance's
+  `deployment_configuration`.
+
+**Delivery is the path from an inbound event to a taken action.** It reads the record, runs a step, passes the
+gate, and takes the action through an adapter. None of the swarm's coordination is on that path: not the
+component that assigns work to agents, not the review lenses that judge a change to the swarm, not the
+planning machinery. A step of a declared workflow is claimed and run by a step runner that belongs to the
+instance's runtime, and the gate that judges the action is the instance's own.
+
+**What degrades when something is absent**, stated from the rules the design already has and not as a new
+mechanism:
+
+- With the swarm's coordination absent, nothing in delivery changes. Development and review of the declarations
+  and the runtime stop, and a declaration already live stays in force.
+- With a step runner or the operator-facing agent absent, drafting and the steps it owns stop, and what they
+  would have written is absent, not guessed. A batch's steps lapse and raise their checkpoints on the ordinary
+  rules (`failure_posture.md`).
+- With an adapter absent, the actions it would take stop at the gate's hold; nothing is sent by another route.
+- With the record unreachable, nothing runs, and the application reports that it cannot read, never a stale
+  picture (decision 37).
+- Screens and the edits staff make to business records need only the record and the sign-in. Checkpoints already
+  raised stay visible in the record whatever else is absent.
+
+**The swarm's shared roles reach the instance through governed writes.** The roles that develop and review a
+client's declarations, runtime, and views are shared across instances; they are principals with grants on the
+instance and write to it as any principal does, with governance writes landing on the deployment's controlling
+instance (decision 91). No shared role holds a credential that reaches further than its grant (decision 97).
+
+**Whose tenant a client instance is.** A client instance owned by another organisation is a tenant of its own, an
+isolation boundary distinct from the operator's (`multi_tenant.md#the-tenant-is-matched-on-the-grant-not-derived-from-the-subject`).
+The shared development and review roles reach it only by grants whose `match_tenant` is that client's tenant, given
+by an instance owner; they are tenant-bound grants, never a cross-tenant capability, and a shared role
+without such a grant is denied there (decision 80).
+
+**Where the runtime runs.** The runtime is a deployment of the swarm's own software (decision 90): it names its
+target host, names the instance it reads and writes, and keeps its recovery path off its own host. The
+instance's `deployment_configuration` names the runtime's command, build arguments, and verification target,
+and is the one place to retrieve before deploying it; a runtime is never deployed from memory or from a
+document alone.
+
+**The rejected alternatives.** A full swarm per client gives the most isolation at the most cost and
+maintenance per client. One shared swarm serving many records (decision 76) is the cheapest, but every
+client's delivery would share one failure domain, which contradicts the ruling. **Cost accepted:** the
+runtime's code reaches each instance by a deployment of its own, so an instance's runtime can lag the
+shared source; the deployment-freshness obligations that govern any deployed checkout apply to it unchanged;
+and every client instance needs its own tenant-bound grants for the shared roles, which an instance owner gives.
+**What would reopen it:** a client whose isolation requirement exceeds a separate failure domain (their own
+review and development roles), which is the full-swarm alternative argued for that client.
+
+**Matrix.** No row is added here. The planted refusal this ruling calls for is a delivery that stalls when the
+swarm's coordination is stopped while the instance's own runtime is up; it is added to `conformance_suite.md`
+in a later change.
+
+### An environment is a separate instance of the record, and promotion reissues the same governed writes in order
+
+**Ruled (decision 150, 2026-10-19, the operator's): an environment is a separate instance of the record with
+its own deployment configuration, and promotion carries the same governed writes, in order, to the next
+instance.** The ruling words this as replaying the writes; the design's word is *reissue*
+(`vocabulary.md#reissue`), because *replay* is refused here for a different thing
+(`vocabulary.md#replay`). Registered as ruled in `conformance.md#the-register-of-open-design-decisions`.
+
+**The rules in this section.**
+
+- An environment (development, demo, production, or any other the operator names) is an instance of the
+  record, and no environment flag or dimension exists inside the record.
+- A governed change proven in one environment reaches the next by reissue of the same writes, in order, never by
+  hand.
+- Only writes that are the same on every instance are reissued (carried from the issue's gap list, not part of
+  the option ruled).
+- A process bound to one environment cannot reach another's external systems, credentials, or accounts.
+
+**The question.** A client deployment runs three environments, each with its own instance of the record and
+its own endpoints: development, a demo the client's staff try things in, and production. Schemas, policies,
+workflow declarations, and intake rules then have to move from the first to the second to the third. Decision
+100 covers proving a newly declared workflow before it binds production work. Decision 90 and decision 91 cover
+a deployment naming its instance and a controlling instance for governance writes. Neither says what an
+environment is or how a governed change travels between them.
+
+**Rule 1: an environment is an instance.** It has its own `deployment_configuration` naming its host, its
+instance, and its verification target (decision 90), its own bindings (so its own addresses, credentials, and
+accounts for every external system), its own grants, and its own data. Demo data and production data never share
+a record. This is the several-records posture of decision 76 applied to a lifecycle, not to sensitivity: the
+instances do not merge, and an identity that spans them is one per instance.
+
+**Rule 2: promotion is reissue, of instance-independent writes only.** The restriction to instance-independent
+writes is stated alongside the ruling, from the issue's gap list, and is not part of the option ruled. A governance write is written once,
+reviewed, and proven in the environment where it is first taken. It reaches the next environment as **the same
+write, reissued in order**, through the target instance's own gate as a governance write on that deployment's
+controlling instance. It is never copied by hand and never edited in transit, so what was proven is what lands.
+
+- **What is reissued.** Only writes that are the same on every instance: a declaration, a policy value, a
+  registry change, an intake rule, and the enabling of a bundle, which names a pinned bundle version or content
+  hash so that what the approver judged is what installs.
+- **What is never carried.** Per-instance entities (bindings, display profiles, module layouts, grants,
+  credentials, addresses, and secrets) are written afresh on each instance under that instance's own grants. A
+  reissue that contains one is refused at the target, on the ground that it is not instance-independent, and the
+  refusal needs no knowledge of any other instance.
+- **Order and dedup.** The order is the order the writes were first taken, read from the source instance's own
+  record of when each was written there, because a later write may read an earlier one. The dedup basis is the write's idempotency key scoped to the target instance, so a reissue that
+  reaches an instance twice lands once.
+- **Failure.** A write that fails on a target stops the reissue at that write and raises its checkpoint there,
+  and the writes after it are not applied.
+
+Decision 100's proving maps onto the demo environment: a declaration that has run there has been proven where it
+cannot reach production.
+
+**Why this is not a replay.** `vocabulary.md#replay` and
+`failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated` refuse doing a prior step again
+from a stored trace, because that repeats an effect that already happened. A reissue repeats no effect: it is a
+first take on a different instance, judged afresh by that instance's gate on its own policy and grants, keyed to
+that instance, and it carries no consent-gated action from one instance to the other.
+
+**Rule 3: a process bound to one environment cannot reach another's external systems.** A development process
+that could reach a production endpoint, or hold a production credential or mailbox or shop account, is an
+incident class of its own. The design requires the property and leaves the mechanism open. The structure that
+makes it checkable is Rule 2's: addresses, credentials, and accounts are per-instance entities, written only on
+the instance they serve and never carried, so a process resolves them only from the instance it is bound to
+(`#whether-one-binding-type-or-two-names-an-external-systems-instance`); a process that cannot determine which
+environment it is bound to fails closed (decision 76).
+
+**The rejected alternative.** One record with declarations scoped by environment has fewer instances, but
+every read and every gate check would then carry an environment dimension, and demo data would share a record
+with production data. **Cost accepted:** more instances to deploy and keep fresh, and a reissue mechanism that
+does not yet exist. **What would reopen it:** an environment too small to justify an instance, which would be
+argued as a lightweight instance rather than as a flag.
+
+**Matrix.** No row is added here. The planted refusals this ruling calls for are a reissue that contains a
+binding, profile, grant, credential, or address; a reissue whose written payload differs from the proven one; a
+reissue that continues past a failed write; an enablement that does not pin a version or content hash; and a
+development-bound process presented with a production address, credential, or account; they are added to
+`conformance_suite.md` in a later change.
 
 ### Whether the instance of the record serving a swarm is an external system when the swarm operates it
 

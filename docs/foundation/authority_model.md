@@ -34,7 +34,7 @@ terms; this table keeps the tuple's own short spelling).
 | domain | the region the authority covers: entity types, repositories, a workflow, a queue | `agent_grant.capabilities`; `ownership_grant` |
 | scope | the operations within the domain, with per-tool parameter constraints | `agent_grant.capabilities`, `param_constraints`; `action_policy.permission_scope` |
 | action | the class of an `action` entity, its `action_type`, resolved to a blast tier | `gating` (`gates_and_workflows.md`) |
-| conditions | confidence threshold, recurrence graduation, per-boundary checkpoints, `operator_only` | `action_policy` |
+| conditions | confidence threshold, recurrence graduation, per-boundary checkpoints, a payment's per-payee cap, `operator_only` | `action_policy` |
 | time | an expiry on every grant and delegation, evaluated at check time; the lease's `expires_at` is the same term on work | `agent_grant.expires_at`; `delegation_edge.expires_at` |
 
 The shape is ABAC (XACML; Cedar). The gate and the grant checker are the policy decision points; their call
@@ -97,6 +97,8 @@ could not read is the same record the swarm's every other decision needs.
 - What stays open, and it is not this document's to close.
 - [What owning confers: the required seat](#what-owning-confers-the-required-seat).
 - [Whether one operator's several instances of the record are one record or several](#whether-one-operators-several-instances-of-the-record-are-one-record-or-several) — ruled, decision 76: several records, one identity per instance, an explicit binding that fails closed when ambiguous, and a stated non-merge rule.
+- [A client's staff member is an operator of the instance, scoped by grants](#a-clients-staff-member-is-an-operator-of-the-instance-scoped-by-grants) — ruled, decision 146: no new principal kind.
+- [The acts the design reserves to the operator are the instance owner's alone, and no grant extends them](#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them) — ruled, decision 158.
 
 A principal is any actor authority is attributed to: a human (an operator) or an agent. A principal is an
 entity in the record, so an ownership or delegation edge has somewhere to point (prior art: ReBAC as a data
@@ -327,12 +329,203 @@ as decision 80, is ruled: the tenant is matched on the grant and not derived fro
 the credential form here untouched, since the several-instance case this ruling concerns is one tenant.
 
 
+### A client's staff member is an operator of the instance, scoped by grants
+
+**Ruled (decision 146, 2026-10-19, the operator's): a client's staff member is an `operator` of the instance
+they work in, scoped by grants. No new principal kind is added.** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. The case is a client's own people resolving checkpoints
+in an application on that client's instance (`application.md`). It is the case decision 82 already covers:
+every instance may have several operators, so the staff member is one of them, with grants narrower than the
+instance owner's.
+
+**The rules in this section.**
+
+- A staff member is an `operator` with identity per person and reach from grants.
+- Nothing a staff operator may do comes from the type alone; the acts the design reserves to the operator are the
+  instance owner's alone (the next section).
+- An approver is resolved from the instance's operator set, and an empty set holds rather than widens.
+
+**What the ruling states.**
+
+1. **Identity is per person.** Each staff member is their own `operator` entity, and their sign-in to the
+   instance is a credential bound to it by a `principal_binding`, as every credential binds to a principal. The
+   instance's sign-in supplies the per-person identity; the store's account value, which every writer shares on a
+   shared instance, identifies the instance and never a person, and a write whose only identity is that value
+   resolves to no principal (see *The mapping down* above).
+2. **Reach is grant data.** What a given person may resolve, view, or write is what their grants admit, at the
+   record, under decisions 41 and 97. A staff member who may resolve one class of checkpoint and nothing else
+   is an `operator` with exactly that grant. "Directs agents" in the operator's definition
+   (`vocabulary.md#operator`) is bounded by the grants, and a person who directs nothing is still the human
+   principal their sign-in identifies.
+
+**Stated alongside the ruling, from the issue's list of what the foundation should state; not part of the option
+ruled.**
+
+3. **Decision 47 holds per person.** The principal that raised a checkpoint does not resolve it. A checkpoint
+   that the instance's operator-facing agent raises is resolved by a staff operator who is not the principal
+   that agent counts as, under the counting rule. The marked self-resolution exception is the instance owner's
+   only (the next section).
+4. **An approver is resolved from the instance's operator set.** Where a channel or an application must name who
+   is asked, it is resolved through the roster and the grants to the operators who hold the right to resolve
+   that class of checkpoint, never to a single configured approver. A reply addressed to one approver of several
+   is then a defect in the resolution, not a design limit. **An empty set holds.** Where no operator holds the
+   right, the existing no-approver rule applies unchanged: a checkpoint that awaits nobody is not raised as one
+   that awaits everybody, the raiser holds the step and records the missing approver as a finding, and the hold
+   is bounded like every hold; the set never widens to every operator, and never falls through to the instance owner
+   (`#approval`).
+
+**Why this and not a distinct approver kind.** A second kind of human principal would have to be answered across
+this document, the checkpoint protocol, and every channel: what it may do, whether the counting rule counts it,
+whether it can hold an `ownership_grant`. The `operator` type already answers each, and the only thing a
+client's staff member lacks is breadth, which a grant expresses. The rejected alternative also leaves the
+instance's own operator set unable to say who may approve, since the kind would sit beside it.
+
+**Cost accepted.** The type that means "the human who directs the swarm" now also names a person who may do
+less. The reading is safe only because reach comes from grants and never from the type, which is decision 41's
+default-deny applied to a person, and because the acts keyed on the type are reconciled in the next section.
+**What would reopen it:** a staff member who must hold something an `operator` cannot carry, which would be
+argued on what the type is missing rather than on the person's role.
+
+**Matrix.** No row is added here. AU-17 already reads the raiser rule against the counting rule, which now counts
+each staff operator as their own interest. The planted refusals this ruling calls for are a checkpoint whose
+approver set is empty widening to every operator, a reply routed to one configured approver, and a write
+attributed to the shared account value; they are added to `conformance_suite.md` in a later change.
+
+### The acts the design reserves to the operator are the instance owner's alone, and no grant extends them
+
+**Ruled (decision 158, 2026-10-22, the operator's): the acts the design reserves to the operator are held by
+the instance's owner or owners only. A staff operator never holds them, and no grant can extend any of them to
+anyone. The rule that the waiver is not delegable stands unchanged. This amends decision 47's self-resolution
+exception from "the operator" to "the instance owner".** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. A client who wants someone else to hold these acts makes
+that person an owner of the instance. The ruling was taken over the alternatives of owner plus named grants and of
+leaving the question open. Two later rulings of the same date settle rows of the classification below: decision
+159 (who may invoke and who may lift a halt) and decision 160 (per-payee caps).
+
+**Why a ruling was needed.** Decision 146 makes a client's staff member an `operator`, and the design says "the
+operator" in several places where it reserves an act. Read as the type, each such reservation would hand the act
+to every staff member, and no grant could narrow it, because a grant narrows what a type admits and not an act
+the design keys on the type.
+
+**The rules in this section.**
+
+- Wherever the design reserves an act to the operator, it reserves it to the instance owner.
+- No grant extends a reserved act to anyone; the only way to hold one is to be an instance owner.
+- The marked self-resolution of decision 47 is the instance owner's only, with no grant path.
+- The `instance_owner` mark is admitted at the record: only a principal that already carries it sets or clears
+  it, apart from the bootstrap's first write.
+
+**The instance owner.** An instance owner is an `operator` that carries the `instance_owner` mark, a field of
+the `operator` entity. The name and the field are provisional until the record's registry takes them. The mark is
+not an `ownership_grant`, and the two must not be confused: decision 46 rules that owning an object confers the
+required seat on checkpoints about that object and nothing else, and the record conventions allow at most one
+`ownership_grant` per registered type, so neither the meaning nor the cardinality fits an instance-level owner.
+Owning any other object, by `ownership_grant`, confers no reserved act. An instance owner is an operator and not a
+new principal kind (decision 146).
+
+*The mechanism in this section, from here to the end of the admission rule, is stated so that the rule is
+checkable. It is derived and is not part of the option ruled; that includes "no quorum", "the last mark cannot be
+cleared", and the recording of findings.*
+
+- **Several owners.** An instance with several owners is expressed by the mark on several `operator` entities.
+  Each holds every reserved act independently; no quorum is added.
+- **No owner.** An instance on which no operator carries the mark refuses every reserved act, by decision 41's
+  default-deny, and never confers them on whoever signs in.
+- **Fit with decision 43.** The first mark is a field of the `operator` entity, which is the second record of the
+  thirteen-record bootstrap set, written and read back with it. It adds no fourteenth kind of record to that closed
+  set.
+
+**The admission rule, at the record.** `operator` is not one of the eight closed governance types, so the
+engine-only write, the action gate, and the inertness of a synced observation that make a governance write bind
+do not reach the mark, and the design does not lengthen that closed list. The mark is instead guarded by a rule
+admitted at the record itself, in the shape decision 47 gave `self_resolved`, reconciled once at the write
+and enforced where the record decides (decision 97):
+
+- **Who may write it.** A write that sets, clears, or transfers `instance_owner` is admitted only when the writing
+  principal carries the mark in the record as of the write, read at the write. The one exception is the
+  bootstrap's first write on an instance that has no mark.
+- **Where it never arrives.** An observation arriving by sync, a reissue (`vocabulary.md#reissue`), a merge, a
+  split, or a `principal_binding` write never sets, clears, or transfers the mark; an observation of that kind is
+  recorded and takes no effect on it.
+- **The last mark.** Clearing the last mark is refused.
+- **Other paths to an owner's identity.** A `principal_binding` that binds a credential to an owner's `operator`
+  entity is out-of-band provisioning, an instance owner's act. A merge, split, delete, or erasure of an `operator`
+  entity that carries the mark is admitted only to an instance owner, and never while that entity carries the last
+  mark; ownership is transferred first.
+- **The first designation and recovery.** The first mark on a new instance is written by the bootstrap that
+  creates the instance, outside the record, and never by a reissue. It is the one write with no prior owner to
+  gate it, so its authority is the bootstrap's. Recovery of an ownerless instance, for example when every owner
+  credential has expired, is the same bootstrap-level act outside the record and never an act inside it. Each is
+  recorded as a finding, written by the credential that performs the bootstrap or the recovery (the run credential
+  the minimal record set binds at its third record), as its first write after the mark, and read back.
+
+**Why a record-level rule and not a governance type.** The alternative was to hold the designation on an existing
+governance type so that it inherits engine-only write, gating, and inert sync. None fits: `agent_grant` is the form
+a grant takes and the ruling is that no grant carries a reserved act, and `swarm_roster` resolves roles to agents,
+not to human principals. The admission rule reuses the enforcement at the record that decision 97 already rules and
+the reconcile-at-the-write shape that decision 47 already uses, and it adds no type and no handler. It is a
+record-level admission rule on a field, and it is not a governance write.
+
+**The reserved acts and their holders.** The ruling is the rule above. The table is the classification of the acts
+found in the foundation by a sweep for acts keyed on the operator. The classification of each row is derived, is
+not exhaustive, and is open to the operator's correction, except where a row cites a decision that rules it. An
+act the design reserves to the operator and the table does not list is the instance owner's by the rule.
+
+| Act | Where stated | Holder |
+|---|---|---|
+| Writing a `waived` verdict | `gates_and_workflows.md#declaration-batch-projection` | instance owner only; not delegable |
+| The marked self-resolution of a checkpoint the resolver raised | `#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked` | instance owner only |
+| Resolving a checkpoint on an `operator_only` action | `#approval` | instance owner only |
+| Approving a governance write in a class reserved to the operator (the high-tier and `NEVER` classes), including an intake rule and a planning mission amendment | `work_model.md#changing-the-swarm-is-work-and-it-goes-through-a-workflow-like-any-other` | instance owner only |
+| Setting or changing a per-payee payment cap | `payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record` | instance owner only (decision 160, ruled 2026-10-22) |
+| Lifting a halt | `failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken` | instance owner only (decision 159, ruled 2026-10-22) |
+| Out-of-band provisioning: minting or widening a credential, binding a credential to an owner's `operator` entity, joining a workspace, widening a grant, designating or removing an instance owner | `#grants`, `adapters.md#per-agent-credentials-where-the-system-issues-them-a-shared-credential-where-it-does-not` | instance owner only |
+| Invoking a halt | `failure_posture.md#the-operator-invoked-halt-and-what-undoes-an-action-already-taken` | any operator whose grants admit it; not a reserved act (decision 159, ruled 2026-10-22) |
+| Resolving an ordinary checkpoint (yes, no, or veto), including one on a payment | `#approval` | any operator whose grants make them a required approver; for a payment, granted per class and never implied by a general resolve grant |
+
+**The last two rows are not reserved acts, which is why a grant can admit them.** A halt only ever restricts, so
+inviting it needs no reservation, while lifting it resumes work and is reserved. The rule that no grant extends a
+reserved act therefore holds without exception: every act a grant can admit is, by that fact, not a reserved act.
+
+**How the design's "the operator resolves" is read.** Where the corpus says the operator resolved a checkpoint,
+it means an operator whose grants make them a required approver for that class, except for the reserved acts in
+the table above, where it means an instance owner. Payment approval is granted to a staff operator per class of
+checkpoint, as an explicit grant for that class, and is never implied by a general grant to resolve checkpoints.
+The cap-permitting checkpoint, the waiver, and the `self_resolved` mark are the instance owner's wherever the
+schema or the payments document tests the resolver.
+
+**Self-resolution is the instance owner's only.** Decision 47's exception is argued from the solo owner's
+governance writes, which only the owner can resolve. It carries to the instance owner and no further, and no
+grant carries it. A staff operator who is the raiser of a checkpoint under the counting rule is refused resolving
+it, marked or not. Authoring a draft is not raising its checkpoint, because the gate raises it
+(`#an-application-resolves-checkpoints-and-holds-no-approval-state-of-its-own`), so a staff operator approving
+the edit they wrote is not self-resolution and is not reserved.
+
+**Cost accepted.** A client whose staff must hold a reserved act makes that person an instance owner, which gives
+them every reserved act: no narrower holder exists. The design's many sentences saying "the operator" are read as
+the instance owner without being rewritten here; the definitions that state a reserved act (the waiver,
+decision 47, and the `operator` entry) say so explicitly, and a sentence elsewhere is read against them. **What
+would reopen it:** an act that a client needs a non-owner to hold, which would be argued as a narrower holder and
+not as a grant.
+
+**Matrix.** No row is added here. The planted refusals are a staff operator who is not an instance owner writing a
+`waived` verdict, resolving a checkpoint on an `operator_only` action, resolving a checkpoint they raised with the
+`self_resolved` mark, approving a reserved-class governance write, setting a per-payee cap, lifting a halt, and
+designating an instance owner; a staff operator holding a plain write grant on `operator` setting the mark on
+themselves; the mark arriving by sync, reissue, merge, split, or a `principal_binding` write; a `principal_binding`
+onto an owner's entity written by a non-owner; a merge, split, delete, or erasure of the last owner's entity; the
+last owner's mark being cleared; a grant that names a reserved act being admitted; an `ownership_grant` on another
+object conferring a reserved act; an instance with no owner admitting a reserved act; an instance owner mark
+arriving in a reissue; and a staff operator approving a payment checkpoint on a general resolve grant with no grant
+for the payment class. They are added to `conformance_suite.md` in a later change.
+
 ## Grants
 
 **The rules in this section.**
 
 - A degraded read never synthesizes a value more permissive than success would have returned.
 - Write admission per entity type is default-deny, and the grant is the allowlist (ruled, decision 41, 2026-09-06).
+- Write admission per **relationship** type is the same default-deny shape, on an optional `relationship_types[]` beside `entity_types[]` (ruled, decision 117, 2026-09-22; G25 / neotoma#2357 merged 2026-09-21).
 - A harness provides only the capabilities the principal's grant names, and a non-enforcing provider is one of them (ruled, decision 87, 2026-09-08).
 - A parameter constraint on a write capability is a field allowlist.
 - The tenant a grant is scoped to is carried on the grant, and is never derived from the credential's subject (ruled, decision 80, 2026-09-07).
@@ -341,6 +534,7 @@ the credential form here untouched, since the several-instance case this ruling 
 - A denial raises a checkpoint, and the denied principal does not route around it.
 - Custody by revocability.
 - Rotation is staged, never a flag day.
+- A swarm-run rotation verifies with a live check before retiring the old credential, and rolls back if the check fails (operator ruling, 2026-09-26).
 - Revocation's reach is every grant that matched the credential, and it is only as fast as the check that reads it.
 
 An `agent_grant` is matched on the credential (`sub`, `iss`) and lists capabilities as operation × entity
@@ -462,6 +656,59 @@ retrieval contract already states. **What would reopen it:** an enforcement poin
 disclosure is not a schema fact — a per-row read refusal that leaks whether a named person is in the
 record — which is the tenancy question above and would be argued there, not here.
 
+**Write admission per relationship type is default-deny, and the grant is the allowlist, on the same
+shape decision 41 already states for entity types (ruled, decision 117, 2026-09-22; G25 / neotoma#2357
+merged 2026-09-21).** Registered in `conformance.md#the-register-of-open-design-decisions`. Decision 41 rules
+write admission for entities; it says nothing about a relationship write, and before this ruling nothing
+in the corpus did — the only hit anywhere for "relationship write" or "edge write" governs acyclicity
+(`conformance.md` register row 102), not admission. The gap became concrete under decision 101: minting
+the `principal_binding` edge that lets a credential act as a principal is the single most powerful write
+in the record, and no rule admitted or refused it. **This rules it: a capability entry gains an optional
+`relationship_types[]` beside its `entity_types[]`, and absent or empty means default-deny for edges,
+exactly as zero entity types already means deny for entities.** A capability naming a relationship type
+permits writes of that type and denies every other; a wildcard over relationship types is not an
+allowlist but the same fail-open shape the entity-type wildcard already names above.
+
+Three grounds, carried from the ruling rather than re-derived here. It extends the mechanism that already
+generalizes (principle 6) instead of standing a second gate on the write path — the shape decisions 56 and
+97 each already rejected, decision 56 for a governance write's enforcement point and decision 97 for every
+agent's read and write, both on the same invariant. It is additive: a grant naming no relationship type
+keeps exactly today's meaning until enforcement, which this row does not assert, so nothing already granted
+changes semantics on the day this lands. And it
+needs nothing the tuple does not already have — a capability is already operation × entity types ×
+repositories with zero grants deny, and decision 41 already calls a wildcard over types "the fail-open
+shape, not an allowlist," which a wildcard over relationship types would be too.
+
+**Two bounding conditions, part of the ruling and not separable from it.** A relationship write inside
+decision 43's closed thirteen-record bootstrap set is admitted by membership in that set and by nothing
+else — no standing operator bypass, so the operator's own credential binding (bootstrap step 3, written
+before any grant exists to admit it) stays admitted the way it is admitted today. And the register did not
+read **ruled** while G25 was unlanded: a grant cannot name a type the record has no registry for. G25 merged
+as neotoma#2357 on 2026-09-21, so the dependency is met and the ruling may now bind named relationship
+types.
+
+**What this does not do.** It does not close the 2026-09-07 exposure in which a subagent read a credential
+file whole and obtained thirty-five variables no grant declared (`conformance.md` register row 105). That
+is a read of a process environment, not a record write, so no admission rule at the record intercepts it;
+it stays ateles#946 and ateles#1047's, judged by AU-11 below. What this ruling changes is what a stolen
+credential is *worth*: with edge writes governed, the credentials that can exist are the ones a
+`principal_binding`-writing grant minted, so revocation reaches every one of them through the same read
+AU-13 already makes, rather than through a convention nothing enforced.
+
+**What this does not settle**, left open on the ruling's own instruction: whether `principal_binding` and
+`delegation_edge` join the closed governance list of eight and who is sole writer for each; whether
+`ownership_grant` passes the admission test at all, given `#what-owning-confers-the-required-seat` bounds
+it to naming accountability rather than the ability to act; whether read admission (decision 94, above)
+widens to relationship types the way it is ruled for entity types; and whether a parameter constraint — a
+field allowlist on an entity write — has an edge-property analogue, which for `principal_binding` would
+now reach `credential_value`.
+
+**Recorded as a live-record fact, not a design one, and not resolved here.** Four `agent_grant` entities
+on the live instance already carry `create_relationship` scoped `["*"]` — edge authority issued as an
+all-or-nothing wildcard. Under this ruling that is exactly the default-allow shape this rule and decision
+41 both reject. This ruling neither narrows, revokes, nor grandfathers them; the migration question is
+open.
+
 **A parameter constraint on a write capability is a field allowlist.** The grant that admits a principal's
 writes to a type may name the fields it may write, and a write carrying a field outside them is denied at
 admission exactly as a write to a type the grant does not name is — read at the write, structured, and never
@@ -548,6 +795,22 @@ credential replaced in one step is a principal whose grants stop matching. So th
 admitted alongside the old one — the grant matching it is written and read back — *before* the agent
 presents it, and the old credential is retired only after read-back shows admissions arriving on the new
 one. The dual-admit window is the whole point: at no moment is the set of matching grants empty.
+
+**A swarm-run rotation verifies with a live check before retiring the old credential, and rolls back if the
+check fails** (operator ruling, 2026-09-26). Where the credential being rotated is one the swarm both
+issues and consumes — an agent's signing key, a shared secret internal to the record
+(`adapters.md#aauth-is-the-internal-credential-not-a-second-identity-system`) — no operator approval gates
+the rotation itself, but the staging above is not enough on its own: dual-admit shows the new credential's
+grant matching on read-back, which is a record-side fact, and says nothing about whether the credential
+actually works where it is presented. So a swarm-run rotation adds one more condition before it retires the
+old credential — a live check exercising the new one against what it is for, not merely that the record
+now admits it — and retires the old credential only once that check passes. A check that fails, or that
+cannot be run, is not a hold: the rotation rolls back, restoring the old credential's standing rather than
+leaving both in an ambiguous state, and either outcome — the check passing and the old credential retired,
+or the check failing and the rotation rolled back — is written to the record with what the check found, so
+the operator reads what happened rather than being asked to approve what is about to. This is the
+dual-admit rule with a gate added on its far side, not a replacement for it — the new credential still
+enters through dual-admit, and what changes is what is required before the old one leaves.
 
 **Revocation's reach is every grant that matched the credential, and it is only as fast as the check that
 reads it.** Withdrawing a credential withdraws every capability any grant conferred on it, across every
@@ -1195,7 +1458,8 @@ using C's state under D's policy, and every hop is reconstructible.
 
 - A required approver is a principal, a role the roster resolves, or the principal an `ownership_grant` names on an entity the subject concerns.
 - A resolution on an `operator_only` action is the operator's decision, never the confirmation that the effect happened.
-- [The raiser of a checkpoint does not resolve it, and the operator's self-resolution is marked](#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked).
+- [The raiser of a checkpoint does not resolve it, and the instance owner's self-resolution is marked](#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked).
+- [An application resolves checkpoints and holds no approval state of its own](#an-application-resolves-checkpoints-and-holds-no-approval-state-of-its-own).
 
 An approval is an explicit yes, no, or veto by a required principal on a `checkpoint`, whose subject is
 an action held at the gate or a task the swarm cannot advance (`gates_and_workflows.md#the-checkpoint`),
@@ -1231,15 +1495,15 @@ the swarm may not reach; `approved` records that decision, and what confirms the
 the operator's report written as one (`gates_and_workflows.md#an-operator_only-action-is-taken-by-the-operator-and-the-step-that-carries-it-closes-on-the-confirmation-never-on-the-resolution`). Principle 2 holds for the operator as for
 any principal.
 
-### The raiser of a checkpoint does not resolve it, and the operator's self-resolution is marked
+### The raiser of a checkpoint does not resolve it, and the instance owner's self-resolution is marked
 
 **Ruled (decision 47, 2026-09-06, with 43): the principal that raised a checkpoint may not resolve it, with
 one exception — the operator may resolve a checkpoint the operator raised, and the resolution is marked
 self-resolved on the record.** Registered as ruled in `conformance.md#the-register-of-open-design-decisions`.
 A resolution is authorized against `AWAITS` and refused where the resolver, under the counting rule
 (`#the-counting-rule-an-agent-counts-as-its-bound-principal`), is the principal `RAISED_BY` names — an agent
-bound to the operator raising a checkpoint the operator resolves is the operator resolving its own. The
-operator's resolution of the operator's own checkpoint is admitted only where it carries the `self_resolved`
+bound to the operator raising a checkpoint the operator resolves is the operator resolving its own. **Amended (decision 158, 2026-10-22, the operator's): the exception is the instance owner's alone and not every operator's, no grant extends it, and a staff operator is refused it** (`#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`). The
+instance owner's resolution of a checkpoint they raised is admitted only where it carries the `self_resolved`
 mark (`data_model.md#concepts`); a self-resolution written without the mark is refused, as every other
 principal's is refused with or without one.
 
@@ -1284,6 +1548,82 @@ table is carried by the roster and the channel binding, as the paragraph above a
 a field of it, the name deferred to a vocabulary pass under invariant 12
 (`adapters.md#whether-one-binding-type-or-two-names-an-external-systems-instance`).
 
+### An application resolves checkpoints and holds no approval state of its own
+
+**Ruled (decisions 146 and 147, 2026-10-19, the operator's).** Registered as ruled in
+`conformance.md#the-register-of-open-design-decisions`. Who the staff are is decision 146, above under
+*Principals*; this section states what they do with the checkpoint and what an edit is.
+
+**The rules in this section.**
+
+- An application is a surface for resolving checkpoints and closing operator-facing steps; it keeps no
+  approval state.
+- The approve control resolves the checkpoint the gate wrote on the action, and the send happens at the take.
+- An edit becomes a new draft, the lint runs, and the checkpoint is resolved on that exact draft, enforced at
+  the record.
+
+**An application never holds an approval state of its own.** A field on a draft that reads unapproved, edited, or
+approved, which the send path then reads, is a second gate beside the action gate. It is also invisible to the
+checkpoint protocol, the audit trail, and the one queue of the instance's operators. The design states the
+opposite: the approve control in an application **resolves the checkpoint the gate wrote** on the
+`send_external_comms` action (or on whatever class the held action carries), by an operator whose grant admits
+it, attributed to that person. The send is then taken through the gate at the take, which reads the standing
+resolution, the parameters, the policy as read then, and the dedup key
+(`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`),
+exactly as in `outreach` (`workflows.md#outreach`). An application may display a state derived from the
+checkpoint and the draft; it never writes one.
+
+**An edit is consented to as a new draft (decision 147).** `outreach` already states that any change after
+consent is a new `draft` that re-enters at the lint step. A staff member editing and approving in one gesture
+needs a stated shape, and it is this:
+
+1. The edit is written as a **new draft** in the record, attributed to the staff operator who made it.
+2. The **lint runs** on that draft, and the application shows its result inline.
+3. If the lint passes, the staff member's approval **resolves the checkpoint carrying that exact draft**, whose
+   text the checkpoint shows in full.
+
+The approval therefore consents to the text that is sent, and a draft that has been consented to cannot be
+refused afterwards for a lint it never faced. A checkpoint that carried the earlier draft is not resolved by the
+approval of the later one.
+
+**Stated alongside the ruling, from the issue's gap list, so that the gesture binds at the record and not at the
+screen.**
+
+- **The draft is a compared parameter.** The draft body, or its content hash, is among the parameters the gate
+  compares at the take against the checkpoint's, and it is compared exactly: the class's `consent_tolerance`
+  governs a figure and never text, so no tolerance admits an edited body.
+- **The lint verdict is a precondition at the record.** A resolution that approves a checkpoint carrying a draft
+  is refused unless a passing lint verdict names that exact draft. Not offering the approve control after a
+  failed lint is a convenience of the screen; a stale screen, or a staff operator holding the resolve grant who
+  writes the resolution directly, is refused the same.
+- **Who raises the checkpoint on an edited draft.** The gate raises it when the consent step of the edited draft
+  opens, through the step runner and the operator-facing agent, never the editor. Authoring a draft is not
+  raising its checkpoint, so the raiser-does-not-resolve rule (decision 47) does not stop a staff operator from
+  approving their own edit: the checkpoint's raiser counts as the principal the operator-facing agent is bound
+  to, and the editor is a different principal. The reserved self-resolution exception is not involved
+  (`#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`).
+- **What the staff member sees and does when their edit fails the lint.** The findings are shown inline against
+  the draft they wrote. No approval is offered, and the draft is not sent. The staff member may correct it and
+  submit a further new draft, which is lint-checked in turn, or hand it back to the step the declaration names
+  on fail, where the drafting agent redrafts; the failed draft stays in the record as history.
+- **What the staff member sees when the second write fails.** If the draft is written and the resolution is not,
+  the application says plainly that the approval did not land. The draft stands unconsented in the record and
+  sends nothing.
+
+**Why the lint runs before the approval and not at the take.** The alternative attaches approval to the edited
+text and runs the lint at the take, so a lint that fails after approval needs a second round with the same
+person and a consented draft can still be refused. Doing it first costs about a second of latency per edit
+and keeps the `outreach` rule unchanged: the consented draft is the sent draft.
+
+**Cost accepted.** An edit-and-approve is two writes (the draft and the resolution) that the application
+presents as one gesture. **What would reopen it:** a lint whose runtime makes the inline wait unusable, which
+would argue for the take-time alternative on that class alone.
+
+**Matrix.** No row is added here. The planted refusals this ruling calls for are an approval that carries text
+other than the draft's; a resolution written directly on a checkpoint whose draft has no passing lint verdict
+naming it; an edited body admitted by a consent tolerance; and a staff operator resolving a checkpoint they
+raised; they are added to `conformance_suite.md` in a later change.
+
 ## Structural checks: quorum and separation of duties
 
 **The rules in this section.**
@@ -1317,7 +1657,10 @@ the one type, told apart by `credential_kind` (decision 101,
 `#what-the-credential-binding-carries-and-what-a-check-reads-to-resolve-a-credential-to-a-principal`): its
 AAuth edge ends at the **agent**, and its acts-as edge ends at the **operator**. This rule reads the
 acts-as edge and so counts the operator. Reading the AAuth edge instead would count the agent, which is the
-attack this section exists to prevent — two agents under one operator would then be two interests.
+attack this section exists to prevent — two agents under one operator would then be two interests. The
+exceptions are the builder and review pair, which decision 143 reads on the AAuth edge, and the payer and
+verifier of a payment released without a checkpoint, which decision 144 reads the same way
+(`#structural-checks-are-reads-over-the-checkpoints-principal-edges`).
 
 **Why.** Principle 5 chooses the restrictive branch: counting an agent as its principal yields fewer
 distinct interests, so a quorum is harder to reach and a separation stricter to satisfy, and the failure of
@@ -1355,6 +1698,31 @@ need a process to keep its count true where the edges need none (principle 11).
 
 **What would reopen it.** A structural check whose inputs are not on the checkpoint — one over principals
 who never resolved and were never awaited — which would first have to say what object it was a check on.
+
+**Extended by decision 143 (2026-10-13), to a pair read over the verdict.** The agent that built an artifact
+never signs a review step on it (`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`). Its
+inputs are not on a checkpoint: they are the verdict's `SIGNED_BY` edge, the batch's `PRODUCES` edges, and the
+actors recorded on the artifact's observations. That is the condition the reopening clause above names, and
+decision 143 meets it once, deliberately, as a default applied by consistency
+(`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`), not as a word of the operator's
+ruling: it extends decision 49 from the checkpoint's principal edges to the verdict's signer and the batch's
+artifacts, naming the verdict as the object it checks. What survives of decision 49 is the ground it gives for
+refusing a second mechanism: the extension adds no vote entity, no tally and no held state, and needs no process
+to keep it true (principle 11). It also departs from decision 48 for this pair alone: it reads the agent's own
+binding, the one that ends at the agent, and not the acts-as binding that ends at the operator, so two agents
+bound to one operator are two distinct signers here
+(`#the-counting-rule-an-agent-counts-as-its-bound-principal`, decision 143). The pair is fixed by the design and
+is not an `action_policy` value.
+
+**Decision 144 (2026-10-13) reads the payer and the verifier of a payment the same way, where no checkpoint is
+written.** This is a default applied by consistency with decision 143, not a word of the operator's ruling, and it
+meets the reopening clause of decision 49 again (above): the check's inputs are the verdict's signer, the roster and
+the leases, not a checkpoint's principal edges. A payment released without a checkpoint (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`)
+has no resolution for the checkpoint's principal edges to be read over, so the structural check is a read the gate makes of the verdict's
+signer against the payer: at the first evaluation the signer of the `prepare` verdict and the agents the roster seats in the `pay` role, at the take the credential presenting it, and the verifier holds none of the payer-slot leases. It is read on the agent's own binding and not the acts-as binding, because
+under decision 48's counting rule two agents of one operator are one interest and the condition could never
+hold in a deployment whose agents all act for the operator. The payer and verifier of a payment that does wait
+on a checkpoint are unchanged.
 
 ### The threshold's home is the `action_policy`, per class
 
@@ -1580,7 +1948,8 @@ as `Permit`. Cedar's rule (zero permits is deny; forbid wins) is the fix. Attenu
 (macaroons) is the invariant delegation carries. RFC 8693's nested `act` claim is the shape of
 `authority_chain`. Clark-Wilson's caveat, that separation of duties fails under collusion, is why an
 operator and the agents they built may count as one interest (Q1). GitHub's prevent-self-review and NIST
-dynamic separation of duty are the smallest structural check. Sources: `ent_08460968e6f49dac21510f4a`.
+dynamic separation of duty are the smallest structural check, and prevent-self-review applies literally to the
+builder and review pair (decision 143). Sources: `ent_08460968e6f49dac21510f4a`.
 
 ## Beyond the sources
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from lib.daemon_runtime import task_lifecycle as tl
 from lib.daemon_runtime.task_lifecycle import (
     MAX_ATTEMPTS,
@@ -48,6 +50,7 @@ def test_failure_and_recovery_transitions():
     assert can_transition("failed", "routed")     # retry
     assert can_transition("failed", "blocked")    # give up
     assert can_transition("blocked", "routed")    # operator remediation
+    assert not can_transition("verified", "failed")  # effect is not retryable
 
 
 def test_terminal_states_are_locked():
@@ -105,6 +108,34 @@ def test_set_status_remediation(monkeypatch):
     assert fields == {"status", "remediation_id"}
 
 
+def test_a_failed_companion_write_is_a_failed_status_write(monkeypatch):
+    """The status lands but its reason does not: not reported as complete."""
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+    def post(url, headers=None, json=None, timeout=None):
+        if json["field"] == "blocked_reason":
+            raise RuntimeError("write rejected")
+        return _Resp()
+
+    monkeypatch.setattr(tl.httpx, "post", post)
+    assert tl.set_task_status("ent_t", TaskStatus.PENDING, handler="apis", reason="why") is False
+    assert tl.set_task_status("ent_t", TaskStatus.PENDING, handler="apis") is True
+
+
+def test_set_task_field_writes_one_field_and_reports_failure(monkeypatch):
+    calls = _capture(monkeypatch)
+    assert tl.set_task_field("ent_t", "disposition", "x", handler="apis", key_suffix="k")
+    (call,) = calls
+    assert call["json"]["field"] == "disposition" and call["json"]["value"] == "x"
+    assert call["json"]["idempotency_key"] == "taskfield-apis-ent_t-disposition-k"
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "")
+    assert tl.set_task_field("ent_t", "disposition", "x", handler="apis") is False
+
+
 def test_set_status_fail_open_without_token(monkeypatch):
     monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "")
     # No token → returns False, never raises.
@@ -118,3 +149,242 @@ def test_set_status_fail_open_on_http_error(monkeypatch):
     monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
     monkeypatch.setattr(tl.httpx, "post", boom)
     assert tl.set_task_status("ent_t", TaskStatus.ROUTED, handler="apis") is False
+
+
+# ── complete_task_with_result (ateles#1155) ─────────────────────────────────
+
+_HEADER = "[cicada] pull_request_link: https://github.com/markmhendrickson/ateles/pull/999"
+
+
+class _FakeTaskStore:
+    """A stand-in Neotoma task entity: `/correct` writes here, snapshots read here.
+
+    `drop` names fields whose writes return 2xx but are silently NOT applied
+    (the undeclared-field / idempotency-replay failure mode), and `mangle`
+    maps a field to the value actually stored instead of the one written.
+    """
+
+    def __init__(self, *, drop=(), mangle=None):
+        self.fields: dict = {"status": "executing", "result": ""}
+        self.drop = set(drop)
+        self.mangle = dict(mangle or {})
+        self.writes: list[tuple[str, object]] = []
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        field, value = json["field"], json["value"]
+        self.writes.append((field, value))
+        if field not in self.drop:
+            self.fields[field] = self.mangle.get(field, value)
+        return _Resp()
+
+    def snapshot(self, _entity_id):
+        return dict(self.fields)
+
+
+def _use_store(monkeypatch, store):
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(tl.httpx, "post", store.post)
+
+
+def test_complete_writes_result_before_status_and_reads_both_back(monkeypatch):
+    """Order is the point, and the outcome is only truthy once state read back.
+
+    `set_task_status` writes `status` first and its companions after, so a
+    process killed between the two leaves a task reading DONE with no artifact
+    reference. This path writes the reference first.
+    """
+    store = _FakeTaskStore()
+    _use_store(monkeypatch, store)
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result=_HEADER, fetch_snapshot=store.snapshot,
+        from_status="executing",
+    )
+    assert outcome and outcome.stage == "done"
+    assert [f for f, _ in store.writes] == ["result", "status"]
+    assert store.fields == {"status": "done", "result": _HEADER}
+
+
+def test_complete_never_writes_done_when_result_does_not_read_back(monkeypatch):
+    """NEGATIVE effect test: goes RED if the result read-back is removed.
+
+    The `/correct` call for `result` returns 2xx but the entity keeps the old
+    value. Without the read-back the status write still happens and the task
+    reads DONE carrying no (or the wrong) artifact reference.
+    """
+    store = _FakeTaskStore(drop={"result"})
+    _use_store(monkeypatch, store)
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result=_HEADER, fetch_snapshot=store.snapshot,
+    )
+    assert not outcome and outcome.stage == "result_readback"
+    assert "status" not in [f for f, _ in store.writes], "wrote DONE unproven"
+    assert store.fields["status"] == "executing"
+
+
+def test_complete_rejects_a_result_that_reads_back_as_something_else(monkeypatch):
+    """Equality, not presence: a stale or truncated earlier value is not the header."""
+    store = _FakeTaskStore(mangle={"result": "cicada completed (trigger=created)"})
+    _use_store(monkeypatch, store)
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result=_HEADER, fetch_snapshot=store.snapshot,
+    )
+    assert not outcome and outcome.stage == "result_readback"
+    assert "status" not in [f for f, _ in store.writes]
+
+
+def test_complete_is_not_ok_when_terminal_status_does_not_read_back(monkeypatch):
+    """NEGATIVE effect test: goes RED if the status read-back is removed.
+
+    The `status` write returns 2xx but the entity is not DONE. The caller must
+    be told, because it is about to claim `job.finished`.
+    """
+    store = _FakeTaskStore(drop={"status"})
+    _use_store(monkeypatch, store)
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result=_HEADER, fetch_snapshot=store.snapshot,
+    )
+    assert not outcome and outcome.stage == "status_readback"
+    assert outcome.detail
+    assert store.fields["status"] == "executing"
+
+
+def test_complete_fails_closed_when_the_snapshot_read_raises_or_is_missing(monkeypatch):
+    store = _FakeTaskStore()
+    _use_store(monkeypatch, store)
+
+    def boom(_id):
+        raise RuntimeError("neotoma down")
+
+    for reader in (boom, lambda _id: None):
+        store.fields.update(status="executing", result="")
+        outcome = tl.complete_task_with_result(
+            "ent_t", handler="apis", result=_HEADER, fetch_snapshot=reader,
+        )
+        assert not outcome and outcome.stage == "result_readback"
+        assert "status" not in [f for f, _ in store.writes]
+
+
+def test_complete_idempotency_key_carries_artifact_identity(monkeypatch):
+    """Two attempts naming different artifacts must not dedupe into one write."""
+    calls = _capture(monkeypatch)
+    for ref in ("owner/repo#1", "owner/repo#2"):
+        tl.complete_task_with_result(
+            "ent_t", handler="apis", result=ref, artifact_identity=ref,
+            fetch_snapshot=lambda _id, ref=ref: {"status": "done", "result": ref},
+        )
+    keys = [c["json"]["idempotency_key"] for c in calls]
+    assert len(set(keys)) == len(keys), keys
+    assert all("owner/repo#" in k for k in keys)
+
+
+def test_complete_fail_open_without_token(monkeypatch):
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "")
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result="x", fetch_snapshot=lambda _id: {},
+    )
+    assert not outcome and outcome.stage == "result_write"
+
+
+def test_complete_is_not_ok_when_the_result_changes_after_the_status_write(monkeypatch):
+    """Pins the `result` clause of the terminal read-back.
+
+    The status write lands (`done`), but the entity's `result` no longer equals
+    the artifact the completion rests on (a concurrent or replayed write). A
+    DONE task whose result is not the header is exactly the false completion
+    this gate exists to stop, so the outcome must not be ok. Goes RED if the
+    `result` comparison is dropped from the post-status read-back.
+    """
+    store = _FakeTaskStore()
+    real_post = store.post
+
+    def post_then_clobber_result(url, headers=None, json=None, timeout=None):
+        resp = real_post(url, headers=headers, json=json, timeout=timeout)
+        if json["field"] == "status":
+            store.fields["result"] = "cicada completed (trigger=created)"
+        return resp
+
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(tl.httpx, "post", post_then_clobber_result)
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result=_HEADER, fetch_snapshot=store.snapshot,
+    )
+    assert not outcome and outcome.stage == "status_readback"
+    assert store.fields["status"] == "done"
+
+
+# ── conditional writes (/correct with expected_version) ─────────────────────
+
+
+class _VersionedResp:
+    def __init__(self, status=200, body=None):
+        self.status_code = status
+        self._body = body if body is not None else {}
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+def _versioned(monkeypatch, response):
+    calls: list[dict] = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append({"url": url, "json": json})
+        return response
+
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(tl.httpx, "post", fake_post)
+    return calls
+
+
+def test_a_conditional_write_sends_the_version_and_returns_the_fresh_one(monkeypatch):
+    calls = _versioned(monkeypatch, _VersionedResp(200, {"entity_version": "b" * 64}))
+    write = tl.set_task_field_if_version(
+        "ent_t", "disposition", "x", expected_version="a" * 64, handler="apis", key_suffix="k"
+    )
+    assert write.ok and not write.conflict and write.version == "b" * 64
+    (call,) = calls
+    assert call["url"].endswith("/correct")
+    assert call["json"]["expected_version"] == "a" * 64
+    assert "overwrite" not in call["json"], "a stale-version refusal must not be overridable"
+    assert call["json"]["field"] == "disposition" and call["json"]["entity_type"] == "task"
+
+
+def test_a_stale_version_is_a_conflict_and_not_a_failure_to_retry_blindly(monkeypatch):
+    _versioned(monkeypatch, _VersionedResp(409, {"error_code": "ERR_FIELD_VERSION_CONFLICT"}))
+    write = tl.set_task_field_if_version(
+        "ent_t", "disposition", "x", expected_version="a" * 64, handler="apis"
+    )
+    assert write.conflict and not write.ok and write.version is None
+
+
+def test_other_errors_are_failures_not_conflicts(monkeypatch):
+    _versioned(monkeypatch, _VersionedResp(409, {"error_code": "ERR_SOMETHING_ELSE"}))
+    write = tl.set_task_field_if_version("ent_t", "f", "x", expected_version="a" * 64, handler="apis")
+    assert not write.ok and not write.conflict
+    _versioned(monkeypatch, _VersionedResp(500, {}))
+    write = tl.set_task_field_if_version("ent_t", "f", "x", expected_version="a" * 64, handler="apis")
+    assert not write.ok and not write.conflict
+
+
+@pytest.mark.parametrize("token", [None, ""])
+def test_without_a_version_nothing_is_written_at_all(monkeypatch, token):
+    calls = _versioned(monkeypatch, _VersionedResp(200, {}))
+    write = tl.set_task_field_if_version("ent_t", "f", "x", expected_version=token, handler="apis")
+    assert not write.ok and calls == []
+
+
+def test_the_snapshot_and_its_version_come_from_one_read(monkeypatch):
+    from lib.daemon_runtime import gating
+
+    monkeypatch.setattr(
+        gating, "fetch_task_record",
+        lambda tid: {"entity_type": "task", "entity_version": "c" * 64, "snapshot": {"snapshot": {"status": "pending"}}},
+    )
+    snap, version = gating.fetch_task_snapshot_and_version("ent_t")
+    assert snap["status"] == "pending" and version == "c" * 64
+    monkeypatch.setattr(gating, "fetch_task_record", lambda tid: None)
+    assert gating.fetch_task_snapshot_and_version("ent_t") == (None, None)

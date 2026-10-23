@@ -5,11 +5,11 @@
 
 Which rules a lens reviewing for one kind of failure should select, by the conformance class the matrix assigns each row (`conformance_suite.md#how-the-suite-judges-and-what-a-row-is`). This is an index of row ids and the file each is projected into — the statements themselves are in those files and are not repeated here, so there is one copy of every rule in this directory.
 
-## Class M — 364 rules
+## Class M — 390 rules
 
 - [`adapters.md`](adapters.md) — AD-1, AD-2, AD-3, AD-4, AD-5, AD-6, AD-7, AD-8, AD-8a, AD-9, AD-10, AD-11, AD-12, AD-13, AD-14, AD-15, AD-16, AD-17, AD-18, AD-19, AD-20, AD-21, AD-22, AD-23, AD-24, AD-25, AD-26, AD-27, AD-28, AD-29, AD-30, AD-31, AD-32, AD-33, AD-34, AD-36, AD-37, AD-38, AD-39, AD-40, AD-41, AD-42
 
-- [`authority_model.md`](authority_model.md) — AU-1, AU-2, AU-3, AU-4, AU-5, AU-7, AU-8, AU-9, AU-10, AU-11, AU-12, AU-13, AU-14, AU-15, AU-16, AU-17, AU-18, AU-19, AU-20, AU-21
+- [`authority_model.md`](authority_model.md) — AU-1, AU-2, AU-3, AU-4, AU-5, AU-7, AU-8, AU-9, AU-10, AU-11, AU-12, AU-13, AU-14, AU-15, AU-16, AU-17, AU-18, AU-19, AU-20, AU-21, AU-22, AU-23, AU-24, AU-25, AU-26, AU-27, AU-28
 
 - [`calendar.md`](calendar.md) — CA-1, CA-2, CA-3, CA-4, CA-5, CA-6, CA-7, CA-8
 
@@ -19,7 +19,7 @@ Which rules a lens reviewing for one kind of failure should select, by the confo
 
 - [`failure_posture.md`](failure_posture.md) — GW-50, FP-1, FP-2, FP-3, FP-4, FP-5, FP-6, FP-7, FP-8, FP-9, FP-10, FP-11, FP-12, FP-13, FP-14, FP-15, FP-16, FP-17, FP-18, FP-19, FP-20, FP-21, FP-22, FP-23, FP-24
 
-- [`gates_and_workflows.md`](gates_and_workflows.md) — GW-1, GW-2, GW-3, GW-3a, GW-4, GW-5, GW-6, GW-7, GW-8, GW-9, GW-10, GW-11, GW-12, GW-13, GW-14, GW-15, GW-16, GW-17, GW-18, GW-19, GW-20, GW-21, GW-22, GW-23, GW-24, GW-25, GW-25a, GW-26, GW-27, GW-28, GW-29, GW-29a, GW-30, GW-31, GW-32, GW-33, GW-33a, GW-34, GW-35, GW-36, GW-37, GW-38, GW-39, GW-40, GW-41, GW-42, GW-43, GW-44, GW-45, GW-46, GW-47, GW-48, GW-49, GW-52, GW-53, GW-54, DM-28
+- [`gates_and_workflows.md`](gates_and_workflows.md) — GW-1, GW-2, GW-3, GW-3a, GW-4, GW-5, GW-6, GW-7, GW-8, GW-9, GW-10, GW-11, GW-12, GW-13, GW-14, GW-15, GW-16, GW-17, GW-18, GW-19, GW-20, GW-21, GW-22, GW-23, GW-24, GW-25, GW-25a, GW-26, GW-27, GW-28, GW-29, GW-29a, GW-30, GW-31, GW-32, GW-33, GW-33a, GW-34, GW-35, GW-36, GW-37, GW-38, GW-39, GW-40, GW-41, GW-42, GW-43, GW-44, GW-45, GW-46, GW-47, GW-48, GW-49, GW-52, GW-53, GW-54, GW-55, DM-28
 
 - [`github.md`](github.md) — GH-1, GH-2, GH-3, GH-4, GH-5, GH-6, GH-7, GH-8, GH-9, GH-10, GH-11, GH-12, GH-13, GH-14, GH-15, GH-16, GH-16a, GH-17, GH-18
 
@@ -27,9 +27,9 @@ Which rules a lens reviewing for one kind of failure should select, by the confo
 
 - [`migration.md`](migration.md) — MG-1, MG-2, MG-3, MG-4, MG-5, MG-6, MG-7, MG-8, MG-9, MG-10, MG-13
 
-- [`payments.md`](payments.md) — PY-1, PY-2, PY-3, PY-3a, PY-4, PY-5, PY-5a, PY-6, PY-7, PY-8, PY-9, PY-10, PY-11, PY-12, PY-13, PY-14, PY-15
+- [`payments.md`](payments.md) — PY-1, PY-2, PY-3, PY-3a, PY-4, PY-5, PY-5a, PY-6, PY-7, PY-8, PY-9, PY-10, PY-11, PY-12, PY-13, PY-14, PY-15, PY-16, PY-16a, PY-16b, PY-16c, PY-16d, PY-16e, PY-16f, PY-16g, PY-17, PY-18, PY-19, PY-20, PY-21
 
-- [`planning_model.md`](planning_model.md) — PM-1, PM-2, PM-3, PM-4, PM-5, PM-6, PM-7, PM-8, PM-9, PM-10, PM-11
+- [`planning_model.md`](planning_model.md) — PM-1, PM-2, PM-3, PM-4, PM-5, PM-6, PM-7, PM-8, PM-9, PM-10, PM-11, PM-13, PM-14, PM-15, PM-16, PM-17
 
 - [`principles.md`](principles.md) — PR-1, PR-2, PR-3, PR-4, PR-5, PR-6, PR-7, PR-8, PR-9, PR-10, PR-11
 

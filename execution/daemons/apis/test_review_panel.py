@@ -177,6 +177,39 @@ def test_security_lens_stays_off_non_sensitive_diffs():
     assert "security" not in [l.lens for l in panel]
 
 
+def test_always_on_lenses_survive_a_constrained_broad_diff_panel():
+    broad = [
+        "execution/mcp/ateles/server.py",
+        "docs/guide.md",
+        "requirements.txt",
+        "src/a.py",
+        "src/b.py",
+        "src/c.py",
+        "src/d.py",
+        "src/e.py",
+    ]
+    for cap in (4, 5, 6):
+        seated = [lens.lens for lens in select_panel(set(), broad, max_panel=cap)]
+        assert "qa" in seated, f"qa dropped at cap={cap}: {seated}"
+        assert "pm" in seated, f"pm dropped at cap={cap}: {seated}"
+        assert "security" in seated, f"security dropped at cap={cap}: {seated}"
+
+
+def test_default_panel_seats_qa_and_content_on_broad_diff():
+    broad = [
+        "execution/mcp/ateles/server.py",
+        "docs/guide.md",
+        "requirements.txt",
+        "src/a.py",
+        "src/b.py",
+        "src/c.py",
+        "src/d.py",
+        "src/e.py",
+    ]
+    seated = {lens.lens for lens in select_panel(set(), broad)}
+    assert {"security", "pm", "qa", "ux", "legal", "content"} <= seated
+
+
 def test_security_lens_survives_the_panel_cap():
     # Regression: the security lens owns no gate, so plain registry order let
     # the default cap of 4 drop it exactly on a BROAD security PR — the case

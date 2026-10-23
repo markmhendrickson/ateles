@@ -51,6 +51,13 @@ import urllib.request
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+_DAEMON_DIR = Path(__file__).resolve().parent
+if str(_DAEMON_DIR) not in sys.path:
+    sys.path.insert(0, str(_DAEMON_DIR))
+from release_checkout_root import (  # noqa: E402
+    default_neotoma_repo_root as _default_neotoma_repo_root,
+)
+
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
 NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
@@ -98,8 +105,25 @@ AGENT_LOG = LOG_DIR / "phoenicurus-prepare-agent.log"
 # none) is the blocker.
 STALE_ESCALATION_FILE = Path(__file__).parent / ".phoenicurus_prepare_stale_escalated"
 
+# `_default_neotoma_repo_root` used to be defined here, duplicating the exact
+# same "prefer ~/neotoma-rc-src, else fall back to ~/repos/neotoma" policy
+# install.sh independently re-typed in bash (arch REQUEST_CHANGES on #1293:
+# the two would drift the next time only one was updated). It is now imported
+# above as an alias for `release_checkout_root.default_neotoma_repo_root` —
+# the ONE source both this module and install.sh (via that module's own CLI)
+# derive from. See release_checkout_root.py's module docstring.
+#
+# Without a correct default here, any caller that spawns prepare.py without
+# explicitly setting NEOTOMA_REPO_ROOT — e.g. swarm_dispatch._handle_push_main,
+# which inherits the Apis daemon's own environment rather than the
+# phoenicurus-prepare plist's — silently defaults to the shared clone. That is
+# exactly what happened: the merge-triggered path logged "could not determine
+# checkout state (no upstream branch configured)" against ~/repos/neotoma on
+# every run, even though the scheduled path (whose plist DOES set the env var)
+# was pointed correctly.
+
 NEOTOMA_REPO_ROOT = Path(
-    os.environ.get("NEOTOMA_REPO_ROOT", str(Path.home() / "repos" / "neotoma"))
+    os.environ.get("NEOTOMA_REPO_ROOT", "") or str(_default_neotoma_repo_root())
 )
 GITHUB_REPO = os.environ.get("NEOTOMA_GITHUB_REPO", "markmhendrickson/neotoma")
 TELEGRAM_TOPIC = os.environ.get("TELEGRAM_TOPIC_PHOENICURUS", "") or os.environ.get(
@@ -115,6 +139,21 @@ MIN_COMMITS = int(os.environ.get("PHOENICURUS_MIN_COMMITS", "1"))
 # needs to move. Override with PHOENICURUS_STALE_RELEASE_BLOCK_DAYS.
 STALE_RELEASE_BLOCK_DAYS = int(
     os.environ.get("PHOENICURUS_STALE_RELEASE_BLOCK_DAYS", "3")
+)
+
+# How often to re-page the operator about the SAME still-stuck release_result,
+# once it has already crossed STALE_RELEASE_BLOCK_DAYS. ateles#1304: a
+# release_result stuck past the stale threshold used to escalate exactly ONCE
+# per blocking entity, then log "already escalated — not re-notifying" on
+# every subsequent run forever. v0.23.1 blocked every release behind it for
+# 9+ days (13 commits, including 3 security fixes) with nothing after the
+# first page. Default 24h — frequent enough that a forgotten block surfaces
+# again within a working day, not so frequent that a genuinely-in-progress
+# publish (minutes to tens of minutes) gets paged about at all, since THAT
+# case never crosses STALE_RELEASE_BLOCK_DAYS in the first place. Override
+# with PHOENICURUS_STALE_RELEASE_REESCALATE_HOURS.
+STALE_RELEASE_REESCALATE_HOURS = float(
+    os.environ.get("PHOENICURUS_STALE_RELEASE_REESCALATE_HOURS", "24")
 )
 
 # Email notification (release RCs also go to the operator's inbox, not just
@@ -136,6 +175,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
+from lib import github_app_token  # noqa: E402
 
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
 # unbounded retry logging filled a 926 GB disk on 2026-08-18.
@@ -172,19 +212,55 @@ def _mark_ran_for_sha(sha: str) -> None:
         MERGE_STATE_FILE.write_text(sha)
 
 
+def _seconds_since_last_escalation(entity_id: str) -> float | None:
+    """
+    Seconds since the operator was last paged about THIS blocking entity, or
+    None if never (or the marker is unreadable/for a different entity).
+
+    The file holds ``"<entity_id> <unix_ts>"`` rather than just the entity_id.
+    A bare entity_id (the pre-fix format) is treated as "escalated a very long
+    time ago" — i.e. due for re-escalation — rather than crashing, so an old
+    marker file left over from before this change degrades gracefully instead
+    of needing a manual reset.
+    """
+    if not entity_id or not STALE_ESCALATION_FILE.exists():
+        return None
+    raw = STALE_ESCALATION_FILE.read_text().strip()
+    saved_id, _, ts_s = raw.partition(" ")
+    if saved_id != entity_id:
+        return None
+    try:
+        ts = float(ts_s)
+    except ValueError:
+        return float("inf")  # old-format marker: treat as long overdue
+    return max(0.0, datetime.now(timezone.utc).timestamp() - ts)
+
+
 def _already_escalated_stale_block(entity_id: str) -> bool:
-    """True if we already notified the operator about THIS blocking entity."""
-    return (
-        bool(entity_id)
-        and STALE_ESCALATION_FILE.exists()
-        and STALE_ESCALATION_FILE.read_text().strip() == entity_id
-    )
+    """
+    True if the operator was paged about THIS blocking entity within the
+    re-escalation cadence, so this run should stay quiet.
+
+    Before ateles#1304, this was "ever" rather than "within N days": once
+    escalated, a stuck release_result silently blocked every release forever
+    afterward with nothing but a repeated INFO log line nobody was watching —
+    exactly what happened to v0.23.1, stuck 9+ days while main gained 13
+    commits including 3 security fixes. Re-escalating on a cadence trades a
+    few repeat notifications (already the cost when the operator IS actively
+    ignoring a real blocker) for never going silent on one they forgot.
+    """
+    age_s = _seconds_since_last_escalation(entity_id)
+    if age_s is None:
+        return False
+    return age_s < (STALE_RELEASE_REESCALATE_HOURS * 3600)
 
 
 def _mark_escalated_stale_block(entity_id: str) -> None:
     if entity_id:
         try:
-            STALE_ESCALATION_FILE.write_text(entity_id)
+            STALE_ESCALATION_FILE.write_text(
+                f"{entity_id} {datetime.now(timezone.utc).timestamp()}"
+            )
         except OSError as exc:
             # Losing this only costs us a repeat notification, never a missed
             # one — never let it block the run.
@@ -478,6 +554,9 @@ def main_ci_green() -> bool | None:
                 "--json", "conclusion,status", "--jq", ".[0]",
             ],
             cwd=str(NEOTOMA_REPO_ROOT),
+            # Read-only CI status: the swarm App's short-lived token, not the
+            # agent PAT (credential_rotation_split_by_issuer).
+            env=github_app_token.gh_read_env(GITHUB_REPO),
             capture_output=True,
             text=True,
             timeout=60,
@@ -635,6 +714,123 @@ def existing_release_status(
     except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
         log.warning(f"could not check existing release_result: {exc}")
     return None
+
+
+def _npm_registry_version(package: str = "neotoma") -> str:
+    """Current `latest` on the npm registry, or '' if it can't be read.
+
+    Mirrors publish.py's ``_registry_version`` exactly (same command, same
+    fail-open contract) — duplicated rather than imported because prepare.py
+    and publish.py are each meant to run standalone with no cross-import, and
+    this is a two-line shell call, not shared policy that could drift.
+    """
+    try:
+        proc = subprocess.run(
+            ["npm", "view", package, "version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        log.warning(f"could not read npm registry version for {package}: {exc}")
+        return ""
+    return (proc.stdout or "").strip()
+
+
+def _reconcile_against_npm(
+    status: str, entity_id: str, version: str, *, dry_run: bool
+) -> bool:
+    """
+    Auto-correct a stuck 'publishing' release_result when npm already shows it
+    published, instead of escalating a block that has actually resolved.
+
+    ateles#1304: v0.23.1 published to npm at 2026-09-16T13:41Z, but the
+    release_result stayed 'publishing' — the terminal status write after
+    npm_publish never landed on the SAME entity this daemon reads back
+    (confirmed 2026-09-26: this incident is the same root cause as
+    ateles#508/#518, not a distinct write-loss bug — release_result has no
+    canonical_name_fields bound to version, so each status-transition payload
+    shape lands on a different heuristically-keyed entity; v0.23.1 fragmented
+    into three rows exactly as #508 documents for v0.22.0). This function is
+    the containment for the SYMPTOM, not a fix for #508/#518's identity gap —
+    it still needs to reconcile every 'publishing' block against npm until
+    that lands. Every prepare run for the next 9+ days re-read the same stale
+    'publishing' row and blocked, even though the thing it was waiting on had
+    already happened. A stale WRITE should not require a human to notice a
+    fact the registry already knows.
+
+    Scope: only 'publishing' reconciles this way. 'prepared',
+    'pending_approval', and 'approved' are stages BEFORE the irreversible
+    `npm publish` step — npm showing the version live would mean something
+    else entirely there (e.g. a hand-run publish bypassing this pipeline), not
+    a missed status write, so those are left for the operator to look at
+    rather than auto-corrected. 'failed' is deliberately excluded too: it is
+    already a terminal state, and this function should never override an
+    operator's or publish.py's own account of what happened.
+
+    Signs the correction as phoenicurus, the same identity + entity_id-scoped
+    /correct path used everywhere else this daemon writes release_result
+    (store_release_result.py cannot do this: it only creates, with no
+    entity_id target — see ateles#1304's investigation notes). Returns True
+    if the release_result was corrected (caller should stop treating it as a
+    block), False if reconciliation did not apply or failed.
+    """
+    if status != "publishing" or not entity_id or not version:
+        return False
+    want = version.lstrip("v")
+    live = _npm_registry_version()
+    if live != want:
+        log.info(
+            f"[phoenicurus-release] INFO npm registry shows "
+            f"{live or 'nothing'!r}, not {want!r} — {entity_id} genuinely still "
+            "publishing (or stuck before npm), not auto-reconciling."
+        )
+        return False
+
+    log.warning(
+        f"[phoenicurus-release] WARNING release_result {entity_id} ({version}) "
+        f"is 'publishing' but npm already shows {live!r} live — the terminal "
+        "status write after publish evidently never landed. Auto-reconciling "
+        "to 'published' rather than blocking every future release behind a "
+        "write that already happened."
+    )
+    if dry_run:
+        log.info(f"[dry-run] would correct {entity_id} status -> published")
+        return True
+
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT / "lib" / "daemon_runtime"))
+        from neotoma_signed import NeotomaWriter  # noqa: PLC0415
+
+        writer = NeotomaWriter("phoenicurus")
+        result = writer.correct(
+            "release_result",
+            entity_id,
+            "status",
+            "published",
+            idempotency_key=f"phoenicurus-release-{version}-npm-reconcile-{date.today().isoformat()}",
+        )
+        if result.status and 200 <= result.status < 300:
+            log.info(
+                f"[phoenicurus-release] INFO reconciled {entity_id} to "
+                "status=published (confirmed against npm)."
+            )
+            notify_operator(
+                f"✅ Phoenicurus: release_result {entity_id} ({version}) was "
+                "stuck at 'publishing' but npm already shows it live. "
+                "Auto-corrected to 'published' — no action needed. Prep can "
+                "now continue for anything merged since."
+            )
+            return True
+        log.warning(
+            f"[phoenicurus-release] WARNING npm-reconcile correction for "
+            f"{entity_id} returned status={result.status} — not treating as "
+            "reconciled."
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001 — never let reconciliation crash prep
+        log.warning(f"npm-reconcile correction for {entity_id} failed: {exc}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -965,33 +1161,66 @@ def run_prepare(dry_run: bool, force: bool, on_merge: bool = False) -> int:
                 f"{age_days:.1f} day(s), past the {STALE_RELEASE_BLOCK_DAYS}-day "
                 "stale threshold."
             )
-            # Escalate once per blocking entity, not once per run. The
-            # on-merge path is rate-limited per COMMIT, not per day (see
-            # module docstring), so several merges can land while the same
-            # release_result is still stuck — without this, each one would
-            # re-page the operator about a block they already know about.
-            if not dry_run and _already_escalated_stale_block(entity_id):
+            # Before paging anyone: is this actually still blocked, or did the
+            # terminal status write just never land? (ateles#1304 — v0.23.1's
+            # exact failure.) Only attempted once a block is already stale, so
+            # a genuinely-in-progress publish (minutes long) never triggers an
+            # npm registry call on every routine run.
+            if _reconcile_against_npm(status, entity_id, version, dry_run=dry_run):
                 log.info(
-                    f"[phoenicurus-release] INFO already escalated {entity_id} "
-                    "— not re-notifying the operator."
-                )
-            else:
-                log.warning(
-                    "[phoenicurus-release] WARNING escalating to the operator."
-                )
-                notify_operator(
-                    f"⚠️ Phoenicurus: release_result {entity_id} ({version}) has "
-                    f"been '{status}' for {age_days:.1f} day(s) — longer than the "
-                    f"{STALE_RELEASE_BLOCK_DAYS}-day stale threshold. This is "
-                    "blocking prep of every release since. Approve or skip it, or "
-                    "correct its status if it's stale (e.g. a test/sentinel "
-                    "artifact)."
+                    f"[phoenicurus-release] INFO {entity_id} reconciled against "
+                    "npm — re-evaluating this run instead of blocking."
                 )
                 if not dry_run:
-                    _mark_escalated_stale_block(entity_id)
-        if not dry_run:
-            _mark_ran(on_merge, head)
-        return 0
+                    inflight = existing_release_status()
+                if not inflight:
+                    # Fully unblocked: fall through to the CI gate below on
+                    # THIS run rather than waiting for the next trigger — a
+                    # merge or the daily sweep already got us this far.
+                    pass
+                else:
+                    if not dry_run:
+                        _mark_ran(on_merge, head)
+                    return 0
+            else:
+                # Genuinely still stuck (or reconciliation couldn't confirm
+                # either way) — escalate, but on a CADENCE rather than once
+                # ever. Before ateles#1304, this escalated exactly once per
+                # blocking entity, then logged "already escalated — not
+                # re-notifying" forever after — which is how v0.23.1 blocked
+                # 13 commits' worth of releases (3 of them security fixes) for
+                # 9+ days with a single silent-after-the-first-page warning.
+                # The on-merge path is rate-limited per COMMIT, not per day
+                # (see module docstring), so several merges landing inside one
+                # cadence window still only re-pages once that window is up.
+                if not dry_run and _already_escalated_stale_block(entity_id):
+                    log.info(
+                        f"[phoenicurus-release] INFO escalated {entity_id} "
+                        f"within the last {STALE_RELEASE_REESCALATE_HOURS:.0f}h "
+                        "— not re-notifying yet."
+                    )
+                else:
+                    log.warning(
+                        "[phoenicurus-release] WARNING escalating to the operator."
+                    )
+                    notify_operator(
+                        f"⚠️ Phoenicurus: release_result {entity_id} ({version}) has "
+                        f"been '{status}' for {age_days:.1f} day(s) — longer than the "
+                        f"{STALE_RELEASE_BLOCK_DAYS}-day stale threshold. This is "
+                        "blocking prep of every release since. Approve or skip it, or "
+                        "correct its status if it's stale (e.g. a test/sentinel "
+                        f"artifact). (Will re-notify every "
+                        f"{STALE_RELEASE_REESCALATE_HOURS:.0f}h while still blocked.)"
+                    )
+                    if not dry_run:
+                        _mark_escalated_stale_block(entity_id)
+                if not dry_run:
+                    _mark_ran(on_merge, head)
+                return 0
+        else:
+            if not dry_run:
+                _mark_ran(on_merge, head)
+            return 0
 
     # CI gate.
     ci = main_ci_green()

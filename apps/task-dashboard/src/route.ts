@@ -6,6 +6,7 @@
  * without any dev-server rewrite rules:
  *
  *   #/                       THE CURRENT SESSION — the app root (see below)
+ *   #/console                the Console overview: mission, strategies, areas
  *   #/tasks                  the task view
  *   #/agents                 the agent directory
  *   #/agents/ent_<hex>       one agent's definition
@@ -56,6 +57,7 @@ import { useEffect, useState } from "react";
 
 export type Section =
   | "home"
+  | "console"
   | "tasks"
   | "agents"
   | "sessions"
@@ -74,6 +76,7 @@ export type Section =
  */
 export const NAV_SECTIONS = [
   "home",
+  "console",
   "tasks",
   "agents",
   "sessions",
@@ -122,6 +125,12 @@ export function parseHash(hash: string): Route {
 
   if (path[0] === "tasks") {
     return { ...EMPTY, section: "tasks" };
+  }
+
+  if (path[0] === "console") {
+    // A flat page for now: the overview is the whole content of slice 1. Area,
+    // workflow and role pages get sub-routes in later slices.
+    return { ...EMPTY, section: "console" };
   }
 
   if (path[0] === "agents") {
@@ -180,6 +189,9 @@ export function parseHash(hash: string): Route {
 export function toHash(route: Route): string {
   if (route.section === "home") {
     return "#/";
+  }
+  if (route.section === "console") {
+    return "#/console";
   }
   if (route.section === "agents") {
     return route.agentId ? `#/agents/${route.agentId}` : "#/agents";

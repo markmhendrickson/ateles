@@ -31,7 +31,11 @@ each CLI and reading its real output — not from documentation)
 ``codex``   ``--json`` emits JSONL; the final ``turn.completed`` event carries
             ``usage`` (``input_tokens``, ``cached_input_tokens``,
             ``output_tokens``, ``reasoning_output_tokens``). It reports NO model
-            name anywhere in that stream.
+            name anywhere in that stream. In TEXT mode (what dispatches run) the
+            CLI ends its stderr with a ``tokens used`` line followed by one
+            thousands-separated TOTAL (verified 2026-10-06, codex-cli 0.157.1):
+            no input/output/cache split, so only ``reported_total_tokens`` is
+            set from it and every split field stays ``None``.
 
 ``cursor``  ``--output-format json`` emits a ``result`` object carrying ``usage``
             with camelCase keys (``inputTokens``, ``outputTokens``,
@@ -74,6 +78,7 @@ model absorb a whole plan's quota unnoticed.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 # Providers whose CLI never reports the model it resolved to. Kept explicit so
@@ -101,6 +106,9 @@ class DispatchUsage:
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
     reasoning_tokens: int | None = None
+    # A single total the harness printed WITHOUT a split (codex text mode). Kept
+    # apart from input/output so a total is never presented as a measured split.
+    reported_total_tokens: int | None = None
     total_cost_usd: float | None = None
     # Models named by the harness itself, when it reports more than one (a
     # single dispatch can span models, e.g. a cheap summarizer plus a main
@@ -118,19 +126,20 @@ class DispatchUsage:
                 self.cache_read_tokens,
                 self.cache_write_tokens,
                 self.reasoning_tokens,
+                self.reported_total_tokens,
             )
         )
 
     @property
     def total_tokens(self) -> int | None:
-        """Input + output, when both are known.
+        """Input + output, when either is known; else a harness-printed total.
 
         Cache reads are deliberately excluded: they are billed differently
         across providers, and summing them into one headline number would make
         two providers' totals look comparable when they are not.
         """
         if self.input_tokens is None and self.output_tokens is None:
-            return None
+            return self.reported_total_tokens
         return (self.input_tokens or 0) + (self.output_tokens or 0)
 
     def as_event_fields(self) -> dict:
@@ -174,7 +183,13 @@ class DispatchUsage:
             parts.append(f"model={self.model}({self.model_source or 'unknown'})")
         else:
             parts.append("model=unreported")
-        if self.has_tokens:
+        if (
+            self.reported_total_tokens is not None
+            and self.input_tokens is None
+            and self.output_tokens is None
+        ):
+            parts.append(f"tokens total={self.reported_total_tokens} (no split reported)")
+        elif self.has_tokens:
             parts.append(
                 f"tokens in={self.input_tokens if self.input_tokens is not None else '?'}"
                 f" out={self.output_tokens if self.output_tokens is not None else '?'}"
@@ -339,11 +354,29 @@ _PARSERS = {
 }
 
 
+_CODEX_TOKENS_USED = re.compile(r"(?mi)^\s*tokens used\s*:?\s*\n?\s*([0-9][0-9,._ ]*)\s*$")
+
+
+def _codex_total_from_stderr(stderr: str) -> int | None:
+    """The total on codex's text-mode ``tokens used`` trailer, or ``None``.
+
+    The LAST match wins (a resumed run prints one per turn). Anything that is
+    not a clean integer once the thousands separators are removed is ``None``:
+    a half-parsed number would be a fabricated figure.
+    """
+    matches = _CODEX_TOKENS_USED.findall(stderr or "")
+    if not matches:
+        return None
+    digits = re.sub(r"[,._ ]", "", matches[-1])
+    return int(digits) if digits.isdigit() else None
+
+
 def parse_dispatch_usage(
     provider: str,
     stdout: str,
     *,
     requested_model: str | None = None,
+    stderr: str = "",
 ) -> DispatchUsage:
     """Extract model + token attribution for one dispatch.
 
@@ -352,6 +385,9 @@ def parse_dispatch_usage(
     holds no token counts, and ``model`` falls back to ``requested_model``
     marked ``model_source="requested"`` so a reader can never mistake the
     router's intent for a measurement.
+
+    ``stderr`` is read only for codex's text-mode ``tokens used`` total, and
+    only when stdout carried no machine usage of its own.
 
     Never raises: usage recording must not be able to fail a dispatch.
     """
@@ -366,6 +402,11 @@ def parse_dispatch_usage(
             # A malformed/truncated stream must degrade to "unreported", never
             # to a partial figure that reads as measured.
             usage = DispatchUsage(provider=provider)
+    if provider == "codex" and not usage.has_tokens:
+        try:
+            usage.reported_total_tokens = _codex_total_from_stderr(stderr)
+        except Exception:
+            usage.reported_total_tokens = None
 
     if usage.model is None:
         requested = (requested_model or "").strip()

@@ -44,9 +44,24 @@ on:
       - "execution/scripts/test_foundation_mechanical_checks_ci.py"
       - "docs/foundation/decision_state.md"
       - "execution/daemons/apis/test_foundation*.py"
+      - "CLAUDE.md"
       - ".github/workflows/foundation-checks.yml"
     # Synchronize only re-runs when a matching path is in the push delta;
     # empty commits skip this filter (ateles#802 — head 392aee1a missed the lane).
+  # ateles#1138: push to main carries NO paths filter, deliberately, and binds
+  # only the decision-state step (the rest of this job's checkers are read
+  # against the checked-out tree the same as on a PR, so they still run here,
+  # but the defect #1138 exists for is specific to decision-state: the
+  # committed docs/foundation/decision_state.md is a projection of
+  # origin/main itself, so it can go stale from a push that touches no
+  # foundation path -- e.g. a merge that lands a ruling branch into main
+  # without regenerating. A paths filter on this trigger would silently skip
+  # exactly the push most likely to leave main stale, which is the "reports
+  # without binding" failure this workflow exists to catch, applied to its
+  # own push trigger this time instead of to a PR.
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -160,12 +175,41 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f" --check
 
-      # Decision state: the register projected onto ruled/merged/implemented,
-      # held equal to a fresh render. The projection reads origin/main plus the
-      # current remote branches, so a ruling that lives only on a branch is
-      # reported rather than read as open. Skipped when origin/main is not
-      # fetchable — the renderer exits nonzero with that diagnostic, and a lane
-      # that cannot read the register must not report the projection as correct.
+      # Decision state: the committed docs/foundation/decision_state.md held
+      # equal to a fresh render of ONE source (ateles#1138). The committed
+      # file is a pure projection of that source -- it never reads any other
+      # branch -- so this step's verdict does not move when an unrelated
+      # branch moves. The separate cross-branch "ruled on a branch but not yet
+      # merged" view is a report only (`render_decision_state.py --branches`,
+      # printed to stdout), never committed and never part of this check.
+      #
+      # --source worktree (the default; named explicitly here) reads
+      # docs/foundation/conformance.md as checked out rather than re-fetching
+      # origin/main. On this job's `pull_request` trigger, `actions/checkout`
+      # has already materialized base-plus-PR as the working tree (GitHub's
+      # own refs/pull/N/merge commit), so a PR that adds or rules a register
+      # row sees that row here and can regenerate decision_state.md correctly
+      # BEFORE it merges -- reading origin/main alone could never see a row
+      # the PR itself is adding, so that render was mechanically incapable of
+      # matching what main needs once the PR lands (ateles#1138 round two,
+      # ateles#1300). On this job's `push`-to-main trigger the working tree
+      # IS that push's own commit, so the source choice makes no difference
+      # there; --source worktree is still named for consistency.
+      #
+      # Runs on every pull_request in this job's paths filter above AND on
+      # every push to main with NO paths filter (ateles#1138): the committed
+      # file is main's own state, so a push that changes no foundation path
+      # can still leave it stale (e.g. a merge that lands a register ruling
+      # without regenerating), and skipping this step on such a push is the
+      # same "reports without binding" defect this whole workflow exists to
+      # catch, aimed at main this time instead of at a PR.
+      #
+      # Skipped only when origin/main is not fetchable -- the renderer exits
+      # nonzero with that diagnostic, and a lane that cannot read the register
+      # must not report the projection as correct. On push to main this branch
+      # is not expected to be reached: the "Fetch origin/main as a ref" step
+      # above has no continue-on-error, so a failed fetch already fails the
+      # job before this step runs, rather than this step quietly skipping.
       - name: Decision state — matches the register it projects
         if: always() && steps.corpus.outputs.present == 'true'
         run: |
@@ -173,7 +217,7 @@ jobs:
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           git rev-parse --verify --quiet origin/main >/dev/null || {
             echo "::notice::origin/main not fetchable — decision state skipped"; exit 0; }
-          python3 "$f" --check
+          python3 "$f" --check --source worktree
       # Register narrative: the decision register's prose held to its own table.
       # The rule-coverage contract binds a decision opened in a DOCUMENT to a
       # register row; nothing read the narrative around the table, so the prose
@@ -205,6 +249,34 @@ jobs:
         if: always() && steps.corpus.outputs.present == 'true'
         run: |
           f=execution/scripts/check_foundation_decision_101.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Decision 117: when register row 117 is ruled, authority_model.md#grants
+      # must carry the widened capability tuple (relationship_types[] beside
+      # entity_types[], default-deny-on-absent/empty), refuse the legacy
+      # entity-types-by-repositories tuple with no relationship-type term, and
+      # the corpus must place principal_binding/delegation_edge/ownership_grant
+      # on the closed governance list or state the entity-only deferral naming
+      # the widened tuple as the alternate mechanism, plus the bootstrap
+      # step-3 admission sentence. Prevents ruled-without-registration drift
+      # (pm/qa REQUEST_CHANGES on ateles#1088, carrying ateles#925's own
+      # Engineering build checklist).
+      - name: Decision 117 — ruled relationship-type grant shape in authority_model
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_117.py
+          [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
+          python3 "$f"
+
+      # Decision 119: a ruled commissioning design must carry its authority,
+      # dependency frontier, completion evidence, recovery, and planted
+      # negatives into the canonical corpus. Prevents a mutable status or a
+      # task-only dependency model from surviving the ruling.
+      - name: Decision 119 — commissioned planning execution corpus
+        if: always() && steps.corpus.outputs.present == 'true'
+        run: |
+          f=execution/scripts/check_foundation_decision_119.py
           [ -f "$f" ] || { echo "::notice::$f absent on this branch — skipped"; exit 0; }
           python3 "$f"
 

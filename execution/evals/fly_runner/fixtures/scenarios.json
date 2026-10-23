@@ -1,0 +1,1735 @@
+{
+  "description": "Agent-facing Fly runner scenarios (ateles#1456). Each one drives the real dispatch_role CLI and skill_runner dispatch path; only the Fly Machines API (an httpx mock transport), the GitHub App mint and revoke, and the Neotoma result read are stand-ins. All credentials are synthetic. local_cli_ran is observed from a stand-in local CLI that leaves a marker when it runs.",
+  "scenarios": [
+    {
+      "id": "opted_out_class_stays_local",
+      "description": "APIS_FLY_RUNNER_CLASSES unset: a carry_forward_check dispatch runs on this machine exactly as before and never touches Fly.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        }
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "LOCAL GATE_INHERITANCE: clear",
+        "local_cli_ran": true,
+        "fly_requests": 0,
+        "minted": 0
+      }
+    },
+    {
+      "id": "opted_in_class_runs_on_fly",
+      "description": "The class is opted in and the role has its own AAuth key: the run goes to a per-job machine with a minted, revoked App token, and the machine's recorded result comes back as the dispatch result.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        }
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "FLY GATE_INHERITANCE: clear",
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "minted": 1,
+        "revoked_all_minted": true,
+        "in_flight_after": 0,
+        "machine_gone": true,
+        "output_truncated": false
+      }
+    },
+    {
+      "id": "shared_role_token_uses_aauth_key_without_shipping_bearer",
+      "description": "The role token matches the shared daemon bearer, so the Fly job ships only its AAuth key: the child launches without a Neotoma MCP server while the runner still signs its result record with that key. The discarded token name remains in the forbidden-environment probe.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+        "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY KEY FALLBACK OK\n"
+        }
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "FLY KEY FALLBACK OK",
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "minted": 1,
+        "revoked_all_minted": true,
+        "in_flight_after": 0,
+        "machine_gone": true,
+        "key_only_no_agent_mcp": true,
+        "dispatch_events": ["key_only_notice", "launch"],
+        "result_record_aauth_key": true,
+        "probe_env_contains": "LANIUS_NEOTOMA_TOKEN"
+      }
+    },
+    {
+      "id": "shared_role_token_fly_launch_falls_back_with_correction",
+      "description": "A key-only Fly launch is refused; the opted-in dispatch corrects its capability notice and completes locally with normal tools, without claiming a Fly result.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+        "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "create": "refused"
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "LOCAL GATE_INHERITANCE: clear",
+        "local_cli_ran": true,
+        "machines_created": 0,
+        "in_flight_after": 0,
+        "revoked_all_minted": true,
+        "dispatch_events": ["key_only_notice", "launch", "local_correction"],
+        "local_key_only_correction": "The Fly launch failed; this run fell back to a local run with its normal tools."
+      }
+    },
+    {
+      "id": "shared_role_token_fly_ineligible_falls_back_with_correction",
+      "description": "A key-only Fly run becomes ineligible before any launch request; the opted-in dispatch reports that reason and completes locally with normal tools.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+        "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "raise_before_launch": "ineligible"
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "LOCAL GATE_INHERITANCE: clear",
+        "local_cli_ran": true,
+        "fly_requests": 0,
+        "machines_created": 0,
+        "minted": 0,
+        "in_flight_after": 0,
+        "dispatch_events": ["key_only_notice", "run_attempt", "local_correction"],
+        "local_key_only_correction": "This run was not eligible for Fly, so it ran locally with its normal tools."
+      }
+    },
+    {
+      "id": "forced_fly_ineligible_role_refused",
+      "description": "--runner fly for a role with no Neotoma identity of its own: refused with the reason; nothing runs locally or on Fly.",
+      "settings": {},
+      "identity": "none",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "no Neotoma identity of its own",
+        "local_cli_ran": false,
+        "fly_requests": 0,
+        "minted": 0
+      }
+    },
+    {
+      "id": "forced_fly_without_app_refused_not_pat",
+      "description": "--runner fly when the GitHub App is not configured: refused rather than falling back to the shared PAT, which appears nowhere.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "unconfigured",
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "never falls back to a PAT",
+        "local_cli_ran": false,
+        "fly_requests": 0,
+        "pat_absent": true
+      }
+    },
+    {
+      "id": "forced_fly_budget_deferral",
+      "description": "The monthly Fly budget cannot cover one more maximum-length run: the dispatch is deferred with cooled_until, and the minted token is revoked.",
+      "settings": {
+        "APIS_FLY_MONTHLY_BUDGET_USD": "0.01",
+        "APIS_FLY_RATE_PER_HOUR_USD": "100"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "budget",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "machines_created": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "forced_fly_disconnect_cleans_up",
+      "description": "The connection drops while waiting on the machine: the machine is destroyed and confirmed gone before its slot is released, and the token is revoked.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "disconnect",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "error while waiting on machine",
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "machine_gone": true,
+        "revoked_all_minted": true,
+        "in_flight_after": 0
+      }
+    },
+    {
+      "id": "forced_fly_timeout_cleans_up",
+      "description": "The machine outlives the Apis deadline: it is stopped and force-deleted, the dispatch reports a timeout, and the token is revoked.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "timeout",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo",
+        "--timeout",
+        "5"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "timed out",
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "machine_gone": true,
+        "revoked_all_minted": true,
+        "in_flight_after": 0,
+        "remote_outcome_unknown": true,
+        "remote_machine_state": "terminated",
+        "error_contains_run_id": true
+      }
+    },
+    {
+      "id": "oversized_output_is_flagged",
+      "description": "The runner kept only the tail of an oversized stdout: the dispatch still succeeds (the verdict is the last line), but the envelope says output_truncated and the stdout opens with a marker naming the run.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "...tail of a long report\nGATE_INHERITANCE: clear\n",
+          "stdout_truncated": true
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "GATE_INHERITANCE: clear",
+        "output_truncated": true,
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "revoked_all_minted": true,
+        "in_flight_after": 0
+      }
+    },
+    {
+      "id": "login_start_response_lost",
+      "description": "A Codex login machine starts but the start response is lost: the outcome is unknown, so the dispatch fails without any local replay and names the remote run; the machine is stopped and confirmed before its slot and lock are released; the token is revoked.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "start": "lost"
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "UNKNOWN outcome",
+        "local_cli_ran": false,
+        "login_state": "stopped",
+        "login_lock_free": true,
+        "revoked_all_minted": true,
+        "in_flight_after": 0,
+        "remote_outcome_unknown": true,
+        "remote_machine_state": "terminated"
+      }
+    },
+    {
+      "id": "expired_reservation_reaped_listed",
+      "description": "After a dispatcher restart an overdue reservation's machine is still running: the reaper destroys it, confirms, charges its capped runtime once, releases, and the new dispatch runs.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "seed": [
+        {
+          "machine": "m-old",
+          "state": "listed",
+          "age": 5000,
+          "window": 1920
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "FLY GATE_INHERITANCE: clear",
+        "local_cli_ran": false,
+        "seed_settled": true,
+        "machine_gone": true,
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "expired_reservation_reaped_absent",
+      "description": "After a dispatcher restart an overdue reservation's machine is already gone: the reaper confirms it, charges its capped runtime once, and releases.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "seed": [
+        {
+          "machine": "m-gone",
+          "state": "absent",
+          "age": 5000,
+          "window": 1920
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "local_cli_ran": false,
+        "seed_settled": true,
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "tracked_unconfirmed_delete_keeps_capacity_reserved",
+      "description": "The reaper's delete is acknowledged but the machine keeps running: its reservation is kept (marked unconfirmed, not charged as settled), so with one concurrent slot the new dispatch is deferred with cooled_until.",
+      "settings": {
+        "APIS_FLY_MAX_CONCURRENT": "1"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "seed": [
+        {
+          "machine": "m-stuck",
+          "state": "sticky",
+          "age": 5000,
+          "window": 1920
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "concurrency",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "seed_settled": false,
+        "machines_created": 0,
+        "in_flight_at_least": 1,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "opted_in_lost_create_unconfirmed_no_local_replay",
+      "description": "Opted-in class, local fallback on (the default): the create response is lost and the machine survives every termination attempt. The task must not run locally; the result is a failure that names the remote run as unknown and unconfirmed, and its reservation is kept for the reaper.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "create": "lost",
+        "delete_ineffective": true
+      },
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "Not retried locally",
+        "local_cli_ran": false,
+        "remote_outcome_unknown": true,
+        "remote_machine_state": "unconfirmed",
+        "in_flight_at_least": 1,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "opted_in_lost_create_terminated_no_local_replay",
+      "description": "Opted-in class, local fallback on: the create response is lost, and the machine is then found and confirmed destroyed. It may already have done work, so the task still must not run locally.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "create": "lost"
+      },
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "Not retried locally",
+        "local_cli_ran": false,
+        "remote_outcome_unknown": true,
+        "remote_machine_state": "terminated",
+        "in_flight_after": 0,
+        "machine_gone": true,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "opted_in_create_refused_falls_back_locally",
+      "description": "Positive control: Fly rejects the create outright (nothing was created), so the opted-in class falls back to the local executor, logged and counted, and succeeds.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "create": "refused"
+      },
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "LOCAL GATE_INHERITANCE: clear",
+        "local_cli_ran": true,
+        "machines_created": 0,
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "untracked_unconfirmed_delete_keeps_capacity_reserved",
+      "description": "A machine is running that no reservation accounts for, and it survives the reaper's stop and delete. The reaper owns it as an unconfirmed reservation, so with one concurrent slot the new dispatch is deferred with cooled_until and no new machine is created.",
+      "settings": {
+        "APIS_FLY_MAX_CONCURRENT": "1"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "untracked": [
+        {
+          "machine": "m-ghost",
+          "delete_ineffective": true
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "concurrency",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "seed_settled": false,
+        "machines_created": 0,
+        "in_flight_at_least": 1,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "concurrent_dispatchers_preserve_live_owner",
+      "description": "Another dispatcher (a separate, live process sharing the ledger) holds a reservation and a running machine. This dispatch's reaper runs, leaves that machine and reservation alone, and the dispatch runs on its own machine.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "other_dispatcher": [
+        {
+          "machine": "m-other-live",
+          "alive": true
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "FLY GATE_INHERITANCE: clear",
+        "local_cli_ran": false,
+        "machines_kept": [
+          "m-other-live"
+        ],
+        "machines_created": 1,
+        "revoked_all_minted": true,
+        "seed_kept": true
+      }
+    },
+    {
+      "id": "abandoned_owner_is_recovered",
+      "description": "Control: the other dispatcher's process has exited. Its reservation is provably abandoned, so the reaper terminates its machine, charges it once and releases it, and the dispatch runs.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "other_dispatcher": [
+        {
+          "machine": "m-other-dead",
+          "alive": false
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "local_cli_ran": false,
+        "seed_settled": true,
+        "machine_gone": true,
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "unknown_outcome_never_fails_over",
+      "description": "Unpinned routing over two providers. The launch is uncertain and Fly's error text looks like a provider rate limit. The dispatch stops after ONE attempt with its remote identifiers intact: no failover, no local replay.",
+      "provider": "router",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "create": "lost",
+        "lost_error": "rate_limit_error: usage limit reached"
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "attempts": 1,
+        "local_cli_ran": false,
+        "remote_outcome_unknown": true,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "timeout_unconfirmed_keeps_recovery_metadata",
+      "description": "The machine outlives the deadline and also survives termination: a failed result with an unknown outcome, the run id named in the error, the machine unconfirmed, and its reservation kept.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "timeout",
+        "record": null,
+        "delete_ineffective": true
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo",
+        "--timeout",
+        "5"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "timed out",
+        "error_contains_run_id": true,
+        "remote_outcome_unknown": true,
+        "remote_machine_state": "unconfirmed",
+        "in_flight_at_least": 1,
+        "local_cli_ran": false,
+        "stderr_contains": "UNKNOWN outcome",
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "recorded_success_unconfirmed_cleanup_is_visible",
+      "description": "The run finishes and records a result, but its machine is not confirmed terminated. The dispatch succeeds (its outcome is known) and still reports the remote run and its unconfirmed machine, with a warning, and keeps the reservation.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY GATE_INHERITANCE: clear\n"
+        },
+        "delete_ineffective": true
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "remote_outcome_unknown": false,
+        "remote_machine_state": "unconfirmed",
+        "stderr_contains": "not confirmed terminated",
+        "in_flight_at_least": 1,
+        "local_cli_ran": false,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "login_back_to_back_dispatchers_keep_their_own_payload",
+      "description": "Two dispatches use the same Codex login machine back to back. Each starts with its OWN job config, each result belongs to its own run, and the first run's cleanup never touches the second's job.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "dispatches": 2,
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "result for {run_id}\n"
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_has_own_run_id": true,
+        "starts_with_own_config": true,
+        "local_cli_ran": false,
+        "in_flight_after": 0,
+        "second": {
+          "exit": 0,
+          "ok": true,
+          "stdout_has_own_run_id": true,
+          "starts": 2
+        },
+        "lease_released": true
+      }
+    },
+    {
+      "id": "login_cleanup_unverified_blocks_readmission",
+      "description": "The first run's job config cannot be verifiably cleared from the login machine. Its reservation is kept (machine unconfirmed), so the next dispatch cannot take the machine: it is refused before anything is started, and the first job's config is never handed to another run.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "dispatches": 2,
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "result for {run_id}\n"
+        },
+        "scrub_ignored": true
+      },
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "remote_machine_state": "unconfirmed",
+        "in_flight_at_least": 1,
+        "local_cli_ran": false,
+        "second": {
+          "exit": 1,
+          "ok": false,
+          "reason_contains": "not confirmed stopped",
+          "starts": 1
+        }
+      }
+    },
+    {
+      "id": "abandoned_login_reservation_never_stops_a_live_run",
+      "description": "Another dispatcher (a live separate process) is running its job on the Codex login machine, and an abandoned reservation from a dead dispatcher also names that machine. This dispatch's reaper leaves the live job running with its config intact and keeps the abandoned reservation unconfirmed; the dispatch is told the machine is busy, with a retry time.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "other_dispatcher": [
+        {
+          "machine": "m-codex-login",
+          "alive": true,
+          "login": true,
+          "job_on_machine": true
+        },
+        {
+          "machine": "m-codex-login",
+          "alive": false,
+          "login": true
+        }
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "busy",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "login_state": "started",
+        "login_config_run_id": "other-m-codex-login-live",
+        "login_stop_requests": 0,
+        "seed_kept": true,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "malformed_result_read_keeps_outcome_unknown",
+      "description": "The run finishes but the result store answers with a malformed page. The outcome is unknown, not 'no result': the dispatch fails with remote_outcome_unknown, the remote run named, after one attempt and with no local replay.",
+      "provider": "router",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": "malformed"
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "attempts": 1,
+        "remote_outcome_unknown": true,
+        "remote_machine_state": "terminated",
+        "reason_contains": "outcome is unknown",
+        "local_cli_ran": false,
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "login_machine_stopped_with_foreign_job_and_no_ledger_entry_is_refused",
+      "description": "The ledger knows nothing about the Codex login machine (lost, unshared, or another host), but the machine is stopped with another run's job on it. Admission reads the machine's live state, refuses with a retry time, and sends it no update, start, stop or delete.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "login_machine": {
+          "state": "stopped",
+          "config_run_id": "foreign-run"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "not free",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "login_mutations": 0,
+        "login_config_run_id": "foreign-run",
+        "login_state": "stopped",
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "login_machine_started_with_foreign_job_and_no_ledger_entry_is_refused",
+      "description": "The ledger knows nothing about the Codex login machine (lost, unshared, or another host), but the machine is started with another run's job on it. Admission reads the machine's live state, refuses with a retry time, and sends it no update, start, stop or delete.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "login_machine": {
+          "state": "started",
+          "config_run_id": "foreign-run"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "not free",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "login_mutations": 0,
+        "login_config_run_id": "foreign-run",
+        "login_state": "started",
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "login_machine_leased_elsewhere_is_refused",
+      "description": "Another dispatcher holds the Codex login machine's Fly lease (no ledger entry here). Admission cannot take the lease, so it refuses with a retry time and makes no update, start, stop or delete; the other holder's lease is untouched.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "login_lease": "another dispatcher"
+      },
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "lease is held by another",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "login_mutations": 0,
+        "login_lease_holder": "another dispatcher",
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "login_machine_without_version_is_refused",
+      "description": "The Machines API answer for the login machine carries no version. Absence is never availability: admission refuses with a retry time before taking any lease or making any write.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "login_version": null
+      },
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "instance_id is missing",
+        "cooled_until": true,
+        "local_cli_ran": false,
+        "login_mutations": 0,
+        "login_lease_holder": "",
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "cleanup_read_back_config_absent_keeps_the_reservation",
+      "description": "The run finishes, but after the clean-up update the Machines API answers for the login machine with its config absent. That is no evidence the job config was cleared: the dispatch reports the machine unconfirmed and the reservation (with its lease nonce) is kept for the reaper.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "done\n"
+        },
+        "corrupt_after_scrub": "absent"
+      },
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "remote_machine_state": "unconfirmed",
+        "in_flight_at_least": 1,
+        "local_cli_ran": false,
+        "stderr_contains": "not confirmed terminated",
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "cleanup_read_back_config_null_keeps_the_reservation",
+      "description": "The run finishes, but after the clean-up update the Machines API answers for the login machine with its config null. That is no evidence the job config was cleared: the dispatch reports the machine unconfirmed and the reservation (with its lease nonce) is kept for the reaper.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "done\n"
+        },
+        "corrupt_after_scrub": "null"
+      },
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "remote_machine_state": "unconfirmed",
+        "in_flight_at_least": 1,
+        "local_cli_ran": false,
+        "stderr_contains": "not confirmed terminated",
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "lease_release_unverifiable_keeps_the_reservation",
+      "description": "The lease release fails and the lease read-back answers with an empty data object. A missing holder is unknown, not another holder: the dispatch reports the machine unconfirmed and the reservation is kept.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "done\n"
+        },
+        "release_fails": true,
+        "lease_view_override": {
+          "status": "success",
+          "data": {}
+        }
+      },
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "remote_machine_state": "unconfirmed",
+        "in_flight_at_least": 1,
+        "local_cli_ran": false,
+        "stderr_contains": "not confirmed terminated",
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "exhausted_ledger_without_month_marker_is_refused",
+      "description": "The ledger has used up its budget and its daily launches, but its month marker is missing. That is not a new period: every Fly launch is refused with a message that the ledger needs repair, nothing is sent to Fly, and the ledger is not reset.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "ledger_raw": {
+        "spend_usd": 19.999,
+        "launches_today": 50,
+        "local_fallbacks": 0,
+        "in_flight": {},
+        "owners": {},
+        "day": "2030-03-17"
+      },
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "needs operator repair",
+        "fly_requests": 0,
+        "local_cli_ran": false,
+        "ledger_untouched": true,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "exhausted_ledger_without_day_marker_is_refused",
+      "description": "The ledger has used up its budget and its daily launches, but its day marker is missing. That is not a new period: every Fly launch is refused with a message that the ledger needs repair, nothing is sent to Fly, and the ledger is not reset.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "ledger_raw": {
+        "spend_usd": 19.999,
+        "launches_today": 50,
+        "local_fallbacks": 0,
+        "in_flight": {},
+        "owners": {},
+        "month": "2030-03"
+      },
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "needs operator repair",
+        "fly_requests": 0,
+        "local_cli_ran": false,
+        "ledger_untouched": true,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "incomplete_result_record_is_an_unknown_outcome",
+      "description": "The result record the run left has an exit code but no stdout, stderr or flags. An incomplete record is not a result: the dispatch reports an unknown remote outcome, never a success, and does not replay locally.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null,
+        "record_raw": {
+          "exit_code": 0
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "remote_outcome_unknown": true,
+        "reason_contains": "outcome is unknown",
+        "local_cli_ran": false,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "non_finite_budget_setting_disables_fly",
+      "description": "APIS_FLY_MONTHLY_BUDGET_USD is set to NaN. That is not a budget: Fly is disabled, the dispatch is refused with a message naming the setting and no retry time, nothing is minted or sent to Fly, and nothing runs locally.",
+      "settings": {
+        "APIS_FLY_MONTHLY_BUDGET_USD": "NaN"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "APIS_FLY_MONTHLY_BUDGET_USD",
+        "cooled_until": false,
+        "fly_requests": 0,
+        "minted": 0,
+        "local_cli_ran": false
+      }
+    },
+    {
+      "id": "negative_daily_cap_refuses_an_opted_in_class_without_local_fallback",
+      "description": "The class is opted onto Fly and local fallback is on, but APIS_FLY_MAX_MACHINES_PER_DAY is negative. Fly is disabled: the dispatch is refused naming the setting, and it is not quietly run on this machine instead.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+        "APIS_FLY_MAX_MACHINES_PER_DAY": "-5"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "APIS_FLY_MAX_MACHINES_PER_DAY",
+        "fly_requests": 0,
+        "minted": 0,
+        "local_cli_ran": false
+      }
+    },
+    {
+      "id": "held_reservation_with_unreadable_cost_refuses_admission",
+      "description": "Another dispatcher holds a long reservation whose reserved cost cannot be read. Admission cannot establish the budget, so the launch is refused with a repair message: nothing is sent to Fly, nothing runs locally, and the ledger is left exactly as it was.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "ledger_raw": {
+        "month": "2030-03",
+        "day": "2030-03-17",
+        "spend_usd": 0.0,
+        "launches_today": 1,
+        "local_fallbacks": 0,
+        "in_flight": {
+          "held-1": {
+            "run_id": "held-1",
+            "owner": "apis-other",
+            "machine_id": "m-held",
+            "login": false,
+            "started_at": 1899999900.0,
+            "deadline": 1900021620.0,
+            "max_cost_usd": "unknown"
+          }
+        },
+        "owners": {}
+      },
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "needs operator repair",
+        "fly_requests": 0,
+        "local_cli_ran": false,
+        "ledger_untouched": true,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "machine_is_destroyed_while_the_ledger_is_unusable",
+      "description": "The ledger becomes unusable while the run's machine is up, and the connection to the run is lost. Accounting stays frozen (nothing is charged, released or rewritten), but the machine this dispatch launched is still destroyed, and the outcome is reported unknown.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "disconnect",
+        "record": null,
+        "ledger_breaks_on_wait": "null"
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "remote_outcome_unknown": true,
+        "machine_gone": true,
+        "ledger_text_after": "null",
+        "local_cli_ran": false,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "runner_entrypoint_exits_by_deadline_with_full_output",
+      "kind": "entrypoint",
+      "mode": "saturated-output",
+      "budget_seconds": 3,
+      "description": "The real runner entrypoint, as a subprocess, with stdout and stderr full and unread and the record write stalled. At its deadline it cleans up what the job started and exits 98, within the cleanup tolerance.",
+      "expect": {
+        "exit": 98,
+        "within_seconds": 5.5,
+        "condition_reached": true,
+        "cleanup_reached": true,
+        "descendant_checked": true
+      }
+    },
+    {
+      "id": "runner_entrypoint_exits_by_deadline_while_output_is_held",
+      "kind": "entrypoint",
+      "mode": "output-held",
+      "budget_seconds": 3,
+      "description": "The same, with the main thread inside a stdout write that cannot complete. The deadline exit takes no output lock, so it still exits 98 in time.",
+      "expect": {
+        "exit": 98,
+        "within_seconds": 5.5,
+        "condition_reached": true,
+        "cleanup_reached": true,
+        "descendant_checked": true
+      }
+    },
+    {
+      "id": "runner_entrypoint_exits_by_deadline_when_cleanup_stalls",
+      "kind": "entrypoint",
+      "mode": "stalled-cleanup",
+      "budget_seconds": 3,
+      "description": "At the deadline the cleanup does its work and then never returns. The exit does not wait for it beyond the cleanup tolerance.",
+      "expect": {
+        "exit": 98,
+        "within_seconds": 5.5,
+        "condition_reached": true,
+        "cleanup_reached": true,
+        "descendant_checked": true
+      }
+    },
+    {
+      "id": "runner_entrypoint_exits_promptly_when_the_run_raises",
+      "kind": "entrypoint",
+      "mode": "exceptional-exit",
+      "budget_seconds": 3,
+      "description": "The run raises part way while another thread waits forever. The entrypoint does not leave its exit to interpreter shutdown: it cleans up and exits 99 promptly.",
+      "expect": {
+        "exit": 99,
+        "after_condition_within": 2.5,
+        "condition_reached": true,
+        "cleanup_reached": true,
+        "descendant_checked": true
+      }
+    },
+    {
+      "id": "runner_entrypoint_exits_promptly_when_the_run_asks_to_exit",
+      "kind": "entrypoint",
+      "mode": "system-exit",
+      "budget_seconds": 3,
+      "description": "The run asks to exit part way while another thread waits forever. The entrypoint still cleans up and exits 99 promptly.",
+      "expect": {
+        "exit": 99,
+        "after_condition_within": 2.5,
+        "condition_reached": true,
+        "cleanup_reached": true,
+        "descendant_checked": true
+      }
+    },
+    {
+      "id": "login_claim_waits_for_the_machine_to_settle",
+      "description": "Right after each config update the Codex login machine reports a transitional state for a moment before it is stopped again. The claim waits for it to settle instead of refusing, the job runs once, and afterwards the machine holds no job files.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "settle_reads": 2,
+        "record": {
+          "exit_code": 0,
+          "stdout": "LOGIN SETTLED OK\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "LOGIN SETTLED OK",
+        "local_cli_ran": false,
+        "login_starts": 1,
+        "login_state": "stopped",
+        "login_job_files_after": false,
+        "in_flight_after": 0,
+        "revoked_all_minted": true,
+        "login_lock_free": true
+      }
+    },
+    {
+      "id": "login_machine_that_never_settles_fails_closed_without_job_files",
+      "description": "After the claim's update the Codex login machine never settles back to stopped. The launch fails closed before any start, the job files are cleared from the machine's stored config, and the reservation is released.",
+      "provider": "codex",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "never_settles": true,
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "did not settle",
+        "local_cli_ran": false,
+        "login_starts": 0,
+        "login_job_files_after": false,
+        "in_flight_after": 0,
+        "revoked_all_minted": true,
+        "login_lock_free": true
+      }
+    },
+    {
+      "id": "large_system_prompt_travels_as_a_file_not_an_argument",
+      "description": "The role's system prompt is about 150 KB, as real agent definitions with their rule index are. On Fly it is shipped as a job file and passed by path, so no argument the machine receives comes near Linux's 128 KB limit for one argument, and the run completes.",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "agent_prompt_bytes": 150000,
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY LARGE PROMPT OK\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "FLY LARGE PROMPT OK",
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "argv_max_bytes_below": 10000,
+        "system_prompt_file_bytes_over": 150000,
+        "revoked_all_minted": true,
+        "in_flight_after": 0
+      }
+    },
+    {
+      "id": "claude_runs_on_its_login_machine_with_the_volume_token",
+      "description": "Claude runs on its own login machine, like Codex and Cursor. The job names only the token file on the machine's volume; no Claude token is read on the Mac or sent to Fly. The machine is claimed, started, cleared of the job and left stopped, with no per-job machine created.",
+      "claude_login": true,
+      "settings": {
+        "APIS_FLY_CLAUDE_MACHINE_ID": "m-claude-login"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "CLAUDE LOGIN OK\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "CLAUDE LOGIN OK",
+        "local_cli_ran": false,
+        "machines_created": 0,
+        "login_starts": 1,
+        "claude_login_state": "stopped",
+        "claude_login_clear": true,
+        "claude_token_file": "/data/claude/oauth_token",
+        "in_flight_after": 0,
+        "revoked_all_minted": true
+      }
+    },
+    {
+      "id": "fly_dispatch_is_not_gated_by_the_macs_usage_reading",
+      "description": "The Mac's own Claude login reads far over its weekly ceiling, and the usage gate is on. A dispatch that runs on Fly uses the runner's separately held login, so the Mac's reading does not gate it. It runs, and the envelope says which reading was set aside. The Fly caps still apply.",
+      "mac_usage": "over_ceiling",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "FLY UNGATED OK\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "FLY UNGATED OK",
+        "local_cli_ran": false,
+        "machines_created": 1,
+        "usage_gate_exempted_contains": "usage gate paced",
+        "revoked_all_minted": true,
+        "in_flight_after": 0
+      }
+    },
+    {
+      "id": "the_same_dispatch_bound_for_the_mac_keeps_its_usage_gate",
+      "description": "The same over-ceiling reading, but the dispatch is bound for the Mac. It is refused by the usage gate exactly as before, and nothing runs.",
+      "mac_usage": "over_ceiling",
+      "settings": {},
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--runner",
+        "local",
+        "--github-delivery",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "ceiling",
+        "local_cli_ran": false,
+        "machines_created": 0
+      }
+    },
+    {
+      "id": "fly_dispatch_keeps_the_operators_zero_headroom_override",
+      "description": "The operator has set Claude's headroom to zero, and the Mac's own Claude login reports itself exhausted. A Fly dispatch is not gated by the Mac's reading, but the operator's override still applies: the dispatch is refused, and no machine is created.",
+      "mac_usage": "exhausted",
+      "settings": {
+        "APIS_HARNESS_HEADROOM": "{\"claude\": 0.0}"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": {
+          "exit_code": 0,
+          "stdout": "SHOULD NOT RUN\n"
+        }
+      },
+      "args": [
+        "--runner",
+        "fly",
+        "--github-delivery",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 1,
+        "ok": false,
+        "reason_contains": "headroom=0.000",
+        "local_cli_ran": false,
+        "machines_created": 0
+      }
+    }
+  ]
+}

@@ -16,9 +16,10 @@ SKILL.md, and (when the definition specifies a restricted tool_allowlist) passes
 Stage 2 (ateles#94): writes a harness_event to Neotoma at dispatch start,
 completion, and failure.
 
-Stage 5 (ateles#94): when no agent_definition loads (empty prompt_markdown),
-emits a notifier WARN and a harness_event with the degraded_generic_subagent
-marker so degraded dispatches are observable. Dispatch still proceeds.
+Canonical execution admission refuses absent, malformed or inactive role
+instructions before child construction. Historical prompt-formatting helpers
+still expose a degraded marker for introspection; that marker grants no
+execution authority.
 
 ateles#257: on a FAILED dispatch the complete child stdout AND stderr are
 persisted to a per-dispatch file under ``~/Library/Logs/ateles/dispatch-failures/``
@@ -35,15 +36,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -56,19 +60,42 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from lib.daemon_runtime import AgentDefinition, AgentLoader  # noqa: E402
+from lib import github_app_token as _github_app_token  # noqa: E402
+from lib.credential_scrub import (  # noqa: E402
+    AGENT_CHILD_MARKER_ENV,
+    is_generation_credential,
+)
+from lib.daemon_runtime import (  # noqa: E402
+    AgentDefinition, AgentDefinitionUnavailable, AgentPolicyUnavailable,
+    AgentLoader, admit_agent_definition,
+)
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 from foundation import (  # noqa: E402
     SWARM_FOUNDATION_CONTRACT,  # noqa: F401 — re-exported beside the sibling contracts
     foundation_contract,
 )
+import local_provider  # noqa: E402
+import model_tiering  # noqa: E402
+import fly_runner  # noqa: E402
 from harness_router import (  # noqa: E402
+    FRONTIER_PROVIDERS,
+    MAC_READING_SOURCES,
+    configured_providers,
     cool_down,
+    cooled_until_all,
     cooling_providers,
+    headroom_resolution,
+    minimum_headroom,
     provider_candidates,
     provider_exclusion_reason,
+    record_cooling,
+    render_wall,
     usable_provider_names,
+    usage_gate,
+    usage_gate_refusals_all,
 )
+from limit_reset import parse_refusal  # noqa: E402
+from usage_probe import refresh_usage_if_stale  # noqa: E402
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
@@ -84,7 +111,31 @@ CODEX_BIN = (
     or shutil.which("codex")
 )
 CURSOR_BIN = os.environ.get("APIS_CURSOR_BIN") or shutil.which("cursor-agent")
+TRUSTED_MACOS_SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 DISPATCH_TIMEOUT_SECONDS = int(os.environ.get("APIS_DISPATCH_TIMEOUT", "1800"))
+
+
+async def _kill_spawned_process_group(proc: asyncio.subprocess.Process) -> None:
+    """Kill and drain exactly the process group created for one provider run.
+
+    Provider CLIs commonly launch a native child. Killing only the immediate
+    wrapper can orphan that child with the stdout/stderr pipes still open,
+    which makes the timeout path's follow-up ``communicate()`` hang forever.
+    Every caller launches with ``start_new_session=True``, so the wrapper PID
+    is also the exact process-group ID; no process-name or broad PID matching
+    is involved.
+    """
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int) and hasattr(os, "killpg"):
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        proc.kill()
+    await proc.communicate()
+
+
 ATELES_REPO = Path(
     os.environ.get("ATELES_REPO_PATH", str(Path.home() / "repos" / "ateles"))
 )
@@ -106,34 +157,42 @@ ATELES_REPO = Path(
 _DROPPED_ALLOWLIST_RULE_RE = re.compile(r'Ignoring\s+--allowedTools rule "([^"]*)"')
 
 # ── Gate-writeback tool grant (ateles#795) ────────────────────────────────────
-# The Neotoma tools a gate-owning review lens needs to record its OWN verdict.
+# The Neotoma tools a gate-owning review lens is pre-approved for READ-ONLY
+# access to, so it can look up and read back the parent issue's `gate_status`
+# for its own situational awareness.
 #
-# A panelist seated because it owns a pending pre-impl gate is instructed (the
-# GATE WRITEBACK block in swarm_dispatch._panelist_prompt) to `correct()`
-# `gate_status.<lens>` on the parent issue entity and then read it back. On PR
-# #791 that write was DENIED — and not by Neotoma: the `agent_grant` admitting
-# `issue` on retrieve+correct has been live and `active` since ateles#769, and
-# the instance policy is permissive. It was denied by the LOCAL harness. A
+# HISTORY, and why `correct` is NO LONGER in this tuple. A panelist seated
+# because it owns a pending pre-impl gate used to be instructed to `correct()`
+# `gate_status.<lens>` on the parent issue entity itself, pre-approved via this
+# same allowlist. On PR #791 that write was DENIED by the LOCAL harness (a
 # headless `claude --print` child runs in `default` permission mode, where an
-# MCP write tool it was not explicitly granted raises an approval prompt that a
-# non-interactive child cannot answer. The lens signed off in prose while
-# `gate_status.ux` stayed `pending`, and gate inheritance — a hard stop that
-# outranks APIS_AUTONOMY_AUTO_MERGE — withheld the merge forever.
+# MCP write tool it was not explicitly granted raises an approval prompt a
+# non-interactive child cannot answer), so this tuple originally added
+# `mcp__mcpsrv_neotoma__correct` to pre-approve exactly that write.
 #
-# The remedy is to name these three tools on `--allowed-tools` so the writeback
-# is pre-approved at tool granularity. Deliberately NOT the remedy:
-# `--permission-mode bypassPermissions` or `--dangerously-skip-permissions`,
-# either of which lifts every gate on the child (shell, network, the entire MCP
-# surface) to fix one internal governance write. Least privilege is the point.
+# The operator's amended ADR on ateles#795 moved the system-of-record write
+# off this path entirely: `gate_waive.IssueGateStore.sign_off`, called by the
+# DISPATCHER after a clean lens verdict, signs the write with the LENS's own
+# AAuth keypair — never this MCP session's shared daemon bearer. Leaving
+# `mcp__mcpsrv_neotoma__correct` pre-approved here left an unattributed sibling
+# path wide open: every lens session presents the SAME shared bearer over MCP
+# (see `neotoma_token_for_agent`'s Tier-2 fallback), so a pre-approved
+# `correct()` on `gate_status` from ANY seated lens could clear a gate with no
+# lens AAuth signature at all — and `sign_off`'s own idempotent no-op on an
+# already-cleared gate (see `gate_waive.sign_off`) would then read that
+# shared-bearer write back as a verified success. Removing `correct` from this
+# allowlist closes that sink: an agent MCP `correct()` of `gate_status` is no
+# longer pre-approved at the tool-permission layer, so it falls back to the
+# same `default`-mode approval prompt a non-interactive child cannot answer —
+# best-effort at most, never a clearance path (Falco's security review on PR
+# #1181, ateles#795 amended ADR).
 #
-# The two retrieve tools are here because the recipe is correct-then-READ-BACK:
-# a `correct()` the lens cannot verify is exactly the silent failure ateles#762
-# cause #2 named, and a blind write would trade one invisible failure for
-# another.
+# The two retrieve tools remain pre-approved: they are read-only situational
+# awareness (what does `gate_status` currently say), not a system-of-record
+# mutation, so pre-approving them carries none of the attribution risk above.
 GATE_WRITEBACK_TOOLS: tuple[str, ...] = (
     "mcp__mcpsrv_neotoma__retrieve_entity_by_identifier",
     "mcp__mcpsrv_neotoma__retrieve_entity_snapshot",
-    "mcp__mcpsrv_neotoma__correct",
 )
 
 
@@ -150,6 +209,566 @@ def gate_writeback_allowlist(tools: list[str]) -> list[str]:
             merged.append(tool)
     return merged
 
+
+# ── Deny the sibling attribution-bypass sink (Falco's REQUEST_CHANGES, PR #1181) ──
+# `GATE_WRITEBACK_TOOLS` is additive — it never carried `correct`, but an
+# ADDITIVE allowlist cannot un-grant a tool the agent already has through the
+# `mcp__mcpsrv_neotoma__*` wildcard (every claude dispatch gets this wildcard;
+# see the `--mcp-config` block below) or through `tools == ["*"]` (every tool,
+# unconditionally). Removing `correct` from `GATE_WRITEBACK_TOOLS` was
+# necessary but not sufficient: the wildcard/`*` path still pre-approves
+# `mcp__mcpsrv_neotoma__correct` for a gate-owning lens exactly as before,
+# which is the identical shared-bearer attribution-bypass sink `sign_off` was
+# built to close (Falco's finding `ent_f276d2310e1705a7bbbe1fd0`, reconfirmed
+# at commit `104867d`).
+#
+# This is the actual close: for a run that OWNS a pending pre-impl gate
+# (`owns_pending_gate=True` — every run whose clean verdict `sign_off` records,
+# i.e. the PR panel and the Phase-1 issue-spec pm turn), `correct` is placed on
+# the CLI's DENY list, which takes precedence over any allow entry including a
+# wildcard. This is a subtractive control, not an additive grant, so it cannot
+# be defeated by the same class of gap that made the additive fix incomplete.
+#
+# Since the dispatcher security run at e874537f (BLOCKING
+# `incomplete_class_sweep`), the deny also covers EVERY seated reviewer
+# (`run_skill(seated_reviewer=True)`), not only a run that owns a pending gate:
+# an advisory seat, or a gate owner re-seated after its gate cleared, held the
+# same wildcard over the same shared bearer.
+GATE_OWNER_DENIED_TOOLS: tuple[str, ...] = ("mcp__mcpsrv_neotoma__correct",)
+
+# Codex names MCP tools relative to their configured server.  The public
+# agent definitions use Claude's fully-qualified spelling
+# (``mcp__mcpsrv_neotoma__<tool>``), while Codex's ``enabled_tools`` /
+# ``disabled_tools`` values contain only ``<tool>``.  Keep the translation
+# beside the source constants so the two surfaces cannot drift independently.
+CODEX_NEOTOMA_SERVER_ID = "mcpsrv_neotoma"
+CODEX_NEOTOMA_TOOL_PREFIX = f"mcp__{CODEX_NEOTOMA_SERVER_ID}__"
+CODEX_GATE_BEARER_ENV = "NEOTOMA_BEARER_TOKEN"
+CODEX_GATE_REQUIRED_READ_TOOLS: tuple[str, ...] = tuple(
+    tool.removeprefix(CODEX_NEOTOMA_TOOL_PREFIX) for tool in GATE_WRITEBACK_TOOLS
+)
+CODEX_GATE_DENIED_TOOLS: tuple[str, ...] = tuple(
+    tool.removeprefix(CODEX_NEOTOMA_TOOL_PREFIX) for tool in GATE_OWNER_DENIED_TOOLS
+)
+# Explicit, semantically read-only tools, never a prefix or a server wildcard.
+# Codex's headless approval policy cannot answer an MCP prompt. Approve only
+# these reads when the existing role allowlist already exposes them; all
+# other tools retain prompt approval, including granted writes.
+CODEX_PREAPPROVED_READ_TOOLS = frozenset({
+    "get_session_identity", "retrieve_entities", "retrieve_entity_by_identifier",
+    "retrieve_entity_snapshot", "retrieve_related_entities",
+})
+GATE_OWNER_DENY_CAPABLE_PROVIDERS: tuple[str, ...] = ("claude", "codex")
+
+
+def _codex_read_approvals(enabled: tuple[str, ...] | list[str] | None) -> dict:
+    reads = CODEX_PREAPPROVED_READ_TOOLS
+    if enabled is not None:
+        reads = reads.intersection(enabled)
+    return {tool: {"approval_mode": "approve"} for tool in sorted(reads)}
+
+
+def _append_codex_read_approvals(lines: list[str], server: str,
+                               enabled: tuple[str, ...] | None) -> None:
+    lines.append('default_tools_approval_mode = "prompt"')
+    for tool in _codex_read_approvals(enabled):
+        lines.extend(["", f"[mcp_servers.{server}.tools.{tool}]",
+                      'approval_mode = "approve"'])
+
+
+def _codex_read_approval_error(server: dict) -> str | None:
+    if server.get("default_tools_approval_mode") != "prompt":
+        return "Codex MCP default approval must remain prompt"
+    enabled = server.get("enabled_tools")
+    if enabled is not None and (not isinstance(enabled, list)
+                               or not all(isinstance(t, str) for t in enabled)):
+        return "Codex MCP approval allowlist is not a string list"
+    if server.get("tools", {}) != _codex_read_approvals(enabled):
+        return "Codex MCP approval must preapprove exactly the granted known reads"
+    return None
+
+
+@dataclass(frozen=True)
+class CodexGateOwnerConfig:
+    """Verified, isolated Codex configuration for one seated review run."""
+
+    home: Path
+    config_path: Path
+
+
+def _codex_gate_enabled_tools(agent_tools: list[str]) -> tuple[str, ...] | None:
+    """Translate one agent's Neotoma grant into Codex MCP-local tool names.
+
+    ``None`` means the agent already carries a wildcard and Codex should expose
+    the server's ordinary tool set, minus ``disabled_tools``.  A restricted
+    grant remains restricted, but always retains the two read tools a seated
+    reviewer needs for gate-state awareness.  ``correct`` may still appear in
+    the allowlist: Codex applies ``disabled_tools`` after ``enabled_tools``, so
+    keeping it there exercises the deny-wins property instead of relying on an
+    additive allowlist to subtract authority.
+    """
+    if "*" in agent_tools or f"{CODEX_NEOTOMA_TOOL_PREFIX}*" in agent_tools:
+        return None
+    translated = [
+        tool.removeprefix(CODEX_NEOTOMA_TOOL_PREFIX)
+        for tool in agent_tools
+        if tool.startswith(CODEX_NEOTOMA_TOOL_PREFIX)
+    ]
+    for tool in CODEX_GATE_REQUIRED_READ_TOOLS:
+        if tool not in translated:
+            translated.append(tool)
+    return tuple(translated)
+
+
+def _codex_gate_config_text(base_url: str, agent_tools: list[str]) -> str:
+    """Render the complete isolated Codex config for one gate-owning run."""
+    enabled_tools = _codex_gate_enabled_tools(agent_tools)
+    endpoint = f"{base_url.rstrip('/')}/mcp"
+    lines = [
+        'cli_auth_credentials_store = "file"',
+        "",
+        f"[mcp_servers.{CODEX_NEOTOMA_SERVER_ID}]",
+        f"url = {json.dumps(endpoint)}",
+        f"bearer_token_env_var = {json.dumps(CODEX_GATE_BEARER_ENV)}",
+        "required = true",
+    ]
+    if enabled_tools is not None:
+        lines.append(f"enabled_tools = {json.dumps(list(enabled_tools))}")
+    lines.append(f"disabled_tools = {json.dumps(list(CODEX_GATE_DENIED_TOOLS))}")
+    _append_codex_read_approvals(lines, CODEX_NEOTOMA_SERVER_ID, enabled_tools)
+    return "\n".join(lines) + "\n"
+
+
+def _codex_gate_config_contract(config_path: Path, base_url: str) -> str | None:
+    """Return why *config_path* cannot enforce the gate-owner deny, or None.
+
+    This is the launch proof, not a best-effort lint.  The isolated config must
+    expose exactly the intended record server, source its bearer from the
+    child environment, keep the required reads, and deny exactly ``correct``.
+    Any malformed or broadened shape refuses the child before it starts.
+    """
+    try:
+        parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return f"Codex gate-owner config is unreadable: {exc}"
+    if parsed.get("cli_auth_credentials_store") != "file":
+        return "Codex gate-owner config must preserve file-backed subscription auth"
+    servers = parsed.get("mcp_servers")
+    if not isinstance(servers, dict) or set(servers) != {CODEX_NEOTOMA_SERVER_ID}:
+        return (
+            "Codex gate-owner config must contain exactly the intended MCP "
+            f"server {CODEX_NEOTOMA_SERVER_ID!r}"
+        )
+    server = servers.get(CODEX_NEOTOMA_SERVER_ID)
+    if not isinstance(server, dict):
+        return "Codex gate-owner MCP server configuration is not a table"
+    expected_url = f"{base_url.rstrip('/')}/mcp"
+    if server.get("url") != expected_url:
+        return "Codex gate-owner MCP server URL does not match NEOTOMA_BASE_URL"
+    if server.get("bearer_token_env_var") != CODEX_GATE_BEARER_ENV:
+        return "Codex gate-owner MCP bearer is not environment-bound"
+    if server.get("required") is not True:
+        return "Codex gate-owner MCP server is not marked required"
+    denied = server.get("disabled_tools")
+    if denied != list(CODEX_GATE_DENIED_TOOLS):
+        return (
+            "Codex gate-owner disabled_tools must deny exactly "
+            f"{list(CODEX_GATE_DENIED_TOOLS)!r}"
+        )
+    enabled = server.get("enabled_tools")
+    if enabled is not None:
+        if not isinstance(enabled, list) or not all(
+            isinstance(tool, str) for tool in enabled
+        ):
+            return "Codex gate-owner enabled_tools is not a string list"
+        missing_reads = set(CODEX_GATE_REQUIRED_READ_TOOLS) - set(enabled)
+        if missing_reads:
+            return (
+                "Codex gate-owner enabled_tools omits required reads: "
+                + ", ".join(sorted(missing_reads))
+            )
+    return _codex_read_approval_error(server)
+
+
+def _prepare_codex_gate_owner_config(
+    *,
+    base_url: str,
+    agent_tools: list[str],
+    env_extra: dict[str, str] | None,
+) -> CodexGateOwnerConfig:
+    """Create and read back an isolated Codex config without global mutation.
+
+    Codex refreshes file-backed ChatGPT credentials during ordinary runs.  The
+    isolated home therefore symlinks its ``auth.json`` to the effective source
+    instead of copying it: refreshes reach the canonical cache, while the
+    isolated ``config.toml`` still prevents ambient MCP servers from loading.
+    """
+    inherited_home = Path(
+        (env_extra or {}).get("CODEX_HOME")
+        or os.environ.get("CODEX_HOME")
+        or (Path.home() / ".codex")
+    )
+    auth_source = inherited_home / "auth.json"
+    if not auth_source.is_file():
+        raise RuntimeError(
+            "Codex subscription auth.json is unavailable in the effective "
+            "CODEX_HOME; refusing a gate-owning launch"
+        )
+    if auth_source.stat().st_mode & 0o077:
+        raise RuntimeError(
+            "Codex subscription auth.json is accessible to group or other users; "
+            "refusing a gate-owning launch"
+        )
+    tmp_parent_value = (env_extra or {}).get("TMPDIR", "").strip()
+    tmp_parent = Path(tmp_parent_value) if tmp_parent_value else None
+    if tmp_parent is not None:
+        tmp_parent.mkdir(parents=True, exist_ok=True)
+    home = Path(
+        tempfile.mkdtemp(
+            prefix="apis_codex_gate_",
+            dir=str(tmp_parent) if tmp_parent is not None else None,
+        )
+    )
+    try:
+        os.chmod(home, 0o700)
+        auth_path = home / "auth.json"
+        auth_path.symlink_to(auth_source.resolve(strict=True))
+        if not auth_path.is_symlink() or (
+            auth_path.resolve(strict=True) != auth_source.resolve(strict=True)
+        ):
+            raise RuntimeError(
+                "Codex gate-owner auth.json does not resolve to the effective "
+                "subscription credential cache"
+            )
+        config_path = home / "config.toml"
+        config_path.write_text(
+            _codex_gate_config_text(base_url, agent_tools), encoding="utf-8"
+        )
+        os.chmod(config_path, 0o600)
+        if config_path.stat().st_mode & 0o777 != 0o600:
+            raise RuntimeError("Codex gate-owner config is not mode 0600")
+        contract_error = _codex_gate_config_contract(config_path, base_url)
+        if contract_error:
+            raise RuntimeError(contract_error)
+        return CodexGateOwnerConfig(home=home, config_path=config_path)
+    except Exception:
+        shutil.rmtree(home, ignore_errors=True)
+        raise
+
+
+# ── Isolated harness home for local Codex and Cursor dispatches ──────────────
+# A swarm child must not inherit the operator's personal harness
+# configuration: ~/.codex/config.toml and ~/.cursor/mcp.json declare MCP
+# servers for personal tools, a dev instance and a client's hosted instance.
+# Every local Codex and Cursor dispatch therefore runs with a generated,
+# per-dispatch home whose MCP servers are exactly the ones the role's tool
+# allowlist names: by default only the production Neotoma, reached over its
+# remote MCP endpoint with the ROLE's own token (never the operator's bearer).
+# Remote HTTP MCP is opened by the CLI itself, so no local stdio shim has to
+# start inside the dispatch sandbox. Only the CLI's own login capability is
+# carried over (Codex: a symlink to auth.json; Cursor: a link to the macOS
+# login keychain directory), plus Codex's non-secret model settings.
+#
+# Every place each CLI reads MCP servers from was checked against the
+# installed CLIs (see the PR). The home and the guards below cover each:
+# Codex: CODEX_HOME/config.toml (generated), project .codex/config.toml
+# layers (read only for a TRUSTED project; the generated config trusts none),
+# -c/--config overrides (refused), --profile (refused). Cursor: HOME's
+# .cursor/mcp.json and local plugins (generated home, no plugins), and the
+# project root's .cursor/mcp.json, where the project root is the git root of
+# --workspace or --workspace itself (a dispatch whose project root holds any
+# such file is refused, whatever it contains).
+
+HARNESS_ISOLATION_REFUSED = "harness isolation refused"
+# The child-only environment variable the isolated Codex config reads the
+# role's own Neotoma bearer from (the value never enters argv or a file).
+ROLE_NEOTOMA_BEARER_ENV = "ATELES_ROLE_NEOTOMA_TOKEN"
+# Non-secret Codex settings carried from the operator's config so the
+# default model behaves as before. Nothing else is copied.
+CODEX_CARRIED_SETTINGS = ("model", "model_reasoning_effort", "service_tier")
+ISOLATED_PROVIDERS = ("codex", "cursor")
+# Codex flags that would bring configuration from outside the isolated home.
+_CODEX_CONFIG_FLAGS = ("-c", "--config", "-p", "--profile")
+
+
+class IsolationRefusal(RuntimeError):
+    """The isolated home cannot be built: a CONFIGURATION REPAIR is needed
+    (not a wait). ``setting`` names what to fix; never a value."""
+
+    def __init__(self, message: str, *, setting: str):
+        super().__init__(message)
+        self.setting = setting
+
+
+@dataclass(frozen=True)
+class IsolatedHarnessHome:
+    """A generated, verified harness home for one local dispatch."""
+
+    home: Path
+    config_path: Path
+    servers: tuple[str, ...]
+    env: dict[str, str]
+
+
+def allowed_mcp_servers(agent_tools: list[str]) -> dict[str, tuple[str, ...] | None]:
+    """The MCP servers a role's tool allowlist grants: ``{server: enabled tool
+    names, or None for the server's whole tool set}``. Only Neotoma can be
+    provided; a role with no Neotoma tools gets no server at all."""
+    if "*" in agent_tools or f"{CODEX_NEOTOMA_TOOL_PREFIX}*" in agent_tools:
+        return {CODEX_NEOTOMA_SERVER_ID: None}
+    tools = tuple(
+        t.removeprefix(CODEX_NEOTOMA_TOOL_PREFIX)
+        for t in agent_tools if t.startswith(CODEX_NEOTOMA_TOOL_PREFIX)
+    )
+    return {CODEX_NEOTOMA_SERVER_ID: tools} if tools else {}
+
+
+def _role_neotoma_endpoint(role: str) -> tuple[str, str]:
+    """``(mcp url, the role's own token)`` for a role granted Neotoma tools.
+
+    Neotoma is a hard dependency for such a role (failure_posture): a missing
+    own token or an invalid endpoint refuses the launch (``IsolationRefusal``)
+    rather than running without memory. The shared bearer is never used."""
+    name = neotoma_token_env_name(role)
+    token = os.environ.get(name, "").strip()
+    if not token:
+        raise IsolationRefusal(
+            f"role {role!r} is granted Neotoma tools but has no Neotoma token of its own "
+            f"({name}); the operator's bearer is never used", setting=name)
+    base = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
+    if not _valid_https_endpoint(base):
+        raise IsolationRefusal(
+            f"role {role!r} is granted Neotoma tools but NEOTOMA_BASE_URL is not a valid "
+            "https endpoint", setting="NEOTOMA_BASE_URL")
+    return f"{base}/mcp", token
+
+
+_HOST_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_ENDPOINT_AUTHORITY = re.compile(
+    rf"(?:\[(?P<ipv6>[0-9A-Fa-f:.]+)\]|(?P<host>{_HOST_LABEL}(?:\.{_HOST_LABEL})*\.?))"
+    r"(?::(?P<port>[0-9]{1,5}))?"
+)
+
+
+def _valid_https_endpoint(base: str) -> bool:
+    """True only for an ``https://host[:port][/path]`` URL whose authority and
+    port are both well formed. Every parse failure is a False, never an
+    exception, so a malformed value always reaches the caller as a refusal."""
+    from urllib.parse import urlsplit
+
+    if not base or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in base):
+        return False
+    try:
+        parts = urlsplit(base)
+        host = parts.hostname
+        port = parts.port  # raises ValueError for a non-numeric or out-of-range port
+    except ValueError:
+        return False
+    if parts.scheme != "https" or not host or parts.query or parts.fragment:
+        return False
+    match = _ENDPOINT_AUTHORITY.fullmatch(parts.netloc)
+    if match is None:
+        return False
+    if match["ipv6"] is not None:
+        try:
+            ipaddress.IPv6Address(match["ipv6"])
+        except ValueError:
+            return False
+    if match["port"] is not None and not (port is not None and 1 <= port <= 65535):
+        return False
+    return True
+
+
+def _codex_carried_settings() -> dict[str, str]:
+    source = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "config.toml"
+    try:
+        with open(source, encoding="utf-8") as fh:
+            parsed = tomllib.loads(fh.read())
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    return {k: parsed[k] for k in CODEX_CARRIED_SETTINGS
+            if k in parsed and isinstance(parsed[k], str)}  # fmt: skip
+
+
+def _isolated_codex_config_text(servers: dict[str, tuple[str, ...] | None], url: str) -> str:
+    lines = ['cli_auth_credentials_store = "file"']
+    for key, value in _codex_carried_settings().items():
+        lines.append(f"{key} = {json.dumps(value)}")
+    for server, enabled in servers.items():
+        lines += ["", f"[mcp_servers.{server}]", f"url = {json.dumps(url)}",
+                  f"bearer_token_env_var = {json.dumps(ROLE_NEOTOMA_BEARER_ENV)}",
+                  "required = true"]  # fmt: skip
+        if enabled is not None:
+            lines.append(f"enabled_tools = {json.dumps(list(enabled))}")
+        _append_codex_read_approvals(lines, server, enabled)
+    return "\n".join(lines) + "\n"
+
+
+def effective_mcp_servers(provider: str, config_path: Path) -> set[str]:
+    """The MCP server ids a generated harness config declares (read back)."""
+    with open(config_path, encoding="utf-8") as fh:
+        text = fh.read()
+    if provider == "codex":
+        parsed = tomllib.loads(text)
+        servers = parsed["mcp_servers"] if "mcp_servers" in parsed else {}
+        for key in ("projects", "profiles", "profile"):
+            if key in parsed:  # trust or a profile would admit other config
+                raise RuntimeError(f"the generated Codex config must not declare {key!r}")
+    else:
+        parsed = json.loads(text)
+        servers = parsed["mcpServers"] if "mcpServers" in parsed else {}
+    if not isinstance(servers, dict):
+        raise RuntimeError("the generated MCP server table is not a table")
+    if provider == "codex":
+        for server in servers.values():
+            error = _codex_read_approval_error(server)
+            if error:
+                raise RuntimeError(error)
+    return set(servers)
+
+
+def cursor_project_mcp_files(workspace: str) -> list[str]:
+    """Every project-level MCP file the Cursor CLI could load for
+    ``--workspace``: ``.cursor/mcp.json`` at the project root, which Cursor
+    takes as the git root of the workspace, else the workspace itself. To be
+    sure of the same root, every candidate is checked: the workspace, its
+    ``git rev-parse`` top level and main worktree, and its nearest ancestor
+    holding a ``.git`` entry. Presence alone counts (a link or any content)."""
+    root = Path(workspace).resolve()
+    candidates = {root}
+    for args in (["rev-parse", "--show-toplevel"], ["rev-parse", "--git-common-dir"]):
+        try:
+            out = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                                 text=True, timeout=10, check=False)  # fmt: skip
+        except (OSError, subprocess.SubprocessError):
+            continue
+        value = out.stdout.strip()
+        if out.returncode == 0 and value:
+            path = Path(value) if os.path.isabs(value) else root / value
+            candidates.add(path.resolve().parent if args[1] == "--git-common-dir"
+                           else path.resolve())  # fmt: skip
+    for parent in (root, *root.parents):
+        if os.path.lexists(parent / ".git"):
+            candidates.add(parent)
+            break
+    return sorted(str(c / ".cursor" / "mcp.json") for c in candidates
+                  if os.path.lexists(c / ".cursor" / "mcp.json"))  # fmt: skip
+
+
+def resolve_dispatch_workspace(path: str) -> str:
+    """The one absolute, symlink-resolved workspace path a dispatch uses for
+    its guard, its child's cwd and its CLI workspace flag (the same
+    resolution ``cursor_project_mcp_files`` applies to the roots it walks)."""
+    return str(Path(path).resolve())
+
+
+def launch_workspace_mismatch(provider: str, cmd: list[str], workspace: str) -> str:
+    """Why the workspace the CLI will be told differs from *workspace* (the one
+    the guard checks), or ``""`` when they are the same absolute path."""
+    flag = {"cursor": "--workspace", "codex": "--cd"}.get(provider)
+    if flag is None or flag not in cmd:
+        return ""
+    i = cmd.index(flag)
+    value = cmd[i + 1] if i + 1 < len(cmd) else ""
+    if not os.path.isabs(value) or value != workspace:
+        return (f"the {provider} workspace flag does not name the checked workspace; "
+                "the launch is refused")  # fmt: skip
+    return ""
+
+
+def codex_config_overrides(cmd: list[str]) -> list[str]:
+    """Codex flags in *cmd* that would bring MCP servers, trust or a profile
+    from outside the isolated home (``-c mcp_servers...``, ``--profile``)."""
+    found = []
+    for i, arg in enumerate(cmd):
+        flag, _, inline = arg.partition("=")
+        if flag in ("-p", "--profile"):
+            found.append(flag)
+        elif flag in ("-c", "--config"):
+            value = inline or (cmd[i + 1] if i + 1 < len(cmd) else "")
+            if value.split("=", 1)[0].strip().split(".", 1)[0] in (
+                    "mcp_servers", "projects", "profiles", "profile"):  # fmt: skip
+                found.append(f"{flag} {value.split('=', 1)[0].strip()}")
+    return found
+
+
+def prepare_isolated_harness_home(provider: str, *, role: str, agent_tools: list[str],
+                                  cwd: str | None,
+                                  env_extra: dict[str, str] | None) -> IsolatedHarnessHome:  # fmt: skip
+    """Generate and verify a per-dispatch harness home for *provider*.
+
+    Raises ``IsolationRefusal`` (a configuration repair) or ``RuntimeError``;
+    either way nothing is launched. ``cwd`` is the Cursor workspace."""
+    granted = allowed_mcp_servers(agent_tools)
+    endpoint = _role_neotoma_endpoint(role) if granted else None
+    other = sorted({t.split("__")[1] for t in agent_tools
+                    if t.startswith("mcp__") and not t.startswith(CODEX_NEOTOMA_TOOL_PREFIX)
+                    and t.count("__") >= 2})  # fmt: skip
+    if other:
+        log.warning(f"[apis] {provider} child for {role!r}: MCP servers {other} in the "
+                    "allowlist are not provided to an isolated swarm child")  # fmt: skip
+    if provider == "cursor":
+        found = cursor_project_mcp_files(cwd or os.getcwd())
+        if found:
+            raise IsolationRefusal(
+                "the dispatch's workspace has its own Cursor MCP configuration at its project "
+                "root, which would add servers to an isolated child",
+                setting="the workspace project's .cursor/mcp.json")
+    tmp_value = (env_extra or {}).get("TMPDIR", "").strip()
+    tmp_parent = Path(tmp_value) if tmp_value else None
+    if tmp_parent is not None:
+        tmp_parent.mkdir(parents=True, exist_ok=True)
+    home = Path(tempfile.mkdtemp(prefix=f"apis_{provider}_home_",
+                                 dir=str(tmp_parent) if tmp_parent else None))  # fmt: skip
+    try:
+        os.chmod(home, 0o700)
+        env: dict[str, str] = {}
+        if provider == "codex":
+            auth_source = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "auth.json"
+            if not auth_source.is_file():
+                raise IsolationRefusal("the Codex subscription login is unavailable",
+                                       setting="Codex login (CODEX_HOME/auth.json)")  # fmt: skip
+            (home / "auth.json").symlink_to(auth_source.resolve(strict=True))
+            config_path = home / "config.toml"
+            with open(config_path, "w", encoding="utf-8") as fh:
+                fh.write(_isolated_codex_config_text(granted, endpoint[0] if endpoint else ""))
+            env["CODEX_HOME"] = str(home)
+        else:
+            cursor_dir = home / ".cursor"
+            cursor_dir.mkdir(mode=0o700)
+            config_path = cursor_dir / "mcp.json"
+            servers = {
+                server: {"url": endpoint[0], "headers": {"Authorization": f"Bearer {endpoint[1]}"}}
+                for server in granted
+            } if endpoint else {}  # fmt: skip
+            fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"mcpServers": servers}, fh)
+            keychains = Path.home() / "Library" / "Keychains"
+            if keychains.is_dir():
+                # Cursor keeps its login in the macOS login keychain, found
+                # under HOME: link that directory, nothing else.
+                (home / "Library").mkdir(mode=0o700)
+                (home / "Library" / "Keychains").symlink_to(keychains)
+            gitconfig = Path.home() / ".gitconfig"
+            if gitconfig.is_file():
+                env["GIT_CONFIG_GLOBAL"] = str(gitconfig)  # commits keep their identity
+            env["HOME"] = str(home)
+            env["CURSOR_CONFIG_DIR"] = str(cursor_dir)
+            if os.path.lexists(cursor_dir / "plugins"):
+                raise RuntimeError("the isolated Cursor home must hold no plugins")
+        os.chmod(config_path, 0o600)
+        declared = effective_mcp_servers(provider, config_path)
+        if declared != set(granted):
+            raise RuntimeError(f"the generated {provider} config declares {sorted(declared)}, "
+                               f"not exactly {sorted(granted)}")  # fmt: skip
+        if provider == "codex" and endpoint:
+            env[ROLE_NEOTOMA_BEARER_ENV] = endpoint[1]
+        return IsolatedHarnessHome(home=home, config_path=config_path,
+                                   servers=tuple(sorted(declared)), env=env)  # fmt: skip
+    except Exception:
+        shutil.rmtree(home, ignore_errors=True)
+        raise
 
 # ── Per-agent Neotoma credential (ateles#795) ─────────────────────────────────
 # A lens that owns a pre-impl gate is INSTRUCTED to record its own verdict by
@@ -184,6 +803,13 @@ def gate_writeback_allowlist(tools: list[str]) -> list[str]:
 # case the caller refuses instead (`gate_writeback_identity_error`), per
 # CLAUDE.md "fail closed on the field that carries the safety meaning".
 NEOTOMA_IDENTITY_UNAVAILABLE = "per-agent Neotoma identity unavailable"
+
+# ateles#795, Falco's REQUEST_CHANGES on PR #1181: the public-safe error-class
+# prefix for a gate-owning run refused because its provider cannot deny a
+# single MCP tool (see the `owns_pending_gate and provider != "claude"` check
+# in `_run_skill_once`). Mirrors `NEOTOMA_IDENTITY_UNAVAILABLE`'s shape so
+# `swarm_dispatch.review_failure_class` can match on it the same way.
+GATE_OWNER_TOOL_DENY_UNAVAILABLE = "gate-owner tool-deny unavailable on provider"
 
 
 def neotoma_token_env_name(role: str) -> str:
@@ -239,7 +865,7 @@ def _require_neotoma_base_url() -> str:
     v = os.environ.get("NEOTOMA_BASE_URL", "").strip()
     if not v:
         raise RuntimeError(
-            'NEOTOMA_BASE_URL is not set. It must point at the Neotoma instance (e.g. https://neotoma.markmhendrickson.com). Local hosting was retired 2026-08-04 and http://localhost:9180 no longer serves anything, so there is deliberately no default: a silent fallback would send writes at a dead port. Under launchd the plist supplies this; for an ad-hoc run, export it or source ~/.config/neotoma/.env first.'
+            "NEOTOMA_BASE_URL is not set. It must point at the Neotoma instance (e.g. https://neotoma.markmhendrickson.com). Local hosting was retired 2026-08-04 and http://localhost:9180 no longer serves anything, so there is deliberately no default: a silent fallback would send writes at a dead port. Under launchd the plist supplies this; for an ad-hoc run, export it or source ~/.config/neotoma/.env first."
         )
     return v.rstrip("/")
 
@@ -287,11 +913,83 @@ def _notify_dropped_allowlist_rules(
 _agent_def_cache: dict[str, AgentDefinition] = {}
 
 
-def _load_agent_def(role: str) -> AgentDefinition:
-    """Load (and cache) an AgentDefinition for the given role name."""
-    if role not in _agent_def_cache:
-        _agent_def_cache[role] = AgentLoader(role).load()
-    return _agent_def_cache[role]
+def _load_agent_def(role: str, *, fresh: bool = False) -> AgentDefinition:
+    """Load (and cache) an AgentDefinition for the given role name.
+
+    Raises ``AgentDefinitionUnavailable`` when the definition cannot be loaded
+    (after the loader's short retry). A failure is never cached and never replaced
+    by a stand-in: the next dispatch asks Neotoma again.
+
+    A local SKILL.md does not supply authority for a missing canonical role.
+    Absence markers are refused even if a lower loader returns one.
+    """
+    if fresh:
+        requested = role.strip().lower() if isinstance(role, str) else ''
+        if not requested:
+            raise AgentDefinitionUnavailable(str(role), 'invalid_name', 1)
+        agent_def = admit_agent_definition(AgentLoader(requested).load(), requested)
+        if (not isinstance(agent_def.name, str)
+                or agent_def.name.strip().lower() != requested
+                or not isinstance(agent_def.entity_id, str)
+                or not agent_def.entity_id.strip()
+                or not isinstance(agent_def.status, str)
+                or agent_def.status.strip().lower() != 'active'
+                or agent_def.is_stub):
+            raise AgentDefinitionUnavailable(requested, 'bad_response', 1)
+        return agent_def
+    if role in _agent_def_cache:
+        return admit_agent_definition(_agent_def_cache[role], role)
+    agent_def = admit_agent_definition(AgentLoader(role).load(), role)
+    _agent_def_cache[role] = agent_def
+    return agent_def
+
+
+def canonical_role_fingerprint(role: str, agent_def: AgentDefinition) -> str:
+    """Hash the admitted role contract for two fresh reads of one dispatch.
+
+    This is an equality check, not a signature or an atomic server lease.
+    AgentDefinition.version has a local default; only raw source evidence can
+    contribute a revision.
+    """
+    snapshot = agent_def.raw.get('snapshot', {}) if isinstance(agent_def.raw, dict) else {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    original_tools = agent_def.tool_allowlist
+    if isinstance(original_tools, tuple):
+        original_tools = list(original_tools)
+    payload = {
+        'role': role.strip().lower(),
+        'name': agent_def.name.strip().lower(),
+        'entity_id': agent_def.entity_id,
+        'status': agent_def.status.strip().lower(),
+        'is_stub': agent_def.is_stub,
+        'prompt_markdown': agent_def.prompt_markdown,
+        'tool_allowlist': original_tools,
+        'tools': agent_def.tools,
+        'agent_grant': agent_def.agent_grant,
+        'aauth_sub': agent_def.aauth_sub,
+        'tier': agent_def.tier,
+        'override_policy': agent_def.override_policy,
+        'source_version': snapshot.get('version'),
+        'source_revision': snapshot.get('revision'),
+        'last_observation_id': agent_def.last_observation_id or None,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+
+
+def _load_active_policy_prompt(role: str, *, agent_definition_id: str | None = None) -> str:
+    """Read live policy on every admission; an unreadable corpus refuses execution."""
+    try:
+        rendered = AgentLoader(role).render_policy_prompt(agent_definition_id=agent_definition_id)
+        if not isinstance(rendered, str):
+            raise ValueError("bad policy rendering")
+        return rendered
+    except AgentPolicyUnavailable:
+        raise
+    except Exception as exc:
+        from lib.daemon_runtime.agent_loader import load_failure_code
+        raise AgentPolicyUnavailable(role, "render", load_failure_code(exc)) from None
 
 
 # ── Review-verdict vocabulary (ateles#938 — one source, defined once) ─────────
@@ -307,9 +1005,12 @@ def _load_agent_def(role: str) -> AgentDefinition:
 # escalated to the operator instead of clearing the panel.
 #
 # `SIGNED_OFF` is NOT a synonym for `APPROVE`. It certifies a narrower, prior
-# claim: that a gate-owning lens's `correct()` write to `gate_status` landed,
-# confirmed by an immediate read-back (see the GATE WRITEBACK instruction in
-# swarm_dispatch._panelist_prompt). `APPROVE` certifies a judgement about the
+# claim: that a gate-owning lens's `gate_status` write landed, confirmed by an
+# immediate read-back — as of ateles#795's amended ADR that write is the
+# DISPATCHER's own lens-AAuth-signed `gate_waive.IssueGateStore.sign_off`
+# (called from `swarm_dispatch._run_pr_review_panel` and
+# `_run_issue_spec_pipeline`), never the lens's own in-session `correct()`.
+# `APPROVE` certifies a judgement about the
 # PR as a whole. Collapsing the two would let a durable-write confirmation
 # stand in for a merge authorisation it never made — so `SIGNED_OFF` maps to
 # the inert GitHub `COMMENT` event, never `APPROVE` (see
@@ -329,6 +1030,15 @@ REVIEW_VERDICT_TOKENS: tuple[str, ...] = (
     "SIGNED_OFF",
 )
 
+# The one sentence every gate-verdict prompt uses to state where the
+# dispatcher reads a verdict (`swarm_dispatch.lens_own_verdict`: a fixed
+# position, independent security run at 8f51ffc2 on PR #1181). The contract
+# below and `swarm_dispatch.gate_verdict_instruction` both render it from
+# here, so the prompts cannot state two different rules.
+GATE_VERDICT_POSITION_RULE = (
+    "the FIRST line of your reply must be your header; the second line your verdict"
+)
+
 
 # ── Shared GitHub-interaction convention (Phase 1 / Layer A) ──────────────────
 # Injected into every GitHub-dispatched agent's system prompt by build_system_prompt
@@ -340,8 +1050,7 @@ REVIEW_VERDICT_TOKENS: tuple[str, ...] = (
 
 _VERDICT_VOCABULARY_LINES = {
     "APPROVE": "all checks pass, no blockers.",
-    "REQUEST_CHANGES": "one or more [BLOCKING] findings; the author must "
-    "address them.",
+    "REQUEST_CHANGES": "one or more [BLOCKING] findings; the author must address them.",
     "COMMENT": "observations only; nothing blocks merge.",
     "BLOCKED": "cannot proceed (missing information, open pre-impl gate, etc.).",
     "SIGNED_OFF": "your gate/phase is signed off.",
@@ -385,6 +1094,29 @@ em-dash, same "Ateles swarm," prefix. Do not add repository/issue suffixes or re
 
 Per ateles#109: when posting under your own dedicated provisioned account (avatar is \
 attribution), the header MAY be omitted. When included, it MUST be the exact form above.
+
+**Gate verdicts are read from your header only.** When you own a gate, the dispatcher \
+reads your verdict from a fixed position in the reply you return: \
+{gate_verdict_position_rule}. That holds on every account, including a dedicated one; \
+at most one `<!-- review:<lens> commit=<sha> -->` marker line may come before the \
+header, and everything else goes after the verdict line. A first line that is not your \
+header, a second line that is not your verdict, a second header, or a second verdict \
+line anywhere leaves the gate pending. Never reproduce an earlier comment's header \
+or verdict line, quoted or not.
+
+**A gate-verdict comment's attribution (header, or avatar on a dedicated account) is \
+already its attribution — omit the generic harness footer on it.** Your harness may \
+separately instruct you to close every reply with a "Generated with…" / \
+`Co-Authored-By:` trailer. \
+That trailer exists to mark AI-authored content when nothing else on the comment does, \
+and on a comment carrying a `<!-- review:<lens> commit=<sha> -->` marker something else \
+already does that job — the attribution header above on a shared account, or the \
+dedicated account's own avatar per the ateles#109 carve-out just above. Either way, do \
+not also append the generic trailer to that comment (ateles#1326: on a shared account \
+the trailer repeats the header's robot emoji, which reads to the dispatcher as a second \
+header on an otherwise valid sign-off). This never leaves a gate-verdict comment with NO \
+attribution at all — it always has one of the two. This applies only to gate-verdict \
+comments; a commit message or PR description still gets the generic trailer as normal.
 
 ### Verdict line — exact, verbatim form
 
@@ -448,7 +1180,8 @@ the same issue or PR. Use `gh api -X PATCH repos/<owner>/<repo>/issues/comments/
 ### PR review head and supersession
 
 Every PR verdict is scoped to the exact artifact it reviewed. Put the full current
-40-hex head SHA in an HTML marker at the start of the comment:
+40-hex head SHA in ONE HTML marker line at the start of the comment, above the header:
+the first form for a lens review, the second for a Vanellus aggregation, never both.
 
 ```
 <!-- review:<lens> commit=<full40hex> -->
@@ -494,7 +1227,7 @@ summary, not a narrative.\
 # cannot occur elsewhere in the text has no such failure mode.
 SWARM_GITHUB_CONTRACT = SWARM_GITHUB_CONTRACT.replace(
     "{verdict_vocabulary_block}", _VERDICT_VOCABULARY_BLOCK
-)
+).replace("{gate_verdict_position_rule}", GATE_VERDICT_POSITION_RULE)
 
 # ── Prior-art contract (check existing context before building) ───────────────
 # Injected into every dispatched agent's system prompt by build_system_prompt,
@@ -564,6 +1297,7 @@ def build_system_prompt(
     agent_def: AgentDefinition,
     skill_md: str,
     include_github_contract: bool = False,
+    policy_prompt: str = "",
 ) -> tuple[str, bool]:
     """
     Build the composite system prompt for a role dispatch.
@@ -596,7 +1330,18 @@ def build_system_prompt(
     so absent — on a checkout with no docs/foundation/conformance.md, so the
     prompt only ever names a reading list the agent can open; the day a kernel
     document lands, the injected text changes to name it.
+
+    ``policy_prompt`` is the live, role-scoped agent_policy rendering from
+    Neotoma. It follows the stable definition and skill layers so conditional
+    rules are delivered through the same provider-neutral prompt carrier. An
+    empty rendering preserves the pre-policy prompt byte-for-byte.
     """
+    def with_policy(prompt: str) -> str:
+        rendered_policy = policy_prompt.strip()
+        if not rendered_policy:
+            return prompt
+        return f"{prompt}\n\n---\n\n{rendered_policy}"
+
     contracts = ""
     if include_github_contract:
         contracts = f"{SWARM_GITHUB_CONTRACT}\n\n---\n\n{SWARM_PRIOR_ART_CONTRACT}"
@@ -606,22 +1351,18 @@ def build_system_prompt(
     definition_prompt = (agent_def.prompt_markdown or "").strip()
     if definition_prompt:
         if include_github_contract:
-            return (
+            return with_policy(
                 f"{definition_prompt}\n\n"
                 "---\n\n"
                 f"{contracts}\n\n"
                 "---\n\n"
-                f"{skill_md}",
-                False,
-            )
-        return (
-            f"{definition_prompt}\n\n---\n\n{skill_md}",
-            False,
-        )
+                f"{skill_md}"
+            ), False
+        return with_policy(f"{definition_prompt}\n\n---\n\n{skill_md}"), False
     # Degraded: no definition_prompt.
     if include_github_contract:
-        return f"{contracts}\n\n---\n\n{skill_md}", True
-    return skill_md, True
+        return with_policy(f"{contracts}\n\n---\n\n{skill_md}"), True
+    return with_policy(skill_md), True
 
 
 # ── Neotoma harness_event writer ───────────────────────────────────────────────
@@ -635,10 +1376,12 @@ def _write_harness_event(
     event_type: str,
     tool_name: str,
     success: str,
+    agent_session_id: str = "",
     input_summary: str = "",
     output_summary: str = "",
     duration_ms: int | None = None,
     usage: "DispatchUsage | None" = None,
+    resolved_tier: "model_tiering.ResolvedTier | None" = None,
 ) -> None:
     """
     Best-effort write of a harness_event entity to Neotoma.
@@ -650,17 +1393,36 @@ def _write_harness_event(
     dispatch_usage.py). Its fields are merged in only when actually reported —
     a harness that reports nothing adds no keys, so an absent field reads as
     "not reported" rather than as a measured zero.
+
+    ``resolved_tier`` (operator ruling 2026-09-29, model_tiering.py) records
+    the ACTION-CLASS tiering decision — which tier this dispatch was required
+    to run at and why (policy / unresolved-fail-closed / escalated) — which is
+    a distinct fact from ``usage.model``/``usage.model_source`` (what model
+    actually ran and how confidently that is known). Both are recorded so a
+    reader can ask "was this dispatch tiered correctly" independent of
+    whether the harness happened to report its own model.
     """
     base_url = _require_neotoma_base_url()
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     if not token:
+        # Best-effort diagnostic write: log loudly and skip rather than raise.
+        # Every caller of this function already wraps it in
+        # `try/except Exception: log.debug(...)`, so a raise here would only
+        # get demoted to a debug line indistinguishable from a transient
+        # network blip — losing the signal instead of surfacing it. Logging
+        # at WARNING here, before returning, is what actually makes an empty
+        # token visible: the audit trail has a hole, but dispatch (the thing
+        # this event is only OBSERVING) is not the thing failing.
+        log.warning(
+            "[apis] NEOTOMA_BEARER_TOKEN is not set; skipping harness_event "
+            f"write (event_type={event_type}, task_entity_id={task_entity_id})"
+        )
         return
 
     event_at = datetime.now(timezone.utc).isoformat()
-    # canonical_name_fields per schema: session_id, event_type, event_at
-    # session_id is not available at dispatch time; use role+task+event_at as a
-    # stable-enough dedup key without it.
-    idempotency_key = f"harness-event-{role}-{task_entity_id}-{event_type}-{event_at}"
+    # canonical_name_fields per schema: session_id, event_type, event_at.
+    session_key = agent_session_id or f"{role}:{task_entity_id}"
+    idempotency_key = f"harness-event-{session_key}-{event_type}-{event_at}"
 
     entity: dict = {
         "entity_type": "harness_event",
@@ -671,8 +1433,18 @@ def _write_harness_event(
         "success": success,
         "task_entity_id": task_entity_id,
     }
+    if agent_session_id:
+        entity["session_id"] = agent_session_id
     if input_summary:
         entity["input_summary"] = input_summary[:500]
+    if resolved_tier is not None:
+        # Prefixed (not appended) so the 500-char truncation below can never
+        # cut it: the marker survives even where the server drops the
+        # dedicated tier fields as undeclared on this schema.
+        tier_marker = f"tiering={resolved_tier.tier}({resolved_tier.source})"
+        output_summary = (
+            f"{tier_marker} {output_summary}" if output_summary else tier_marker
+        )
     if output_summary:
         entity["output_summary"] = output_summary[:500]
     if duration_ms is not None:
@@ -683,12 +1455,39 @@ def _write_harness_event(
         # write and drops the undeclared keys — the pre-existing fields still
         # land, so this can never regress what was already recorded.
         entity.update(usage.as_event_fields())
+    if resolved_tier is not None:
+        # Additive, same posture as `usage` above: an undeclared field on an
+        # unrecognized schema is dropped server-side, never rejected. The
+        # `tiering=` marker is ALSO prefixed onto output_summary above, so
+        # the requested tier survives even where the dedicated field does
+        # not — the same durability strategy #567 established for `usage`'s
+        # model marker.
+        entity["requested_tier"] = resolved_tier.tier
+        entity["tier_action_class"] = resolved_tier.action_class
+        entity["tier_source"] = resolved_tier.source
+        if resolved_tier.escalation_reasons:
+            entity["tier_escalation_reasons"] = list(resolved_tier.escalation_reasons)
 
     payload = {
         "idempotency_key": idempotency_key,
         "observation_source": "workflow_state",
         "entities": [entity],
     }
+    relationships = []
+    if task_entity_id:
+        relationships.append({
+            "source_index": 0,
+            "target_entity_id": task_entity_id,
+            "relationship_type": "REFERS_TO",
+        })
+    if agent_session_id:
+        relationships.append({
+            "source_index": 0,
+            "target_entity_id": agent_session_id,
+            "relationship_type": "REFERS_TO",
+        })
+    if relationships:
+        payload["relationships"] = relationships
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
         f"{base_url}/store",
@@ -702,8 +1501,53 @@ def _write_harness_event(
     )
     req.add_header("User-Agent", NEOTOMA_USER_AGENT)
     try:
-        with urllib.request.urlopen(req, timeout=5.0):
-            pass
+        with urllib.request.urlopen(req, timeout=5.0) as response:
+            raw = response.read()
+        stored = json.loads(raw) if raw else {}
+        event_id = next((
+            row.get("entity_id")
+            for row in stored.get("entities", [])
+            if row.get("entity_type") == "harness_event"
+        ), None)
+        if event_id:
+            readback_req = urllib.request.Request(
+                f"{base_url}/entities/{event_id}", method="GET",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            )
+            readback_req.add_header("User-Agent", NEOTOMA_USER_AGENT)
+            with urllib.request.urlopen(readback_req, timeout=5.0) as response:
+                readback = json.loads(response.read())
+            snapshot = readback.get("snapshot") or {}
+            if isinstance(snapshot.get("snapshot"), dict):
+                snapshot = snapshot["snapshot"]
+            expected = {
+                "task_entity_id": task_entity_id,
+                **({"session_id": agent_session_id} if agent_session_id else {}),
+            }
+            if any(snapshot.get(field) != value for field, value in expected.items()):
+                log.warning(
+                    "[apis] harness_event readback mismatch "
+                    f"(entity_id={event_id}, task_entity_id={task_entity_id})"
+                )
+            relationships_req = urllib.request.Request(
+                f"{base_url}/entities/{event_id}/relationships", method="GET",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            )
+            relationships_req.add_header("User-Agent", NEOTOMA_USER_AGENT)
+            with urllib.request.urlopen(relationships_req, timeout=5.0) as response:
+                stored_relationships = json.loads(response.read()).get("relationships", [])
+            expected_targets = {target for target in (task_entity_id, agent_session_id) if target}
+            actual_targets = {
+                rel.get("target_entity_id")
+                for rel in stored_relationships
+                if rel.get("source_entity_id") == event_id
+                and rel.get("relationship_type") == "REFERS_TO"
+            }
+            if not expected_targets.issubset(actual_targets):
+                log.warning(
+                    "[apis] harness_event relationship readback mismatch "
+                    f"(entity_id={event_id}, task_entity_id={task_entity_id})"
+                )
     except Exception as exc:
         log.debug(f"[apis] harness_event write failed (non-fatal): {exc}")
 
@@ -765,10 +1609,24 @@ def _slug(value: str, *, limit: int = 60) -> str:
     return (cleaned or "unknown")[:limit]
 
 
+def _redacted_env_var_names() -> list[str]:
+    """The fixed secret variable names plus every per-agent PAT variable.
+
+    Agent PATs are named `<ROLE>_AGENT_PAT` (plus the shared `ATELES_AGENT_PAT`),
+    one per role, so they are found by suffix rather than listed: a new agent's
+    PAT is redacted without editing this file.
+    """
+    names = list(_REDACTED_ENV_VARS)
+    for var in sorted(os.environ):
+        if var.endswith("_AGENT_PAT") and var not in names:
+            names.append(var)
+    return names
+
+
 def _redact_secrets(text: str) -> str:
     """Replace any known secret value appearing in child output."""
     out = text
-    for var in _REDACTED_ENV_VARS:
+    for var in _redacted_env_var_names():
         secret = os.environ.get(var, "")
         if secret and len(secret) >= 8:
             out = out.replace(secret, f"<redacted:{var}>")
@@ -949,9 +1807,137 @@ class SkillResult:
     error: str = ""  # non-process failure: missing binary / SKILL.md / timeout
     provider: str = ""
     attempted_providers: tuple[str, ...] = ()
+    # Set only when the runner independently established that a zero-exit
+    # child encountered one canonical delivery denial and no provider
+    # capacity/auth/launch diagnostic.  Callers must not infer this from the
+    # free-form transcript or from ``error`` alone.
+    delivery_failure_reason: str = ""
+    # Every distinct delivery denial found across the complete stderr
+    # diagnostic set, in canonical signature order rather than transcript
+    # order.  ``delivery_failure_reason`` is trusted only when this tuple has
+    # exactly that one recoverable entry and ``delivery_failure_conflicts`` is
+    # empty.
+    delivery_failure_reasons: tuple[str, ...] = ()
+    delivery_failure_conflicts: tuple[str, ...] = ()
+    # Set (ISO-8601, local zone) when NOTHING ran because every eligible
+    # provider is inside a persisted session/usage-limit cooling window: the
+    # earliest instant one comes back. Distinct from generic exhaustion.
+    cooled_until: str = ""
     # Per-dispatch model + token attribution (dispatch_usage.py). None when the
     # dispatch never reached a harness (missing binary, unreadable SKILL.md).
     usage: DispatchUsage | None = None
+    # Why a claude-local attempt failed (`kind` or `kind:reason`, see
+    # local_provider.describe_failure). Set whenever local ran or was skipped and
+    # failed, even when a later provider then succeeded — so a run that cost
+    # frontier spend is never indistinguishable from one that stayed local.
+    local_failure: str = ""
+    # True when the CLI's stdout was cut to its tail before it reached us (the
+    # Fly runner keeps the last 256 KB). The stdout then starts with a marker
+    # line saying so; a caller that needs the complete output must check this.
+    output_truncated: bool = False
+    # Fly executor (ateles#1456): the remote run id, the state its machine was
+    # left in ("terminated" or "unconfirmed"; an unconfirmed machine keeps its
+    # reservation for the reaper), and whether the run's outcome is unknown
+    # (an uncertain launch, a lost wait, or a missing result record). An
+    # unknown outcome is never a success and is never replayed locally.
+    remote_outcome_unknown: bool = False
+    # The role's agent_definition could not be loaded, so NOTHING was dispatched.
+    # A repair state: not a success, not a provider capacity limit. It ends the
+    # whole dispatch (no failover to another provider, no cooldown), because every
+    # provider would hit the same missing definition; the task is retried later.
+    definition_unavailable: bool = False
+    # Same admission failure semantics for unreadable governing policies: no
+    # child, no provider cooldown/failover, retry after the read is repaired.
+    policy_unavailable: bool = False
+    remote_run_id: str = ""
+    remote_machine_state: str = ""
+    # A configuration the operator must repair before this dispatch can run
+    # (not a wait): per provider, naming the setting, never a value.
+    configuration_repair: str = ""
+    # A builder's Fly delivery (build_delivery.plan_fly_delivery): what the
+    # runner's record said, read back. ``fly_delivery_status`` is one of the
+    # runner's statuses, ``unknown`` (the run's outcome is unknown) or
+    # ``unreported`` (the record carries no delivery status); empty for every
+    # other dispatch. A launched delivery is terminal: never failed over,
+    # retried or re-run locally.
+    fly_delivery_status: str = ""
+    fly_delivery_reason: str = ""
+    fly_delivery_branch: str = ""
+    fly_delivery_commit: str = ""
+    fly_pr_number: int | None = None
+    fly_pr_url: str = ""
+    # Nothing was sent to Fly: the job was not eligible (including a refused
+    # delivery-token mint) or its launch provably did not take effect. A
+    # builder may then run its delivery locally, as it would without Fly.
+    fly_ineligible_before_launch: bool = False
+    # A Fly run is not gated by the Mac's usage reading (operator ruling
+    # 2026-10-15). When that reading WOULD have refused this provider
+    # locally, what it said; empty when it would have allowed it.
+    usage_gate_exempted: str = ""
+
+
+# Leads the error of a dispatch refused because the role's agent_definition could
+# not be loaded. Fixed text: callers and tests match on it, and it carries no
+# response content.
+DEFINITION_UNAVAILABLE_PREFIX = "agent_definition unavailable"
+POLICY_UNAVAILABLE_PREFIX = "agent_policy unavailable"
+
+
+_SHARED_NEOTOMA_BEARER_NAMES = ("NEOTOMA_BEARER_TOKEN", "NEOTOMA_BEARER_TOKEN_PROD")
+
+
+def _neotoma_identity_for_child(env: dict[str, str], role: str, *, granted: bool) -> None:
+    """A local Codex or Cursor child's Neotoma credentials, in place: the
+    shared daemon bearer, its production twin and every other role's token
+    are removed. A role with Neotoma tools keeps only its own token, also as
+    ``NEOTOMA_BEARER_TOKEN`` so a script in the child acts as the role; a role
+    without Neotoma tools gets no Neotoma credential at all."""
+    own_name = neotoma_token_env_name(role)
+    own = env.get(own_name, "").strip()
+    for name in [k for k in env if k.endswith("_NEOTOMA_TOKEN")]:
+        env.pop(name, None)
+    for name in _SHARED_NEOTOMA_BEARER_NAMES:
+        env.pop(name, None)
+    if granted and own:
+        env[own_name] = own
+        env["NEOTOMA_BEARER_TOKEN"] = own
+
+
+def _isolation_refusal_result(skill: str, provider: str, exc: "IsolationRefusal") -> SkillResult:
+    """A launch refused before any child for a configuration the operator must
+    repair (value-free, no cooldown; the provider loop fails over)."""
+    detail = f"{exc} (repair: {exc.setting})"
+    msg = f"{provider} launch failed: {HARNESS_ISOLATION_REFUSED}: {detail}"
+    log.error(f"[apis] {skill} dispatch refused before launch — {msg}")
+    return SkillResult(skill, False, None, "", "", error=msg, provider=provider,
+                       configuration_repair=f"{provider}: {detail}")  # fmt: skip
+
+
+def _fly_delivery_fields(job, *, unknown: bool) -> dict:
+    """The SkillResult fields of a Fly delivery: what its record said, or
+    ``unknown`` when the run's outcome is unknown. Empty for any other job."""
+    if job is None or job.delivery is None:
+        return {}
+    branch = job.delivery["branch"]
+    if unknown:
+        return {"fly_delivery_status": "unknown", "fly_delivery_branch": branch}
+    got = job.delivery_result or {"delivery_status": "unreported"}
+    return {
+        "fly_delivery_status": got["delivery_status"],
+        "fly_delivery_reason": got.get("delivery_reason") or "",
+        "fly_delivery_branch": got.get("delivery_branch") or branch,
+        "fly_delivery_commit": got.get("delivery_commit") or "",
+        "fly_pr_number": got.get("pr_number"),
+        "fly_pr_url": got.get("pr_url") or "",
+    }
+
+
+class _LocalSpawnError(Exception):
+    """The local CLI could not be started (an OSError from the spawn)."""
+
+
+class _LocalIsolationRefused(_LocalSpawnError):
+    """The isolated harness home was refused before any child started."""
 
 
 # ── Harness adapters + capacity detection ─────────────────────────────────────
@@ -984,6 +1970,9 @@ _AUTH_FAILURE_SIGNATURES = (
     "invalid api key",
     "not logged in",
     "login required",
+    "permission denied (publickey)",
+    "could not read username for",
+    "authentication failed for",
 )
 
 _METERED_CREDENTIALS = (
@@ -998,18 +1987,269 @@ def _provider_binaries() -> dict[str, str | None]:
         "claude": CLAUDE_BIN,
         "codex": CODEX_BIN,
         "cursor": CURSOR_BIN,
+        # The claude CLI against a local model; absent unless configured
+        # (local_provider.load_config), so an unconfigured host never sees it.
+        local_provider.LOCAL_PROVIDER: (
+            CLAUDE_BIN if local_provider.load_config() is not None else None
+        ),
     }
+
+
+_DIAGNOSTIC_PREFIX_RE = re.compile(r"^(?:(?:fatal|error):\s*)+")
+_API_ERROR_PREFIX_RE = re.compile(r"^api error:\s*(?:\d{3}\s*:?[ \t]*)?")
+_ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+_SSH_AUTH_DIAGNOSTIC_RE = re.compile(
+    r"^(?:[\w.+-]+@[\w.-]+:\s*)?permission denied \(publickey\)(?:$|[ \t:;,.-])"
+)
+_CAPACITY_DIAGNOSTIC_PATTERNS = (
+    re.compile(r"^you(?:'ve| have) hit (?:your )?(?:weekly |session )?usage limit\b"),
+    re.compile(r"^you(?:'ve| have) hit your (?:weekly |session )?limit\b"),
+    re.compile(r"^you(?:'ve| have) reached your usage limit\b"),
+)
+
+
+def _diagnostic_starts_with(line: str, signature: str) -> bool:
+    """Match a diagnostic token with an optional explanatory suffix."""
+    if not line.startswith(signature):
+        return False
+    if len(line) == len(signature):
+        return True
+    return line[len(signature)] in " \t:;,.-(["
+
+
+def _normalize_diagnostic_candidate(candidate: str) -> str:
+    """Normalize one anchored diagnostic without searching within its prose."""
+    normalized = _ANSI_SGR_RE.sub("", candidate).replace("\u00a0", " ").strip().lower()
+    while normalized:
+        previous = normalized
+        normalized = _DIAGNOSTIC_PREFIX_RE.sub("", normalized)
+        normalized = _API_ERROR_PREFIX_RE.sub("", normalized)
+        if normalized == previous:
+            break
+    return normalized
+
+
+def _diagnostic_envelope_candidates(envelope: object) -> tuple[str, ...]:
+    """Return only the supported string fields from a provider JSON envelope."""
+    if not isinstance(envelope, dict):
+        return ()
+    error = envelope.get("error")
+    if isinstance(error, str):
+        return (error,)
+    if isinstance(error, dict):
+        return tuple(
+            value
+            for key in ("message", "type")
+            if isinstance(value := error.get(key), str)
+        )
+    return ()
+
+
+def _diagnostic_candidate_kind(candidate: str) -> str | None:
+    """Classify one already-extracted candidate at its normalized start."""
+    normalized = _normalize_diagnostic_candidate(candidate)
+    if re.match(r"^(?:codex|claude|cursor(?:-agent)?) launch failed:", normalized):
+        return "launch"
+    if _SSH_AUTH_DIAGNOSTIC_RE.match(normalized) or any(
+        _diagnostic_starts_with(normalized, signature)
+        for signature in _AUTH_FAILURE_SIGNATURES
+    ):
+        return "auth"
+    if any(
+        _diagnostic_starts_with(normalized, signature)
+        for signature in _CAPACITY_FAILURE_SIGNATURES
+    ) or any(pattern.match(normalized) for pattern in _CAPACITY_DIAGNOSTIC_PATTERNS):
+        return "capacity"
+    return None
+
+
+def _diagnostic_line_kind(raw_line: str) -> str | None:
+    """Classify one provider diagnostic without scanning ordinary prose.
+
+    Normalize provider API/JSON envelopes, SGR color, and Git's ``fatal:`` or
+    ``error:`` prefixes. Keep matching anchored at the extracted diagnostic
+    start so a prompt or verdict discussing these words is excluded.
+    """
+    normalized = _normalize_diagnostic_candidate(raw_line)
+    if not normalized:
+        return None
+    candidates = [normalized]
+    if normalized.startswith("{"):
+        try:
+            envelope = json.loads(normalized)
+        except json.JSONDecodeError:
+            envelope = None
+        extracted = _diagnostic_envelope_candidates(envelope)
+        if extracted:
+            candidates = list(extracted)
+    for candidate in candidates:
+        if (kind := _diagnostic_candidate_kind(candidate)) is not None:
+            return kind
+    return None
+
+
+def _structured_diagnostic_kinds(text: str) -> set[str]:
+    """Classify JSON envelopes that start at a diagnostic line boundary.
+
+    ``json.JSONDecoder.raw_decode`` lets a formatted envelope end before a
+    following diagnostic line. Requiring the object to start after only the
+    same supported prefixes as the line classifier, and to occupy the rest of
+    its closing line, keeps arbitrary prose out of this structured path.
+    """
+    cleaned = _ANSI_SGR_RE.sub("", text).replace("\u00a0", " ")
+    decoder = json.JSONDecoder()
+    kinds: set[str] = set()
+    line_start = 0
+    while line_start < len(cleaned):
+        line_end = cleaned.find("\n", line_start)
+        if line_end < 0:
+            line_end = len(cleaned)
+        first_line = cleaned[line_start:line_end]
+        brace_offset = first_line.find("{")
+        if brace_offset >= 0:
+            prefix = first_line[:brace_offset]
+            if _normalize_diagnostic_candidate(prefix + "{}") == "{}":
+                object_start = line_start + brace_offset
+                try:
+                    envelope, object_end = decoder.raw_decode(cleaned, object_start)
+                except json.JSONDecodeError:
+                    envelope = None
+                    object_end = object_start
+                closing_line_end = cleaned.find("\n", object_end)
+                if closing_line_end < 0:
+                    closing_line_end = len(cleaned)
+                if not cleaned[object_end:closing_line_end].strip():
+                    for candidate in _diagnostic_envelope_candidates(envelope):
+                        if (kind := _diagnostic_candidate_kind(candidate)) is not None:
+                            kinds.add(kind)
+        line_start = line_end + 1
+    return kinds
+
+
+def _diagnostic_failure_kinds(*texts: str) -> set[str]:
+    kinds = {
+        kind
+        for text in texts
+        for raw_line in text.splitlines()
+        if (kind := _diagnostic_line_kind(raw_line)) is not None
+    }
+    for text in texts:
+        kinds.update(_structured_diagnostic_kinds(text))
+    return kinds
+
+
+def _cool_after_capacity_failure(provider: str, result: "SkillResult") -> None:
+    """Cool ``provider`` until the reset its refusal states, and persist it.
+
+    The in-process timer alone was invisible to the next ``dispatch_role``
+    process, so a spent 5-hour session window was relaunched (and refused
+    instantly) by every dispatch until the hour-long timer of some long-lived
+    process happened to cover it.  The window is written where the router reads
+    selection state.
+
+    Persisting is a cross-process hold-out, so it trusts only the provider's own
+    refusal: the run must have FAILED (a successful run that merely discusses
+    limits never persists), the refusal must be a short limit line at the end of
+    its output (``limit_reset.parse_refusal``), and the stated reset is clamped
+    to the longest window that kind of limit can have.  Anything else keeps the
+    old in-process timer only.  An unreadable reset gets the conservative
+    default (``APIS_HARNESS_COOLDOWN_SECONDS``, one hour) and says so.
+    """
+    cool_down(provider)
+    if result.ok or result.returncode in (0, None):
+        return
+    try:
+        refusal = parse_refusal(result.stdout, result.stderr, provider=provider)
+        if refusal is None:
+            log.warning(
+                f"[apis] {provider} was classified as a capacity failure but its "
+                "output does not end in a limit refusal; cooled in-process only"
+            )
+            return
+        now = time.time()
+        if refusal.until_wall is not None:
+            until = refusal.until_wall
+            reason = {"session": "session_limit", "weekly": "weekly_limit"}.get(
+                refusal.kind, "usage_limit"
+            )
+            log.warning(
+                f"[apis] {provider} refused with a {refusal.kind} limit; cooled until "
+                f"{render_wall(until)} (stated reset {refusal.matched!r} in "
+                f"{refusal.zone}{'; clamped' if refusal.clamped else ''})"
+            )
+        else:
+            try:
+                default = max(
+                    0.0, float(os.environ.get("APIS_HARNESS_COOLDOWN_SECONDS", "3600"))
+                )
+            except ValueError:
+                default = 3600.0
+            until, reason = now + default, "capacity_unparsed_reset"
+            log.warning(
+                f"[apis] {provider} refused with a capacity failure whose reset "
+                f"time could not be read; cooled for the default {int(default)}s "
+                f"(until {render_wall(until)})"
+            )
+        record_cooling(provider, until, reason=reason, observed_at=now)
+    except Exception as exc:  # noqa: BLE001 — persistence must never break failover
+        log.error(f"[apis] could not persist {provider} cooling window: {exc}")
+
+
+def _refresh_usage_snapshot(binaries: dict[str, str | None]) -> None:
+    """Refresh the usage snapshot under the subscription-only child environment."""
+    try:
+        refresh_usage_if_stale(binaries, env=_subscription_only_env())
+    except Exception as exc:  # noqa: BLE001 - feeding must never break dispatch
+        log.error(f"[apis] usage snapshot refresh failed: {exc}")
+
+
+def _usage_gate_message(gates: dict) -> tuple[str, str]:
+    """The distinct "usage gate refused frontier dispatch" text and retry time.
+
+    Names WHICH gate refused (stale reading vs weekly pace) so the operator is
+    never told a stale meter is exhaustion, and says when to expect capacity.
+    """
+    retry_at = render_wall(min(float(g.returns_at) for g in gates.values()))
+    detail = "; ".join(f"{name}: {g.message}" for name, g in sorted(gates.items()))
+    return (
+        f"frontier dispatch refused by the usage gate ({detail}); "
+        f"local/mechanical work is unaffected; retry after {retry_at}",
+        retry_at,
+    )
+
+
+def _cooled_message(windows: dict[str, dict[str, object]]) -> tuple[str, str]:
+    """The distinct "every eligible provider is cooled" text and its end time."""
+    earliest = render_wall(min(float(w["until"]) for w in windows.values()))
+    detail = "; ".join(
+        f"{name}: {w['reason']}, until {render_wall(float(w['until']))}"
+        for name, w in sorted(windows.items())
+    )
+    return (
+        "all eligible subscription-backed harness providers are cooled until "
+        f"{earliest} after a session/usage limit ({detail}); no CLI was "
+        "launched for this dispatch",
+        earliest,
+    )
 
 
 def _provider_failure_kind(*texts: str) -> str | None:
     """Classify failures that are safe to retry on another harness."""
+    kinds = _diagnostic_failure_kinds(*texts)
+    if "capacity" in kinds:
+        return "capacity"
+    if "auth" in kinds:
+        return "auth"
+
+    # Failed-provider payloads may embed diagnostics in arbitrary sentences.
+    # Preserve that established fallback for failed attempts only; delivery
+    # recovery uses only the anchored line classifier above.
     blob = " ".join(text for text in texts if text).lower()
     if any(signature in blob for signature in _CAPACITY_FAILURE_SIGNATURES):
         return "capacity"
     if any(signature in blob for signature in _AUTH_FAILURE_SIGNATURES):
         return "auth"
     return None
-
 
 
 # ── Codex sandbox: writable git roots + network (ateles#590) ──────────────────
@@ -1120,6 +2360,66 @@ _DELIVERY_DENIAL_SIGNATURES: tuple[tuple[str, str], ...] = (
     ),
 )
 
+# The canonical, exact errors emitted when a zero-exit child did useful work
+# but the delivery mechanism refused it. Provider routing must preserve these
+# errors verbatim: they describe a task/delivery failure, not provider capacity
+# or authentication, even when the larger transcript quotes those words.
+_DELIVERY_DENIAL_REASONS = frozenset(
+    reason for _pattern, reason in _DELIVERY_DENIAL_SIGNATURES
+)
+_RECOVERABLE_DELIVERY_DENIAL_REASONS = frozenset(
+    {
+        "sandbox denied network access — the child could not push or reach the GitHub API",
+        "the child could not reach the git remote — nothing was pushed",
+    }
+)
+
+
+def _delivery_failure_reasons(*texts: str) -> tuple[str, ...]:
+    """Return every distinct delivery denial in canonical signature order.
+
+    Signature order, rather than line order, makes the classification stable
+    when two diagnostics are emitted in the opposite order.  Only stderr is
+    supplied by the runner; stdout may quote these strings as reviewed prose.
+    """
+    lines = [
+        line.strip() for text in texts if text for line in text.lower().splitlines()
+    ]
+    return tuple(
+        reason
+        for pattern, reason in _DELIVERY_DENIAL_SIGNATURES
+        if any(re.match(pattern, line) for line in lines)
+    )
+
+
+def _delivery_failure_conflicts(
+    reasons: tuple[str, ...], *texts: str
+) -> tuple[str, ...]:
+    """Name every condition that makes delivery-only recovery ambiguous."""
+    conflicts: list[str] = []
+    if len(reasons) > 1:
+        conflicts.append("multiple_delivery_failures")
+    diagnostic_kinds = _diagnostic_failure_kinds(*texts)
+    conflicts.extend(
+        kind for kind in ("auth", "capacity", "launch") if kind in diagnostic_kinds
+    )
+    if len(reasons) == 1 and reasons[0] not in _RECOVERABLE_DELIVERY_DENIAL_REASONS:
+        conflicts.append("nonrecoverable_delivery_failure")
+    return tuple(conflicts)
+
+
+def _delivery_diagnostic_error(
+    reasons: tuple[str, ...], conflicts: tuple[str, ...]
+) -> str:
+    if not reasons:
+        return ""
+    if not conflicts:
+        return reasons[0]
+    return (
+        "mixed delivery diagnostics — delivery="
+        f"{list(reasons)!r}; conflicts={list(conflicts)!r}"
+    )
+
 
 def _delivery_failure_reason(*texts: str) -> str | None:
     """Name the delivery denial in a child's output, if there is one.
@@ -1135,15 +2435,14 @@ def _delivery_failure_reason(*texts: str) -> str | None:
     # signatures, so any agent dispatched to read them was reported as a failed
     # delivery (ateles#601 pm lens, reproduced). Anchoring is what separates
     # "git said this" from "someone wrote this down".
-    for text in texts:
-        if not text:
-            continue
-        for line in text.lower().splitlines():
-            stripped = line.strip()
-            for pattern, reason in _DELIVERY_DENIAL_SIGNATURES:
-                if re.match(pattern, stripped):
-                    return reason
-    return None
+    reasons = _delivery_failure_reasons(*texts)
+    return reasons[0] if reasons else None
+
+
+# The one adapter that can run with no tools at all (`--tools ""`), which is
+# what `inference_only` requires. Codex and Cursor have no equivalent control
+# here, so an inference-only run never reaches them.
+INFERENCE_ONLY_PROVIDER = "claude"
 
 
 def _provider_command(
@@ -1154,6 +2453,8 @@ def _provider_command(
     *,
     cwd: str | None,
     network: bool = False,
+    codex_outer_sandboxed: bool = False,
+    model: str | None = None,
 ) -> tuple[list[str], bytes | None]:
     """Build one provider's noninteractive command and initial stdin payload.
 
@@ -1161,21 +2462,43 @@ def _provider_command(
     #590 asks for it "without granting blanket network access to every
     dispatch", so it is off by default and the caller turns it on for the
     dispatches whose task actually involves GitHub delivery.
-    """
-    if provider == "claude":
-        return [binary, "--print", "--append-system-prompt", system_prompt], None
 
-    composite_prompt = (
-        f"{system_prompt}\n\n"
-        "---\n\n"
-        "## Dispatched task\n\n"
-        f"{work_prompt}"
-    )
+    ``codex_outer_sandboxed`` is reserved for a caller that has already bound
+    a separately probed OS sandbox around the Codex process. In that one case
+    Codex must not install its own nested macOS Seatbelt profile:
+    ``sandbox-exec`` rejects the nested ``sandbox_apply`` operation before any
+    command can run. ``danger-full-access`` here means "no inner Codex
+    sandbox"; the caller's outer sandbox remains the enforcement boundary.
+    `_run_skill_once` refuses this flag unless the real command is wrapped by
+    ``sandbox-exec``.
+
+    ``model`` (ateles#567 / operator ruling 2026-09-29, model_tiering.py):
+    when non-empty, pins this dispatch to a named model instead of the
+    provider's ambient default, on all three providers. ``None`` (the
+    default) reproduces exact prior behaviour — no flag is added — which
+    matters for ``claude``: ``model_tiering.model_for_tier`` returns ``None``
+    only when no vendor_binding is configured at all, and this module never
+    guesses a model alias in that case.
+    """
+    model = model_tiering.validate_model_selector(model)
+    if provider == "claude":
+        return (
+            [
+                binary,
+                "--print",
+                *(["--model", model] if model else []),
+                "--append-system-prompt",
+                system_prompt,
+            ],
+            None,
+        )
+
+    composite_prompt = f"{system_prompt}\n\n---\n\n## Dispatched task\n\n{work_prompt}"
     if provider == "codex":
         # See the ateles#590 note above _git_roots_for_sandbox: without these
         # two additions a codex child in a linked worktree writes correct code
         # and then cannot commit, push, or open a PR.
-        git_roots = _git_roots_for_sandbox(cwd)
+        git_roots = [] if codex_outer_sandboxed else _git_roots_for_sandbox(cwd)
         add_dir_flags: list[str] = []
         for root in git_roots:
             add_dir_flags += ["--add-dir", root]
@@ -1188,16 +2511,24 @@ def _provider_command(
         # and to the dispatches that need it rather than to all of them (#590:
         # "without granting blanket network access to every dispatch").
         network_flags = (
-            ["-c", "sandbox_workspace_write.network_access=true"] if network else []
+            []
+            if codex_outer_sandboxed
+            else ["-c", "sandbox_workspace_write.network_access=true"]
+            if network
+            else []
         )
-        if network:
+        if network and not codex_outer_sandboxed:
             log.info("[apis] codex sandbox: network enabled for this dispatch")
+        sandbox_mode = (
+            "danger-full-access" if codex_outer_sandboxed else "workspace-write"
+        )
         return (
             [
                 binary,
                 "exec",
+                *(["--model", model] if model else []),
                 "--sandbox",
-                "workspace-write",
+                sandbox_mode,
                 *network_flags,
                 *add_dir_flags,
                 "--ephemeral",
@@ -1210,6 +2541,11 @@ def _provider_command(
             composite_prompt.encode(),
         )
     if provider == "cursor":
+        # The prompt goes on stdin (the CLI reads it there when no positional
+        # prompt is given), never as one argv element: a composite prompt is
+        # often over 100 KB, and Linux refuses any single argument over
+        # 128 KB (MAX_ARG_STRLEN), which a Fly machine hits before the CLI
+        # even starts.
         return (
             [
                 binary,
@@ -1219,10 +2555,10 @@ def _provider_command(
                 "--approve-mcps",
                 "--output-format",
                 "text",
+                *(["--model", model] if model else []),
                 *(["--workspace", cwd] if cwd else []),
-                composite_prompt,
             ],
-            None,
+            composite_prompt.encode(),
         )
     raise ValueError(f"unsupported harness provider: {provider}")
 
@@ -1248,23 +2584,122 @@ def _requested_model(provider: str, cmd: list[str]) -> str | None:
         # Support the `--model=x` spelling too.
         for flag in ("--model=",):
             if arg.startswith(flag):
-                value = arg[len(flag):].strip()
+                value = arg[len(flag) :].strip()
                 return value or None
     return None
 
 
 def _subscription_only_env(
     env_extra: dict[str, str] | None = None,
+    *,
+    local_review: bool = False,
+    local_review_home: str | None = None,
+    inference_only: bool = False,
 ) -> dict[str, str]:
-    """Build a child env that cannot silently spill into metered API billing."""
-    child = {**os.environ, **(env_extra or {})}
+    """Build the child environment for a governed harness invocation.
+
+    Local review inference gets an allowlisted environment rather than the
+    daemon's ambient credentials.  Its isolated HOME/GH_CONFIG_DIR plus Git's
+    explicit no-helper settings close credential-file, keychain, SSH-agent,
+    and inherited-token publication paths while retaining only subscription
+    authentication needed to run the selected model.
+
+    Two independent controls on metered API billing:
+
+    * The harness metered keys (``_METERED_CREDENTIALS``) are stripped unless
+      ``APIS_ALLOW_METERED_HARNESS=1`` explicitly allows them.
+    * GitHub App private keys (`github_app_token.is_app_key_variable`) are
+      ALWAYS stripped, by pattern, in both branches.
+    * Media-generation vendor credentials are ALWAYS stripped, by name and by
+      prefix (``lib.credential_scrub``), and the override above
+      never releases them. They belong to the host-side capability client only
+      (ateles#1189); a dispatched agent must never hold one. The child is also
+      marked so the capability client refuses to run inside it.
+
+    STAGED CONTROL: this is still a denylist. A metered key nobody has named
+    passes through. The standing fix is an allowlist child environment
+    (tracked as a follow-up); until then ``test_unnamed_future_metered_key_is_scrubbed``
+    is an ``xfail(strict=True)`` documenting the gap.
+    """
+    merged = {**os.environ, **(env_extra or {})}
+    if local_review:
+        if not local_review_home:
+            raise ValueError("local_review requires an isolated local_review_home")
+        allowed = {
+            "PATH",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TERM",
+            "NO_COLOR",
+            "CODEX_HOME",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        }
+        if inference_only:
+            # A tool-free child has no use for another adapter's home, and an
+            # ambient one is configuration it must not inherit.
+            allowed = allowed - {"CODEX_HOME"}
+        child = {key: value for key, value in merged.items() if key in allowed}
+        isolated = Path(local_review_home)
+        child.update(
+            {
+                "HOME": str(isolated),
+                "XDG_CONFIG_HOME": str(isolated / ".config"),
+                "GH_CONFIG_DIR": str(isolated / ".config" / "gh"),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_TERMINAL_PROMPT": "0",
+                "GCM_INTERACTIVE": "never",
+                "GIT_ASKPASS": "/usr/bin/false",
+                "SSH_ASKPASS": "/usr/bin/false",
+                # An empty credential.helper resets any helper accumulated
+                # from repository-local configuration before disabling
+                # interactive fallback.
+                "GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_KEY_0": "credential.helper",
+                "GIT_CONFIG_VALUE_0": "",
+                "GIT_CONFIG_KEY_1": "credential.interactive",
+                "GIT_CONFIG_VALUE_1": "never",
+            }
+        )
+    else:
+        child = merged
     if child.get("APIS_ALLOW_METERED_HARNESS", "0") != "1":
         for key in _METERED_CREDENTIALS:
             child.pop(key, None)
     elif child.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
         # Even under the explicit override, prefer Max-plan OAuth for Claude.
         child.pop("ANTHROPIC_API_KEY", None)
+    for key in [k for k in child if is_generation_credential(k)]:
+        child.pop(key, None)
+    # GitHub App private keys, ALWAYS, in every branch: a key lets its holder
+    # mint a token for that App, so a prompt-steered agent holding one could act
+    # as any identity. The daemon mints; the agent gets only the token it is
+    # handed (`github_token`), never a key. Names are matched by pattern, so an
+    # App added tomorrow is covered without anyone naming it here.
+    for key in [k for k in child if _github_app_token.is_app_key_variable(k)]:
+        child.pop(key, None)
+    child[AGENT_CHILD_MARKER_ENV] = "1"
     return child
+
+
+def _dispatch_succeeded(
+    returncode: int | None,
+    delivery_denial: object,
+    postcondition_failure: object,
+) -> bool:
+    """Whether one finished dispatch counts as a success.
+
+    The exit code is necessary but not sufficient: an exit-0 run that could not
+    deliver, or that failed its post-condition check, is a failure. This is the
+    single definition behind both ``SkillResult.ok`` and the ledger's usage row.
+    """
+    return bool(
+        returncode == 0 and not delivery_denial and postcondition_failure is None
+    )
 
 
 # ── Single-provider runner ─────────────────────────────────────────────────────
@@ -1276,7 +2711,9 @@ async def _run_skill_once(
     *,
     provider: str,
     role: str | None = None,
+    expected_role_fingerprint: str | None = None,
     task_entity_id: str = "",
+    agent_session_id: str = "",
     timeout: int | None = None,
     env_extra: dict[str, str] | None = None,
     notifier=None,  # lib.notify.Notifier | None — kept optional to avoid hard dep
@@ -1284,37 +2721,110 @@ async def _run_skill_once(
     include_github_contract: bool = False,
     cwd: str | None = None,
     owns_pending_gate: bool = False,
+    command_wrapper: list[str] | None = None,
+    codex_outer_sandboxed: bool = False,
+    local_review: bool = False,
+    work_class: str | None = None,
+    action_class: str | None = None,
+    escalation_signals: "model_tiering.EscalationSignals | None" = None,
+    model: str | None = None,
+    precomputed_tier: "model_tiering.ResolvedTier | None" = None,
+    inference_only: bool = False,
+    runner: str | None = None,
+    repository: str = "",
+    local_fallback_check=None,
+    fly_delivery: dict | None = None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
 
-    Stage 1: loads the role's agent_definition (role defaults to skill when not
-    passed — skill name == role name in this codebase). Prepends the definition's
-    prompt_markdown to SKILL.md; applies the tool allowlist when restricted.
+    ``runner`` / ``repository`` (ateles#1456): which executor runs the CLI.
+    ``None`` (every call site that predates this) runs locally unless the
+    dispatch's ``action_class`` is listed in ``APIS_FLY_RUNNER_CLASSES``;
+    ``"local"`` always runs locally; ``"fly"`` forces the Fly executor and
+    refuses, with the reason, when the job is not eligible for it. Everything
+    before the spawn (gates, tiering, prompt, argv) is identical on both, and
+    both return the same ``(returncode, stdout, stderr)``. ``repository``
+    scopes the Fly job's per-job GitHub App token.
+
+    Stage 1: loads the role's agent_definition and live agent_policy (role
+    defaults to skill when not passed — skill name == role name in this
+    codebase). Prepends the definition's prompt_markdown to SKILL.md, appends
+    the policy rendering, and applies the tool allowlist when restricted.
 
     Stage 2: writes harness_event entities to Neotoma at start, completion, and
     failure.
 
-    Stage 5: when agent_definition carries empty prompt_markdown, logs a WARN,
-    sends a notifier alert (when a notifier is supplied), and records a
-    degraded_generic_subagent harness_event. Dispatch still proceeds.
+    Model tiering (operator ruling 2026-09-29, model_tiering.py): when
+    ``action_class`` is supplied, the dispatch's tier is resolved from the
+    live ``action_policy`` config (escalated by ``escalation_signals``, when
+    given), and the tier is turned into a model via the live
+    ``vendor_binding`` config for ``provider``. ``model`` overrides both —
+    an explicit caller-supplied model wins outright, matching every other
+    override-beats-config precedent in this module (``env_extra``,
+    ``timeout``). ``action_class=None`` (every call site that predates this)
+    reproduces EXACT prior behaviour: no tier is resolved, no model is
+    requested, the provider's ambient default runs unchanged. An unreadable
+    or unbound policy/binding never falls back to the ambient default when
+    ``action_class`` WAS supplied — see ``model_tiering``'s module docstring
+    for why that asymmetry is deliberate (fail up to the strongest tier,
+    never down to silence).
 
-    ``github_token`` (#109 — per-agent GitHub identity): when supplied, the token
-    is injected into subprocess_env as both ``GITHUB_TOKEN`` and ``GH_TOKEN`` so
-    the spawned agent's ``gh`` calls authenticate as the correct identity.  When
-    not supplied, the child inherits the daemon's ambient env unchanged (current
-    behaviour for all callers that predate #109).  Only GitHub-triggered pipeline
-    call sites pass this; SSE task-path dispatches leave it unset.
+    ``precomputed_tier``: when supplied, THIS tier is used instead of
+    re-resolving from ``action_class``/``escalation_signals`` — only the
+    provider-specific ``model_for_tier`` lookup still runs. ``run_skill``
+    resolves the tier exactly ONCE per logical dispatch and passes it to
+    every provider attempt in its failover loop, so a config edit landing
+    mid-failover cannot retier the same dispatch differently across two
+    providers (the tier is a property of the work, not of when in the
+    failover sequence a provider happened to be tried). A direct caller of
+    this function (tests, `dispatch_role.py`'s single-attempt path) that
+    passes ``action_class`` with no ``precomputed_tier`` still gets a fresh
+    resolution, unchanged from before.
+
+    The canonical admission boundary refuses empty role instructions before
+    prompt formatting or provider construction; local skill text cannot supply
+    the missing authority.
+
+    ``github_token`` (#109 — per-agent GitHub identity): when supplied and
+    non-empty, the token is injected into subprocess_env as both
+    ``GITHUB_TOKEN`` and ``GH_TOKEN`` so the spawned agent's ``gh`` calls
+    authenticate as the correct identity. When not supplied (``None``) on a
+    dispatch that does NOT set ``include_github_contract``, the child inherits
+    the daemon's ambient env unchanged (current behaviour for all callers that
+    predate #109). An explicitly empty string is a distinct, refused case —
+    see below.
 
     ``include_github_contract`` (Phase 1 / Layer A): when True, SWARM_GITHUB_CONTRACT
-    is injected into the system prompt between the agent_definition and the SKILL.md.
-    Pass True ONLY from GitHub-trigger call sites in swarm_dispatch.py; leave as
-    False (the default) for all SSE/non-GitHub task dispatches so the contract never
-    appears in payment, health, finance, or other non-GitHub work.
+    is injected into the system prompt between the agent_definition and the SKILL.md,
+    AND (ateles#590) this dispatch is network-enabled (see ``network=`` on the
+    ``_provider_command`` call below). Pass True from GitHub-trigger call sites in
+    swarm_dispatch.py, or from a manual/programmatic dispatch (dispatch_role.py)
+    whose task must commit, push, or open a pull request; leave as False (the
+    default) for all other dispatches so the contract never appears in payment,
+    health, finance, or other non-GitHub work.
 
-    Claude's `--allowed-tools` and injected Neotoma MCP config remain specific
-    to the Claude adapter. Codex and Cursor receive the same system + skill
-    instructions as a composite prompt and use their ambient configured tools.
+    Credential-boundary contract (ateles#590 security repair, PR #1334): a
+    network-enabled dispatch (``include_github_contract=True``) REQUIRES a
+    non-empty ``github_token`` — omitted or empty both return a failed
+    ``SkillResult`` before any child is spawned, rather than falling back to
+    the daemon's ambient GitHub identity. On any dispatch, an explicitly empty
+    ``github_token`` (requested but resolved to ``""``) is refused the same
+    way, since that shape means a caller tried to resolve a per-agent PAT and
+    failed — silently falling back to the ambient identity there is exactly
+    what let a PR land under the operator's own account instead of the
+    agent's (ateles#109's original incident).
+
+    Claude's `--allowed-tools` remains adapter-specific. A seated or
+    gate-owning Codex run receives an isolated, per-run ``CODEX_HOME`` whose
+    only MCP server is the intended Neotoma record server and whose
+    ``disabled_tools = ["correct"]`` deny is read back before launch. Ordinary
+    Codex runs and all Cursor runs retain their existing ambient-tool behavior.
+
+    ``local_review`` gives a child inference-only authority: no GitHub or
+    Neotoma publication credentials, no ambient credential files/keychain,
+    no SSH agent, and (for Claude) an empty strict MCP configuration.  Parent
+    publication remains outside this child environment.
 
     ``cwd`` (QE3 — eval-authoring affordance): when supplied, the dispatched
     child subprocess runs with this working directory instead of inheriting the
@@ -1322,12 +2832,117 @@ async def _run_skill_once(
     of a PR branch so it can author an eval fixture, run ``eval:tier1``, commit,
     and push. When None (every call site that predates QE3), the child inherits
     the daemon's directory unchanged — exact current behaviour, no regression.
+
+    ``command_wrapper`` (harness_lens_runner, ent_89a4d44b063cb0902106da49):
+    when supplied, its elements are PREPENDED to the provider's own argv
+    before ``asyncio.create_subprocess_exec`` runs it below — e.g.
+    ``["/usr/bin/sandbox-exec", "-f", "/path/to/profile.sb"]`` to run
+    codex/cursor's real binary under a macOS sandbox that denies specific file
+    reads/writes. The absolute executable and profile shape are validated here;
+    PATH resolution is never accepted for the no-inner-sandbox transition.
+    This is the only point in the dispatch path where the process that will
+    actually execute is assembled, so it is the only point a caller can make
+    a guard bind onto the REAL subprocess rather than merely describe an
+    intended mitigation next to code that runs unwrapped. Applied
+    unconditionally when given — a caller that only wants it for codex/cursor
+    passes ``None`` here for claude. The wrapper itself never needs and is
+    never handed credential material; it wraps argv only.
+
+    ``codex_outer_sandboxed`` disables Codex's inner sandbox only after this
+    function verifies that the actual command is wrapped by ``sandbox-exec``.
+    It exists for harness_lens_runner's probed effect-level guard; ordinary
+    Codex dispatches retain ``workspace-write``.
+
+    ``work_class`` (ateles task ent_71387d9c1d1d3d1eef9ecc01 — lean local
+    prompt): when ``provider == local_provider.LOCAL_PROVIDER``, this replaces
+    the full agent_definition system prompt with
+    ``local_provider.build_lean_prompt`` — role summary, the work class's own
+    hard rules, and the task's SKILL.md. Governing policies are still appended;
+    if that exceeds the local context ceiling the ceiling check refuses the
+    local attempt rather than omitting those policies. It has no effect
+    on any other provider: a Claude/Codex/Cursor dispatch is built exactly as
+    before, full stop, whether or not ``work_class`` is passed. After a local
+    run, ``local_provider.verify_postcondition`` checks the work class's
+    ground truth (where one exists) and fails the result over to a frontier
+    provider rather than accepting a wrong local answer as ``ok``.
     """
+    model = model_tiering.validate_model_selector(model)
     _role = (role or skill).lower()
     timeout = timeout or DISPATCH_TIMEOUT_SECONDS
 
+    if inference_only and not (provider == INFERENCE_ONLY_PROVIDER and local_review):
+        # The tool-free control exists for one adapter only. Any other provider
+        # would run with its own tool and MCP authority, so refuse before a
+        # child is built rather than fall back to it.
+        msg = (
+            f"inference_only is supported only on {INFERENCE_ONLY_PROVIDER!r} "
+            f"with local_review; refusing to launch {provider!r} with tools"
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
+    if codex_outer_sandboxed:
+        trusted_wrapper_profile_pair = bool(
+            provider == "codex"
+            and command_wrapper
+            and len(command_wrapper) == 3
+            and command_wrapper[0] == str(TRUSTED_MACOS_SANDBOX_EXEC)
+            and command_wrapper[1] == "-f"
+            and Path(command_wrapper[2]).is_absolute()
+            and TRUSTED_MACOS_SANDBOX_EXEC.is_file()
+            and os.access(TRUSTED_MACOS_SANDBOX_EXEC, os.X_OK)
+        )
+        if not trusted_wrapper_profile_pair:
+            msg = (
+                "codex_outer_sandboxed requires provider='codex' and the exact "
+                "trusted wrapper/profile pair rooted at "
+                f"{TRUSTED_MACOS_SANDBOX_EXEC}; refusing to disable the inner "
+                "Codex sandbox for a PATH-resolved, relative, malformed, or "
+                "look-alike wrapper"
+            )
+            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
+    # The workspace is resolved to one absolute path here, before anything
+    # consumes it: the command's workspace flags, the git roots granted to
+    # the sandbox, the isolation guard and the child's cwd all use this value.
+    if cwd:
+        cwd = resolve_dispatch_workspace(cwd)
+
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
-    agent_def = await asyncio.to_thread(_load_agent_def, _role)
+    try:
+        if expected_role_fingerprint is not None:
+            if not isinstance(expected_role_fingerprint, str) or not re.fullmatch(r'[0-9a-f]{64}', expected_role_fingerprint):
+                raise AgentDefinitionUnavailable(_role, 'bad_response', 1)
+            agent_def = await asyncio.to_thread(_load_agent_def, _role, fresh=True)
+            if canonical_role_fingerprint(_role, agent_def) != expected_role_fingerprint:
+                raise AgentDefinitionUnavailable(_role, 'bad_response', 1)
+        else:
+            agent_def = await asyncio.to_thread(_load_agent_def, _role)
+    except AgentDefinitionUnavailable as exc:
+        msg = (
+            f"{DEFINITION_UNAVAILABLE_PREFIX}: {exc} — nothing was dispatched; "
+            "repair the load, the task is retried"
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(
+            skill, False, None, "", "", error=msg, provider=provider,
+            definition_unavailable=True,
+        )
+
+    # Policy is authority too. Read it before provider admission or any runner,
+    # even for the local adapter; cached definitions never cache policy reads.
+    try:
+        policy_prompt = await asyncio.to_thread(
+            _load_active_policy_prompt, _role, agent_definition_id=agent_def.entity_id
+        )
+    except AgentPolicyUnavailable as exc:
+        msg = (
+            f"{POLICY_UNAVAILABLE_PREFIX}: {exc} — nothing was dispatched; "
+            "repair the load, the task is retried"
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider,
+                           policy_unavailable=True)
 
     binary = _provider_binaries().get(provider)
     if binary is None:
@@ -1344,29 +2959,169 @@ async def _run_skill_once(
         log.error(f"[apis] {skill} dispatch skipped — {msg}")
         return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
-    # ateles#795 — a gate owner that cannot be ATTRIBUTED must not run silently.
-    # Running it anyway burns a full review whose verdict Neotoma will refuse,
-    # and leaves `gate_status.<lens>` at `pending` — the state that is
-    # indistinguishable from a review that never ran, which is the whole defect.
-    # Refusing BEFORE the subprocess turns that invisible loss into a named,
-    # loud failure the panel surfaces on the PR. Only gate owners are refused;
-    # an advisory lens still runs on the shared bearer exactly as before.
-    if owns_pending_gate:
-        _, _own_identity = neotoma_token_for_agent(_role)
-        identity_error = gate_writeback_identity_error(
-            _role, is_own_identity=_own_identity
-        )
-        if identity_error:
-            log.error(f"[apis] {skill} dispatch refused — {identity_error}")
-            return SkillResult(
-                skill,
-                False,
-                None,
-                "",
-                "",
-                error=identity_error,
-                provider=provider,
+    # ── Model tiering (operator ruling 2026-09-29, model_tiering.py) ──────────
+    # Resolved AFTER the binary/SKILL.md checks above (so a genuinely missing
+    # binary or skill is diagnosed as that, not misdirected toward tiering
+    # config) but BEFORE the degraded-dispatch event below, so every
+    # harness_event path — degraded, start, success, failure, timeout —
+    # carries the same tiering decision for this dispatch. `model` (an
+    # explicit caller override) always wins; otherwise an `action_class`
+    # resolves a tier via the live action_policy (escalated by
+    # `escalation_signals`), and the tier resolves to a model via the live
+    # vendor_binding for THIS provider. No `action_class` at all reproduces
+    # exact prior behaviour (no tier resolved, no model requested).
+    resolved_tier: model_tiering.ResolvedTier | None = precomputed_tier
+    resolved_model = model
+    if resolved_model is None and (action_class is not None or resolved_tier is not None):
+        if resolved_tier is None:
+            resolved_tier = model_tiering.resolve_tier(
+                action_class, signals=escalation_signals
             )
+    # claude-local runs the model its own local_provider config names (its
+    # command is built separately and takes no --model), so vendor_binding
+    # has nothing to resolve for it: the tier is still recorded on its events,
+    # but a missing binding must not refuse the local attempt and push
+    # mechanical work onto a frontier provider.
+    if (
+        resolved_model is None
+        and resolved_tier is not None
+        and provider != local_provider.LOCAL_PROVIDER
+    ):
+        try:
+            resolved_model = model_tiering.model_for_tier(provider, resolved_tier.tier)
+        except model_tiering.UnboundTierError as exc:
+            msg = str(exc)
+            log.error(f"[apis] {skill} dispatch refused — {msg}")
+            try:
+                await asyncio.to_thread(
+                    _write_harness_event,
+                    task_entity_id=task_entity_id,
+                    agent_session_id=agent_session_id,
+                    role=_role,
+                    agent_sub=agent_def.aauth_sub,
+                    event_type="subprocess",
+                    tool_name=f"{provider}:{skill}",
+                    success="false",
+                    output_summary=msg[:500],
+                    resolved_tier=resolved_tier,
+                )
+            except Exception as write_exc:  # noqa: BLE001
+                log.debug(f"[apis] unbound-tier harness_event write failed: {write_exc}")
+            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
+    # ── Fail closed on providers that cannot deny a specific MCP tool ──────────
+    # Falco's REQUEST_CHANGES on PR #1181: the `claude` adapter can put
+    # `correct` on a CLI deny list (`GATE_OWNER_DENIED_TOOLS`, applied below),
+    # which takes precedence over the `mcp__mcpsrv_neotoma__*` wildcard every
+    # dispatch grants. Codex now has the equivalent subtractive primitive:
+    # ``mcp_servers.<id>.disabled_tools`` is applied after ``enabled_tools``.
+    # Its isolated config is created and structurally verified below, after
+    # prompt construction and before any subprocess launch. Cursor still has
+    # no equivalent: `cursor-agent --force --approve-mcps` auto-approves every
+    # MCP call with no per-tool exception. Refuse every unsupported provider
+    # here; Codex gets a second fail-closed preflight at config construction.
+    if owns_pending_gate and provider not in GATE_OWNER_DENY_CAPABLE_PROVIDERS:
+        msg = (
+            f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: provider {provider!r} has no "
+            "mechanism in this codebase to deny a single MCP tool "
+            f"({GATE_OWNER_DENIED_TOOLS[0]}) while still granting the rest of "
+            "the agent's Neotoma access — refusing to launch a seated "
+            "reviewer or gate-owning lens on it rather than running "
+            "unrestricted (ateles#795, "
+            "Falco's security review on PR #1181)."
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
+    # ateles#590 security repair (PR #1334): a network-enabled dispatch must
+    # never silently keep the daemon's ambient GitHub identity. Before #109,
+    # `github_token=None` (the default for every call site) left
+    # GITHUB_TOKEN/GH_TOKEN exactly as `_subscription_only_env` copied them
+    # from `os.environ`. That was harmless while `include_github_contract`
+    # (which also opens Codex network — see `network=include_github_contract`
+    # below) was reachable ONLY from GitHub-triggered call sites in
+    # swarm_dispatch.py, and every one of those already resolves and passes a
+    # `github_token` string (possibly "") via `_token_for_agent_on_repo`. But
+    # `dispatch_role.py`'s manual/programmatic entrypoint (#590) can request
+    # `include_github_contract=True` on its own, and can omit `github_token`
+    # entirely — reaching exactly the silent-inherit path this refusal closes.
+    #
+    # This is a PREFLIGHT refusal — checked and returned here, BEFORE the
+    # Stage 2 "dispatch start" harness_event write and before any subprocess
+    # command is built — for the same reason the owns_pending_gate refusal
+    # above is: a refused dispatch must leave no audit trail suggesting work
+    # was attempted, and every caller of run_skill/`_run_skill_once` expects a
+    # `SkillResult` on failure, never an exception (see this module's own
+    # docstring on failures never raising, and `_run_provider_attempts`'s
+    # `await attempt(selected)` call, which has no try/except around it).
+    # A forced Fly run never runs locally: its GitHub credential is a
+    # per-job App installation token minted at launch, not this argument.
+    if include_github_contract and not github_token and runner != "fly":
+        msg = (
+            "include_github_contract=True (network-enabled GitHub delivery) "
+            "requires an explicit GitHub credential binding via github_token, "
+            "and none was supplied "
+            f"({'omitted' if github_token is None else 'resolved to an EMPTY string'}). "
+            "Refusing to spawn a network-enabled child with no scoped "
+            "identity — that silent fallback to the daemon's ambient "
+            "GITHUB_TOKEN/GH_TOKEN is exactly what let a PR land under the "
+            "operator's own account instead of the agent's. Provision a "
+            "scoped PAT for this dispatch before retrying; never proceed "
+            "unauthenticated or on keyring fallback."
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
+    # ateles#109 — per-agent GitHub identity on a NON-network-enabled
+    # dispatch (e.g. a Neotoma-only task that still wants `gh` calls
+    # attributed correctly under the requesting agent). Same
+    # explicit-empty-fails-closed contract as above: a caller that passes
+    # github_token="" (requested but resolved EMPTY, distinct from not
+    # requested at all — see the subprocess_env block below) must not fall
+    # through to the daemon's ambient identity either.
+    if not include_github_contract and github_token == "" and runner != "fly":
+        msg = (
+            "github_token was explicitly requested for this dispatch but "
+            "resolved to an EMPTY string (no <AGENT>_AGENT_PAT, "
+            "ATELES_AGENT_PAT, NEOTOMA_AGENT_PAT, or GITHUB_TOKEN configured "
+            "for this agent/repo). Refusing to spawn the child with the "
+            "daemon's ambient GitHub identity — that silent fallback is "
+            "exactly what let a PR land under the operator's own account "
+            "instead of the agent's. Provision the missing PAT before "
+            "retrying; never proceed unauthenticated or on keyring fallback."
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+
+    # ateles#795 amended ADR — this preflight refusal is RELAXED, not removed.
+    #
+    # It used to hard-block a gate owner from launching at all when it had no
+    # per-agent Neotoma bearer (`<ROLE>_NEOTOMA_TOKEN`): the lens's own MCP
+    # `correct()` was the only planned writeback path, and a write Neotoma
+    # would refuse for lack of attribution was worse than never running.
+    #
+    # The operator's amended decision moves the SYSTEM-OF-RECORD write off the
+    # lens's MCP session entirely: `swarm_dispatch` now calls
+    # `IssueGateStore.sign_off()` (`gate_waive.py`) after a clean verdict,
+    # which signs the write with the LENS's own AAuth keypair via
+    # `neotoma_signed.signed_request` — not the lens's MCP bearer, and not the
+    # daemon's shared bearer either. No prompt instructs a gate-owning lens
+    # to `correct()` `gate_status` itself any more — the panel's
+    # `_panelist_prompt` GATE WRITEBACK block and the additive-spec
+    # pipeline's `pm_gate_block` / `_pavo_prompt` were all rewritten to state
+    # a verdict via comment only (Falco's security review, PR #1181's
+    # follow-up round) — so a lens's own MCP `correct()` of `gate_status` is
+    # unsolicited at best, not even "advisory", and the absence of a
+    # per-agent MCP bearer is no longer a reason to refuse the launch — refusing here
+    # would leave pm/arch/ux permanently unable to run, which is the second
+    # failure this amendment exists to fix (the operator's decision comment
+    # names this explicitly: provisioning `<ROLE>_NEOTOMA_TOKEN` "routes
+    # around the design rather than implementing it").
+    #
+    # `gate_writeback_identity_error` / `neotoma_token_for_agent` are kept
+    # (still exercised by their own unit tests) for any OTHER caller that
+    # still needs to refuse a write attempted as the wrong principal — this
+    # call site just no longer treats their answer as a launch gate.
 
     try:
         skill_md = skill_path.read_text(encoding="utf-8")
@@ -1382,16 +3137,36 @@ async def _run_skill_once(
         )
 
     # ── Build system prompt (Stage 1 + Stage 5) ────────────────────────────────
-    system_prompt, degraded = build_system_prompt(
-        agent_def, skill_md, include_github_contract=include_github_contract
-    )
+    # claude-local keeps its lean role/work-class prompt rather than the full
+    # frontier definition. Governing policies still apply; if they exceed its
+    # window, the existing ceiling guard refuses instead of dropping authority.
+    if provider == local_provider.LOCAL_PROVIDER:
+        system_prompt = local_provider.build_lean_prompt(work_class)
+        if policy_prompt:
+            system_prompt += "\n\n" + policy_prompt
+        # `degraded` must reflect whether agent_def actually loaded (a stub
+        # from AgentLoader's load-failure fallback has empty prompt_markdown
+        # — see lib/daemon_runtime/agent_loader.py's `_stub()`), the same
+        # condition build_system_prompt uses below, NOT whether the lean
+        # prompt happens to omit prompt_markdown by design. Getting this
+        # wrong would silently skip the undefined-role alerting AND let a
+        # stub's synthesized aauth_sub receive AAuth signing-key injection
+        # further down (`if not degraded and agent_def.aauth_sub:`).
+        degraded = not (agent_def.prompt_markdown or "").strip()
+    else:
+        system_prompt, degraded = build_system_prompt(
+            agent_def,
+            skill_md,
+            include_github_contract=include_github_contract,
+            policy_prompt=policy_prompt,
+        )
 
     if degraded:
         _title_hint = prompt[:80].replace("\n", " ")
         warn_msg = (
             f"Role {_role!r} ran DEGRADED (no agent_definition loaded) "
             f"for task {task_entity_id or '(unknown)'!r}. "
-            "Dispatching with SKILL.md only."
+            "Dispatching with SKILL.md and any available live policy."
         )
         log.warning(f"[apis] {warn_msg}")
         # A role with no agent_definition is ONE fact about that ROLE, not one
@@ -1427,6 +3202,7 @@ async def _run_skill_once(
             await asyncio.to_thread(
                 _write_harness_event,
                 task_entity_id=task_entity_id,
+                agent_session_id=agent_session_id,
                 role=_role,
                 agent_sub=agent_def.aauth_sub,
                 event_type="subprocess",
@@ -1434,6 +3210,7 @@ async def _run_skill_once(
                 success="partial",
                 input_summary=_title_hint,
                 output_summary="degraded_generic_subagent",
+                resolved_tier=resolved_tier,
             )
         except Exception as exc:
             log.debug(f"[apis] degraded harness_event write failed: {exc}")
@@ -1442,14 +3219,86 @@ async def _run_skill_once(
     # A dispatch carrying the GitHub contract is one whose task involves
     # commit/push/PR — the delivery path #590 is about. Everything else runs
     # with the sandbox's default network denial.
-    cmd, stdin_payload = _provider_command(
-        provider,
-        binary,
-        system_prompt,
-        prompt,
-        cwd=cwd,
-        network=include_github_contract,
+    local_cfg = None
+    if provider == local_provider.LOCAL_PROVIDER:
+        # claude-local: refuse before launch when the prompt cannot fit the
+        # local window or the guard hooks cannot be bound. Either refusal is a
+        # launch failure, so `_run_provider_attempts` falls over to frontier.
+        local_cfg = local_provider.load_config()
+        refusal = (
+            local_provider.ceiling_refusal(system_prompt, prompt, local_cfg)
+            if local_cfg is not None
+            else f"{provider} is not configured"
+        )
+        guards_path = ""
+        if refusal is None:
+            # ATELES_REPO_PATH unset means ATELES_REPO (module-level,
+            # resolved once at import) silently fell back to ~/repos/ateles —
+            # the shared interactive clone, not the deployment checkout the
+            # daemon actually runs from. Reading guards from ATELES_REPO in
+            # that case would bind the launch to whatever state that clone
+            # happens to be in and proceed on unverified guards rather than
+            # refuse. Building guards_repo from the env var read here (not
+            # from the separately-resolved ATELES_REPO) keeps the refuse/
+            # proceed decision and the path guards are actually read from as
+            # one value instead of two independent reads of the same var.
+            repo_path_env = os.environ.get("ATELES_REPO_PATH", "").strip()
+            if not repo_path_env:
+                refusal = (
+                    f"{local_provider.FAILURE_GUARDS}: ATELES_REPO_PATH is not "
+                    "set — refusing to read guards from the ATELES_REPO "
+                    f"fallback ({ATELES_REPO}); set ATELES_REPO_PATH to the "
+                    "checkout whose guards this dispatch must bind"
+                )
+            else:
+                log.info(
+                    f"[apis] {skill} claude-local guards read from "
+                    f"ATELES_REPO_PATH={repo_path_env}"
+                )
+                try:
+                    guards_path = local_provider.write_guards_file(Path(repo_path_env))
+                except (local_provider.LocalProviderError, OSError) as exc:
+                    refusal = f"{local_provider.FAILURE_GUARDS}: {exc}"
+        if refusal is not None:
+            msg = f"{provider} launch failed: {refusal}"
+            log.warning(f"[apis] {skill} dispatch skipped — {msg}")
+            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+        cmd = local_provider.build_command(
+            binary, system_prompt, agent_def.tools, local_cfg, guards_path
+        )
+        stdin_payload = None
+    else:
+        cmd, stdin_payload = _provider_command(
+            provider,
+            binary,
+            system_prompt,
+            prompt,
+            cwd=cwd,
+            network=include_github_contract,
+            codex_outer_sandboxed=codex_outer_sandboxed,
+            model=resolved_model,
+        )
+    if command_wrapper:
+        # Prepended to the REAL argv that create_subprocess_exec below will
+        # run — not a parallel description of a guard, the guard itself. See
+        # this parameter's docstring on _run_skill_once.
+        cmd = [*command_wrapper, *cmd]
+
+    local_review_home = (
+        (env_extra or {}).get("ATELES_LOCAL_REVIEW_HOME", "") if local_review else ""
     )
+    if local_review:
+        if not local_review_home or not Path(local_review_home).is_absolute():
+            raise RuntimeError(
+                "local_review dispatch requires an absolute "
+                "ATELES_LOCAL_REVIEW_HOME supplied by the caller"
+            )
+        if github_token is not None:
+            raise RuntimeError(
+                "local_review dispatch cannot accept github_token; publication "
+                "authority belongs exclusively to the parent"
+            )
+        (Path(local_review_home) / ".config" / "gh").mkdir(parents=True, exist_ok=True)
 
     # ── Stage 6: inject Neotoma MCP config so dispatched child can reach Neotoma ─
     # Dispatched `claude --print` children inherit the ambient Claude MCP config,
@@ -1478,33 +3327,73 @@ async def _run_skill_once(
     #   the config to a mode-0600 temp file and pass the file path to --mcp-config.
     #   The temp file is cleaned up in a try/finally after the subprocess exits.
     _mcp_tmp_path: str | None = None
-    if provider == "claude":
-        _neotoma_base = os.environ.get(
-            "NEOTOMA_BASE_URL", ""
-        ).rstrip("/")
+    _codex_gate_config: CodexGateOwnerConfig | None = None
+    _isolated_home: IsolatedHarnessHome | None = None
+    _codex_gate_token = ""
+    if provider == "claude" and local_review:
+        # Claude otherwise merges project/user MCP configuration. A local
+        # review child has no Neotoma publication role at all, so give it an
+        # explicitly empty, strict MCP universe rather than relying on absent
+        # tokens alone. The parent process retains its own MCP/GitHub authority.
+        fd, _mcp_tmp_path = tempfile.mkstemp(
+            suffix=".json", prefix="apis_local_review_mcp_"
+        )
+        os.chmod(_mcp_tmp_path, 0o600)
+        with os.fdopen(fd, "w") as _f:
+            json.dump({"mcpServers": {}}, _f)
+        cmd += ["--mcp-config", _mcp_tmp_path, "--strict-mcp-config"]
+    elif provider == "claude":
+        _neotoma_base = os.environ.get("NEOTOMA_BASE_URL", "").rstrip("/")
         # ateles#795: prefer the ROLE's own Neotoma principal. Falls back to the
         # shared daemon bearer, so every agent without its own credential behaves
-        # exactly as before; a gate owner that needs attribution has already been
-        # refused upstream by the `owns_pending_gate` preflight.
+        # exactly as before. A gate owner is NOT refused here for lacking one
+        # (amended ADR): the system-of-record write is now the dispatcher's
+        # `IssueGateStore.sign_off`, signed with the lens's own AAuth key,
+        # independent of this MCP session's bearer. The prompt no longer
+        # instructs a gate-owning lens to `correct()` `gate_status` itself (the
+        # GATE WRITEBACK block was removed from `_panelist_prompt`), and
+        # `mcp__mcpsrv_neotoma__correct` is no longer pre-approved for this
+        # session either (see `GATE_WRITEBACK_TOOLS`) — an unsolicited `correct`
+        # attempt on `gate_status` would fall back to an unanswerable
+        # `default`-mode approval prompt, never a clearance path.
         _neotoma_token, _ = neotoma_token_for_agent(_role)
+        if not _neotoma_token:
+            # Unlike the harness_event writer above, this is not a
+            # best-effort diagnostic — it constructs the MCP config the
+            # spawned child actually connects with. Neotoma's /mcp endpoint
+            # requires auth (verified live: an unauthenticated POST to
+            # /mcp returns HTTP 401 with "Unauthorized: Authentication
+            # required"), so a missing token here is not a degraded-but-
+            # usable config — it is a config that guarantees the child's
+            # own MCP handshake fails, far from this call site and with no
+            # indication the cause was an empty env var in the parent.
+            # Raise here, matching _require_neotoma_base_url's convention,
+            # so the failure is attributed to its actual cause. This applies
+            # regardless of which tier (role-owned or shared daemon bearer)
+            # neotoma_token_for_agent() resolved from — both can be empty.
+            raise RuntimeError(
+                "NEOTOMA_BEARER_TOKEN is not set; refusing to construct an "
+                "--mcp-config for the dispatched child. Neotoma's /mcp "
+                "endpoint requires authentication, so a config built "
+                "without a bearer token would only fail later, inside the "
+                "child's own MCP handshake, with no trace back to this "
+                "cause. Under launchd the plist supplies this; for an "
+                "ad-hoc run, export it or source ~/.config/neotoma/.env "
+                "first."
+            )
         _mcp_cfg: dict = {
             "mcpServers": {
                 "mcpsrv_neotoma": {
                     "type": "http",
                     "url": f"{_neotoma_base}/mcp",
+                    "headers": {"Authorization": f"Bearer {_neotoma_token}"},
                 }
             }
         }
-        if _neotoma_token:
-            _mcp_cfg["mcpServers"]["mcpsrv_neotoma"]["headers"] = {
-                "Authorization": f"Bearer {_neotoma_token}"
-            }
 
         # Write the MCP config to a mode-0600 temp file to avoid argv exposure.
         try:
-            fd, _mcp_tmp_path = tempfile.mkstemp(
-                suffix=".json", prefix="apis_mcp_"
-            )
+            fd, _mcp_tmp_path = tempfile.mkstemp(suffix=".json", prefix="apis_mcp_")
             os.chmod(_mcp_tmp_path, 0o600)
             with os.fdopen(fd, "w") as _f:
                 json.dump(_mcp_cfg, _f)
@@ -1519,24 +3408,82 @@ async def _run_skill_once(
                 f"[apis] Could not write MCP config temp file (non-fatal): {exc}"
             )
             _mcp_tmp_path = None
+    elif provider == "codex" and owns_pending_gate:
+        # The seated record server is bound to the role's OWN token at a valid
+        # https endpoint, exactly like every other local Codex or Cursor
+        # child: a missing, empty or blank token is a configuration repair
+        # before launch, never the shared bearer.
+        try:
+            _, _codex_gate_token = _role_neotoma_endpoint(_role)
+        except IsolationRefusal as exc:
+            return _isolation_refusal_result(skill, provider, exc)
+        try:
+            _codex_gate_config = _prepare_codex_gate_owner_config(
+                base_url=_require_neotoma_base_url(),
+                agent_tools=agent_def.tools,
+                env_extra=env_extra,
+            )
+        except (OSError, RuntimeError) as exc:
+            # Never launched without its verified config: a configuration
+            # repair (no cooldown; the dispatch fails over), value-free.
+            return _isolation_refusal_result(skill, provider, IsolationRefusal(
+                f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: the seated review's isolated Codex "
+                f"config could not be created and verified ({type(exc).__name__})",
+                setting="Codex login (CODEX_HOME/auth.json) and NEOTOMA_BASE_URL"))
+        cmd.insert(len(command_wrapper or []) + 1, "--strict-config")
+        log.info(
+            "[apis] Codex seated-review MCP contract verified: server=%s "
+            "disabled_tools=%s required_reads=%s",
+            CODEX_NEOTOMA_SERVER_ID,
+            list(CODEX_GATE_DENIED_TOOLS),
+            list(CODEX_GATE_REQUIRED_READ_TOOLS),
+        )
 
     tools = agent_def.tools  # property: list[str]; ['*'] means all
-    if provider == "claude" and tools != ["*"]:
+    # ateles#795, Falco's REQUEST_CHANGES on PR #1181: for a gate-owning run,
+    # `correct` goes on the CLI's DENY list, never relying on the additive
+    # allowlist alone. `--disallowed-tools` takes precedence over
+    # `--allowed-tools` (verified against this installed CLI's `--help`,
+    # which documents both flags; Claude Code's allow/deny precedence is
+    # deny-wins, matching every other permission layer in the product — see
+    # the PR comment for the reviewer-run provider table), so this closes the
+    # wildcard/`*` gap the additive `GATE_WRITEBACK_TOOLS` fix left open: a
+    # gate owner's session can no longer clear `gate_status` over the shared
+    # bearer no matter what its allowlist otherwise grants.
+    disallowed_list = list(GATE_OWNER_DENIED_TOOLS) if owns_pending_gate else []
+    if provider == "claude" and inference_only:
+        # No tools at all: the child can only produce text. Together with the
+        # empty strict MCP configuration and isolated HOME of local_review this
+        # is the confinement, and it is a property of the command line, not of
+        # anything the prompt asks for.
+        cmd += ["--tools", "", "--disable-slash-commands"]
+        log.info(
+            f"[apis] Spawning via {provider}: "
+            f"<{_role}:{skill}.SKILL.md> tool-free inference timeout={timeout}s"
+        )
+    elif provider == "claude" and tools != ["*"]:
         # --allowed-tools is confirmed present in `claude --print --help`
         # (alias: --allowedTools). Accepts comma- or space-separated tool names.
         # MCP server tools use the "mcp__<servername>__*" wildcard form, where the
         # server name matches the mcpServers key (here: "mcpsrv_neotoma" — the
         # universal convention across all 31 agent SKILLs and 24 agent_definitions).
         # This allows all tools from that MCP server without enumerating them individually.
-        allowed_list = list(tools)
-        if "mcp__mcpsrv_neotoma__*" not in allowed_list:
+        allowed_list = [
+            tool for tool in tools if not (local_review and tool.startswith("mcp__"))
+        ]
+        if not local_review and "mcp__mcpsrv_neotoma__*" not in allowed_list:
             allowed_list.append("mcp__mcpsrv_neotoma__*")
-        # ateles#795: name the gate-writeback tools explicitly even though the
-        # `mcp__mcpsrv_neotoma__*` wildcard above nominally covers them. The
-        # wildcard is what a restricted agent already had on PR #791 when its
-        # `correct()` was still denied, so it is not sufficient evidence that
-        # the writeback is pre-approved. Exact tool names are.
-        allowed_list = gate_writeback_allowlist(allowed_list)
+        # ateles#795: name the two read-only gate tools explicitly even though
+        # the `mcp__mcpsrv_neotoma__*` wildcard above nominally covers them —
+        # exact tool names are the durable statement of intent, not reliance on
+        # a wildcard that could later narrow. `correct` is deliberately absent
+        # (see `GATE_WRITEBACK_TOOLS`'s docstring): the dispatcher's signed
+        # `sign_off` is the system-of-record write now, and this session's own
+        # `correct()` of `gate_status` must NOT be pre-approved — and, for a
+        # gate-owning run, is additionally on the deny list below regardless
+        # of the wildcard.
+        if not local_review:
+            allowed_list = gate_writeback_allowlist(allowed_list)
         allowed = ",".join(allowed_list)
         cmd += ["--allowed-tools", allowed]
         log.info(
@@ -1552,35 +3499,68 @@ async def _run_skill_once(
         # cannot answer a prompt. So the most-trusted agents were the ones
         # whose gate writeback was surest to be denied (ateles#795).
         #
-        # Granting the three gate-writeback tools by name is the smallest fix
-        # that makes the verdict recordable. It does NOT narrow the agent: the
-        # `*` wildcard is preserved as the first entry, so every other tool the
-        # agent had remains available exactly as before.
-        allowed = ",".join(gate_writeback_allowlist(["*"]))
+        # Granting the two read-only gate tools by name is a courtesy grant for
+        # situational awareness, not a writeback fix — `correct` on
+        # `gate_status` is deliberately NOT pre-approved (see
+        # `GATE_WRITEBACK_TOOLS`'s docstring: the dispatcher's signed
+        # `sign_off` is the system-of-record write now). This does NOT narrow
+        # the agent: the `*` wildcard is preserved as the first entry, so every
+        # other tool the agent had remains available exactly as before. For a
+        # gate-owning run, `correct` is additionally denied below — the `*`
+        # wildcard on its own left `correct` reachable, which is exactly the
+        # sink Falco's review confirmed on PR #1181.
+        allowed = ",".join(["*"] if local_review else gate_writeback_allowlist(["*"]))
         cmd += ["--allowed-tools", allowed]
         log.info(
             f"[apis] Spawning via {provider}: "
             f"<{_role}:{'agent_def+' if not degraded else 'degraded-'}{skill}.SKILL.md> "
             f"--allowed-tools {allowed} timeout={timeout}s"
         )
-    else:
+    if provider == "claude" and disallowed_list:
+        cmd += ["--disallowed-tools", ",".join(disallowed_list)]
+        log.info(
+            f"[apis] Spawning via {provider}: <{_role}:{skill}.SKILL.md> "
+            f"--disallowed-tools {','.join(disallowed_list)} "
+            "(seated reviewer or gate-owning run — correct() denied "
+            "regardless of allowlist)"
+        )
+    if provider != "claude":
         log.info(
             f"[apis] Spawning via {provider}: "
             f"<{_role}:{'agent_def+' if not degraded else 'degraded-'}{skill}.SKILL.md> "
             f"timeout={timeout}s"
         )
 
+    # ── Tier observability (operator ruling 2026-09-29) ────────────────────────
+    # One log line and one ledger row per dispatch attempt: the tier, why, and
+    # the model actually requested. An un-tiered dispatch is logged as such
+    # (`tiering=untiered(no_action_class)`), never omitted, so a call site that
+    # forgot to name an action class shows up here instead of hiding.
+    # The id ties this start row to the spend row appended when the dispatch
+    # ends (`record_dispatch_usage`), so attribution survives a provider failover
+    # that records one start row per provider tried.
+    _ledger_dispatch_id = model_tiering.new_dispatch_id()
+    log.info(
+        f"[apis] {skill} via {provider}: "
+        + model_tiering.record_dispatch(
+            skill=skill, provider=provider, resolved=resolved_tier,
+            model=resolved_model, dispatch_id=_ledger_dispatch_id,
+        )
+    )
+
     # ── Stage 2: harness_event at dispatch start ───────────────────────────────
     try:
         await asyncio.to_thread(
             _write_harness_event,
             task_entity_id=task_entity_id,
+            agent_session_id=agent_session_id,
             role=_role,
             agent_sub=agent_def.aauth_sub,
             event_type="subprocess",
             tool_name=f"{provider}:{skill}",
             success="partial",  # "partial" = in-flight / started
             input_summary=prompt[:200],
+            resolved_tier=resolved_tier,
         )
     except Exception as exc:
         log.debug(f"[apis] start harness_event write failed (non-fatal): {exc}")
@@ -1588,15 +3568,61 @@ async def _run_skill_once(
     # Hard boundary from the approved plan: all three adapters use bundled
     # subscription auth by default. API-key credentials are removed so a capped
     # plan queues/fails over instead of silently spending metered tokens.
-    subprocess_env = _subscription_only_env(env_extra)
+    subprocess_env = _subscription_only_env(
+        env_extra,
+        local_review=local_review,
+        local_review_home=local_review_home or None,
+        inference_only=inference_only,
+    )
+    if provider in ISOLATED_PROVIDERS:
+        # Codex and Cursor only; Claude's environment is unchanged here.
+        _neotoma_identity_for_child(
+            subprocess_env, _role,
+            granted=bool(allowed_mcp_servers(agent_def.tools)) or owns_pending_gate)
+    if local_cfg is not None:
+        # Local inference: point the CLI at the loopback proxy and strip any
+        # frontier OAuth credential so it cannot be sent there.
+        local_provider.apply_env(subprocess_env, local_cfg)
+    if _codex_gate_config is not None:
+        # Point Codex at the isolated config only after `_subscription_only_env`
+        # has assembled the child environment. The bearer value stays in the
+        # environment named by `bearer_token_env_var`; it never enters argv or
+        # config.toml.
+        subprocess_env["CODEX_HOME"] = str(_codex_gate_config.home)
+        subprocess_env[CODEX_GATE_BEARER_ENV] = _codex_gate_token
+    # A local Codex or Cursor child never gets the operator's personal harness
+    # configuration: just before it is spawned (``_run_local``), it gets a
+    # generated home whose MCP servers are exactly the role's allowed ones.
+    _ordinary_local = (
+        provider in ISOLATED_PROVIDERS
+        and _codex_gate_config is None  # a seated Codex review is isolated above
+        and local_cfg is None
+        and not local_review  # guarded lens runs bring their own isolated home
+        and not inference_only
+    )
+    # For an ordinary local Codex or Cursor child the generated, verified home
+    # is the only home: a CODEX_HOME / HOME in env_extra is refused at the
+    # local launch, never used in its place.
+    _home_key = "CODEX_HOME" if provider == "codex" else "HOME"
+    _home_override_refusal: IsolationRefusal | None = None
+    if _ordinary_local and (env_extra or {}).get(_home_key):
+        _home_override_refusal = IsolationRefusal(
+            "a caller-supplied harness home may not replace the generated, verified one",
+            setting=f"env_extra {_home_key}")
+    _isolation_wanted = _ordinary_local
 
-    # ateles#109 — per-agent GitHub identity: when the caller resolved a
-    # per-agent token (e.g. via _token_for_agent_on_repo in swarm_dispatch),
-    # override both GITHUB_TOKEN and GH_TOKEN so the child's `gh` calls
-    # authenticate as that agent's own account.  When github_token is None
-    # (all SSE task-path and non-GitHub call sites), this block is skipped and
-    # the child inherits the daemon's ambient tokens unchanged — exact
-    # current behaviour, no regression.
+    # ateles#109 / ateles#590 (PR #1334): inject the resolved per-agent GitHub
+    # identity, if any. The fail-closed refusals for a network-enabled
+    # dispatch with no token, and for an explicitly-empty token on any
+    # dispatch, already returned a SkillResult in the preflight block above —
+    # by this point github_token is either None (not requested; ambient env
+    # passes through unchanged, exact pre-#109 behaviour) or a non-empty
+    # scoped string to inject. When include_github_contract is True, the
+    # ambient GITHUB_TOKEN/GH_TOKEN are stripped first so no path leaves the
+    # daemon's own identity in a network-enabled child's env.
+    if include_github_contract:
+        subprocess_env.pop("GITHUB_TOKEN", None)
+        subprocess_env.pop("GH_TOKEN", None)
     if github_token:
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
@@ -1619,7 +3645,7 @@ async def _run_skill_once(
     # a child's MCP writes are attributed to the role; the header is. Reading
     # these three vars as "the lens writes as itself" is what let the shared
     # bearer pass for a per-lens identity while ateles#795 stayed open.
-    if not degraded and agent_def.aauth_sub:
+    if not local_review and not degraded and agent_def.aauth_sub:
         keys_dir = os.environ.get("ATELES_PRIVATE_KEYS_DIR", "")
         if keys_dir:
             jwk_path = os.path.join(keys_dir, f"{_role}.jwk.json")
@@ -1630,47 +3656,327 @@ async def _run_skill_once(
                     "NEOTOMA_AAUTH_ISS", "https://markmhendrickson.com"
                 )
 
-    _start_ns = time.monotonic_ns()
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=subprocess_env,
-            cwd=cwd,  # QE3: qa lens runs in a PR-branch worktree
-        )
-    except OSError as exc:
+    def _cleanup_launch_artifacts() -> None:
         if _mcp_tmp_path is not None:
             try:
                 os.unlink(_mcp_tmp_path)
             except OSError:
                 pass
-        msg = f"{provider} launch failed: {exc}"
-        log.warning(f"[apis] {skill} dispatch skipped — {msg}")
-        return SkillResult(
-            skill,
-            False,
-            None,
-            "",
-            "",
-            error=msg,
-            provider=provider,
-        )
+        if _codex_gate_config is not None:
+            shutil.rmtree(_codex_gate_config.home, ignore_errors=True)
+        if _isolated_home is not None:
+            shutil.rmtree(_isolated_home.home, ignore_errors=True)
 
+    # ── Executor choice (ateles#1456) ──────────────────────────────────────────
+    # Local is today's code, unchanged. The fly executor takes the SAME argv,
+    # stdin and timeout plus an explicit credential set and returns the same
+    # (returncode, stdout, stderr). Reached only for an opted-in class or a
+    # forced `runner="fly"`; with APIS_FLY_RUNNER_CLASSES unset and no runner
+    # passed, `wants_fly` is False and nothing below changes.
+    #
+    # `FlyExecutor.run` owns the whole Fly job lifetime: its own finally
+    # revokes the job's GitHub token and settles the machine on every path.
+    _fly_job = None
+    _fly_note = ""
+    if fly_delivery is not None:
+        # A delivery runs on Fly or not at all here: the builder, not this
+        # function, falls back to its local worktree path.
+        runner = "fly"
+    _fly_forced = runner == "fly"
+    _fly_reason = ""
+    # Fly is configured but a cost, capacity or time limit is invalid: a
+    # refusal, never a local fallback (ateles#1456).
+    _fly_disabled = False
+    if fly_runner.wants_fly(runner, action_class):
+        try:
+            _fly_job = fly_runner.build_job(
+                provider=provider,
+                role=_role,
+                cmd=cmd,
+                stdin=stdin_payload if stdin_payload is not None else prompt.encode(),
+                timeout=timeout,
+                repository=repository,
+                github_requested=github_token is not None or include_github_contract,
+                mcp_config_path=_mcp_tmp_path,
+                local_review=local_review,
+                inference_only=inference_only,
+                command_wrapper=command_wrapper,
+                cwd=cwd,
+                owns_pending_gate=owns_pending_gate,
+                codex_outer_sandboxed=codex_outer_sandboxed,
+                delivery=fly_delivery,
+                neotoma_tools_granted=bool(allowed_mcp_servers(agent_def.tools)),
+            )
+        except fly_runner.FlyIneligible as exc:
+            _fly_reason = f"not eligible for Fly: {exc}"
+        except fly_runner.FlyConfigInvalid as exc:
+            _fly_reason = str(exc)
+            _fly_disabled = True
+
+    def _fly_refusal_or_fallback(reason: str) -> SkillResult | None:
+        """A refusal to return, or None to run locally (logged and counted)."""
+        fallback_ok = not _fly_forced and not _fly_disabled and (
+            reason.startswith("not eligible")
+            or fly_runner.get_executor().config.local_fallback
+        )
+        if not fallback_ok:
+            # Deliberately NOT the "<provider> launch failed:" shape: a Fly
+            # infrastructure failure says nothing about the provider, so it
+            # must not cool the provider or fail over as if it did.
+            msg = f"fly runner refused: {reason}"
+            log.error(f"[apis] {skill} dispatch refused — {msg}")
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider,
+                fly_ineligible_before_launch=not _fly_disabled and reason.startswith(
+                    ("not eligible", "Fly launch failed")),
+            )  # fmt: skip
+        if local_fallback_check is not None:
+            # This provider was chosen WITHOUT the Mac's usage gate because
+            # it was bound for Fly. Running locally instead, it gets the
+            # local gate again; an exemption never carries over.
+            local_reason = local_fallback_check(provider)
+            if local_reason:
+                msg = (f"fly runner fell back to the Mac, where {provider} may not run: "
+                       f"{local_reason}")  # fmt: skip
+                log.warning(f"[apis] {skill} not dispatched — {msg}")
+                return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+        count = fly_runner.get_executor().ledger.count_local_fallback()
+        log.warning(
+            f"[apis] {skill} running locally instead of on Fly ({reason}); "
+            f"local fallback #{count} this ledger"
+        )
+        return None
+
+    if _fly_reason:
+        _refusal = _fly_refusal_or_fallback(_fly_reason)
+        if _refusal is not None:
+            _cleanup_launch_artifacts()
+            return _refusal
+
+    proc = None
+
+    async def _run_local() -> tuple[int | None, bytes, bytes]:
+        nonlocal proc, _isolated_home
+        spawn_cwd = cwd
+        if _home_override_refusal is not None:
+            exc = _home_override_refusal
+            raise _LocalIsolationRefused(f"{exc} (repair: {exc.setting})")
+        if _isolation_wanted and _isolated_home is None:
+            # ONE absolute workspace (resolved above, or the daemon's own
+            # directory) is what the guard checks, the child's cwd and the
+            # CLI's workspace flag; nothing is resolved twice.
+            workspace = cwd or resolve_dispatch_workspace(os.getcwd())
+            spawn_cwd = workspace
+            try:
+                overrides = codex_config_overrides(cmd) if provider == "codex" else []
+                if overrides:
+                    raise IsolationRefusal(
+                        f"the Codex command carries configuration overrides {overrides}",
+                        setting="codex command")
+                if provider == "cursor" and "--workspace" not in cmd:
+                    # Cursor takes its project MCP file from --workspace: name
+                    # the workspace the guard checks, never an implicit one.
+                    cmd.extend(["--workspace", workspace])
+                mismatch = launch_workspace_mismatch(provider, cmd, workspace)
+                if mismatch:
+                    raise RuntimeError(mismatch)
+                _isolated_home = prepare_isolated_harness_home(
+                    provider, role=_role, agent_tools=agent_def.tools, cwd=workspace,
+                    env_extra=env_extra,
+                )
+            except IsolationRefusal as exc:
+                raise _LocalIsolationRefused(f"{exc} (repair: {exc.setting})") from None
+            except (OSError, RuntimeError) as exc:
+                # A fixed reason and the exception's class: never its text,
+                # which can carry local paths or system detail.
+                raise _LocalIsolationRefused(
+                    "the isolated harness home could not be prepared and verified "
+                    f"({type(exc).__name__})") from None
+            except ValueError:
+                # Never let a malformed value escape as a generic error, and
+                # never echo it: it may be a credential-bearing setting.
+                raise _LocalIsolationRefused(
+                    "harness isolation could not be prepared from the current "
+                    "configuration") from None
+            subprocess_env.update(_isolated_home.env)
+            log.info(f"[apis] {provider} child for {_role!r} runs in an isolated harness "
+                     f"home; MCP servers: {list(_isolated_home.servers) or 'none'}")  # fmt: skip
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=subprocess_env,
+                cwd=spawn_cwd,  # QE3: qa lens runs in a PR-branch worktree
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise _LocalSpawnError(str(exc)) from exc
+        out, err = await asyncio.wait_for(
+            proc.communicate(
+                input=stdin_payload if stdin_payload is not None else prompt.encode()
+            ),
+            timeout=timeout,
+        )
+        return proc.returncode, out, err
+
+    def _report_fly_capability(message: str) -> None:
+        log.warning("[apis] %s: %s", skill, message)
+        print(message, file=sys.stderr, flush=True)
+        if notifier is not None:
+            try:
+                from lib.notify import Priority
+
+                notifier.send(message, priority=Priority.WARN, handler="apis")
+            except Exception as exc:
+                log.debug(f"[apis] Fly capability notifier.send failed: {exc}")
+
+    _start_ns = time.monotonic_ns()
     try:
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(
-                    input=stdin_payload if stdin_payload is not None else prompt.encode()
-                ),
-                timeout=timeout,
+            if _fly_job is not None:
+                try:
+                    if _fly_job.neotoma_tools_unavailable:
+                        _report_fly_capability(fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE)
+                    returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
+                except fly_runner.FlyRefusal as exc:
+                    msg = f"fly runner refused: {exc}"
+                    log.warning(f"[apis] {skill} dispatch deferred — {msg}")
+                    return SkillResult(
+                        skill, False, None, "", "", error=msg, provider=provider,
+                        cooled_until=exc.cooled_until,
+                    )  # fmt: skip
+                except (fly_runner.FlyIneligible, fly_runner.FlyLaunchError) as exc:
+                    reason = (
+                        f"not eligible for Fly: {exc}"
+                        if isinstance(exc, fly_runner.FlyIneligible)
+                        else f"Fly launch failed: {exc}"
+                    )
+                    _refusal = _fly_refusal_or_fallback(reason)
+                    if _refusal is not None:
+                        return _refusal
+                    if _fly_job.neotoma_tools_unavailable:
+                        # FlyIneligible is raised BEFORE any launch is requested;
+                        # only FlyLaunchError means a launch was attempted.
+                        _report_fly_capability(
+                            "This run was not eligible for Fly, so it ran locally "
+                            "with its normal tools."
+                            if isinstance(exc, fly_runner.FlyIneligible)
+                            else "The Fly launch failed; this run fell back to a "
+                            "local run with its normal tools."
+                        )
+                    _fly_job = None
+                    _start_ns = time.monotonic_ns()
+                    returncode, stdout, stderr = await _run_local()
+                except (fly_runner.FlyUncertainLaunch, Exception) as exc:
+                    if isinstance(exc, (asyncio.TimeoutError, _LocalSpawnError)):
+                        raise  # the deadline path below carries its own metadata
+                    if not isinstance(exc, fly_runner.FlyUncertainLaunch) and not (
+                        _fly_job.launch_requested
+                    ):
+                        raise  # nothing was sent to Fly: an ordinary error
+                    # Any failure once a create/start was sent (an uncertain
+                    # launch, or an unexpected error later) leaves the remote
+                    # outcome unknown: keep it intact end to end.
+                    _what = (
+                        "an uncertain launch"
+                        if isinstance(exc, fly_runner.FlyUncertainLaunch)
+                        else f"an unexpected {type(exc).__name__}"
+                    )
+                    # The remote run may have happened. Never replayed here,
+                    # whatever the fallback setting: report it, unresolved.
+                    state = _fly_job.remote_state or "unconfirmed"
+                    msg = (
+                        f"fly runner: remote run {_fly_job.run_id} (machine "
+                        f"{_fly_job.machine_id or 'unknown'}) has an UNKNOWN outcome after "
+                        f"{_what} ({str(exc)[:200]}); machine {state}"
+                        + (
+                            "; its reservation is kept for the reaper"
+                            if state == "unconfirmed" else ""
+                        )
+                        + ". Not retried locally: check what the run did before "
+                        "dispatching it again."
+                    )
+                    log.error(f"[apis] {skill} dispatch outcome unknown — {msg}")
+                    try:
+                        await asyncio.to_thread(
+                            _write_harness_event,
+                            task_entity_id=task_entity_id,
+                            agent_session_id=agent_session_id,
+                            role=_role,
+                            agent_sub=agent_def.aauth_sub,
+                            event_type="subprocess",
+                            tool_name=f"{provider}:{skill}",
+                            success="false",
+                            output_summary=(
+                                f"fly_outcome=unknown fly_run={_fly_job.run_id} "
+                                f"fly_machine={_fly_job.machine_id or 'unknown'} "
+                                f"fly_machine_state={state}"
+                            ),
+                            resolved_tier=resolved_tier,
+                        )
+                    except Exception as write_exc:  # noqa: BLE001
+                        log.debug(f"[apis] uncertain-launch harness_event failed: {write_exc}")
+                    return SkillResult(
+                        skill, False, None, "", "", error=msg, provider=provider,
+                        remote_outcome_unknown=True, remote_run_id=_fly_job.run_id,
+                        remote_machine_state=state,
+                        **_fly_delivery_fields(_fly_job, unknown=True),
+                    )  # fmt: skip
+                finally:
+                    if _fly_job is not None and _fly_job.machine_id:
+                        _fly_note = (
+                            f" fly_machine={_fly_job.machine_id} fly_run={_fly_job.run_id}"
+                            + (" stdout_truncated=true" if _fly_job.stdout_truncated else "")
+                            + (" fly_outcome=unknown" if _fly_job.outcome_unknown else "")
+                            + (
+                                f" fly_machine_state={_fly_job.remote_state}"
+                                if _fly_job.remote_state else ""
+                            )
+                        )
+            else:
+                returncode, stdout, stderr = await _run_local()
+        except _LocalIsolationRefused as exc:
+            # A configuration repair, not a provider failure: no child started.
+            msg = f"{provider} launch failed: {HARNESS_ISOLATION_REFUSED}: {exc}"
+            log.error(f"[apis] {skill} dispatch refused before launch — {msg}")
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider,
+                configuration_repair=f"{provider}: {exc}",
+            )
+        except _LocalSpawnError as exc:
+            msg = f"{provider} launch failed: {exc}"
+            log.warning(f"[apis] {skill} dispatch skipped — {msg}")
+            return SkillResult(
+                skill,
+                False,
+                None,
+                "",
+                "",
+                error=msg,
+                provider=provider,
             )
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
+            if proc is not None:
+                await _kill_spawned_process_group(proc)
             duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
             msg = f"timed out after {timeout}s"
+            if _fly_job is not None:
+                # The remote task's own result was never observed. Say which
+                # run it was, what state its machine was left in, and that it
+                # must be checked before anything re-dispatches it.
+                _state = _fly_job.remote_state or "unconfirmed"
+                msg += (
+                    f"; remote run {_fly_job.run_id} (machine "
+                    f"{_fly_job.machine_id or 'unknown'}) has an UNKNOWN outcome, machine "
+                    f"{_state}"
+                    + (
+                        "; its reservation is kept for the reaper"
+                        if _state == "unconfirmed" else ""
+                    )
+                    + ". Not retried: check what the run did before dispatching it again."
+                )
             log.error(f"[apis] {skill} dispatch {msg}")
 
             # Stage 2: harness_event on timeout (failure)
@@ -1678,12 +3984,13 @@ async def _run_skill_once(
                 await asyncio.to_thread(
                     _write_harness_event,
                     task_entity_id=task_entity_id,
+                    agent_session_id=agent_session_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
                     tool_name=f"{provider}:{skill}",
                     success="false",
-                    output_summary=f"timeout after {timeout}s",
+                    output_summary=f"timeout after {timeout}s{_fly_note}",
                     duration_ms=duration_ms,
                     # A killed child's stdout is discarded, so no token counts
                     # exist for a timeout — but the provider and the requested
@@ -1696,9 +4003,24 @@ async def _run_skill_once(
                         "",
                         requested_model=_requested_model(provider, cmd),
                     ),
+                    resolved_tier=resolved_tier,
                 )
             except Exception as exc:
                 log.debug(f"[apis] timeout harness_event write failed: {exc}")
+
+            # A timed-out dispatch still spent something; its spend row carries
+            # the provider and requested model with every count null.
+            model_tiering.record_dispatch_usage(
+                dispatch_id=_ledger_dispatch_id,
+                skill=skill,
+                provider=provider,
+                resolved=resolved_tier,
+                requested_model=_requested_model(provider, cmd),
+                usage=parse_dispatch_usage(
+                    provider, "", requested_model=_requested_model(provider, cmd)
+                ),
+                ok=False,
+            )
 
             # ateles#257 — a timed-out dispatch is the same silent failure class;
             # route it through the same rate-limited operator notification.
@@ -1719,6 +4041,12 @@ async def _run_skill_once(
                 "",
                 error=msg,
                 provider=provider,
+                remote_outcome_unknown=_fly_job is not None,
+                remote_run_id=_fly_job.run_id if _fly_job is not None else "",
+                remote_machine_state=(
+                    (_fly_job.remote_state or "unconfirmed") if _fly_job is not None else ""
+                ),
+                **_fly_delivery_fields(_fly_job, unknown=True),
             )
 
         duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
@@ -1738,12 +4066,51 @@ async def _run_skill_once(
         # stdout as prose. Scanning both made "the child read about a denial"
         # indistinguishable from "the child was denied", and the reproduction
         # transcript in #601's own body is a verbatim instance of that.
-        _delivery_denial = _delivery_failure_reason(_stderr_text)
-        if _delivery_denial and proc.returncode == 0:
+        _delivery_reasons = _delivery_failure_reasons(_stderr_text)
+        _delivery_conflicts = _delivery_failure_conflicts(
+            _delivery_reasons, _stderr_text
+        )
+        _delivery_denial = _delivery_diagnostic_error(
+            _delivery_reasons, _delivery_conflicts
+        )
+        _delivery_only_reason = (
+            _delivery_reasons[0]
+            if (
+                len(_delivery_reasons) == 1
+                and not _delivery_conflicts
+                and returncode == 0
+            )
+            else ""
+        )
+        if _delivery_denial and returncode == 0:
             log.error(
                 f"[apis] {skill} dispatch via {provider} exited 0 but could not "
                 f"deliver: {_delivery_denial}"
             )
+
+        # ── Local post-condition check (ateles task ent_71387d9c1d1d3d1eef9ecc01) ──
+        # A local run that exits 0 with a syntactically fine reply is not
+        # necessarily a CORRECT one — the regression this exists to catch was
+        # exactly that: rc=0, plausible prose, and a wrong count. Checked only
+        # for claude-local, only for a work class with a real ground truth
+        # (local_provider._POSTCONDITION_CHECKS); every other provider and
+        # every other work class is unaffected.
+        _postcondition_failure = (
+            local_provider.verify_postcondition(work_class, _stdout_text, cwd=cwd)
+            if provider == local_provider.LOCAL_PROVIDER
+            else None
+        )
+        if _postcondition_failure:
+            log.error(
+                f"[apis] {skill} dispatch via {provider} exited 0 but failed "
+                f"its post-condition check: {_postcondition_failure}"
+            )
+
+        # The effective outcome, computed once: the ledger's usage row and the
+        # authoritative SkillResult below must never disagree about it.
+        _dispatch_ok = _dispatch_succeeded(
+            returncode, _delivery_denial, _postcondition_failure
+        )
 
         # ── Per-dispatch usage attribution ───────────────────────────────────────
         # Parsed from what the harness already emitted; never estimated. Under
@@ -1755,22 +4122,60 @@ async def _run_skill_once(
             provider,
             _stdout_text,
             requested_model=_requested_model(provider, cmd),
+            stderr=_stderr_text,
         )
+        # The same attribution, appended to the tier ledger so spend is read
+        # per provider / model / tier / work class from one file.
+        await asyncio.to_thread(
+            model_tiering.record_dispatch_usage,
+            dispatch_id=_ledger_dispatch_id,
+            skill=skill,
+            provider=provider,
+            resolved=resolved_tier,
+            requested_model=_requested_model(provider, cmd),
+            usage=_usage,
+            ok=_dispatch_ok,
+        )
+
+        if _fly_job is not None and _fly_job.neotoma_tools_unavailable:
+            _note = fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE
+            _stdout_text = f"{_stdout_text.rstrip()}\n{_note}\n"
+            _fly_note += f" {_note}"
+            log.warning("[apis] %s: %s", skill, _note)
 
         result = SkillResult(
             skill=skill,
-            ok=proc.returncode == 0 and _delivery_denial is None,
-            returncode=proc.returncode,
+            ok=_dispatch_ok,
+            returncode=returncode,
             stdout=_stdout_text,
             stderr=_stderr_text,
             provider=provider,
             error=(
                 _delivery_denial
-                if (_delivery_denial and proc.returncode == 0)
-                else ""
+                if (_delivery_denial and returncode == 0)
+                else (_postcondition_failure or "")
+            ),
+            delivery_failure_reason=_delivery_only_reason,
+            delivery_failure_reasons=(
+                _delivery_reasons if returncode == 0 else ()
+            ),
+            delivery_failure_conflicts=(
+                _delivery_conflicts if returncode == 0 else ()
             ),
             usage=_usage,
+            output_truncated=bool(_fly_job is not None and _fly_job.stdout_truncated),
+            remote_outcome_unknown=bool(_fly_job is not None and _fly_job.outcome_unknown),
+            remote_run_id=_fly_job.run_id if _fly_job is not None else "",
+            remote_machine_state=_fly_job.remote_state if _fly_job is not None else "",
+            **_fly_delivery_fields(
+                _fly_job, unknown=bool(_fly_job is not None and _fly_job.outcome_unknown)),
         )
+        if _fly_job is not None and _fly_job.remote_state == "unconfirmed":
+            log.warning(
+                f"[apis] {skill}: remote run {_fly_job.run_id} finished and its result was "
+                f"recorded, but machine {_fly_job.machine_id} is not confirmed terminated; "
+                "its reservation is kept for the reaper"
+            )
 
         # ── Dropped-allowlist-rule notification (ateles#255) ──────────────────────
         # Checked regardless of exit code: the CLI logs "Ignoring --allowedTools
@@ -1785,7 +4190,7 @@ async def _run_skill_once(
         )
         if dropped_rules:
             _notify_dropped_allowlist_rules(
-                notifier, role=_role, rules=dropped_rules, returncode=proc.returncode
+                notifier, role=_role, rules=dropped_rules, returncode=returncode
             )
 
         # ── Stage 2: harness_event at completion ──────────────────────────────────
@@ -1798,6 +4203,7 @@ async def _run_skill_once(
                 await asyncio.to_thread(
                     _write_harness_event,
                     task_entity_id=task_entity_id,
+                    agent_session_id=agent_session_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
@@ -1805,10 +4211,11 @@ async def _run_skill_once(
                     success="true",
                     output_summary=(
                         f"provider={provider} {len(result.stdout)}B stdout rc=0"
-                        f" {_usage.summary()}"
+                        f" {_usage.summary()}{_fly_note}"
                     ),
                     duration_ms=duration_ms,
                     usage=_usage,
+                    resolved_tier=resolved_tier,
                 )
             except Exception as exc:
                 log.debug(f"[apis] success harness_event write failed: {exc}")
@@ -1819,7 +4226,7 @@ async def _run_skill_once(
                 write_dispatch_failure_log,
                 skill=skill,
                 role=_role,
-                returncode=proc.returncode,
+                returncode=returncode,
                 stdout=result.stdout,
                 stderr=result.stderr,
                 task_entity_id=task_entity_id,
@@ -1831,7 +4238,7 @@ async def _run_skill_once(
 
             log.error(
                 f"[apis] {skill} dispatch via {provider} failed "
-                f"(rc={proc.returncode}); "
+                f"(rc={returncode}); "
                 f"full output: {path_note} "
                 f"(stdout {len(result.stdout)}B, stderr {len(result.stderr)}B); "
                 f"stderr head: {result.stderr[:500]}"
@@ -1840,13 +4247,14 @@ async def _run_skill_once(
                 await asyncio.to_thread(
                     _write_harness_event,
                     task_entity_id=task_entity_id,
+                    agent_session_id=agent_session_id,
                     role=_role,
                     agent_sub=agent_def.aauth_sub,
                     event_type="subprocess",
                     tool_name=f"{provider}:{skill}",
                     success="false",
                     output_summary=(
-                        f"provider={provider} rc={proc.returncode} "
+                        f"provider={provider} rc={returncode}{_fly_note} "
                         f"{_usage.summary()} "
                         f"full_output={path_note} "
                         f"{result.stderr[:200]}"
@@ -1856,6 +4264,7 @@ async def _run_skill_once(
                     # on success would systematically under-count exactly the
                     # dispatches most likely to have burned a retry loop.
                     usage=_usage,
+                    resolved_tier=resolved_tier,
                 )
             except Exception as exc:
                 log.debug(f"[apis] failure harness_event write failed: {exc}")
@@ -1867,7 +4276,7 @@ async def _run_skill_once(
                     notifier,
                     skill=skill,
                     role=_role,
-                    returncode=proc.returncode,
+                    returncode=returncode,
                     stderr=result.stderr,
                     task_entity_id=task_entity_id,
                     log_path=failure_log_path,
@@ -1882,6 +4291,10 @@ async def _run_skill_once(
                 os.unlink(_mcp_tmp_path)
             except OSError:
                 pass
+        if _codex_gate_config is not None:
+            shutil.rmtree(_codex_gate_config.home, ignore_errors=True)
+        if _isolated_home is not None:
+            shutil.rmtree(_isolated_home.home, ignore_errors=True)
 
 
 def usable_providers() -> set[str]:
@@ -1893,7 +4306,87 @@ def usable_providers() -> set[str]:
     honored, so that pinning never turns into "the lens silently did not run"
     (review_panel.resolve_lens_provider).
     """
-    return usable_provider_names(_provider_binaries())
+    binaries = _provider_binaries()
+    # The usage gate is part of "usable": refresh a stale reading first, or a
+    # provider that would be usable after the refresh looks excluded.  The probe
+    # blocks (a file lock plus a CLI run), so it is never run from a thread that
+    # hosts an event loop: async code must call `usable_providers_async`.
+    if _on_event_loop():
+        log.debug("[apis] usable_providers() called on the event loop; usage refresh skipped")
+    else:
+        _refresh_usage_snapshot(binaries)
+    return usable_provider_names(binaries)
+
+
+def _on_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+async def usable_providers_async() -> set[str]:
+    """`usable_providers` for async callers: refreshes the usage reading off the loop.
+
+    Refresh-before-selection still holds (the refresh completes before the gate is
+    read), but the probe runs in a worker thread so the Apis event loop never
+    stalls for its duration.
+    """
+    binaries = _provider_binaries()
+    await asyncio.to_thread(_refresh_usage_snapshot, binaries)
+    return usable_provider_names(binaries)
+
+
+def _fly_routing(runner: str | None, action_class: str | None) -> tuple[frozenset[str], tuple[str, ...]]:
+    """``(fly_bound, fly_extra)`` for one dispatch (operator ruling 2026-10-15).
+
+    ``fly_bound``: the providers whose run will be on Fly, so the Mac's usage
+    gate (weekly ceiling, pace line, and a missing, stale or failed reading of
+    the Mac's own login) does not apply to them. Every frontier provider when
+    the dispatch goes to Fly at all (``fly_runner.wants_fly``); none
+    otherwise. If the Fly path then falls back to the Mac, the local gate is
+    applied again before anything runs (``_local_fallback_refusal``).
+
+    ``fly_extra``: providers selectable ONLY for a Fly-bound dispatch. Claude
+    when it is a Fly login provider with its login machine configured, even
+    though it is not enabled for local dispatch (``APIS_HARNESS_PROVIDERS``).
+    The local candidate list itself is never changed.
+    """
+    if not fly_runner.wants_fly(runner, action_class):
+        return frozenset(), ()
+    extra: tuple[str, ...] = ()
+    if ("claude" not in configured_providers()
+            and "claude" in fly_runner.FlyConfig.from_env().login_machines):  # fmt: skip
+        # Its Fly login machine is configured (APIS_FLY_CLAUDE_MACHINE_ID).
+        extra = ("claude",)
+    return frozenset(FRONTIER_PROVIDERS), extra
+
+
+def _mac_usage_note(provider: str) -> str:
+    """What the Mac's usage reading says against *provider*, for a Fly run
+    that is exempt from it: the gate's refusal and/or a Mac-read headroom at
+    or below the floor. Empty when the reading would have allowed it."""
+    notes = []
+    try:
+        gate = usage_gate(provider)
+        if gate is not None and not gate.allowed:
+            notes.append(f"usage gate {gate.code}: {gate.message}")
+        value, source = headroom_resolution()[provider]
+        if source in MAC_READING_SOURCES and value <= minimum_headroom():
+            notes.append(f"headroom {value:.3f} from {source}")
+    except Exception as exc:  # noqa: BLE001 — a report, never a decision
+        notes.append(f"Mac usage reading unreadable ({type(exc).__name__})")
+    return "; ".join(notes)
+
+
+def _local_fallback_refusal(provider: str, *, pinned: bool) -> str | None:
+    """Why *provider* may NOT run locally after its Fly path fell back: the
+    local gate as any local dispatch sees it, and (unless the caller pinned
+    it) the provider must be enabled for local dispatch."""
+    if not pinned and provider not in configured_providers():
+        return f"{provider} is not enabled for local dispatch (APIS_HARNESS_PROVIDERS)"
+    return provider_exclusion_reason(provider, _provider_binaries())
 
 
 async def run_skill(
@@ -1901,7 +4394,9 @@ async def run_skill(
     prompt: str,
     *,
     role: str | None = None,
+    expected_role_fingerprint: str | None = None,
     task_entity_id: str = "",
+    agent_session_id: str = "",
     timeout: int | None = None,
     env_extra: dict[str, str] | None = None,
     notifier=None,
@@ -1911,8 +4406,43 @@ async def run_skill(
     provider: str | None = None,
     preferred_provider: str | None = None,
     owns_pending_gate: bool = False,
+    seated_reviewer: bool = False,
+    command_wrapper: list[str] | None = None,
+    codex_outer_sandboxed: bool = False,
+    local_review: bool = False,
+    work_class: str | None = None,
+    action_class: str | None = None,
+    escalation_signals: "model_tiering.EscalationSignals | None" = None,
+    model: str | None = None,
+    resolved_tier: "model_tiering.ResolvedTier | None" = None,
+    inference_only: bool = False,
+    runner: str | None = None,
+    repository: str = "",
+    fly_delivery: dict | None = None,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
+
+    ``runner`` / ``repository``: forwarded to every ``_run_skill_once``
+    attempt; see that function (ateles#1456, the Fly executor).
+
+    ``resolved_tier``: a tier the caller already resolved (and, for a caller
+    that enforces a ceiling, already checked). It is used as-is for every
+    attempt instead of resolving ``action_class`` again, so the tier a caller
+    validated is the tier that runs. ``inference_only``: run with no tools
+    (see ``INFERENCE_ONLY_PROVIDER``); requires ``local_review`` and a pinned
+    ``provider`` of that adapter.
+
+    ``command_wrapper``: forwarded verbatim to ``_run_skill_once`` on every
+    attempt — see that function's docstring. Unrelated to provider selection;
+    it wraps whichever provider's binary ends up chosen.
+
+    ``codex_outer_sandboxed`` is the paired adapter signal for an already
+    probed outer ``sandbox-exec`` wrapper. `_run_skill_once` validates the pair
+    before choosing Codex's no-inner-sandbox mode.
+
+    ``local_review`` selects a child environment with inference authority but
+    no ambient GitHub or Neotoma publication authority. The parent retains and
+    independently applies any publication gate.
 
     The first candidate is selected with smooth weighted round-robin using the
     operator-supplied headroom estimates. Capacity, authentication, and launch
@@ -1923,49 +4453,424 @@ async def run_skill(
     Passing ``provider`` pins the invocation to one adapter, primarily for
     diagnostics and focused tests.
 
-    ``owns_pending_gate`` (ateles#795): the run must be able to record a durable
-    verdict as ITSELF. Without its own Neotoma credential the run is refused
-    rather than started, so a verdict cannot evaporate into a `pending` gate.
-    """
-    async def attempt(selected: str) -> SkillResult:
-        return await _run_skill_once(
-            skill, prompt, provider=selected, role=role,
-            task_entity_id=task_entity_id, timeout=timeout, env_extra=env_extra,
-            notifier=notifier, github_token=github_token,
-            include_github_contract=include_github_contract, cwd=cwd,
-            owns_pending_gate=owns_pending_gate,
-        )
+    ``owns_pending_gate`` (ateles#795): True when this run is seated because it
+    OWNS a pending pre-impl gate (pm/arch/ux). Historically this refused the
+    run outright when the role had no per-agent Neotoma credential, because
+    the lens's own in-session `correct()` was the only writeback path and a
+    write Neotoma would refuse for lack of attribution was worse than not
+    running. The amended ADR moves the system-of-record write to the
+    dispatcher (`gate_waive.IssueGateStore.sign_off`, signed with the lens's
+    own AAuth key, independent of this session), so this flag no longer gates
+    the launch — it is threaded through to `_run_skill_once` for any caller
+    that still wants to distinguish a gate-owning run from an advisory one
+    (e.g. logging), and MUST NOT be reintroduced as a hard launch refusal
+    without re-litigating the amended ADR on ateles#795.
 
-    return await _run_provider_attempts(
-        skill, attempt, binaries=_provider_binaries(), provider=provider,
-        role=role, task_entity_id=task_entity_id, notifier=notifier,
-        preferred_provider=preferred_provider,
+    ``seated_reviewer`` (PR #1181, dispatcher security run at e874537f,
+    BLOCKING `incomplete_class_sweep`): True for EVERY lens the dispatcher
+    seats on a PR panel, an issue-spec section, a missing-lens re-run, or a
+    fix-guidance round, whether or not it owns a pending gate. Each such run
+    gets the `mcp__mcpsrv_neotoma__*` wildcard over the shared daemon bearer,
+    so an advisory seat (security, content, ...) or a gate owner re-seated
+    after its gate cleared could otherwise still `correct` the shared
+    `gate_status` map. It carries the same controls as a gate-owning run:
+    `correct` on a subtractive deny list, and routing only to adapters that
+    prove that deny (Claude and Codex). No seated lens needs `correct` for
+    anything but gate state: they file findings through `store`.
+
+    ``work_class`` names the kind of work (``local_provider.MECHANICAL_WORK_CLASSES``).
+    When it is a configured mechanical class and the run is unpinned and not a
+    seated reviewer, ``claude-local`` is tried first. A local failure falls over
+    ONLY to a frontier provider with a model bound to the cheapest frontier tier
+    (``LOCAL_FALLBACK_TIER``) in the ``vendor_binding``, pinned to that model;
+    with none bound the run is refused and recorded as a local failure, never
+    replayed on a provider's ambient default. An explicit ``model`` is the
+    caller's own choice and is used for the fallback as given. Any other value,
+    or None, leaves routing exactly as before.
+
+    ``action_class``/``escalation_signals``/``model`` (operator ruling
+    2026-09-29, model_tiering.py): the TIER is resolved exactly ONCE here
+    (when ``model`` is not already an explicit override), before any provider
+    is attempted, and that same resolved tier is passed to every
+    ``_run_skill_once`` attempt in the failover loop — only the
+    provider-specific model-for-tier lookup runs per attempt. This closes a
+    race a per-attempt re-resolution would otherwise have: without pinning
+    the tier once, an action_policy/vendor_binding edit landing in the window
+    between a cursor attempt and a codex fallback could retier the SAME
+    logical dispatch differently across the two providers, even though the
+    tier is a property of the WORK, not of which provider happens to run it
+    or when in the failover sequence that happened. ``action_class=None``
+    (every call site that predates this) leaves routing and model selection
+    exactly as before.
+    """
+    model = model_tiering.validate_model_selector(model)
+    # One control, two reasons to apply it. The internal name stays
+    # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
+    # use it only for the deny and deny-capable routing.
+    deny_correct = owns_pending_gate or seated_reviewer
+
+    # Refresh the usage snapshot BEFORE anything reads provider selection:
+    # `_tier_bound_binaries` below consults the usage gate through
+    # `usable_provider_names`, so a refresh that ran later (inside
+    # `_run_provider_attempts`) would let a stale reading exclude claude here and
+    # send the tier filter's fallback to providers with no model bound.
+    if provider in (None, "claude"):
+        await asyncio.to_thread(_refresh_usage_snapshot, _provider_binaries())
+
+    precomputed_tier: model_tiering.ResolvedTier | None = resolved_tier
+    if precomputed_tier is None and model is None and action_class is not None:
+        precomputed_tier = model_tiering.resolve_tier(
+            action_class, signals=escalation_signals
+        )
+    if fly_delivery is not None:
+        runner = "fly"  # a delivery runs on Fly or the builder runs it locally
+    fly_bound, fly_extra = _fly_routing(runner, action_class)
+
+    async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
+        result = await _run_skill_once(
+            skill,
+            prompt,
+            provider=selected,
+            role=role,
+            expected_role_fingerprint=expected_role_fingerprint,
+            task_entity_id=task_entity_id,
+            timeout=timeout,
+            env_extra=env_extra,
+            notifier=notifier,
+            github_token=github_token,
+            include_github_contract=include_github_contract,
+            cwd=cwd,
+            owns_pending_gate=deny_correct,
+            command_wrapper=command_wrapper,
+            codex_outer_sandboxed=codex_outer_sandboxed,
+            local_review=local_review,
+            agent_session_id=agent_session_id,
+            work_class=work_class,
+            action_class=action_class,
+            escalation_signals=escalation_signals,
+            model=fallback_model or model,
+            precomputed_tier=precomputed_tier,
+            inference_only=inference_only,
+            runner=runner,
+            repository=repository,
+            fly_delivery=fly_delivery,
+            local_fallback_check=(
+                (lambda name: _local_fallback_refusal(name, pinned=provider is not None))
+                if selected in fly_bound else None
+            ),
+        )
+        if selected in fly_bound and result.remote_run_id:
+            # It ran on Fly: say what the Mac's reading would have said.
+            note = _mac_usage_note(selected)
+            if note:
+                result.usage_gate_exempted = note
+                log.info(f"[apis] {skill} ran on Fly; the Mac's usage reading for {selected} "
+                         f"does not apply to it ({note})")  # fmt: skip
+        return result
+
+    local_first = (
+        provider is None
+        and not deny_correct
+        # A GitHub-delivery dispatch (commit/push/PR) must never route
+        # local-first: local_provider.build_lean_prompt deliberately omits
+        # SWARM_GITHUB_CONTRACT/SWARM_PRIOR_ART_CONTRACT (they don't fit the
+        # local window either), so a local child given this work would have
+        # no attribution-header/verdict-vocabulary contract and no prior-art
+        # check — neither of which any `_LEAN_HARD_RULES` entry covers. Every
+        # work class this could combine with today is mechanical
+        # (ci_log_triage is the live example, swarm_dispatch.py's CI-fix
+        # path), so this only removes local eligibility, never frontier
+        # eligibility.
+        and not include_github_contract
+        # A guarded dispatch (harness_lens_runner's probed sandbox wrapper or
+        # its inference-only local_review mode) was probed for the frontier
+        # provider it names; never reroute it to a provider it was not probed
+        # for.
+        and not command_wrapper
+        and not local_review
+        and local_provider.is_eligible(work_class, local_provider.load_config())
     )
+    return await _run_provider_attempts(
+        skill,
+        attempt,
+        fallback_models_for=(
+            (lambda names: {name: model for name in names}) if model else None
+        ),
+        binaries=_tier_bound_binaries(
+            _provider_binaries(), precomputed_tier, provider,
+            fly_bound=fly_bound, fly_extra=fly_extra,
+        ),
+        provider=provider,
+        role=role,
+        task_entity_id=task_entity_id,
+        notifier=notifier,
+        preferred_provider=preferred_provider,
+        owns_pending_gate=deny_correct,
+        local_first=local_first,
+        fly_bound=fly_bound,
+        fly_extra=fly_extra,
+    )
+
+
+def _tier_bound_binaries(
+    binaries: dict[str, str | None],
+    tier: "model_tiering.ResolvedTier | None",
+    pinned_provider: str | None,
+    *,
+    fly_bound: frozenset[str] = frozenset(),
+    fly_extra: tuple[str, ...] = (),
+) -> dict[str, str | None]:
+    """Drop frontier providers with no model bound for ``tier`` before selection.
+
+    Same shape as the #1181 fix in ``_run_provider_attempts``: the in-attempt
+    ``UnboundTierError`` refusal is neither a classified ``failure_kind`` nor a
+    launch failure, so on its own it would stop the dispatch at the first
+    unbound provider instead of failing over to a bound one. Filtering here
+    means an unbound provider is simply never a candidate.
+
+    Left unfiltered (so the in-attempt refusal stays the backstop and names
+    the missing binding) when: no tier was resolved, no vendor_binding is
+    configured at all, the caller pinned a provider, or no router-eligible
+    frontier provider would remain (configured, headroom, not cooling —
+    ``usable_provider_names``,
+    which unlike ``provider_candidates`` does not advance the round-robin).
+    ``claude-local`` is never filtered — it runs its own configured model and
+    takes no vendor_binding.
+    """
+    if tier is None or pinned_provider is not None:
+        return binaries
+    binding = model_tiering.configured_vendor_binding()
+    if not binding:
+        return binaries
+    filtered = {
+        name: path
+        for name, path in binaries.items()
+        if name == local_provider.LOCAL_PROVIDER
+        or tier.tier in binding.get(name, {})
+    }
+    usable = usable_provider_names(filtered, fly_bound=fly_bound, fly_extra=fly_extra)
+    if not (usable - {local_provider.LOCAL_PROVIDER}):
+        return binaries
+    return filtered
+
+# The cheapest tier a frontier provider can run: the one just above "local" in
+# model_tiering.TIERS. Pinned by a test so a change to the ladder cannot move the
+# fallback silently.
+LOCAL_FALLBACK_TIER = "mechanical"
+
+
+def _local_fallback_models(providers: list[str]) -> dict[str, str]:
+    """Provider -> model for the providers a failed local run may fall over to.
+
+    A provider appears only when the vendor_binding names a model for
+    ``LOCAL_FALLBACK_TIER``. No binding at all, a provider absent from it, or one
+    lacking that tier means "no fallback", never the provider's ambient default
+    (which ``model_tiering.model_for_tier`` would otherwise return as ``None``
+    for an unconfigured deployment, and which is exactly the spend this refuses).
+    """
+    models: dict[str, str] = {}
+    for name in providers:
+        try:
+            model = model_tiering.model_for_tier(name, LOCAL_FALLBACK_TIER)
+        except model_tiering.UnboundTierError:
+            continue
+        if model:
+            models[name] = model
+    return models
+
+
+def _refuse_local_fallback(
+    skill: str,
+    role: str | None,
+    task_entity_id: str,
+    notifier,
+    reason: str,
+    *,
+    remaining: list[str],
+    last_result: "SkillResult | None",
+    attempted: list[str],
+) -> SkillResult:
+    """The failed result for a local-first run that may not fall over to frontier.
+
+    Never ok, and carrying the local failure, so a refused run is reported as a
+    failure rather than dropped or replayed on a provider's default model.
+    """
+    named = ", ".join(remaining) or "any provider"
+    error = (
+        f"{local_provider.LOCAL_PROVIDER} failed ({reason}) and the frontier "
+        f"fallback was refused: the vendor_binding binds no "
+        f"{LOCAL_FALLBACK_TIER!r}-tier model for {named}. Bind one to allow a "
+        "cheapest-tier fallback: add e.g. {\"claude\": {\"mechanical\": \"haiku\"}} to "
+        "~/.config/ateles/vendor-binding.json (or the file named by APIS_VENDOR_BINDING_FILE)."
+    )
+    log.error(f"[apis] {skill} dispatch refused — {error}")
+    if last_result is None:
+        result = SkillResult(skill, False, None, "", "", error=error)
+    else:
+        result = last_result
+        result.ok = False
+        result.error = error
+    result.local_failure = reason
+    result.attempted_providers = tuple(attempted)
+    notify_dispatch_failure(
+        notifier,
+        skill=skill,
+        role=(role or skill).lower(),
+        returncode=result.returncode,
+        stderr=error,
+        task_entity_id=task_entity_id,
+    )
+    return result
+
+
+def _record_local_failover(
+    *,
+    skill: str,
+    role: str,
+    task_entity_id: str,
+    reason: str,
+    next_provider: str | None,
+    detail: str,
+) -> None:
+    """harness_event row naming a claude-local failure and where the run went next."""
+    cfg = local_provider.load_config()
+    try:
+        agent_sub = _load_agent_def(role).aauth_sub
+    except Exception:  # noqa: BLE001 — provenance must not block the fallback
+        agent_sub = ""
+    try:
+        _write_harness_event(
+            task_entity_id=task_entity_id,
+            role=role,
+            agent_sub=agent_sub,
+            event_type="provider_failover",
+            tool_name=f"{local_provider.LOCAL_PROVIDER}:{skill}",
+            success="false",
+            output_summary=(
+                f"provider={local_provider.LOCAL_PROVIDER} failover_reason={reason} "
+                f"next_provider={next_provider or 'none'} {detail}"
+            ),
+            usage=DispatchUsage(
+                provider=local_provider.LOCAL_PROVIDER,
+                model=cfg.model if cfg else None,
+                model_source="requested" if cfg else None,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"[apis] failover harness_event write failed: {exc}")
 
 
 async def _run_provider_attempts(
     skill, attempt, *, binaries, provider=None, role=None, task_entity_id="",
     notifier=None, retry_safe=False, preferred_provider=None,
+    owns_pending_gate: bool = False, local_first: bool = False,
+    fallback_models_for=None,
+    fly_bound: frozenset[str] = frozenset(), fly_extra: tuple[str, ...] = (),
 ) -> SkillResult:
     """One selection/cooldown/failover mechanism for every harness entrypoint.
 
+    ``fly_bound`` / ``fly_extra``: see ``_fly_routing``. Empty for a dispatch
+    that runs on the Mac, which is then gated exactly as before.
+
+    ``fallback_models_for`` (local-first runs only): maps the providers a failed
+    or unavailable claude-local may fall over to onto the model each is pinned
+    to; a provider missing from the result is not a fallback. Defaults to the
+    cheapest-tier binding (``_local_fallback_models``).
+
     ``retry_safe`` is reserved for tool-free inference: only those calls can
     safely repeat after a timeout/outage without duplicating external effects.
+
+    ``owns_pending_gate`` (ateles#795 / #1181 operational finding): an
+    UNPINNED seated/gate-owning review run (``provider is None``, the normal
+    dispatch path) may land only on an adapter with a proven subtractive deny
+    for ``correct``. Claude binds ``--disallowed-tools``; Codex binds an
+    isolated ``mcp_servers.<id>.disabled_tools`` config and verifies it before
+    launch. Cursor remains excluded. Filtering BEFORE selection keeps an
+    unsupported adapter from becoming a terminal in-attempt refusal that
+    prevents safe failover.
+
+    A caller that hard-PINS a specific ``provider`` (diagnostics, focused
+    tests) is left untouched by this filter — pinning already means "run
+    exactly this adapter or fail," so the adapter's own preflight remains the
+    backstop for every call path.
     """
-    candidates = provider_candidates(binaries, preferred=provider)
+    if owns_pending_gate and provider is None:
+        if (
+            preferred_provider
+            and preferred_provider not in GATE_OWNER_DENY_CAPABLE_PROVIDERS
+        ):
+            # A lens preference cannot be honoured when its adapter lacks the
+            # required subtractive deny; say so rather than drop it silently.
+            log.info(
+                f"[apis] {skill}: preferred provider {preferred_provider!r} "
+                "not used — this run denies mcp__mcpsrv_neotoma__correct, which "
+                f"only {GATE_OWNER_DENY_CAPABLE_PROVIDERS} can enforce"
+            )
+            preferred_provider = None
+        binaries = {
+            name: binaries.get(name) for name in GATE_OWNER_DENY_CAPABLE_PROVIDERS
+        }
+
+    if provider in (None, "claude"):
+        # Callers that enter here directly (run_review_prompt) refresh here;
+        # `run_skill` already did, ahead of its own selection reads, so this is
+        # then a cheap "fresh" check.  Never raises; a failed refresh leaves the
+        # reading to age out and the gate refuses on it.
+        await asyncio.to_thread(_refresh_usage_snapshot, binaries)
+    candidates = provider_candidates(
+        binaries, preferred=provider, local_first=local_first and not owns_pending_gate,
+        fly_bound=fly_bound, fly_extra=fly_extra,
+    )
     if preferred_provider in candidates and provider is None:
-        candidates = [preferred_provider, *[p for p in candidates if p != preferred_provider]]
+        # A lens preference reorders the frontier providers; a local-first
+        # claude-local stays ahead of them.
+        head = [p for p in candidates[:1] if p == local_provider.LOCAL_PROVIDER]
+        rest = [p for p in candidates if p not in head and p != preferred_provider]
+        candidates = [*head, preferred_provider, *rest]
     if not candidates:
+        # Cooling is checked FIRST, over exactly the providers this run could
+        # have used (the deny-capable narrowing for a gate-owning run, the pinned
+        # provider for a pinned one): a live window is a self-clearing wait, not
+        # a capability refusal, and must carry cooled_until so the panel defers
+        # and resumes instead of paging the operator.
+        scope = {provider: binaries.get(provider)} if provider else binaries
+        windows = cooled_until_all(scope)
+        if windows:
+            msg, earliest = _cooled_message(windows)
+            log.warning(f"[apis] {skill} not dispatched — {msg}")
+            return SkillResult(
+                skill, False, None, "", "", error=msg, cooled_until=earliest,
+            )
+        gated = usage_gate_refusals_all(scope, fly_bound=fly_bound)
+        if gated:
+            msg, retry_at = _usage_gate_message(gated)
+            log.warning(f"[apis] {skill} not dispatched — {msg}")
+            return SkillResult(
+                skill, False, None, "", "", error=msg, cooled_until=retry_at,
+            )
+        if owns_pending_gate and provider is None:
+            reasons = "; ".join(
+                f"{name}={provider_exclusion_reason(name, binaries, fly_bound=fly_bound) or 'not eligible'}"
+                for name in GATE_OWNER_DENY_CAPABLE_PROVIDERS
+            )
+            msg = (
+                f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: no provider with a "
+                "proven single-tool deny is currently eligible for this seated "
+                f"reviewer or gate-owning run ({reasons}) — refusing to launch "
+                "on an unsupported provider unrestricted (ateles#795, #1181 "
+                "operational finding). "
+                "Nothing was cooled down."
+            )
+            log.error(f"[apis] {skill} dispatch refused — {msg}")
+            return SkillResult(skill, False, None, "", "", error=msg)
         if provider is not None:
-            reason = provider_exclusion_reason(provider, binaries)
+            reason = provider_exclusion_reason(provider, binaries, fly_bound=fly_bound)
             msg = (
                 f"subscription-backed harness provider '{provider}' is "
                 f"ineligible: {reason or 'not selected'}"
             )
             return SkillResult(skill, False, None, "", "", error=msg)
-        configured = os.environ.get(
-            "APIS_HARNESS_PROVIDERS", "claude,codex,cursor"
-        )
+        configured = os.environ.get("APIS_HARNESS_PROVIDERS", "claude,codex,cursor")
         cooling = ",".join(sorted(cooling_providers())) or "none"
         msg = (
             "no subscription-backed harness provider has usable headroom "
@@ -1974,30 +4879,190 @@ async def _run_provider_attempts(
         return SkillResult(skill, False, None, "", "", error=msg)
 
     attempted: list[str] = []
+    repairs: list[str] = []
     last_result: SkillResult | None = None
-    for selected in candidates:
+    # Local-first work has no silent frontier path. `fallback_models` is None
+    # while claude-local is still ahead in the queue; once local has failed (or
+    # was never launchable) it holds the providers the operator explicitly
+    # allowed as a cheapest-tier fallback, each with the model to pin.
+    fallback_for = fallback_models_for or _local_fallback_models
+    local_failure = ""
+    fallback_models: dict[str, str] | None = None
+    pending = list(candidates)
+    if (
+        local_first
+        and provider is None
+        and not owns_pending_gate
+        and local_provider.LOCAL_PROVIDER not in pending
+    ):
+        # Requested local-first but claude-local is not launchable right now
+        # (cooling down, binary gone). That is a local failure too, and takes
+        # the same policy: frontier only where a fallback model is named.
+        local_failure = local_provider.FAILURE_ENDPOINT + ":claude-local_unavailable"
+        fallback_models = fallback_for(list(pending))
+        pending = [p for p in pending if p in fallback_models]
+        if not pending:
+            return _refuse_local_fallback(
+                skill, role, task_entity_id, notifier, local_failure,
+                remaining=[p for p in candidates], last_result=None, attempted=[],
+            )
+    index = 0
+    while index < len(pending):
+        selected = pending[index]
+        index += 1
         attempted.append(selected)
-        result = await attempt(selected)
+        pinned = (fallback_models or {}).get(selected)
+        result = await (
+            attempt(selected, fallback_model=pinned) if pinned else attempt(selected)
+        )
         result.attempted_providers = tuple(attempted)
-        # A successful agent may legitimately discuss "usage limits" in its
-        # answer. Only inspect stdout when the process itself failed; stderr and
-        # explicit runner errors remain diagnostic on every result.
-        failure_kind = _provider_failure_kind(
-            result.error,
-            result.stderr,
-            result.stdout if not result.ok else "",
+        # ateles#1456: a remote run whose outcome is unknown may have done its
+        # work. It ends the whole dispatch here, BEFORE any classification of
+        # its text: no cooldown, no failover to another provider, no retry,
+        # even when an infrastructure message resembles a provider failure.
+        if result.remote_outcome_unknown:
+            return result
+        # The role's definition or policy could not be loaded: nothing ran, and every other
+        # provider would hit the same failure. Ends the dispatch BEFORE any
+        # classification of its text, so it is never read as provider capacity and
+        # never cools a provider down.
+        if result.definition_unavailable or result.policy_unavailable:
+            return result
+        # A launched Fly delivery may have pushed: whatever its status, it
+        # ends the dispatch here too. Never failed over to another provider.
+        if result.fly_delivery_status:
+            return result
+        if result.configuration_repair:
+            # The isolated harness home was refused before any child started:
+            # a configuration the operator must repair, not a provider failure
+            # or a wait. No cooldown; the next provider may still run.
+            repairs.append(result.configuration_repair)
+            last_result = result
+            log.warning(f"[apis] {skill}: {selected} needs a configuration repair "
+                        f"({result.configuration_repair}); trying the next provider")  # fmt: skip
+            continue
+        # _run_skill_once carries an explicit delivery-only signal only after
+        # independently excluding provider diagnostics from stderr. Preserve
+        # that result before scanning the child's large stdout transcript:
+        # quoted "session limit" prose in a completed verdict is not capacity.
+        # Synthetic/alternate callers must satisfy the same exact invariants;
+        # an error string alone is never the signal.
+        delivery_only = (
+            not result.ok
+            and result.returncode == 0
+            and result.delivery_failure_reason in _DELIVERY_DENIAL_REASONS
+            and result.error == result.delivery_failure_reason
+            and result.delivery_failure_reasons == (result.delivery_failure_reason,)
+            and not result.delivery_failure_conflicts
+        )
+        if delivery_only:
+            return result
+        # A result claiming delivery-only while carrying mixed provider
+        # diagnostics is ambiguous and must take the ordinary failure path.
+        if result.delivery_failure_reason and not delivery_only:
+            result.delivery_failure_reason = ""
+        # A child that emitted any delivery diagnostic but did not satisfy the
+        # exact delivery-only contract is not safe to replay on another
+        # provider.  Returning the original result preserves its complete
+        # stderr and the structured conflict set instead of cooling a healthy
+        # provider because the completed review's stdout happened to quote a
+        # capacity phrase.  This is the cause of the generic Codex-capacity
+        # reports observed by the parent runner at 0a63667d.
+        if result.delivery_failure_reasons:
+            return result
+        if local_failure and selected != local_provider.LOCAL_PROVIDER:
+            result.local_failure = local_failure
+        # ONE success-path rule: a zero-exit result is never stream-classified.
+        # A successful harness may carry its prompt, transcript, or verdict on
+        # stderr (a Codex review always does), and that prose can legitimately
+        # quote "usage limit" or "quota exceeded". Once the adapter has
+        # established success and the delivery checks above found no denial,
+        # those streams are result content rather than provider diagnostics.
+        # On the non-success path every stream (error, stderr, stdout) is
+        # classified, as before.
+        failure_kind = (
+            None
+            if result.ok
+            else _provider_failure_kind(result.error, result.stderr, result.stdout)
         )
         launch_failure = result.error.startswith(f"{selected} launch failed:")
+        gate_preflight_refusal = (
+            launch_failure and GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
+        )
 
         if result.ok and failure_kind is None:
             return result
+        if gate_preflight_refusal:
+            # No child started, so an unpinned review may safely try the next
+            # deny-capable adapter without cooling Codex for unrelated work.
+            # A pinned run, or one with no alternative, retains the precise
+            # fail-closed refusal instead of generic provider exhaustion.
+            if provider is not None or index >= len(pending):
+                return result
+            last_result = result
+            log.warning(
+                f"[apis] {skill}: {selected} gate-owner preflight refused; "
+                "trying next deny-capable provider without cooldown"
+            )
+            continue
+        if selected == local_provider.LOCAL_PROVIDER:
+            # Local inference failed: record why, and fall over to frontier.
+            # Local-first routing is limited to mechanical work classes, which
+            # are safe to re-run from the start (rebase, regeneration, triage).
+            kind = local_provider.classify_failure(
+                result.error, result.stderr, result.stdout
+            )
+            reason = local_provider.describe_failure(
+                result.error, result.stderr, result.stdout
+            )
+            if kind in local_provider.COOLDOWN_FAILURES:
+                # Only an unusable local path is held out; a too-long prompt
+                # or an ordinary task failure says nothing about its health.
+                cool_down(selected)
+            last_result = result
+            local_failure = reason
+            result.local_failure = reason
+            remaining = pending[index:]
+            fallback_models = fallback_for(list(remaining))
+            allowed = [p for p in remaining if p in fallback_models]
+            next_provider = allowed[0] if allowed else None
+            log.warning(
+                f"[apis] {skill}: {selected} failed ({reason}); "
+                + (
+                    f"falling over to {next_provider} on {fallback_models[next_provider]}"
+                    if next_provider
+                    else "no cheapest-tier model bound for a frontier provider — refusing"
+                )
+            )
+            await asyncio.to_thread(
+                _record_local_failover,
+                skill=skill,
+                role=(role or skill).lower(),
+                task_entity_id=task_entity_id,
+                reason=reason,
+                next_provider=next_provider,
+                detail=(
+                    ("" if next_provider else "frontier_fallback=refused ")
+                    + (result.error or result.stderr[:200])
+                ),
+            )
+            if not allowed:
+                return _refuse_local_fallback(
+                    skill, role, task_entity_id, notifier, reason,
+                    remaining=remaining, last_result=result, attempted=attempted,
+                )
+            pending = pending[:index] + allowed
+            continue
         retryable_prompt_failure = retry_safe and (
             not result.ok or failure_kind is not None
         )
         if failure_kind is None and not launch_failure and not retryable_prompt_failure:
             return result
 
-        cool_down(selected)
+        if failure_kind == "capacity":
+            _cool_after_capacity_failure(selected, result)
+        else:
+            cool_down(selected)
         last_result = result
         log.warning(
             f"[apis] {skill}: {selected} {failure_kind or 'launch'} failure; "
@@ -2010,6 +5075,21 @@ async def _run_provider_attempts(
         "all eligible subscription-backed harness providers were exhausted "
         f"after attempts: {', '.join(attempted)}"
     )
+    if repairs:
+        # Kept to the end: what to fix, per provider (names, never values).
+        last_result.configuration_repair = "; ".join(repairs)
+        if len(repairs) == len(attempted):
+            last_result.error = (
+                "dispatch not launched: configuration repair needed "
+                f"({last_result.configuration_repair}); attempted: {', '.join(attempted)}")
+        else:
+            last_result.error += f"; configuration repair needed: {last_result.configuration_repair}"
+    windows = cooled_until_all({provider: binaries.get(provider)} if provider else binaries)
+    if windows:
+        # This dispatch's own refusals spent the last usable window: say when
+        # one returns, not just that they were exhausted.
+        cooled_msg, last_result.cooled_until = _cooled_message(windows)
+        last_result.error = f"{last_result.error}; {cooled_msg}"
     last_result.attempted_providers = tuple(attempted)
     notify_dispatch_failure(
         notifier,
@@ -2022,7 +5102,9 @@ async def _run_provider_attempts(
     return last_result
 
 
-async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> SkillResult:
+async def run_review_prompt(
+    *, role: str, prompt: str, timeout: int = 180
+) -> SkillResult:
     """Route an inference-only review without granting any publisher authority.
 
     The caller owns the role prompt and GitHub signature. Models must be
@@ -2047,64 +5129,136 @@ async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> Sk
     # Inference gets only its subscription authentication and runtime settings.
     # GitHub/Neotoma credentials remain exclusively with the publisher process.
     env = {
-        key: value for key, value in inherited.items()
-        if key in {
-            "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CODEX_HOME",
-            "CLAUDE_CODE_OAUTH_TOKEN", "SSL_CERT_FILE", "SSL_CERT_DIR",
-            "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+        key: value
+        for key, value in inherited.items()
+        if key
+        in {
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "LANG",
+            "LC_ALL",
+            "CODEX_HOME",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "NO_PROXY",
         }
     }
 
     async def attempt(provider: str) -> SkillResult:
         binary = binaries[provider]
-        model = models[provider].strip()
+        model = model_tiering.validate_model_selector(models[provider].strip())
         with tempfile.TemporaryDirectory(prefix="ateles-review-") as workdir:
             if provider == "claude":
-                cmd = [binary, "--print", "--model", model, "--tools", "",
-                       "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-                       "--setting-sources", ""]
+                cmd = [
+                    binary,
+                    "--print",
+                    "--model",
+                    model,
+                    "--tools",
+                    "",
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                    '{"mcpServers":{}}',
+                    "--setting-sources",
+                    "",
+                ]
             else:
-                cmd = [binary, "exec", "--model", model, "--ignore-user-config",
-                       "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check",
-                       "-c", "features.shell_tool=false", "-c", "features.unified_exec=false",
-                       "-c", "web_search=\"disabled\"", "-c", "forced_login_method=\"chatgpt\"",
-                       "--color", "never", "-"]
+                cmd = [
+                    binary,
+                    "exec",
+                    "--model",
+                    model,
+                    "--ignore-user-config",
+                    "--sandbox",
+                    "read-only",
+                    "--ephemeral",
+                    "--skip-git-repo-check",
+                    "-c",
+                    "features.shell_tool=false",
+                    "-c",
+                    "features.unified_exec=false",
+                    "-c",
+                    'web_search="disabled"',
+                    "-c",
+                    'forced_login_method="chatgpt"',
+                    "--color",
+                    "never",
+                    "-",
+                ]
             started = time.monotonic()
             process = None
             try:
                 process = await asyncio.create_subprocess_exec(
-                    *cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE, cwd=workdir, env=env,
+                    *cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=workdir,
+                    env=env,
+                    start_new_session=True,
                 )
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=prompt.encode()), timeout=timeout,
+                    process.communicate(input=prompt.encode()),
+                    timeout=timeout,
                 )
-                out, err = stdout.decode(errors="replace"), stderr.decode(errors="replace")
-                result = SkillResult(role, process.returncode == 0 and bool(out.strip()),
-                                     process.returncode, out, err, provider=provider)
+                out, err = (
+                    stdout.decode(errors="replace"),
+                    stderr.decode(errors="replace"),
+                )
+                result = SkillResult(
+                    role,
+                    process.returncode == 0 and bool(out.strip()),
+                    process.returncode,
+                    out,
+                    err,
+                    provider=provider,
+                )
                 if result.ok:
                     verdicts = re.findall(
-                        r"(?im)^\s*Verdict\s*:\s*(APPROVE|REQUEST_CHANGES|COMMENT)\s*$",
+                        r"(?im)^[^\S\n]*Verdict\s*:\s*(APPROVE|REQUEST_CHANGES|COMMENT)\s*$",
                         out.replace("**", ""),
                     )
                     if len(verdicts) != 1:
                         result.ok = False
-                        result.error = "review response must contain exactly one explicit verdict"
+                        result.error = (
+                            "review response must contain exactly one explicit verdict"
+                        )
                 elif not out.strip() and process.returncode == 0:
                     result.error = "empty review response"
             except asyncio.TimeoutError:
                 if process is not None:
-                    process.kill()
-                    await process.communicate()
-                result = SkillResult(role, False, None, "", "",
-                                     error=f"review timed out after {timeout}s", provider=provider)
+                    await _kill_spawned_process_group(process)
+                result = SkillResult(
+                    role,
+                    False,
+                    None,
+                    "",
+                    "",
+                    error=f"review timed out after {timeout}s",
+                    provider=provider,
+                )
             except OSError as exc:
-                result = SkillResult(role, False, None, "", "",
-                                     error=f"{provider} launch failed: {exc}", provider=provider)
+                result = SkillResult(
+                    role,
+                    False,
+                    None,
+                    "",
+                    "",
+                    error=f"{provider} launch failed: {exc}",
+                    provider=provider,
+                )
             try:
                 await asyncio.to_thread(
-                    _write_harness_event, task_entity_id="", role=role, agent_sub="",
-                    event_type="subprocess", tool_name=f"{provider}:{role}",
+                    _write_harness_event,
+                    task_entity_id="",
+                    role=role,
+                    agent_sub="",
+                    event_type="subprocess",
+                    tool_name=f"{provider}:{role}",
                     success="true" if result.ok else "false",
                     input_summary=f"tool-restricted review; requested model={model}",
                     output_summary=f"provider={provider}; role={role}; {result.error or result.returncode}",
@@ -2115,5 +5269,9 @@ async def run_review_prompt(*, role: str, prompt: str, timeout: int = 180) -> Sk
             return result
 
     return await _run_provider_attempts(
-        role, attempt, binaries=binaries, role=role, retry_safe=True,
+        role,
+        attempt,
+        binaries=binaries,
+        role=role,
+        retry_safe=True,
     )

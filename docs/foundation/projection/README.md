@@ -18,23 +18,23 @@ Generated from `conformance_suite.md`'s conformance matrix by `execution/scripts
 | Projected document | Rules | Chars | Against `MAX_DOC_CHARS` |
 |---|---|---|---|
 | `adapters.md` | 43 | 10,334 | under |
-| `authority_model.md` | 21 | 4,099 | under |
+| `authority_model.md` | 28 | 6,792 | under |
 | `calendar.md` | 8 | 2,687 | under |
 | `conformance.md` | 8 | 7,776 | under |
 | `conformance_suite.md` | — | 522 | under |
 | `data_model.md` | 28 | 3,914 | under |
 | `failure_posture.md` | 25 | 3,470 | under |
-| `gates_and_workflows.md` | 58 | 10,209 | under |
+| `gates_and_workflows.md` | 59 | 10,654 | under |
 | `github.md` | 19 | 4,728 | under |
 | `gmail.md` | 11 | 3,504 | under |
-| `lenses.md` | — | 4,202 | n/a — an index, never a selected reading |
+| `lenses.md` | — | 4,391 | n/a — an index, never a selected reading |
 | `migration.md` | 13 | 6,134 | under |
-| `payments.md` | 17 | 6,117 | under |
-| `planning_model.md` | 12 | 3,982 | under |
+| `payments.md` | 30 | 9,554 | under |
+| `planning_model.md` | 17 | 5,065 | under |
 | `principles.md` | 11 | 3,017 | under |
 | `telegram.md` | 17 | 4,779 | under |
 | `vocabulary.md` | 4 | 939 | under |
 | `work_model.md` | 54 | 11,961 | under |
-| `workflows.md` | 26 | 5,880 | under |
+| `workflows.md` | 26 | 6,248 | under |
 
-375 rules projected, 94,052 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.
+401 rules projected, 102,078 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.

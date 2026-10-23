@@ -220,6 +220,80 @@ Research two things together, because neither answers the question alone:
   is "install" is a different genre from one whose CTA is "book a call", and
   the genre governs section order, proof placement, and page length.
 
+This stage failed twice on 2026-09-21 in the same shape: both runs substituted
+internal artifacts for research and labelled the substitution — one run's
+`method` said "rather than external web research" with zero URLs in
+`sources`; the other's `method` said "rather than external market research"
+while its `summary` named three companies (Stripe, PostHog, Supabase) as
+evidence, and its own `sources` field admitted this was "observed structural
+pattern rather than a cited external study" — three companies named from
+recollection, never fetched. Naming a source without fetching it reads as
+sourced when it is not, which is worse than saying "no evidence." The four
+steps below exist to close that gap, in this order, and all four are
+mandatory — reasoning from upstream artifacts alone, however well-labelled,
+does not satisfy this stage.
+
+### (a) Read the Neotoma corpus first
+
+Query `competitive_analysis`, `homepage_analysis`, `marketing_analysis`,
+`market_research`, and `content_analysis` for this product and its category
+before doing anything else. Much of the external research this stage needs has
+already been done and stored — re-deriving it from upstream artifacts alone is
+the parallel-mechanism failure this skill's standing rules already forbid
+(`SWARM_PRIOR_ART_CONTRACT`). Cite every corpus entity actually consumed by
+entity id in `sources`, with the date each carries (see (d)).
+
+### (b) The corpus is a FLOOR, not a BOUNDARY
+
+This is the operator's explicit instruction. Neotoma is NOT exhaustive on
+competitors or adjacent offerings, and it cannot tell you what it is missing —
+its absence of a competitor means absence-from-the-corpus, never
+absence-from-the-market. Two concrete, corpus-verifiable reasons this matters:
+
+- **Staleness.** A competitive or homepage analysis several months old, in a
+  category that moves monthly, can be actively wrong by the time this stage
+  runs — not merely dated. Example: an April 2026 Neotoma-corpus analysis of a
+  competitor's memory page recorded that competitor "drifting toward direct";
+  by September 2026 that competitor's homepage had dropped memory-product
+  framing entirely for enterprise-governance positioning, and the specific
+  page the analysis scored (benchmark tables, marketing structure) had become
+  a documentation page with no hero, no CTA, and no benchmark table at all.
+  The corpus entry was not just old, it was no longer true of the live page.
+- **Selection shape.** A corpus assembled from whoever happened to get
+  analysed has a shape nobody chose. It will contain deep coverage of some
+  competitors and none of others that matter now.
+
+So stage 3 MUST also go look externally, every run: fetch actual current
+competitor and adjacent landing pages for this product's category, and check
+whether what the corpus says still holds. Use WebFetch on real URLs and
+WebSearch to find current pages you don't already have a URL for. A stage-3
+run that never leaves Neotoma has not done this stage, regardless of how
+thorough the corpus reading was.
+
+### (c) Every convention asserted needs a fetched source or a preference label
+
+For every best-practice claim the finding makes:
+
+- **Either** fetch the page (or the specific claim's source) and cite the URL
+  in `sources` with the date you fetched it, **or**
+- drop the named example and label the claim a preference — state plainly in
+  `confidence` or `conclusion` that it is unevidenced convention, not
+  established practice.
+
+Naming a company, product, or convention from memory without fetching it is
+never acceptable as a citation, however well-known the example seems. If you
+recall that "OSS dev-tool homepages typically do X," that recollection is the
+hypothesis to go verify in (b), not the finding.
+
+### (d) Record staleness
+
+For every corpus entity consumed in (a) and every external source fetched in
+(b)/(c), record its date (the corpus entity's `analysis_date` /
+`researched_date`, or the fetch date for a live page) next to the citation in
+`sources`. A later reader — including a later run of this same stage — must be
+able to see what was current when this finding was written, so they can judge
+whether to trust it as-is or re-verify.
+
 Put each source in `sources` and be honest in `confidence` about what is
 established versus inferred. A convention with no evidence behind it is a
 preference; label it as one so the template can weigh it.

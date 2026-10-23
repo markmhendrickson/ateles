@@ -178,7 +178,7 @@ held is refused at the write (decision 44).
 [`conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`](conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step).
 **Never:** "claimant" (retired: say lease holder).
 **Not for:** "claim fields" for the lease (the task carries none); "lock" for a lease (a lock outlives its holder); "heartbeat" for the lease (the heartbeat
-renews the lease; it is not the lease); owner standing alone, for the lease holder or for anything else — the word carries five meanings
+renews the lease; it is not the lease); owner standing alone, for the lease holder or for anything else — the word carries six meanings
 and always takes its qualifier (step owner, plan owner, grant owner, business owner, current owner, routed
 owner); holder without the lease in front of it.
 
@@ -382,9 +382,12 @@ that word for the socket a delivery lands on.
 rule, or "template" (the rule authors the created task's text; classification is intake's).
 
 ### operator-facing agent
-**Definition:** the [agent](#agent) the roster resolves to the operator-facing [role](#role) — bound per
-[declaration scope](#declaration-scope) in `swarm_roster`, never named in the design — which [claims](#claim) operator-only [tasks](#task),
-carries them and their [checkpoints](#checkpoint) to the [operator](#operator), and records the outcome.
+**Definition:** the [agent](#agent) the roster resolves to the operator-facing [role](#role), bound per
+[declaration scope](#declaration-scope) in `swarm_roster` and never named in the design. The name is an example [slot](#slot)
+name: an implementation may call the slot something else but must fill one that carries work to the operator
+(`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`, constraint 3). The agent
+[claims](#claim) operator-only [tasks](#task), carries them and their [checkpoints](#checkpoint) to the
+[operator](#operator), and records the outcome.
 **See:** [`work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent`](work_model.md#operator-only-tasks-are-claimed-by-the-operator-facing-agent).
 **Never:** —
 **Not for:** the operator for the agent; concierge for the agent, unqualified.
@@ -504,7 +507,7 @@ a [batch](#batch) may take, and the [successors](#successor) a closing [verdict]
 
 ### step
 **Definition:** one declared position in a [workflow](#workflow)'s ordered list, carrying a name, a [step owner](#step-owner), a
-`required` flag, an `on_fail` target with its `rounds_cap`, its [read dependencies](#read-dependency), two intervals
+[`class`](#step-class), a `required` flag, an `on_fail` target with its `rounds_cap`, its [read dependencies](#read-dependency), two intervals
 (`unclaimed_after`, `hold_bound`, each an interval or the [task](#task)'s `due_date` —
 `gates_and_workflows.md#declaration-batch-projection`), and
 parallel-group and join fields, [claimed](#claim) by its step owner on a [batch](#batch) and closed by that
@@ -512,8 +515,8 @@ step owner's
 [verdict](#verdict).
 Step names are data (`pm`, `ux`, `arch`, `impl`, `pr_review`, `qa`, `legal`, `release`,
 `verify_deployed`, and any a [workflow](#workflow) declares), and no name carries an entry of its own: each is
-declared on one workflow, its [step owner](#step-owner)'s [role](#role) is tabled at
-`workflows.md#roles-named-in-this-document`, and the reason the [workflow](#workflow) separates it from its
+declared on one workflow, its [step owner](#step-owner)'s [role](#role) is an example [slot](#slot) name in
+`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`, and the reason the [workflow](#workflow) separates it from its
 neighbours is argued in that workflow's own section — three homes a per-name entry would duplicate
 (principle 9). Where a name's separation is the point, the section says so: `verify_deployed` is a step
 apart from `release` because released and landed are different claims (`principles.md`, invariant 10), and
@@ -577,7 +580,10 @@ principal may also be a role the roster resolves, carried in `needed_input` beca
 [edge](#edge)'s target is a principal and never a role (`authority_model.md#approval`); a role that
 resolves to no principal raises a [checkpoint](#checkpoint) (reason `unspawnable_assignee`) rather than
 falling through to any available agent. A role is declared once and reused; it is not created per [batch](#batch) or
-per checkpoint.
+per checkpoint. A role names a [**slot**](#slot): the design fixes no set of roles, each implementation defines its own and
+fills each slot it uses, and the role names the reference [workflows](#workflow) carry are examples an implementation may
+rename, merge, or split, subject to the five constraints stated at
+[`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`](workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them).
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
 [`authority_model.md#approval`](authority_model.md#approval).
 **Never:** —
@@ -590,6 +596,21 @@ states this for proposal rights: "standing to propose is a capability and not a 
 [ownership](#ownership) [edge](#edge) names for a role (ownership resolves straight to the principal the
 `ownership_grant` points at; nothing is looked up by name).
 
+### slot
+**Definition:** the position a [role](#role) names in a [step](#step) declaration's `owner_role`, filled when the
+roster seats one [principal](#principal) in it; the design requires the position to be filled and never fills it. The design
+fixes no set of slots: each implementation defines its own and is bound only by the constraints on filling them.
+The headings of the roles section in `workflows.md` ("Roles are slots", "A role is a slot an implementation fills")
+use "is a slot" as shorthand for "names a slot"; in a sentence, a role names a slot and is not one.
+**Swap test:** against [role](#role), "fills each role" reads as filling a name and "fills each slot" as filling a
+position, and the rule that turns on it is the second: a name is resolved, a position is seated and can be left unfilled
+(constraint 5 of the roles section holds a slot that resolves to nobody). Against [step owner](#step-owner), the step owner
+is the role a step declares and the slot is the position that role stands for, so "the slot is unseated" is true where "the
+step owner is unseated" reads as the name being unseated. Against [agent](#agent), an agent fills a slot and is not one.
+**See:** [`workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them`](workflows.md#roles-are-slots-and-the-design-fixes-only-the-constraints-on-filling-them).
+**Never:** —
+**Not for:** a fixed list of roles the design defines; an [agent](#agent) for a slot (the roster seats a principal in it, and the slot outlives whichever principal is seated).
+
 ### verdict
 **Definition:** the record a [step owner](#step-owner) writes to close a [step](#step) on a
 [batch](#batch), carrying the [conclusion](#conclusion), the [findings](#finding) that produced it, timestamps,
@@ -601,7 +622,7 @@ swallowed. Written as one word (a verdict); the act of writing one is to sign of
 **Conclusion values:** `signed` (the step's [condition](#condition) is met), a blocking conclusion (it is not,
 and the step's `on_fail` says which earlier step opens again), and `waived` (the [operator](#operator) [principal](#principal) closed
 an unsigned required step, carrying the reason). `waived` is the only conclusion a principal other than the
-step owner may write, and only the operator principal may write it — the right is not delegable
+step owner may write, and only an [instance owner](#instance-owner) may write it — the right is not delegable
 ([`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection)).
 **[Waiver scope](#waiver-scope):** one [batch](#batch)'s unsigned required steps, one `waived` verdict **per step**, each
 naming its step and carrying its reason — so a waived step is queryable as waived rather than recorded as a
@@ -670,7 +691,7 @@ evidence are the fields the rules bind on (`data_model.md#concepts`).
 **Not for:** a finding as the thing that closes a step (the [verdict](#verdict) closes it); a comment on
 an [artifact](#artifact) as a finding (a remark carries no severity and reaches no step); a blocking
 finding that names no executed check; a standing finding discharged by correcting only the work it was
-filed against.
+filed against; a proposal that names no defect (that is an [improvement proposal](#improvement-proposal)).
 
 ### finding scope
 **Definition:** which of a defect's four possible reaches a [finding](#finding) names — narrowest first, the
@@ -829,7 +850,7 @@ count at which [`repeated_lapse`](#repeated_lapse) is raised, undeclared raising
 minimum model tier a class's [action](#action) may be taken at, evaluated at the same take as
 [blast radius](#blast-radius) and set by the [operator](#operator) only for irreversible classes),
 `confidence_threshold` (the policy floor a scored [confidence](#confidence) is compared with — not a second
-term beside `confidence`), `recoveries`, `metered_resources[]`, `quorum`, and `disjoint_roles[]` are the
+term beside `confidence`), `recoveries`, `metered_resources[]`, `payee_caps[]`, `quorum`, and `disjoint_roles[]` are the
 policy's data. A reader meets each on the policy's row; naming one here would be a second home for a value
 that already has one (principle 9).
 **See:** [`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`](gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken),
@@ -942,7 +963,8 @@ another is load-bearing — the same calendar write being `external_api_write` o
 **Definition:** the tier an [action_type](#action_type) resolves to under an [action_policy](#action_policy), one of `LOW`, `HIGH`, or
 `NEVER`.
 `LOW` is taken at or above the [confidence](#confidence) threshold or once an [action series](#action-series) graduates; `HIGH` is
-[checkpointed](#checkpoint) until an action series graduates; `NEVER` is cleared by no confidence and no recurrence.
+[checkpointed](#checkpoint) until an action series graduates; `NEVER` is cleared by no confidence and no recurrence; the only clearing this document states is a payment's, by its own
+parameters (`payments.md#a-payment-on-known-terms-is-taken-without-a-checkpoint-and-only-on-five-conditions-read-from-the-record`).
 **See:** [`gates_and_workflows.md#confidence-and-three-blast-tiers`](gates_and_workflows.md#confidence-and-three-blast-tiers).
 **Never:** "risk level" (unbounded).
 **Not for:** "severity" for a tier.
@@ -1010,21 +1032,41 @@ either way, name the entity — the checkpoint's subject, or the subject of a st
 checkpoint's subject; two subjects on one checkpoint; the subject held as free text.
 
 ### steward
-**Definition:** the [engine](#engine) [role](#role) that merges a pull request once every required [step](#step) is signed off and
+**Definition:** an example [engine](#engine) [role](#role) name for the [slot](#slot) that merges a pull request once every required [step](#step) is signed off and
 the [action gate](#action-gate) permits the `merge_pr` [action](#action).
 **See:** [`gates_and_workflows.md#the-action-gate-is-pr-independent`](gates_and_workflows.md#the-action-gate-is-pr-independent).
 **Never:** "merger".
 **Not for:** "bot" for the steward.
 
 ### review step
-**Definition:** a [step](#step) whose work is a judgement of the [batch](#batch)'s change rather than a
-change to it, closed by its [step owner](#step-owner)'s [verdict](#verdict) like any other step. `pm`,
-`ux`, `arch`, `pr_review`, `qa`, and `legal` are review steps; nothing distinguishes one from a working
-step but what its owner does, and no separate review concept exists in the design.
+**Definition:** a [step](#step) whose declared class is `review`: its work is a judgement of the [batch](#batch)'s change
+rather than a change to it, closed by its [step owner](#step-owner)'s [verdict](#verdict) like any other step. The class is a
+field of the step's declaration (`review`, `work`, or `deterministic`; absent reads as `review`), not a second concept beside the
+step. In the reference [workflows](#workflow) `ux`, `arch`, `pr_review`, `qa`, and `legal` are review steps (example names, not a
+fixed list); a step declared `work` or `deterministic` is not one.
 **See:** [`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection),
+[`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`](gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review),
 [`workflows.md`](workflows.md).
 **Never:** "lens", "review panel", "panel".
 **Not for:** "reviewer" for a review step's owner, unqualified; CI for a review step.
+
+### step class
+**Definition:** the field a [step](#step) declaration carries stating what kind of work the step does: `review` for a
+judgement of [artifacts](#artifact) the step did not leave, `work` for a step that changes something or takes an [action](#action), and
+`deterministic` for a step whose work is a script and whose [verdict](#verdict) is the script's result. An absent class
+reads as `review`.
+**Swap test:** against [action_type](#action_type), a step's class says what the step is and an action's class says which
+[blast radius](#blast-radius) the [action gate](#action-gate) resolves, so "a `deterministic` action" and "a
+`send_external_comms` step" both read wrongly, and the rule that turns on the step class, that the builder of an artifact
+never signs a review step on it, would become a rule about whether an effect is taken. Against [review step](#review-step),
+the review step is a step whose class is `review`, so "a review step" is true where "a review class" is not: the class is the
+field and the review step is what that value makes of a step. Against [reason class](#reason-class), which sorts a
+[checkpoint](#checkpoint) by why it was raised, a step class sorts a declared step by its work and is read at the verdict write
+and never at a checkpoint.
+**See:** [`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`](gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review),
+[`workflows.md#five-constraints-hold-for-any-role-set`](workflows.md#five-constraints-hold-for-any-role-set).
+**Never:** —
+**Not for:** the class of the action a step takes; a class read from the signer's verdict or inferred from the step's name.
 
 ### effect dedup
 **Definition:** the rule that every [outbound](#outbound) effect is idempotent or deduplicated on its own
@@ -1062,6 +1104,8 @@ outright in this design. [Effect dedup](#effect-dedup) exists so a re-claimed st
 effect that already happened, and decision 40 refuses the adjacent shape — a stored reasoning trace a later
 reader replays to reconstruct a step's judgement
 (`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`).
+A reviewed [governance write](#governance-write) applied again to **another instance** of the record is not a replay: it is a
+[reissue](#reissue), a first take on that instance through its own [gate](#gate).
 **Not for:** the sense of a public essay series (*The Human Inversion*, Part 4: reading a session's
 reasoning chain months later). That sense is an as-of read over what a [verdict](#verdict) names it
 read, resolved at its `signed_at` (decision 40) — never a stored trace and never a second doing. Where
@@ -1070,6 +1114,23 @@ read, resolved at its `signed_at` (decision 40) — never a stored trace and nev
 **Never:** "replay protection" (see [effect dedup](#effect-dedup)).
 **Not for:** the essay's sense above; deterministic code replay (`docs/durable_execution_substrate.md`,
 which this design also refuses in favour of explicit persisted state machines).
+
+### reissue
+**Definition:** applying a reviewed [governance write](#governance-write), unchanged, to another instance of the
+[record](#record) as a first take there: it passes that instance's [action gate](#action-gate) afresh, is judged on
+that instance's policy and [grants](#grant) as read then, and carries its own [idempotency key](#idempotency-key)
+scoped to that instance, so a reissue that reaches an instance twice lands once.
+Nothing is redone from a stored trace and no consent-gated [action](#action) is taken again, which is what separates it
+from a [replay](#replay). Writes are reissued in the order they were first taken, because a later write may read an
+earlier one, and only writes that are the same on every instance are reissued: declarations, policy values,
+registry changes, [intake rules](#intake-rule), and bundle enablement pinned to a version or content hash. A write that fails on the
+target stops the reissue at that write and raises its [checkpoint](#checkpoint) there.
+**See:** [`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order`](adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order),
+[`failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated`](failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated).
+**Never:** —
+**Not for:** [replay](#replay) (doing a prior step again from a stored trace on the same instance, which is refused);
+copying an entity by hand from one instance to another; the carrying of an instance's own record into the design's
+types, which is `migration.md`.
 
 ## Core workflows (`workflows.md`)
 
@@ -1083,6 +1144,33 @@ A task with no intake [batch](#batch) is unrouted by that fact; no unrouted stat
 **Never:** "undispatched".
 **Not for:** "triage" for the whole workflow (its first stage); unrouted as a stored status; routing by
 a router (the `route` step is a verdict by a step owner).
+
+### improvement proposal
+**Definition:** the record, made by a [step owner](#step-owner) on a [verdict](#verdict), that the
+context of the [task](#task) the [batch](#batch) carried shows the [workflow](#workflow) declaration it ran
+under could serve its class better, where nothing the declaration did was a defect.
+The rule that turns on it: like a standing [finding](#finding), it produces a task that `REFERS_TO` it, and
+that task's work is an amendment to the declaration, a [governance write](#governance-write) approved at the [action gate](#action-gate) — by the
+swarm where the amendment adds only low-blast [steps](#step), by the [operator](#operator) where it adds a consent point, an
+`operator_only` [action](#action), or a high-blast action, or removes or weakens a consent point, a [review step](#review-step), or a
+closing condition — and never by the batch that proposed it (decision 116).
+Unlike a finding it carries no severity, blocks nothing, and has no one-off form: it is about the declaration,
+never about the batch's work. Swap test against [finding](#finding): "the step owner recorded a finding" asserts
+that something was wrong and binds the [conclusion](#conclusion); "the step owner recorded an improvement
+proposal" asserts that nothing was wrong and binds nothing in this batch — the two sentences differ in what the
+verdict may conclude, so the terms do not overlap. Swap test against [proposal](#proposal): "the [principal](#principal) made
+a proposal" asks that an initiative be accepted, under proposal rights a grant carries; "the step owner recorded
+an improvement proposal" asks nothing of the initiative class and is made by any step owner on its own verdict,
+so the second sentence cannot be read as the first. The name is the operator's (decision 116), and the word it
+shares with [proposal](#proposal) is not a [claim](#claim) that it is one.
+**Field:** `improvement_proposal` — an entity of its own, never a field on the verdict: `PART_OF` the verdict
+that carries it and `REFERS_TO` the batch it was raised on, the relationship types a finding uses
+(`data_model.md#concepts`).
+**See:** [`workflows.md#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries`](workflows.md#a-workflow-is-created-for-the-task-no-declaration-fits-and-improved-by-every-task-it-carries).
+**Never:** —
+**Not for:** a [finding](#finding) for a proposal that names no defect (a finding is a defect or an objection);
+an improvement proposal for a defect (that is a standing finding, with its severity); an improvement proposal
+as a [proposal](#proposal) in the initiative sense (it needs no proposal right).
 
 ## Adapters (`adapters.md`)
 
@@ -1358,6 +1446,57 @@ past [drop](#dropped) or hold are all derived through it, which is why none of t
 an as-of read along event time for what was known (that is the look-ahead the ingestion axis exists to
 prevent).
 
+## Application (`application.md`)
+
+### application
+**Definition:** the console deployed against one instance of the [record](#record) and composed at runtime from
+that instance's entities: which modules show, which labels and brand apply, which of the record's bundles'
+screens appear, and who may see and write what.
+It is a surface and holds no state that is a source of truth; it carries whichever [principal](#principal) is
+signed in and is never itself a principal, an [adapter](#adapter), or a second [gate](#gate). The program is the
+same on every instance, and the application is that program on one of them.
+**See:** [`application.md#what-an-application-is`](application.md#what-an-application-is),
+[`application.md#where-each-part-lives`](application.md#where-each-part-lives).
+**Never:** "client app" for the one program every instance runs.
+**Not for:** the console when the composition on a particular instance is meant (the console is the program the
+product specification describes; the application is it on an instance); an [adapter](#adapter), which crosses the
+one boundary the design has, where an application crosses none.
+
+### environment
+**Definition:** an instance of the [record](#record) that serves one stage of a deployment's life, such as
+development, a demo, or production, with its own `deployment_configuration`, bindings, grants, and data.
+No environment flag or dimension exists inside the record; two environments are two instances, and a governed
+change reaches the next one by [reissue](#reissue) of the same writes, in order.
+**See:** [`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order`](adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order).
+**Never:** —
+**Not for:** the process environment a program reads variables from; a [stage](#stage) of a workflow, which
+groups contiguous steps of one declaration; tenant (the isolation boundary, which an environment may sit
+inside).
+
+### business record
+**Definition:** a record an instance keeps about its owner's own business, such as an invoice, a company, a
+receivable, a price list, a policy, or a customer incident, as distinct from the swarm's own records ([tasks](#task),
+[batches](#batch), [verdicts](#verdict)) and from an [artifact](#artifact), which an [external system](#external-system) holds.
+A business record is shipped as a type in one of the record's bundles. A [business matter](#business-matter) is one
+kind. Which side of a class of business record is authoritative, the record or an external source, is a field of the source's
+[binding](#vendor_binding).
+**See:** [`work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`](work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task),
+[`adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event`](adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event).
+**Never:** "domain record".
+**Not for:** an [artifact](#artifact); a [domain](#domain), which is a term of the [authority](#authority) tuple and
+names a region a grant covers.
+
+### business matter
+**Definition:** a [business record](#business-record) that a client's staff organise their work around, such as a
+customer incident, an overdue receivable, or an order exception, with a lifecycle of its own and effects of its own in
+[external systems](#external-system); [tasks](#task) refer to it and it is not itself a task.
+A customer incident is a business matter of one kind, and no separate term names it. The word is chosen because
+a matter is the thing the work is about, and a [task](#task) is a unit of the work.
+**See:** [`work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`](work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task).
+**Never:** "domain record"; "customer matter" as a term of its own.
+**Not for:** a [task](#task), which is the unit a [workflow](#workflow) carries and a [lease](#lease) holds; an
+[artifact](#artifact), which an external system holds.
+
 ## Planning model (`planning_model.md`)
 
 ### planning record
@@ -1427,7 +1566,7 @@ resolution of a checkpoint for a planning decision (a resolution is a principal'
 or task); a register decision of this directory for a planning decision.
 
 ### planner
-**Definition:** the [role](#role) that [claims](#claim) every [step](#step) of the planning [workflow](#workflow), resolved by the roster per
+**Definition:** an example [role](#role) name for the [slot](#slot) that [claims](#claim) every [step](#step) of the planning [workflow](#workflow), resolved by the roster per
 [declaration scope](#declaration-scope), and once for the levels above a [project](#project).
 **See:** [`workflows.md#planning`](workflows.md#planning),
 [`planning_model.md#maintenance-is-work-the-planning-workflow`](planning_model.md#maintenance-is-work-the-planning-workflow).
@@ -1523,10 +1662,28 @@ The [authority](#authority) [edges](#edge) attach here: an `ownership_grant`, a 
 a [separation-of-duties](#separation-of-duties) constraint. `operator_profile` is a **descriptive** record — identity details,
 locale, preferences — and carries none of them. [Credentials](#credential) bind to the `operator`,
 many-to-one, as they do to any principal.
+An operator's reach is what its [grants](#grant) admit; a client's staff member is an operator of the instance they
+work in with narrower grants, and no other kind of human principal exists (decision 146). Where the design reserves
+an act to "the operator", it reserves it to the [instance owner](#instance-owner), never to every operator and never by a grant
+(`authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`).
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
 **Never:** "admin"; "forker".
 **Not for:** user when authority is meant; `operator_profile` for the principal (it is the descriptive
 record beside it).
+
+### instance owner
+**Definition:** an [operator](#operator) that carries the `instance_owner` mark and so holds the acts the design
+reserves to the operator: writing a `waived` [verdict](#verdict), the marked self-resolution of a [checkpoint](#checkpoint) the resolver
+raised, resolving a checkpoint on an `operator_only` [action](#action), approving a reserved-class [governance write](#governance-write), and
+out-of-band provisioning.
+An instance may have several, each holding every reserved act independently; an instance with none refuses them
+all. No [grant](#grant) extends a reserved act to a non-owner, and a client who wants someone else to hold one
+makes that person an owner. It is not [ownership](#ownership) of an object, which confers the required seat on
+that object's checkpoints and nothing else, and not a new kind of [principal](#principal).
+**See:** [`authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`](authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them).
+**Never:** —
+**Not for:** owner seat for an instance owner (an owner seat is the principal an object's `ownership_grant` names); a
+[step owner](#step-owner); the book-of-business owner of `multi_tenant.md`.
 
 ### agent
 **Definition:** a non-human [principal](#principal) defined by an `agent` entity and acting as a bound principal.
@@ -1625,7 +1782,7 @@ A timeout is a terminal state that never continues. The principal that raised a 
 resolve it; the one exception is the [operator](#operator) resolving a checkpoint the operator raised, admitted
 with the `self_resolved` mark and refused without it (decision 47).
 **See:** [`authority_model.md#approval`](authority_model.md#approval),
-[`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`](authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked).
+[`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked`](authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked).
 **Never:** "silent continuation".
 **Not for:** resolved without who; verdict for an approval (that closes a step); an unmarked self-resolution.
 
@@ -1639,12 +1796,16 @@ principal where none is set (decision 50).
 **Not for:** "required reviewers" for a quorum (1-of-n is not a quorum); verdict for a quorum.
 
 ### separation of duties
-**Definition:** a structural check requiring disjointness between the [roles](#role) on one [checkpoint](#checkpoint), such as
-raiser and resolver or proposer and approver.
-Read as disjointness over the checkpoint's principal [edges](#edge), an [agent](#agent) counting as its bound
-[principal](#principal) (decisions 48 and 49); the pairs a class requires are its `disjoint_roles[]` on the
-`action_policy` (decision 50).
-**See:** [`authority_model.md#structural-checks-quorum-and-separation-of-duties`](authority_model.md#structural-checks-quorum-and-separation-of-duties).
+**Definition:** a structural check requiring disjointness between two duties. For the pairs a class requires, such as a
+[checkpoint](#checkpoint)'s raiser and resolver, it is read over the checkpoint's principal [edges](#edge), an
+[agent](#agent) counting as its bound [principal](#principal) (decisions 48 and 49), and the pairs a class requires are its
+`disjoint_roles[]` on the `action_policy` (decision 50). For the builder and review pair, which the design fixes, it is read on the agent itself and not its bound principal, over
+a [verdict](#verdict)'s signer and the [batch](#batch)'s [artifacts](#artifact) at the verdict write (decision 143, extending
+decision 49); for the payer and verifier of a payment taken without a checkpoint it is read the same way, over the verdict's
+signer and the payer as `payments.md` defines it: the signer of `prepare`, the agents seated in `pay`, the holders of
+the payer-slot [leases](#lease), and the agent that takes `pay` (decision 144).
+**See:** [`authority_model.md#structural-checks-quorum-and-separation-of-duties`](authority_model.md#structural-checks-quorum-and-separation-of-duties),
+[`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`](gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review).
 **Never:** —
 **Not for:** "four eyes" for the check, unqualified; verdict for the check.
 
@@ -1918,9 +2079,9 @@ they appear in a document, a schema, a prompt, or an error message.
 | a step, on a condition its owner cannot yet judge | **holds**, under a held lease, with a finding naming the condition; the hold **ends** by verdict, checkpoint, or lapse | "is paused", "is waiting", "is blocked" (a task with an open checkpoint on it is held by it; `blocked` as a status is retired) |
 | a batch, on closing | its tasks **enter** one successor, or the batch closes with none | "flows into", "triggers" the next workflow |
 
-## Owner: five meanings, one word forbidden alone
+## Owner: six meanings, one word forbidden alone
 
-`owner` on its own is forbidden. Sources use it for five things (C10); each has its own term:
+`owner` on its own is forbidden. Sources use it for five things (C10), and decision 158 adds a sixth, the [instance owner](#instance-owner); each has its own term:
 
 | Meaning | Term | Field |
 |---|---|---|
@@ -1928,6 +2089,7 @@ they appear in a document, a schema, a prompt, or an error message.
 | the step a batch is at | **current step** | derived from the batch's step states; projected as `current_owner` |
 | the implementer a blocking finding's remedy is routed to | **routed agent** | none; the remedy is a task entering intake, and the step owner keeps the verdict (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`) |
 | the operator with the book of business for a customer | **book-of-business owner** | `multi_tenant.md` section 5 |
+| the operator who holds the acts the design reserves to the operator on an instance | **instance owner** | the `instance_owner` mark on the `operator` entity |
 | named accountability for a workflow, domain, or queue | **ownership** (above) | `ownership_grant` |
 
 The [principal](#principal) holding a [task](#task)'s [lease](#lease) is its lease holder, never its owner; the principal an
@@ -1984,7 +2146,7 @@ Besides those two: 22 adapter table headers read `| Event | Status | Outcome in 
 inventing a fifth outcome.
 
 **`resolution` and `type` also failed.** `resolution` carries three bound senses across 220 uses, and
-[`disposition`](#disposition) already occupies the noun slot downstream of *resolve*. `type` failed earlier on
+[`disposition`](#disposition) already occupies the noun position downstream of *resolve*. `type` failed earlier on
 volume: bare `type` appears ~858 times meaning *what kind of thing this is*, which is not what the field
 means.
 

@@ -40,7 +40,7 @@ models name or that the built swarm wrote in their place; and the skills — the
 name at the repository and user roots, and the two entity types behind them — because the operator's direction
 places them in the same plan and because they are where the swarm's procedures are written today. Out of scope: the code that reads and writes
 them, which follows the record and is measured in `status.md`; the adapters' redeployment, which
-`adapters.md#admitting-a-new-adapter` governs; and the declarations of the twelve core workflows, which
+`adapters.md#admitting-a-new-adapter` governs; and the declarations of the twelve reference workflows, which
 the population plan's phases 3 and 4 make and this document only orders against.
 
 This document describes types, counts as classes, and shapes — which fields are populated and what they
@@ -226,7 +226,7 @@ retroactively reshape or minimize what these rows already hold; it declares the 
 | Source type or field (retired names marked) | Disposition | Target | Where the information goes, and why the disposition is safe |
 |---|---|---|---|
 | `agent_definition` (retired name) | re-type | `agent` | the design's fields — `name`, `prompt_markdown`, `context_entity_types[]`, version — carry over. The credential field becomes the credential's binding to the `agent` (gap G17: no edge type for a credential binding is named). A status of planned on the source is a declaration-time fact the design already checks: a role the roster resolves to an agent with no runner raises `unspawnable_assignee` at declaration (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`). The tool allowlist, the write-set field, the tier, the harness preferences, and the model tier have no design field (gap G19) and ride in the interpretation as declared-but-unmodelled, never in `raw_fragments`. The coarse grant label is retired: the real grant is the `agent_grant` entity. Undeclared fields already sitting in the source's `raw_fragments` are read out per entity and either declared or dropped with a note before the merge, because a merge carries them nowhere (`data_model.md#record-conventions`) |
-| the swarm's roster | keep; correct | the roster the design names as the role resolver | one of the governance types (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`); its role-to-agent map is what inverts the retired declarations' agent names into roles (stage 4) and what every `owner_role` resolves through at claim time. Every role must resolve to an `agent` with a credential before any workflow is declared against it; roles that resolve to a planned agent are named in the read-back (stage 3). The design gives it no row in `data_model.md` (gap G21) and says it binds per declaration scope where the instance's is one global map (gap G20) |
+| the swarm's roster | keep; correct | the roster the design names as the role resolver; the reference implementation's own role set is recorded in `docs/swarm_role_set.md`, outside this directory, and the roster and workflow-declaration entities govern over it | one of the governance types (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`); its role-to-agent map is what inverts the retired declarations' agent names into roles (stage 4) and what every `owner_role` resolves through at claim time. Every role must resolve to an `agent` with a credential before any workflow is declared against it; roles that resolve to a planned agent are named in the read-back (stage 3). The design gives it no row in `data_model.md` (gap G21) and says it binds per declaration scope where the instance's is one global map (gap G20) |
 | `agent_grant` | keep; correct | `agent_grant` | the design's fields (`sub`, `iss`, `capabilities[]`, `param_constraints`, `expires_at`) and the source's (`match_sub`, `match_iss`, and a linked host login on the grant) are a tolerant-reader case. Two corrections are governance writes: every capability naming a retired type is widened to name the new type **alongside** the old, before the holder's first write of the new type, and narrowed to the new type only after the holder is redeployed — the staged, dual-admit form `authority_model.md#grants` requires of a rotation, applied to a type name (gap G23: the design never says a type rename re-keys the grants that name it). And the human-device grants that carry wildcards are the fail-open shape the design forbids for a human; narrowing them is the operator's own act. The host login recorded on a grant is a credential binding living on the wrong entity (G17) |
 | `agent_policy` | keep | `agent_policy` | the design names it as the authoritative home of skill bodies and agent behavioural rules, and as one target of a standing finding. Prompts and skills rendered from it still carry retired words; the correction is to the entities, then a re-render (`conformance.md#direction-of-truth-per-class-of-record`) |
 | `agent_strategy` | keep | — | outside the four models. Each names an agent by credential rather than by role, which population's phase 1 will want to read; not migrated |
@@ -383,7 +383,7 @@ predicate is a declaration's `applies_when`, not an agent's.
 
 The extraction of 2026-09-05 read every skill file at both roots and produced one recurring-work candidate
 per procedure, with the skill it came from as the frequency evidence (`status.md` names the counts). The
-table maps each procedure's candidate to the target the design has. *Target* is a core workflow of
+table maps each procedure's candidate to the target the design has. *Target* is a reference workflow of
 `workflows.md`, a step of one, an adapter document's operation, or a gap. Where several skills map to one
 target, they are one row: the collapse is the point, and the count of rows against the count of skills is
 the measure of how much the harness duplicated. A skill named here is named as source state; none of them
@@ -992,8 +992,16 @@ numbers are separate and only two of these are opened as decisions below.
   agent everywhere, which is what `workflows.md` keying the roster per scope exists to permit varying.
   The migration derives the map it finds either way; what the design owes is a statement of which shape
   the roster has once a second scope exists, and that is not settled here.
-- **G21 — the roster has no row in `data_model.md`.** It is one of the governance types and the
-  resolver every `owner_role` depends on, and its fields and edges are stated nowhere.
+- **G21 — the roster has no row in `data_model.md`. CLOSED** by the governance-declaration pass: the
+  `swarm_roster` row states its `declaration_scope` key and its `roles` map, and makes the map's values
+  `REFERS_TO` edges to the `agent` rather than name strings, so a renamed agent cannot leave a role
+  resolving to nothing. What the row deliberately does not settle is G20's cardinality question — whether
+  an instance runs one declaration scope or several — which the row keys for and does not answer. The
+  source type is a **keep** with a mapping: the instance's roster carries `roster_key`, `swarm_domain`,
+  and `issuer`, which are the declaration scope and the AAuth coordinates under other names, and it holds
+  `roles` as a role → **agent-name string** map rather than as edges, which is the G32 shape below applied
+  to this type. `artifact_header_format` and `review_tag_format` on the source are presentation and have
+  no design field; they ride in the interpretation as declared-but-unmodelled.
 - **G22 — incremental migration versus one engine.** The design says migration is incremental and that
   two blind engines are the defect; an incremental engine cutover is two blind engines. This document
   resolves it as incremental over tasks and atomic over engines; the design should say so.
@@ -1048,6 +1056,75 @@ numbers are separate and only two of these are opened as decisions below.
   predicate is an `applies_when` on an optional review step of its declaration whose verdict carries that
   role's findings on the record (`workflows.md#planning`;
   `planning_model.md#maintenance-is-work-the-planning-workflow`).
+- **G32 — `agent_policy`'s design row and the source type disagree on four fields, and three of the four
+  are not tolerant-reader cases.** The type is a **keep** and its row is now stated
+  (`data_model.md#concepts`), which makes the disagreements mappable rather than latent. They are listed
+  here because `data_model.md#record-conventions`' tolerant-reader rule covers *one concept written under several
+  field names* and three of these are not that:
+  **(a) the agent-scoping field.** The design scopes a rule to an agent by `agent_sub` and by nothing
+  else. On the source the field exists, is declared, and is populated in **no** row, while rules meant for
+  one agent carry that agent's `sub` in `domain` — so the two fields carry two concepts (`whom it binds`,
+  `what it is about`) and one of them is being used for both. A tolerant reader here would make the
+  conflation permanent, so the mapping is a **backfill**: `agent_sub` is written from `domain` where
+  `domain` holds an agent identifier, and `domain` is corrected to the rule's actual subject, before any
+  reader filters on either. Until that lands, every reader filtering on `agent_sub` — `agent_loader.py`
+  and `generalizer.py` both do — matches nothing, which is a fail-*open* on rule delivery: the agent runs
+  with none of its rules rather than refusing to run.
+  **(b) `rule_kind`'s vocabulary and its default.** The design closes it to `mandatory` and `advisory`
+  with absence reading `mandatory`. The source carries six values (`mandatory`, `recommended`,
+  `operating_discipline`, `allow`, `issue_spec_contribution`, and a sixth) and three rows with none, and
+  has no default at all. The mapping is per value and is a **governance write, not a derivation**: which
+  of the two a `recommended` or `operating_discipline` rule becomes decides whether it binds, which
+  `conformance_suite.md` WM-22/WM-24 reserve to the gate and ateles#1115 asks the operator to rule. No
+  bulk coercion: a rule silently promoted to `mandatory` is as wrong as one silently demoted.
+  **(c) a rule bound to a condition.** The design's `effective_until` takes a date only; a rule whose end
+  is a real-world condition instead carries a `REFERS_TO` edge to the task whose closing ends it (decision
+  111, ruled 2026-09-25). The source's answer is to write the condition into `scope` as prose — live on at
+  least one rule, whose `scope` reads "… until the full console provides the same projection" — which both
+  defeats the closed `scope` vocabulary and puts a rule's expiry somewhere no filter reads. The rule no
+  longer blocks the mapping, but the mapping itself is not performed here: each such row needs an actual
+  task naming the condition, created and linked by `REFERS_TO` before `scope` is corrected back to one of
+  its three closed values, and that task-creation write is future migration work this decision unblocks
+  rather than work this pass does. Until it lands, these rows carry their condition as
+  declared-but-unmodelled and are **not** coerced into a date.
+  **(d) `description` versus `rule`.** The source makes `description` required and `rule` optional, and
+  nine rows carry only a `description` — an abstract of a rule whose normative body was never ingested.
+  The design's row makes `rule` the field a reader applies. This one **is** a tolerant-reader case in
+  form (two spellings of the rule's text) and is not one in substance for those nine rows, because there
+  is no text to read tolerantly: they need their bodies ingested, not their field names widened.
+- **G34 — `context_entity_types[]` is the design's delivery mechanism for a rule's value, and no code path
+  reads it.** The rule above (`#standing-rules-inside-skills-go-to-task_policy-by-kind-and-never-by-value`) states
+  that a rule's value is written on the entity and "read at runtime by every agent whose `context_entity_types[]`
+  names the type". That clause is the whole reason the same sentence can forbid reproducing the value in a prompt:
+  the entity is reachable, so the copy is redundant. The checkout establishes by code reading that nothing resolves
+  it. The agent loader's definition carries no field of that name and its projection never reads one; it issues an
+  entity fetch and a query-by-name and traverses no relationship. The prompt composer builds from the definition's
+  prompt text, static module constants, and the procedure file, and resolves no entity. Every occurrence of the
+  field name in code is display or copied through unchanged — echoed in a response, rendered into a documentation table, shown in
+  a dashboard. A procedure file is located by concatenating a path, so the graph is not consulted for that either,
+  and the type the instance uses for an all-agent behavioural rule has no consumer in code at all. **So the
+  mechanism the design names as the reason a rule need not be copied does not bind**, which is invariant 1 —
+  a mechanism that does not bind is not a control (`principles.md#1-a-mechanism-that-does-not-bind-is-not-a-control`) — inside the mechanism meant to deliver the
+  rules that state it. The consequence is not that the rule above is wrong: it is that a rule written only on the
+  entity reaches nobody, so every rule is driven into the prompt text by necessity and the corpus's prohibition on
+  reproducing it cannot be honoured while the entity is the only sanctioned home and the prompt is the only working
+  channel. **The divergence is the substrate's to close, not the design's**: the design statement is correct as
+  written and needs no amendment, and what is missing is resolution in the loader — where every consumer already
+  passes — rather than in any one caller. Listed here because a gap between what the design requires and what a
+  checkout does is this document's subject, and because until it closes, a reader is entitled to read that clause as
+  describing something that happens. **Decision 114 is now ruled** (2026-09-25,
+  `conformance.md#the-register-of-open-design-decisions`): `agent_policy` is the home for a rule binding every
+  agent's behaviour, and an agent-specific row is tied to the agent(s) it governs by a graph edge to their
+  `agent`, resolved by traversal, superseding the `scope`/`agent_sub` fields. That closes **which type**
+  this gap's traversal is pointed at and **how an agent-specific row resolves to its agent** — both were open questions
+  this entry left to decision 114 — and the daemon loader and the session rule index each resolve a rule's reach by
+  following its `GOVERNS` edges, with a migration script converting the live `scope=agent`/`agent_sub` rows to edges.
+  **What stays open**: this gap's broader claim —
+  that `context_entity_types[]` is the design's general delivery mechanism for *any* rule's value, read at runtime by
+  every agent whose `context_entity_types[]` names the type — is not resolved by the edge alone. The edge closes the
+  `agent_policy` case specifically; a non-`agent_policy` type still reaches an agent only if some code path resolves
+  `context_entity_types[]` against it, and no such general resolver exists yet. That remainder is unchanged by this
+  ruling and is still this gap's to close.
 
 ## The decisions this document opened, and how each was ruled
 
