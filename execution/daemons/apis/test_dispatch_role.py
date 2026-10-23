@@ -515,6 +515,27 @@ def test_direct_review_refuses_unbound_or_reserved_automatic_model_before_child(
     assert captured_codex_dispatches == []
 
 
+@pytest.mark.parametrize("binding", ["{}", '{"codex": {"mid": "astra-review"}}'])
+def test_daemon_review_call_shape_refuses_before_native_child(
+    captured_codex_dispatches, monkeypatch, binding
+) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:pm": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", binding)
+
+    result = asyncio.run(skill_runner.run_skill(
+        "pavo", "review", github_token="synthetic-token",
+        include_github_contract=True, preferred_provider="codex",
+        owns_pending_gate=True, seated_reviewer=True, notifier=None,
+        action_class="lens_review:pm",
+        escalation_signals=dispatch_role.model_tiering.EscalationSignals(),
+    ))
+
+    assert not result.ok
+    assert captured_codex_dispatches == []
+
+
 @pytest.mark.parametrize(
     ("source", "contents"),
     [
