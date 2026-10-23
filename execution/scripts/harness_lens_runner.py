@@ -1960,7 +1960,15 @@ def dry_run_report(
             model_refusal = str(exc)
     if admission is not None:
         selected_model = admission.resolved_model
-        selected_tier = None
+        selected_tier = (
+            None if not admission.resolved_tier
+            else dispatch_role.model_tiering.ResolvedTier(
+                tier=admission.resolved_tier,
+                source=admission.tier_source,
+                action_class=admission.action_class,
+                escalation_reasons=admission.escalation_reasons,
+            )
+        )
         model_refusal = None if admission.admitted else admission.reason
     if provider == "codex":
         sandbox_mode = (

@@ -1325,6 +1325,32 @@ def test_dry_run_report_marks_missing_authentication_not_ok(tmp_path, target):
     assert report["no_model_call_made"] is True
 
 
+@pytest.mark.parametrize("explicit_model", [None, "explicit-review"])
+def test_dry_run_tier_matches_shared_admission_for_both_model_shapes(
+    tmp_path, target, mock_ready_sandbox, explicit_model
+):
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:arch", required_policy=True
+    )
+    assert admission.admitted
+    if explicit_model is not None:
+        admission = hlr.replace(
+            admission, resolved_model=explicit_model,
+            explicit_model_override=True,
+        )
+    report = hlr.dry_run_report(
+        target, provider="codex", admission=admission,
+        sandbox=hlr.HarnessSandbox.build("codex", tmp_path),
+        task_text="review", worktree_path=tmp_path,
+        model=explicit_model, action_class="lens_review:arch",
+    )
+
+    assert report["tier"] == report["resolved_tier"] == "top"
+    assert report["model"] == report["resolved_model"] == (
+        explicit_model or "sol-test"
+    )
+
+
 def test_dry_run_makes_no_model_call_and_reports_command(
     monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import plistlib
 import signal
 import subprocess
 import sys
@@ -36,6 +37,73 @@ from lib.daemon_runtime import AgentDefinition  # noqa: E402
 # Import module-level objects so we can patch them in-place
 import skill_runner  # noqa: E402
 import harness_router  # noqa: E402
+
+
+def test_explicit_fly_review_reaches_bound_child_while_local_review_refuses(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_FLY_CLAUDE_MACHINE_ID", "test-machine")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:qa": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"claude": {"mid": "sonnet-review"}}')
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "no-usage"))
+    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(tmp_path / "no-plist"))
+    monkeypatch.setattr(skill_runner, "_refresh_usage_snapshot", lambda *_: None)
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude": "/bin/claude"})
+    child_calls = []
+
+    async def child(skill, prompt, **kwargs):
+        child_calls.append(kwargs)
+        return skill_runner.SkillResult(skill, True, 0, "review", "", provider="claude")
+
+    async def attempts(skill, attempt, **kwargs):
+        assert "claude" in kwargs["fly_bound"]
+        assert "claude" in kwargs["fly_extra"]
+        return await attempt("claude")
+
+    monkeypatch.setattr(skill_runner, "_run_skill_once", child)
+    monkeypatch.setattr(skill_runner, "_run_provider_attempts", attempts)
+    fly = asyncio.run(skill_runner.run_skill(
+        "phoenicurus", "review", provider="claude",
+        action_class="lens_review:qa", runner="fly",
+    ))
+    local = asyncio.run(skill_runner.run_skill(
+        "phoenicurus", "review", provider="claude",
+        action_class="lens_review:qa", runner="local",
+    ))
+
+    assert fly.ok
+    assert child_calls[0]["model"] == "sonnet-review"
+    assert child_calls[0]["runner"] == "fly"
+    assert not local.ok
+    assert "not active" in local.error
+    assert len(child_calls) == 1
+
+
+def test_unpinned_run_skill_reports_malformed_plist_before_child(
+    monkeypatch, tmp_path
+) -> None:
+    path = tmp_path / "apis.plist"
+    with path.open("wb") as handle:
+        plistlib.dump(["not a map"], handle)
+    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(path))
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    child_calls = []
+
+    async def child(*args, **kwargs):
+        child_calls.append(args)
+        raise AssertionError("child must not start")
+
+    monkeypatch.setattr(skill_runner, "_run_skill_once", child)
+    result = asyncio.run(skill_runner.run_skill(
+        "phoenicurus", "review", action_class="lens_review:qa",
+    ))
+
+    assert not result.ok
+    assert "plist root is not a map" in result.error
+    assert str(path) in result.error
+    assert child_calls == []
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

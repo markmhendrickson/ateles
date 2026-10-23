@@ -90,6 +90,7 @@ from harness_router import (  # noqa: E402
     minimum_headroom,
     provider_candidates,
     provider_exclusion_reason,
+    provider_policy,
     record_cooling,
     render_wall,
     usable_provider_names,
@@ -4516,6 +4517,9 @@ async def run_skill(
     exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    if fly_delivery is not None:
+        runner = "fly"  # a delivery runs on Fly or the builder runs it locally
+    fly_bound, fly_extra = _fly_routing(runner, action_class)
     if provider_admissions is not None and (
         provider is not None or provider_admission is not None
     ):
@@ -4530,12 +4534,20 @@ async def run_skill(
             [provider] if provider is not None else
             list(provider_admissions) if provider_admissions is not None else
             [provider_admission.requested_provider] if provider_admission is not None else
-            configured_providers()
+            [*configured_providers(), *fly_extra]
         )
+        policy = provider_policy(required=True)
+        if policy.error:
+            return SkillResult(
+                skill, False, None, "", "",
+                error=f"strict review admission refused: {policy.error}; "
+                      f"policy_source={policy.source}",
+            )
         current = {
             candidate: resolve_provider_admission(
                 candidate, action_class=action_class,
                 signals=escalation_signals, required_policy=True,
+                fly_bound=fly_bound, fly_extra=fly_extra,
             )
             for candidate in candidates
         }
@@ -4654,10 +4666,6 @@ async def run_skill(
         precomputed_tier = model_tiering.resolve_tier(
             action_class, signals=escalation_signals
         )
-    if fly_delivery is not None:
-        runner = "fly"  # a delivery runs on Fly or the builder runs it locally
-    fly_bound, fly_extra = _fly_routing(runner, action_class)
-
     async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
         selected_admission = (
             provider_admissions.get(selected) if provider_admissions is not None else None
@@ -4671,6 +4679,7 @@ async def run_skill(
             fresh = resolve_provider_admission(
                 selected, action_class=action_class,
                 signals=escalation_signals, required_policy=True,
+                fly_bound=fly_bound, fly_extra=fly_extra,
             )
             expected = (
                 replace(fresh, resolved_model=admitted.resolved_model,

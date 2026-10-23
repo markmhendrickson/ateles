@@ -233,6 +233,61 @@ def test_lens_dispatch_resolves_the_same_strict_admission_before_run_skill(
     assert admission.resolved_model == "terra-review"
 
 
+def test_explicit_fly_review_admits_configured_fly_only_login_but_auto_stays_local(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_FLY_CLAUDE_MACHINE_ID", "test-machine")
+    # Review is not an automatically vetted Fly class.
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "lens_review:qa")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:qa": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"claude": {"mid": "sonnet-review"}}')
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "no-headroom"))
+    seen = []
+
+    async def capture(skill, prompt, **kwargs):
+        seen.append(kwargs)
+        admission = kwargs["provider_admission"]
+        return SkillResult(skill, admission.admitted, 0 if admission.admitted else None,
+                           "out" if admission.admitted else "", "",
+                           error="" if admission.admitted else admission.reason,
+                           provider="claude")
+
+    monkeypatch.setattr(dispatch_role, "run_skill", capture)
+    fly = asyncio.run(dispatch_role.dispatch(
+        "phoenicurus", "review", provider="claude",
+        action_class="lens_review:qa", runner="fly",
+    ))
+    local = asyncio.run(dispatch_role.dispatch(
+        "phoenicurus", "review", provider="claude",
+        action_class="lens_review:qa",
+    ))
+
+    assert fly.ok
+    assert seen[0]["provider_admission"].admitted
+    assert seen[0]["runner"] == "fly"
+    assert not local.ok
+    assert local.error == "provider 'claude' is not active in process environment"
+
+
+def test_unpinned_review_names_malformed_policy_instead_of_no_provider(
+    monkeypatch, tmp_path
+) -> None:
+    path = tmp_path / "apis.plist"
+    with path.open("wb") as handle:
+        plistlib.dump(["not a map"], handle)
+    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(path))
+
+    result = asyncio.run(dispatch_role.dispatch(
+        "phoenicurus", "review", action_class="lens_review:qa",
+    ))
+
+    assert not result.ok
+    assert "plist root is not a map" in result.error
+    assert str(path) in result.error
+
+
 def test_dispatch_action_class_and_model_default_to_none(monkeypatch) -> None:
     """A caller naming neither must leave run_skill's tiering inputs at their
     no-op defaults — exact prior CLI behaviour, no regression."""

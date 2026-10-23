@@ -209,6 +209,7 @@ from harness_router import (  # noqa: E402
     configured_providers,
     cooling_providers,
     live_headroom,
+    provider_policy,
     resolve_provider_admission,
 )
 from local_provider import (  # noqa: E402
@@ -222,6 +223,7 @@ import mechanical_first  # noqa: E402
 from skill_runner import (  # noqa: E402
     ATELES_REPO,
     SkillResult,
+    _fly_routing,
     _load_agent_def,
     run_skill,
 )
@@ -349,6 +351,7 @@ async def dispatch(
     identity_error = model_tiering.review_identity_error(role, action_class)
     if identity_error:
         return SkillResult(role, False, None, "", "", error=identity_error)
+    fly_bound, fly_extra = _fly_routing(runner, action_class)
     provider_admissions: dict[str, ProviderAdmission] | None = None
     if (
         provider_admission is None
@@ -356,14 +359,23 @@ async def dispatch(
         and action_class is not None
         and action_class.startswith("lens_review:")
     ):
+        policy = provider_policy(required=True)
+        if policy.error:
+            return SkillResult(
+                role, False, None, "", "",
+                error=f"strict lens admission refused: {policy.error}; "
+                      f"policy_source={policy.source}",
+            )
         decisions = {
             candidate: resolve_provider_admission(
                 candidate,
                 action_class=action_class,
                 signals=escalation_signals,
                 required_policy=True,
+                fly_bound=fly_bound,
+                fly_extra=fly_extra,
             )
-            for candidate in configured_providers()
+            for candidate in (*policy.active_providers, *fly_extra)
         }
         provider_admissions = {
             candidate: replace(
@@ -392,6 +404,8 @@ async def dispatch(
             action_class=action_class,
             signals=escalation_signals,
             required_policy=True,
+            fly_bound=fly_bound,
+            fly_extra=fly_extra,
         )
         if provider_admission.admitted and model is not None:
             provider_admission = replace(

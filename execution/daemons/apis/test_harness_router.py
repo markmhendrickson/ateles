@@ -316,6 +316,95 @@ def test_launchd_standalone_and_daemon_environment_resolve_identical_admission(
         assert getattr(standalone, field) == getattr(daemon, field)
 
 
+def test_inherited_policy_cannot_override_installed_daemon_policy(
+    monkeypatch, tmp_path
+) -> None:
+    _strict_model_policy(monkeypatch, tmp_path)
+    path = tmp_path / "apis.plist"
+    with path.open("wb") as handle:
+        plistlib.dump({"EnvironmentVariables": {
+            "APIS_HARNESS_PROVIDERS": "cursor",
+            "APIS_USAGE_GATED_PROVIDERS": "codex",
+        }}, handle)
+    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(path))
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "")
+
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    assert not admission.admitted
+    assert admission.reason_code == "configuration_error"
+    assert "conflicts with the installed daemon policy" in admission.reason
+    assert str(path) in admission.policy_source
+
+
+def test_malformed_plist_root_refuses_even_with_complete_inherited_policy(
+    monkeypatch, tmp_path
+) -> None:
+    _strict_model_policy(monkeypatch, tmp_path)
+    path = tmp_path / "apis.plist"
+    with path.open("wb") as handle:
+        plistlib.dump(["not a policy map"], handle)
+    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(path))
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:qa"
+    )
+
+    assert admission.reason_code == "configuration_error"
+    assert "plist root is not a map" in admission.reason
+
+
+def test_generic_router_retains_environment_policy_with_a_malformed_plist(
+    monkeypatch, tmp_path
+) -> None:
+    path = tmp_path / "apis.plist"
+    with path.open("wb") as handle:
+        plistlib.dump(["not a policy map"], handle)
+    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(path))
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+
+    assert harness_router.configured_providers() == ["codex", "cursor"]
+    assert harness_router.provider_policy(required=True).error == (
+        "launchd plist root is not a map"
+    )
+
+
+@pytest.mark.parametrize(("active", "local_code"), [
+    ("claude,codex", "usage_policy_refusal"),
+    ("codex,cursor", "provider_inactive"),
+])
+def test_fly_review_admission_uses_fly_login_without_losing_local_refusal(
+    monkeypatch, tmp_path, active, local_code
+) -> None:
+    _strict_model_policy(monkeypatch, tmp_path)
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", active)
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_USAGE_GATE", "on")
+    now = time.time()
+    harness_router.record_usage(
+        "claude", [{"name": "weekly_all", "used_percent": 80,
+                    "resets_at": _iso(now + 6 * 86400)}], observed_at=now,
+    )
+
+    local = harness_router.resolve_provider_admission(
+        "claude", action_class="lens_review:qa", now_wall=now
+    )
+    fly = harness_router.resolve_provider_admission(
+        "claude", action_class="lens_review:qa", now_wall=now,
+        fly_bound={"claude"}, fly_extra={"claude"},
+    )
+
+    assert local.reason_code == local_code
+    assert fly.admitted
+    assert fly.resolved_model == "sonnet-review"
+
+
 def test_usage_gated_claude_above_weekly_pace_line_is_distinctly_refused(
     monkeypatch, tmp_path
 ) -> None:

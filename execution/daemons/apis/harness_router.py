@@ -233,6 +233,50 @@ def provider_policy(*, required: bool = False) -> ProviderPolicy:
     """
     active_present = "APIS_HARNESS_PROVIDERS" in os.environ
     gated_present = "APIS_USAGE_GATED_PROVIDERS" in os.environ
+    path = _provider_policy_plist_path()
+    # The installed daemon policy is authoritative when it is available.
+    # A standalone shell may inherit a complete but older policy pair.
+    plist_policy: ProviderPolicy | None = None
+    if (path is not None and path.is_file()
+            and (required or not (active_present or gated_present))):
+        source = f"launchd plist {path}"
+        try:
+            with path.open("rb") as handle:
+                parsed = plistlib.load(handle)
+            if not isinstance(parsed, dict):
+                plist_policy = ProviderPolicy(
+                    (), (), source, "launchd plist root is not a map"
+                )
+            else:
+                env = parsed.get("EnvironmentVariables")
+                if not isinstance(env, dict):
+                    plist_policy = ProviderPolicy(
+                        (), (), source, "launchd plist has no EnvironmentVariables map"
+                    )
+                else:
+                    missing = [
+                        key for key in (
+                            "APIS_HARNESS_PROVIDERS", "APIS_USAGE_GATED_PROVIDERS"
+                        ) if key not in env
+                    ]
+                    plist_policy = (
+                        ProviderPolicy(
+                            (), (), source,
+                            "runtime provider policy is partial: missing "
+                            + ", ".join(missing),
+                        ) if missing else _policy_from_values(
+                            env["APIS_HARNESS_PROVIDERS"],
+                            env["APIS_USAGE_GATED_PROVIDERS"],
+                            source, strict=required,
+                        )
+                    )
+        except (OSError, plistlib.InvalidFileException, TypeError, ValueError) as exc:
+            plist_policy = ProviderPolicy(
+                (), (), source,
+                f"runtime provider policy is unreadable: {type(exc).__name__}",
+            )
+        if plist_policy.error:
+            return plist_policy
     if active_present or gated_present:
         source = "process environment"
         if not (active_present and gated_present):
@@ -261,52 +305,24 @@ def provider_policy(*, required: bool = False) -> ProviderPolicy:
                 source,
                 strict=False,
             )
-        return _policy_from_values(
+        process_policy = _policy_from_values(
             os.environ["APIS_HARNESS_PROVIDERS"],
             os.environ["APIS_USAGE_GATED_PROVIDERS"],
             source,
             strict=required,
         )
-
-    path = _provider_policy_plist_path()
-    if path is not None and path.is_file():
-        source = f"launchd plist {path}"
-        try:
-            with path.open("rb") as handle:
-                parsed = plistlib.load(handle)
-            env = parsed.get("EnvironmentVariables")
-            if not isinstance(env, dict):
-                return ProviderPolicy(
-                    (), (), source, "launchd plist has no EnvironmentVariables map"
-                )
-            missing = [
-                key
-                for key in (
-                    "APIS_HARNESS_PROVIDERS",
-                    "APIS_USAGE_GATED_PROVIDERS",
-                )
-                if key not in env
-            ]
-            if missing:
-                return ProviderPolicy(
-                    (),
-                    (),
-                    source,
-                    "runtime provider policy is partial: missing " + ", ".join(missing),
-                )
-            return _policy_from_values(
-                env["APIS_HARNESS_PROVIDERS"],
-                env["APIS_USAGE_GATED_PROVIDERS"],
-                source,
-                strict=required,
-            )
-        except (OSError, plistlib.InvalidFileException, TypeError, ValueError) as exc:
+        if (required and plist_policy is not None and not process_policy.error
+                and (process_policy.active_providers, process_policy.usage_gated_providers)
+                != (plist_policy.active_providers, plist_policy.usage_gated_providers)):
             return ProviderPolicy(
-                (),
-                (),
-                source,
-                f"runtime provider policy is unreadable: {type(exc).__name__}",
+                (), (), plist_policy.source,
+                "process environment provider policy conflicts with the installed "
+                f"daemon policy in {plist_policy.source}",
             )
+        return process_policy
+
+    if plist_policy is not None:
+        return plist_policy
 
     source = (
         f"launchd plist {path}"
@@ -1477,6 +1493,8 @@ def resolve_provider_admission(
     required_policy: bool = True,
     now: float | None = None,
     now_wall: float | None = None,
+    fly_bound: Collection[str] = (),
+    fly_extra: Collection[str] = (),
 ) -> ProviderAdmission:
     """Resolve strict provider admission and model selection in one result.
 
@@ -1533,7 +1551,7 @@ def resolve_provider_admission(
             "configuration_error",
             f"unsupported provider {normalized!r}; policy_source={policy.source}",
         )
-    if normalized not in policy.active_providers:
+    if normalized not in policy.active_providers and normalized not in fly_extra:
         return decision(
             False,
             "provider_inactive",
@@ -1613,7 +1631,7 @@ def resolve_provider_admission(
 
     moment_wall = time.time() if now_wall is None else now_wall
     exhausted_until = reported_exhaustion(normalized, now_wall=moment_wall)
-    if exhausted_until is not None:
+    if exhausted_until is not None and normalized not in fly_bound:
         return decision(
             False,
             "provider_limit",
@@ -1624,7 +1642,7 @@ def resolve_provider_admission(
             model=resolved_model,
             escalation_reasons=resolved_tier.escalation_reasons,
         )
-    if normalized in policy.usage_gated_providers:
+    if normalized in policy.usage_gated_providers and normalized not in fly_bound:
         gate = usage_gate(normalized, now_wall=moment_wall)
         if gate is not None and not gate.allowed:
             return decision(
@@ -1661,7 +1679,9 @@ def resolve_provider_admission(
             escalation_reasons=resolved_tier.escalation_reasons,
         )
 
-    headroom, headroom_source = headroom_resolution(now_wall=moment_wall)[normalized]
+    headroom, headroom_source = headroom_resolution(
+        now_wall=moment_wall, without_mac_readings=fly_bound
+    )[normalized]
     # Usage-derived headroom is advisory for an active provider outside the
     # usage gate. Explicit operator overrides still apply to every provider.
     floor_applies = (
