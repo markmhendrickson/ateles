@@ -13,6 +13,7 @@ import asyncio
 import builtins
 import importlib.util
 import contextlib
+from dataclasses import replace
 import io
 import json
 from pathlib import Path
@@ -143,6 +144,10 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
             "APIS_HARNESS_HEADROOM_FILE": str(tmp_path / "headroom.json"),
             "APIS_HARNESS_USAGE_FILE": str(tmp_path / "usage.json"),
             "APIS_TIER_LEDGER_FILE": str(tmp_path / "tier.jsonl"),
+            "APIS_ACTION_POLICY": json.dumps({"lens_review:pm": "mid", "lens_review:arch": "top"}),
+            "APIS_VENDOR_BINDING": json.dumps(BINDING),
+            "APIS_ACTION_POLICY_FILE": str(tmp_path / "action-policy.json"),
+            "APIS_VENDOR_BINDING_FILE": str(tmp_path / "vendor-binding.json"),
             "APIS_FLY_RUNNER_CLASSES": "",
             "GITHUB_TOKEN": "eval-only-not-a-credential",
             "GH_TOKEN": "eval-only-not-a-credential",
@@ -181,9 +186,6 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
 
         mp.setattr(agent_loader.AgentLoader, "_neotoma", policy_query)
         mp.setattr(skill_runner, "_write_harness_event", lambda **kw: obs["events"].append(kw))
-        mp.setattr(model_tiering, "configured_action_policy", lambda: {"lens_review:arch": "top"})
-        mp.setattr(model_tiering, "configured_vendor_binding", lambda: BINDING)
-
         def create(worktree, *, head):
             obs["worktree_preparations"].append(head)
             assert head == HEAD
@@ -221,7 +223,13 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
 
         async def dispatch(role, task, **kw):
             if mutation == "drop_model":
-                kw.pop("model", None)
+                # The admission now carries the effective model independently
+                # of the selector. Lose both at the child boundary so this
+                # mutation actually removes the provider's --model flag.
+                kw["model"] = None
+                kw["provider_admission"] = replace(
+                    kw["provider_admission"], resolved_model="",
+                )
             elif mutation == "drop_action_class":
                 kw.pop("action_class", None)
             obs["dispatch_calls"].append({k: kw.get(k) for k in (

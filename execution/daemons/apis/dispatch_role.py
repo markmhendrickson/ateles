@@ -109,6 +109,7 @@ NOT IN SCOPE (deliberately)
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import asyncio
 import json
 import os
@@ -355,6 +356,8 @@ async def dispatch(
             signals=escalation_signals,
             required_policy=True,
         )
+        if provider_admission.admitted and model is not None:
+            provider_admission = replace(provider_admission, resolved_model=model)
 
     run_kwargs = dict(
         role=role,
