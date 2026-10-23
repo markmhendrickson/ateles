@@ -349,11 +349,20 @@ which workflows it has gone through, and no router chose the successor: a step o
 
 ```mermaid
 flowchart TD
-    C[task + intake batch + ADDRESSED_BY admitted atomically] --> I[intake batch: unrouted while no closing route verdict]
+    U{complete atomic creation unit?} -->|no: any required part missing| X[refuse admission; publish no partial unit]
+    U -->|yes: assembly finding included when applicable| C[task + intake batch + ADDRESSED_BY admitted atomically] --> I[intake batch: unrouted while no closing route verdict]
     I --> A{persistent assembly exclusion?}
-    A -->|no: ordinary intake| S1[classify: action_type, assigned_to, parent or children]
-    A -->|yes: assembly hold| H[only resolved pm step owner may claim classify]
-    H -->|eligible pm claims| S1
+    A -->|no: ordinary intake| O[eligible pm claims classify]
+    O --> S1[classify verdict: action_type, assigned_to, parent or children]
+    A -->|yes: assembly finding| E{eligible resolved pm step owner?}
+    E -->|no| N[no PM-only claim; ordinary claims refused]
+    N -.->|eligible PM becomes available| E
+    E -->|yes: claims classify lease| Q{assembly complete?}
+    Q -->|no| H[hold finding persists; no classify verdict; lease renewed while active]
+    H -->|PM rechecks after contributions| Q
+    H -->|lease lapses or is returned| L[active lease ends; finding and exclusion persist]
+    L -->|PM-only claim reopens| E
+    Q -->|yes: PM judges condition resolved| S1
     S1 --> S2[link: existing issue attached as artifact]
     S2 --> S3[dedupe: no open duplicate]
     S3 --> S4[prioritize: from the priority_rubric entity]
@@ -365,6 +374,20 @@ flowchart TD
     R -.->|FOLLOWS| F
     R --> CH[chain, read along FOLLOWS: intake → feature → release; stored nowhere]
 ```
+
+**Text equivalent:** The record refuses creation if any required part of the atomic unit is missing:
+the workflow-entering task, its intake batch, its `ADDRESSED_BY` edge, or, for assembly, the
+creator-time `classify` hold finding. A complete ordinary task can enter the usual eligible `pm`
+claim path. An assembling task is excluded from ordinary claims while its finding has no
+`classify` verdict. Only a declaration-resolved `pm` step owner may claim `classify`; if no
+eligible `pm` owner is available, it remains excluded with no PM-only claim. Once claimed, an
+incomplete assembly stays on the finding with no `classify` verdict while the owner renews the
+lease. A lapsed or returned lease ends only that active hold: the finding and exclusion remain,
+and only an eligible `pm` owner may reclaim `classify`. When that owner judges assembly complete,
+it writes the `classify` verdict, clearing the exclusion; only then may `link`, `dedupe`,
+`prioritize`, and `route` proceed. An aggregate parent is a separate intentional Empty case:
+it is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge;
+its absent batch is not Unknown or a missing atomic unit.
 
 **Invariants:** [`work_model.md#intake-is-every-tasks-first-workflow`](work_model.md#intake-is-every-tasks-first-workflow),
 [`#there-is-no-task-lifecycle-there-are-batches`](work_model.md#there-is-no-task-lifecycle-there-are-batches),

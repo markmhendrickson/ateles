@@ -39,7 +39,7 @@ LIVE_MODEL_SECTION_SHA256 = (
     "9c5bee6f7c856c94426ce3866af4aedbe67284a42a2770b41b1afac8b901fa57"
 )
 SCENARIO_J_SECTION_SHA256 = (
-    "eb9ad8dc0777c4cc1d9d1a9ee5ea7ac84a1bcb9fb304d27f69cccf5e538d89e6"
+    "bb202fcedcb854828d32e675df6aa224b428c3e37ca11cd074ee7a40ea36a001"
 )
 HOLD_MODEL_SECTION_SHA256 = (
     "f14d9ba6700ea67fedd13ca47cfd680d9da667f852be0adfc48959b33997c1e7"
@@ -878,6 +878,72 @@ def check(root: Path) -> list[str]:
     return problems
 
 
+# Keep source locations beside the diagnostics so every protected mismatch has
+# an actionable origin, including the checks that combine multiple surfaces.
+_UNIVERSAL_ENTRY_LOCATIONS = (
+    "docs/foundation/work_model.md — sections Intake is every task's first "
+    "workflow, How a batch is formed, and Where tasks come from; "
+    "docs/foundation/workflows.md — section intake; "
+    "docs/foundation/scenarios.md — section (j); "
+    "docs/foundation/data_model.md — row task; "
+    "docs/foundation/conformance_suite.md — rows WM-13, WM-14, WM-21, "
+    "WM-32b, WM-35a, WM-39"
+)
+_PROBLEM_LOCATIONS = {
+    "register": "docs/foundation/conformance.md — row 84",
+    "model": "docs/foundation/work_model.md — section What distinguishes a task being assembled",
+    "creator-authority-model": "docs/foundation/work_model.md — section What distinguishes a task being assembled",
+    "claim-model": "docs/foundation/work_model.md — section What a claim predicate treats as claimable",
+    "claimable-vocabulary": "docs/foundation/vocabulary.md — section claimable",
+    "live-model": "docs/foundation/work_model.md — section A task is live",
+    "scenario-workflow-entry": "docs/foundation/scenarios.md — section (j)",
+    "intake-workflow-atomic-entry": "docs/foundation/workflows.md — section intake",
+    "aggregate-parent-model": "docs/foundation/work_model.md — section Parent and child tasks",
+    "aggregate-parent-scenario": "docs/foundation/scenarios.md — section (f)",
+    "aggregate-parent-wm-35": "docs/foundation/conformance_suite.md — row WM-35",
+    "batch-opening-model": "docs/foundation/work_model.md — section How a batch is formed",
+    "wm-27": "docs/foundation/conformance_suite.md — row WM-27",
+    "scenario-intake-node": "docs/foundation/scenarios.md — section (j)",
+    "hold-model": "docs/foundation/work_model.md — section A batch may hold",
+    "finding-schema": "docs/foundation/data_model.md — row finding",
+    "workflow-exception": "docs/foundation/workflows.md — section intake",
+    "scenario-exception": "docs/foundation/scenarios.md — section (j)",
+    "wm-13-atomic-entry": "docs/foundation/conformance_suite.md — row WM-13",
+    "wm-14a": "docs/foundation/conformance_suite.md — row WM-14a",
+    "wm-31": "docs/foundation/conformance_suite.md — rows WM-31 and WM-31a",
+    "wm-39": "docs/foundation/conformance_suite.md — row WM-39",
+    "universal-entry": _UNIVERSAL_ENTRY_LOCATIONS,
+    "universal-entry-assembly-difference": _UNIVERSAL_ENTRY_LOCATIONS,
+    "universal-entry-intake-model": "docs/foundation/work_model.md — section Intake is every task's first workflow",
+    "universal-entry-batch-formation": "docs/foundation/work_model.md — section How a batch is formed",
+    "universal-entry-source-index": "docs/foundation/work_model.md — section Where tasks come from",
+    "universal-entry-data-model": "docs/foundation/data_model.md — row task",
+    "universal-entry-workflow": "docs/foundation/workflows.md — section intake",
+    "universal-entry-scenario": "docs/foundation/scenarios.md — section (j)",
+    "universal-entry-creation-rows": "docs/foundation/conformance_suite.md — rows WM-13, WM-14, WM-21, WM-32b, WM-35a, WM-39",
+}
+for _row in ("WM-13", "WM-14", "WM-21", "WM-32b", "WM-35a", "WM-39"):
+    _PROBLEM_LOCATIONS[f"universal-entry-{_row.lower()}"] = (
+        f"docs/foundation/conformance_suite.md — row {_row}"
+    )
+
+
+def _actionable_problem(problem: str) -> str:
+    label = problem.partition(" — ")[0].removeprefix("decision-84-")
+    location = _PROBLEM_LOCATIONS.get(label)
+    if location is None:
+        raise CorpusProblem(
+            f"unmapped diagnostic {label} in execution/scripts/check_foundation_decision_84.py"
+        )
+    return (
+        f"{problem} [{location}]. Next: inspect decision 84 in "
+        "docs/foundation/conformance.md row 84 and the named source; for an "
+        "intentional edit, update the matching expectation or SHA-256 guard in "
+        "execution/scripts/check_foundation_decision_84.py, then rerun "
+        "python3 execution/scripts/check_foundation_decision_84.py."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -886,11 +952,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         problems = check(args.root)
+        diagnostics = [_actionable_problem(problem) for problem in problems]
     except CorpusProblem as exc:
         print(f"decision 84 check: {exc}", file=sys.stderr)
         return 1
-    for problem in problems:
-        print(problem)
+    for diagnostic in diagnostics:
+        print(diagnostic)
     print(f"decision 84 check: {len(problems)} problem(s)")
     return 1 if problems else 0
 

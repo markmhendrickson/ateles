@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from itertools import product
@@ -149,6 +150,56 @@ def mutate_real_corpus_normalized(
 def test_complete_carry_passes(tmp_path: Path) -> None:
     write_corpus(tmp_path)
     assert decision_84.check(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "old", "new", "location"),
+    [
+        (
+            "workflows.md",
+            "**Entry condition:** every workflow-entering task",
+            "**Entry boundary:** every workflow-entering task",
+            "docs/foundation/workflows.md — section intake",
+        ),
+        (
+            "scenarios.md",
+            "At any moment the\n",
+            "At each moment the\n",
+            "docs/foundation/scenarios.md — section (j)",
+        ),
+        (
+            "conformance_suite.md",
+            "the exclusion survives lapse, crash, return, and transfer",
+            "the exclusion survives lapse, crash, and transfer",
+            "docs/foundation/conformance_suite.md — row WM-14a",
+        ),
+    ],
+)
+def test_cli_mismatch_names_location_and_intentional_edit_step(
+    tmp_path: Path, name: str, old: str, new: str, location: str
+) -> None:
+    write_corpus(tmp_path)
+    path = tmp_path / "docs" / "foundation" / name
+    source = path.read_text(encoding="utf-8")
+    assert source.count(old) == 1
+    path.write_text(source.replace(old, new, 1), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_DIR / "check_foundation_decision_84.py"),
+            "--root",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert location in result.stdout
+    assert "intentional edit" in result.stdout
+    assert "check_foundation_decision_84.py" in result.stdout
 
 
 def test_lease_only_mutant_fails(tmp_path: Path) -> None:
