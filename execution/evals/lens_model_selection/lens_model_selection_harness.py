@@ -85,6 +85,17 @@ def _reader_runtime(mp, *, missing_dependency):
 def run_scenario(scenario, tmp_path, *, mutation="none"):
     assert mutation in MUTATIONS
     active_runner = runner
+    lens = scenario.get("lens", "pm")
+    agent = runner.lens_by_name(lens).agent
+    verdict = (
+        f"<!-- review:arch commit={HEAD} -->\n"
+        "**🤖 Waxwing — Ateles swarm, architecture reviewer**\n"
+        "**SIGNED_OFF**\n\nSynthetic eval verdict.\n"
+        if lens == "arch" else
+        f"<!-- review:pm commit={HEAD} -->\n"
+        "**🤖 Pavo — Ateles swarm, pm review**\n"
+        "**SIGNED_OFF**\n\nSynthetic eval verdict.\n"
+    )
     trace = tmp_path / "provider-calls.jsonl"
     child = _executable(tmp_path / "fixture-provider", f'''
         import json, os, re, sys
@@ -97,7 +108,7 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         with Path({str(trace)!r}).open("a") as stream:
             stream.write(json.dumps(record) + "\\n")
         path = re.search(r"It must only write the verdict to (.+?) using", prompt).group(1)
-        verdict = "<!-- review:pm commit={HEAD} -->\\n**🤖 Pavo — Ateles swarm, pm review**\\n**SIGNED_OFF**\\n\\nSynthetic eval verdict.\\n"
+        verdict = {verdict!r}
         Path(path).write_text(verdict)
         print("Verdict: APPROVE\\n" if "--ignore-user-config" in argv else verdict, end="")
     ''')
@@ -177,10 +188,10 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         mp.setattr(skill_runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
         mp.setattr(active_runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
         def definition(self):
-            assert self.agent_name == "pavo"
+            assert self.agent_name == agent
             obs["definition_loads"].append(self.agent_name)
             agent_def = agent_loader.AgentDefinition(
-                entity_id="ent_eval_pavo", name="pavo", status="active",
+                entity_id=f"ent_eval_{agent}", name=agent, status="active",
                 prompt_markdown="Synthetic canonical review role.", tool_allowlist=["Read"],
                 raw={"snapshot": {"revision": "eval-1"}},
             )
@@ -246,7 +257,7 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
             mp.setattr(model_tiering, "validate_model_selector", lambda model: model)
         argv = [
             "--repo", "eval-owner/eval-repo", "--pr", "1", "--head", HEAD,
-            "--lens", "pm", "--brief", str(brief), "--timeout", "5", "--json",
+            "--lens", lens, "--brief", str(brief), "--timeout", "5", "--json",
             "--task-entity-id", "ent_eval_task",
             *scenario["args"],
         ]

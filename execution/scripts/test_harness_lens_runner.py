@@ -4209,10 +4209,12 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
         "capture_stash_ref_state",
         lambda worktree: hlr.StashRefState(resolved_oid=None, packed_oid=None),
     )
+    monkeypatch.setattr(hlr, "verify_stash_ref_unchanged_after_dispatch", lambda *a: None)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **k: target.head)
 
     import asyncio
 
-    asyncio.run(
+    report = asyncio.run(
         hlr.run_one(
             target,
             provider="codex",
@@ -4229,6 +4231,7 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
 
     expected_action_class = action_class or f"lens_review:{lens}"
     expected_model = model or ("sol-test" if lens == "security" else "terra-test")
+    assert report["ok"], report
     assert seen["model"] == model
     assert seen["action_class"] == expected_action_class
     assert seen["provider_admission"].action_class == expected_action_class
@@ -4242,8 +4245,9 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
     assert seen["provider"] == "codex"
 
 
+@pytest.mark.parametrize("model", [None, "explicit-review"])
 def test_run_one_rejects_a_foreign_lens_class_before_worktree_or_child(
-    monkeypatch, tmp_path, target, brief_file
+    monkeypatch, tmp_path, target, brief_file, model
 ):
     target = hlr.LensTarget(
         repo=target.repo, pr=target.pr, head=target.head,
@@ -4265,6 +4269,7 @@ def test_run_one_rejects_a_foreign_lens_class_before_worktree_or_child(
         target, provider="codex", post=False, dry_run=False,
         repo_worktree_name="ateles", scratch_root=tmp_path,
         brief_path=brief_file, timeout=None, action_class="lens_review:pm",
+        model=model,
     ))
     assert not report["ok"]
     assert report["no_model_call_made"] is True

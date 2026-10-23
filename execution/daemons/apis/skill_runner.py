@@ -4439,6 +4439,9 @@ async def run_skill(
     ``harness_router.resolve_provider_admission``. Guarded standalone
     entrypoints pass it through unchanged; this function refuses any mismatch
     and launches only its resolved provider/tier/model.
+    ``provider_admissions`` holds the equivalent decisions for an unpinned
+    lens. Candidate selection and failover stay with the shared router, while
+    each attempt uses its own admitted tier and model.
 
     ``command_wrapper``: forwarded verbatim to ``_run_skill_once`` on every
     attempt — see that function's docstring. Unrelated to provider selection;
@@ -4569,12 +4572,15 @@ async def run_skill(
             )
         provider = provider_admission.requested_provider
         model = provider_admission.resolved_model
-        resolved_tier = model_tiering.ResolvedTier(
-            tier=provider_admission.resolved_tier,
-            source=provider_admission.tier_source,
-            action_class=provider_admission.action_class,
-            escalation_reasons=provider_admission.escalation_reasons,
-        )
+        if not provider_admission.explicit_model_override:
+            resolved_tier = model_tiering.ResolvedTier(
+                tier=provider_admission.resolved_tier,
+                source=provider_admission.tier_source,
+                action_class=provider_admission.action_class,
+                escalation_reasons=provider_admission.escalation_reasons,
+            )
+        else:
+            resolved_tier = None
 
     # Refresh the usage snapshot BEFORE anything reads provider selection:
     # `_tier_bound_binaries` below consults the usage gate through
@@ -4601,11 +4607,14 @@ async def run_skill(
             return SkillResult(skill, False, None, "", "", error="unadmitted lens provider", provider=selected)
         selected_tier = precomputed_tier
         if selected_admission is not None:
-            selected_tier = model_tiering.ResolvedTier(
-                tier=selected_admission.resolved_tier,
-                source=selected_admission.tier_source,
-                action_class=selected_admission.action_class,
-                escalation_reasons=selected_admission.escalation_reasons,
+            selected_tier = (
+                None if selected_admission.explicit_model_override else
+                model_tiering.ResolvedTier(
+                    tier=selected_admission.resolved_tier,
+                    source=selected_admission.tier_source,
+                    action_class=selected_admission.action_class,
+                    escalation_reasons=selected_admission.escalation_reasons,
+                )
             )
         result = await _run_skill_once(
             skill,

@@ -250,6 +250,13 @@ def test_cli_escalation_flags_reach_run_skill_and_raise_the_tier(
     policy = tmp_path / "policy.json"
     policy.write_text('{"lens_review:pm": "mid", "lens_review:arch": "top"}')
     monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(policy))
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv(
+        "APIS_VENDOR_BINDING",
+        '{"codex": {"mid": "terra-review", "top": "sol-review"}}',
+    )
+    monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda role: _stub_def())
     seen: list[dict] = []
 
     async def _capture(skill, prompt, **kwargs):
@@ -423,13 +430,66 @@ def test_unpinned_lens_admits_only_bound_candidates_at_the_child_boundary(
     assert cmd[cmd.index("--model") + 1] == "terra-review"
 
 
-def test_unpinned_lens_missing_binding_refuses_without_a_child(
+def test_unpinned_lens_can_choose_a_different_strictly_bound_candidate(
     captured_codex_dispatches, monkeypatch
+) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex,cursor")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:pm": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"cursor": {"mid": "cursor-review"}}')
+    monkeypatch.setattr(
+        skill_runner, "_provider_binaries",
+        lambda: {"claude": None, "codex": "/bin/codex", "cursor": "/bin/cursor-agent"},
+    )
+
+    result = asyncio.run(dispatch_role.dispatch(
+        "pavo", "review", action_class="lens_review:pm"
+    ))
+
+    assert result.ok, result.error
+    assert result.provider == "cursor"
+    assert result.attempted_providers == ("cursor",)
+    assert len(captured_codex_dispatches) == 1
+    cmd = captured_codex_dispatches[0]["cmd"]
+    assert cmd[0] == "/bin/cursor-agent"
+    assert cmd[cmd.index("--model") + 1] == "cursor-review"
+
+
+@pytest.mark.parametrize("provider", [None, "codex"])
+def test_lens_explicit_model_preserves_override_provenance_at_child_boundary(
+    captured_codex_dispatches, monkeypatch, tmp_path, provider
+) -> None:
+    ledger = tmp_path / "tier-ledger.jsonl"
+    monkeypatch.setenv("APIS_TIER_LEDGER_FILE", str(ledger))
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
+    monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:pm": "mid"}')
+    monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex": {"mid": "terra-review"}}')
+
+    result = asyncio.run(dispatch_role.dispatch(
+        "pavo", "review", provider=provider,
+        action_class="lens_review:pm", model="explicit-review",
+    ))
+
+    assert result.ok, result.error
+    assert len(captured_codex_dispatches) == 1
+    cmd = captured_codex_dispatches[0]["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "explicit-review"
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    dispatch_row = next(row for row in rows if row["event"] == "dispatch")
+    assert dispatch_row["tier"] == "explicit_model"
+    assert dispatch_row["source"] == "explicit_model"
+    assert dispatch_row["model"] == "explicit-review"
+
+
+@pytest.mark.parametrize("binding", ["{}", '{"codex": {"mid": ""}}'])
+def test_unpinned_lens_missing_binding_refuses_without_a_child(
+    captured_codex_dispatches, monkeypatch, binding
 ) -> None:
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
     monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "claude")
     monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:pm": "mid"}')
-    monkeypatch.setenv("APIS_VENDOR_BINDING", "{}")
+    monkeypatch.setenv("APIS_VENDOR_BINDING", binding)
 
     result = asyncio.run(dispatch_role.dispatch(
         "pavo", "review", action_class="lens_review:pm"
@@ -448,6 +508,19 @@ def test_reported_exhaustion_refuses_strict_and_generic_dispatch_without_a_child
     monkeypatch.setenv("APIS_ACTION_POLICY", '{"lens_review:pm": "mid"}')
     monkeypatch.setenv("APIS_VENDOR_BINDING", '{"codex": {"mid": "terra-review"}}')
     now = time.time()
+    harness_router.record_usage(
+        "codex",
+        [{"name": "weekly_all", "used_percent": 100,
+          "resets_at": harness_router._iso_from_wall(now + 6 * 86400)}],
+        observed_at=now,
+    )
+    admitted_strict = asyncio.run(dispatch_role.dispatch(
+        "pavo", "review", action_class="lens_review:pm"
+    ))
+    admitted_generic = asyncio.run(dispatch_role.dispatch("pavo", "review"))
+    assert admitted_strict.ok and admitted_generic.ok
+    assert len(captured_codex_dispatches) == 2
+
     harness_router.record_exhausted("codex", now + 3600, observed_at=now)
 
     strict = asyncio.run(dispatch_role.dispatch(
@@ -457,7 +530,7 @@ def test_reported_exhaustion_refuses_strict_and_generic_dispatch_without_a_child
 
     assert not strict.ok and "reported a limit" in strict.error
     assert not generic.ok
-    assert captured_codex_dispatches == []
+    assert len(captured_codex_dispatches) == 2
 
 
 def test_standalone_plist_and_zero_usage_headroom_reach_bound_child_argv(

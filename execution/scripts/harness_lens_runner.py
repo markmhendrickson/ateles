@@ -2619,7 +2619,9 @@ async def run_one(
             "posted": False,
         }
     if model is not None:
-        admission = replace(admission, resolved_model=model)
+        admission = replace(
+            admission, resolved_model=model, explicit_model_override=True
+        )
 
     worktree_path = (
         scratch_root / f"{repo_worktree_name}-wt-{target.lens}-{target.pr}-{provider}"

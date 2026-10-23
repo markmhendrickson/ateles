@@ -126,6 +126,7 @@ class ProviderAdmission:
     tier_source: str = ""
     resolved_model: str = ""
     escalation_reasons: tuple[str, ...] = ()
+    explicit_model_override: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -141,6 +142,7 @@ class ProviderAdmission:
             "tier_source": self.tier_source,
             "resolved_model": self.resolved_model,
             "escalation_reasons": list(self.escalation_reasons),
+            "explicit_model_override": self.explicit_model_override,
         }
 
 

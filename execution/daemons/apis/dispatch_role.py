@@ -337,6 +337,8 @@ async def dispatch(
     ``provider_admission`` is the shared router's already-resolved decision for
     a guarded entrypoint. ``run_skill`` validates and consumes its exact
     provider/tier/model instead of reconstructing policy from shell prefixes.
+    An unpinned lens resolves the same strict decision for each configured
+    provider and lets the router choose only among admitted candidates.
 
     ``integration_base`` / ``integration_mode`` (work class ``rebase``) and
     ``regenerate_commands`` (work class ``regenerate_generated_files``) opt the
@@ -361,7 +363,9 @@ async def dispatch(
             for candidate in configured_providers()
         }
         provider_admissions = {
-            candidate: replace(decision, resolved_model=model) if model else decision
+            candidate: replace(
+                decision, resolved_model=model, explicit_model_override=True
+            ) if model else decision
             for candidate, decision in decisions.items()
             if decision.admitted
         }
@@ -387,7 +391,9 @@ async def dispatch(
             required_policy=True,
         )
         if provider_admission.admitted and model is not None:
-            provider_admission = replace(provider_admission, resolved_model=model)
+            provider_admission = replace(
+                provider_admission, resolved_model=model, explicit_model_override=True
+            )
 
     run_kwargs = dict(
         role=role,
