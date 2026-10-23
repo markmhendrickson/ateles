@@ -123,6 +123,7 @@ def _default_full_headroom(monkeypatch, tmp_path):
             {
                 "lens_review:pm": "mid",
                 "lens_review:qa": "mid",
+                "lens_review:arch": "top",
                 "lens_review:security": "top",
             }
         ),
@@ -4213,8 +4214,14 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
         )
     )
 
+    expected_action_class = action_class or "lens_review:pm"
+    expected_model = model or (
+        "sol-test" if expected_action_class == "lens_review:arch" else "terra-test"
+    )
     assert seen["model"] == model
-    assert seen["action_class"] == action_class
+    assert seen["action_class"] == expected_action_class
+    assert seen["provider_admission"].action_class == expected_action_class
+    assert seen["provider_admission"].resolved_model == expected_model
     assert "CODEX_HOME" in seen["env_extra"]
     assert seen["command_wrapper"]
     assert seen["command_wrapper"][0] == "/usr/bin/sandbox-exec"
