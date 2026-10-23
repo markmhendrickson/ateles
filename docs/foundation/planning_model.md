@@ -845,7 +845,7 @@ second. Decision 43 rules that the operator's own governance write after bootstr
 resolved by the operator as a marked self-resolution
 (`conformance_suite.md#what-the-bootstrap-set-is-and-whether-the-operators-later-governance-writes-are-gated`);
 decision 47 rules that a raiser does not resolve, the operator's marked self-resolution the one exception
-(`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`);
+(`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked`);
 and decision 56 puts the governance types on the engine's grant alone, so that a second grant on the
 operator's credential would make the sole writer not sole
 (`gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`). An amendment to a

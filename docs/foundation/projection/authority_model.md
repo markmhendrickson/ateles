@@ -43,7 +43,7 @@ Every rule `authority_model.md` owns, one entry each: the rule's own statement f
 
 - **AU-16** — yes/no/veto by a required principal; authorized against required approvers; timeout terminal; silence never accepts; no cross-principal auto-approve; notification via roster and channel config *[M]*
 
-## [The raiser of a checkpoint does not resolve it, and the operator's self-resolution is marked](../authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked)
+## [The raiser of a checkpoint does not resolve it, and the instance owner's self-resolution is marked](../authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked)
 
 - **AU-17** — the raiser does not resolve; the operator's self-resolution is marked *[M (decision 47, ruled 2026-09-06, with 43)]*
 

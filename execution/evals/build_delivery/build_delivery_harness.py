@@ -543,7 +543,15 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
     mp.setenv("APIS_USAGE_GATE", "off")
     mp.setenv("APIS_USAGE_PROBE", "off")
     mp.setenv("APIS_TIER_LEDGER_FILE", str(root / "tier-ledger.jsonl"))
-    mp.setenv("NEOTOMA_BASE_URL", "http://eval.invalid")
+    # A Codex child granted Neotoma tools runs in an isolated harness home and
+    # needs its role's own token and an https endpoint (placeholders here).
+    mp.setenv("NEOTOMA_BASE_URL", "https://eval.invalid")
+    mp.setenv("CICADA_NEOTOMA_TOKEN", "eval-cicada-own-token")
+    # A stand-in Codex login, so the isolated home never links the host's.
+    codex_login = root / "codex-login"
+    codex_login.mkdir(exist_ok=True)
+    (codex_login / "auth.json").write_text("{}")
+    mp.setenv("CODEX_HOME", str(codex_login))
     # Production allows no rewrite of a clone's github.com remote. The eval's only
     # one is the local bare repository that stands in for GitHub; it is named here
     # in code (never in the environment) for this process only.
@@ -571,6 +579,7 @@ def _install(mp, world: World, obs: dict, mutation: str, scenario: dict) -> None
     )
     loader = MagicMock()
     loader.load.return_value = definition
+    loader.render_policy_prompt.return_value = ""  # verified empty policy fixture
     mp.setattr(skill_runner, "AgentLoader", lambda *a, **k: loader)
 
     real = skill_runner.run_skill

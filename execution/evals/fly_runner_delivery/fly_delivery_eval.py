@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from execution.daemons.apis.fly_cleanup_test_support import cleanup_details
+
 HERE = Path(__file__).resolve().parent
 _REPO = HERE.parents[2]
 _RUNNER_DIR = _REPO / "deploy" / "fly-runner"
@@ -61,6 +63,7 @@ class Trace:
     secret_on_disk: bool = False
     output_text: str = ""
     work_left: list = field(default_factory=list)
+    cleanup: dict = field(default_factory=dict)
 
 
 def _genv(home: Path) -> dict:
@@ -181,11 +184,12 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     with contextlib.redirect_stdout(out):
         rc = run_job.main(job_dir, writer=lambda b, a, r: stored.setdefault("r", r) is not None,
                           runner=stand_in_cli, hard_exit=lambda code: None)
+    cleanup = cleanup_details(work_root)
     return Trace(
         rc=rc, record=stored.get("r"), cli_ran=bool(ran), remote_before=before,
         remote_after=_refs(remote, home), api_calls=calls,
         secret_on_disk=any(disk_hits), output_text=out.getvalue(),
-        work_left=sorted(os.listdir(work_root)) if work_root.exists() else [],
+        work_left=["<entry>"] if cleanup["leftovers"] else [], cleanup=cleanup,
     )
 
 
@@ -249,6 +253,6 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
         problems.append("the token or its header was found on disk")
     if any(not c["token_ok"] for c in trace.api_calls):
         problems.append("an API call did not use the job's token")
-    if trace.work_left:
-        problems.append("the work directory was left behind")
+    if trace.work_left or trace.cleanup.get("incomplete"):
+        problems.append("the work directory was left behind: " + json.dumps(trace.cleanup))
     return problems

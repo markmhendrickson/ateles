@@ -236,7 +236,8 @@ class InventoryHost:
 class CheckIsSatisfiableTest(unittest.TestCase):
     def test_two_runs_with_worktree_churn_between_them_both_match(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            host = InventoryHost(Path(directory))
+            # The factory may use a platform alias; selected inputs are not resolved.
+            host = InventoryHost(Path(directory).resolve())
             host.commit_inventory()
             first = host.package("run-1")
             self.assertEqual(host.check(first), (0, ""))
@@ -255,7 +256,7 @@ class CheckIsSatisfiableTest(unittest.TestCase):
     def test_a_real_rule_change_still_fails_the_check(self) -> None:
         """The exclusions must not blind the check to rule drift."""
         with tempfile.TemporaryDirectory() as directory:
-            host = InventoryHost(Path(directory))
+            host = InventoryHost(Path(directory).resolve())
             host.commit_inventory()
             _write(
                 host.home / ".codex" / "AGENTS.md",
@@ -271,7 +272,7 @@ class RepositoryDatesTest(unittest.TestCase):
 
     def test_git_sourced_dates_are_stable_across_repackaging(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            host = InventoryHost(Path(directory))
+            host = InventoryHost(Path(directory).resolve())
             packaged = [
                 host.package("run-1"),
                 host.package("run-2", run_epoch=LATER_DAY_EPOCH),
@@ -291,12 +292,12 @@ class RepositoryDatesTest(unittest.TestCase):
     def test_shallow_clone_records_no_date_rather_than_a_wrong_one(self) -> None:
         """A depth-1 clone would date every file to its head commit."""
         with tempfile.TemporaryDirectory() as directory:
-            host = InventoryHost(Path(directory))
+            host = InventoryHost(Path(directory).resolve())
             _git(host.source, "commit", "-q", "--allow-empty", "-m", "later",
                  when="2026-03-04T12:00:00+00:00")
-            shallow = Path(directory) / "shallow"
+            shallow = Path(directory).resolve() / "shallow"
             _git(
-                Path(directory),
+                Path(directory).resolve(),
                 "clone",
                 "-q",
                 "--depth",
@@ -304,7 +305,7 @@ class RepositoryDatesTest(unittest.TestCase):
                 f"file://{host.source}",
                 str(shallow),
             )
-            data = Path(directory) / "shallow-data"
+            data = Path(directory).resolve() / "shallow-data"
             inputs.package_inputs(shallow, data)
             inputs.validate_inputs(data)
             manifest = json.loads((data / inputs.MANIFEST).read_text())
@@ -318,7 +319,7 @@ class RepositoryDatesTest(unittest.TestCase):
 
     def test_malformed_recorded_date_is_rejected_at_the_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            host = InventoryHost(Path(directory))
+            host = InventoryHost(Path(directory).resolve())
             data = host.package("run")
             manifest_path = data / inputs.MANIFEST
             original = json.loads(manifest_path.read_text())
@@ -368,7 +369,7 @@ class ComparedSectionTest(unittest.TestCase):
             "ateles/CLAUDE.md", "CLAUDE.md", "L1", "Never use git stash."
         )
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             output = root / "docs" / "foundation" / "rule_inventory.md"
             _write(output, committed)
             argv = [
@@ -593,7 +594,7 @@ class CanonicalRootsRuleTest(unittest.TestCase):
 
     def test_primary_clone_directly_under_repos_is_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            host = InventoryHost(Path(directory))
+            host = InventoryHost(Path(directory).resolve())
             statements, store = self.read(host, host.canonical_root)
             self.assertTrue(store.read_ok, store.read_error)
             self.assertEqual((store.populated, store.statements), (1, len(statements)))
@@ -601,7 +602,7 @@ class CanonicalRootsRuleTest(unittest.TestCase):
 
     def test_roots_outside_the_definition_are_unread(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            host = InventoryHost(Path(directory))
+            host = InventoryHost(Path(directory).resolve())
             ateles = host.repos / "ateles"
             _git(ateles, "worktree", "add", "-q", str(host.repos / "ateles-linked"))
             nested = host.repos / "group" / "inner"

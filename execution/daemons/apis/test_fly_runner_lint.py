@@ -32,6 +32,9 @@ FILES = (
 _EMPTY_CALLS = {"dict", "list", "tuple", "set", "str", "frozenset"}
 
 ALLOWLIST: dict[str, str] = {
+    "execution/daemons/apis/fly_runner.py:FlyLedger._snapshot:raw.get('deliveries', {})":
+        'an older pre-delivery ledger has no bindings; present malformed bindings fail closed',
+
     'execution/daemons/apis/fly_runner.py:FlyExecutor._lease_for_cleanup:return None':
         'None is "no usable lease": the machine is left alone and the reservation kept',
     "deploy/fly-runner/run_job.py:run_cli:exc.stderr or b''":
@@ -128,8 +131,6 @@ ALLOWLIST: dict[str, str] = {
         "None is 'unknown', which _reapable never treats as stale",
     'execution/daemons/apis/fly_runner.py:_parse_ts:return None':
         'an unreadable time: the reaper then charges the whole window',
-    "execution/daemons/apis/fly_runner.py:build_job:jwk.get('sub') or ''":
-        "a missing subject cannot equal the role's and is refused",
     "execution/daemons/apis/fly_runner.py:build_job:os.environ.get('NEOTOMA_BASE_URL', '')":
         'unset is refused straight after (must be https)',
     "execution/daemons/apis/fly_runner.py:build_job:os.environ.get('NEOTOMA_BEARER_TOKEN', '')":

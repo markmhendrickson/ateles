@@ -692,7 +692,7 @@ channel's two mechanisms give that ruling. Where the adapters' own code lives is
 The steps that take these operations are `workflows.md`'s; the gate's decision
 function and the checkpoint's protocol are `gates_and_workflows.md`'s; whom a checkpoint may await, and
 whether its raiser may resolve it, are `authority_model.md`'s — the second ruled 2026-09-06: the raiser does
-not resolve, the operator's self-resolution excepted and marked (decision 47, `authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`). Which rows have a built path is
+not resolve, the operator's self-resolution excepted and marked (decision 47, `authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked`). Which rows have a built path is
 `status.md`'s — and every row marked **unhandled** above has one there. Two decisions this document opened
 are ruled in the two sections that follow.
 

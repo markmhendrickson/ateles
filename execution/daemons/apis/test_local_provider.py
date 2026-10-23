@@ -537,12 +537,12 @@ def test_tiered_mechanical_work_still_runs_local(tmp_path, monkeypatch):
     assert done and done[0]["resolved_tier"].tier == "mechanical"
 
 
-def test_local_dispatch_uses_the_lean_prompt_not_agent_def_or_policy(tmp_path, monkeypatch):
+def test_local_dispatch_keeps_the_lean_prompt_when_no_policies_bind(tmp_path, monkeypatch):
     """The regression this whole change exists to fix: a claude-local dispatch
     must carry the tiny lean prompt (role + work-class hard rules) as its
     --system-prompt, never the agent_definition.prompt_markdown ("You are
-    Cicada.", from _agent_def()) or a live-policy rendering. A frontier
-    dispatch is untouched — this only asserts the local branch."""
+    Cicada.", from _agent_def()). A verified empty policy corpus leaves that
+    lean prompt intact; governing policies are covered separately below."""
     _write_config(tmp_path)
     spawns, events = _Spawns(local_reply=(0, b"rebased", b"")), []
     result = _run(spawns, events, work_class="rebase")
@@ -554,6 +554,18 @@ def test_local_dispatch_uses_the_lean_prompt_not_agent_def_or_policy(tmp_path, m
     assert "You are Cicada." not in system_prompt  # agent_def.prompt_markdown
     assert "Active agent policies" not in system_prompt  # policy_prompt
     assert len(system_prompt) < 2000
+
+
+def test_local_dispatch_carries_governing_policies_in_its_actual_prompt(tmp_path, monkeypatch):
+    _write_config(tmp_path)
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda *a, **kw: "POLICY CANARY")
+    spawns, events = _Spawns(local_reply=(0, b"rebased", b"")), []
+    result = _run(spawns, events, work_class="rebase")
+    assert result.ok and result.provider == LOCAL
+    (cmd, _), = spawns.calls
+    system_prompt = cmd[cmd.index("--system-prompt") + 1]
+    assert local_provider.build_lean_prompt("rebase") in system_prompt
+    assert "POLICY CANARY" in system_prompt
 
 
 def test_local_dispatch_fails_over_on_wrong_worktree_hygiene_answer(tmp_path, fallback_bound):
@@ -582,15 +594,11 @@ def test_local_dispatch_accepts_correct_worktree_hygiene_answer(tmp_path):
     assert result.ok and result.provider == LOCAL
 
 
-def test_local_dispatch_with_stub_agent_def_is_reported_degraded(tmp_path, monkeypatch):
-    """A local dispatch for a role whose agent_definition failed to load
-    (stub: empty prompt_markdown, synthesized aauth_sub) must be treated as
-    DEGRADED exactly like a frontier dispatch would be — not silently treated
-    as a healthy load just because the lean prompt never reads
-    prompt_markdown in the first place. Regression: `degraded` was briefly
-    hardcoded False for every claude-local run, which would have (a) skipped
-    the undefined-role alert path and (b) let a stub's synthesized aauth_sub
-    receive AAuth signing-key injection."""
+def test_local_dispatch_with_stub_agent_def_is_refused(tmp_path, monkeypatch):
+    """Even the lean local prompt needs admitted canonical role authority.
+
+    A present signing key must never reach a child for an undefined role.
+    """
     _write_config(tmp_path)
     monkeypatch.setenv("ATELES_PRIVATE_KEYS_DIR", str(tmp_path / "keys"))
     # A JWK IS present at the expected path — if `degraded` were wrongly
@@ -618,16 +626,9 @@ def test_local_dispatch_with_stub_agent_def_is_reported_degraded(tmp_path, monke
             )
         )
 
-    assert result.ok and result.provider == LOCAL
-    (_, env), = spawns.calls
-    assert "NEOTOMA_AAUTH_PRIVATE_JWK_PATH" not in env, (
-        "a stub agent_def must not receive AAuth signing-key injection on the local path"
-    )
-    degraded_events = [e for e in events if e.get("output_summary") == "degraded_generic_subagent"]
-    assert degraded_events, (
-        "a stub agent_def on the local path must still write the degraded_generic_subagent "
-        "harness_event, same as the frontier path"
-    )
+    assert not result.ok and result.definition_unavailable
+    assert spawns.calls == [], "a stub must not receive a child or signing-key injection"
+    assert events == [], "refusal must not masquerade as degraded execution"
 
 
 def test_local_failure_falls_over_to_frontier_and_records_why(tmp_path, fallback_bound):
@@ -1034,3 +1035,12 @@ def test_rebase_hard_rules_allow_a_merge_commit_for_a_pushed_branch():
     rules = local_provider.lean_hard_rules("rebase")
     assert "git merge --no-ff" in rules and "already pushed" in rules
     assert "git rebase <base>" in rules  # still the default
+
+
+@pytest.fixture(autouse=True)
+def _verified_empty_policy_admission(monkeypatch):
+    """Keep unrelated adapter tests off live policy reads; real failure/absence
+    behavior is exercised by test_policy_authority_dispatch.py.
+    """
+    import skill_runner
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda *a, **kw: "")

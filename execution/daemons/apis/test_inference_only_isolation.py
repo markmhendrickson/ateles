@@ -190,3 +190,12 @@ def test_ordinary_runs_are_unchanged(tmp_path, canaries):
     assert result.ok
     assert "--tools" not in cap["cmd"]
     assert "--allowed-tools" in cap["cmd"]
+
+
+@pytest.fixture(autouse=True)
+def _verified_empty_policy_admission(monkeypatch):
+    """Keep unrelated adapter tests off live policy reads; real failure/absence
+    behavior is exercised by test_policy_authority_dispatch.py.
+    """
+    import skill_runner
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda *a, **kw: "")

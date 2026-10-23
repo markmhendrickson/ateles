@@ -41,7 +41,12 @@ if str(_REPO_ROOT) not in sys.path:
 
 from lib.daemon_runtime import (  # noqa: E402
     AAuthSigner,
+    AgentDefinition,
+    AgentDefinitionUnavailable,
+    AgentPolicyUnavailable,
     AgentLoader,
+    admit_agent_definition,
+    load_agent_definition_or_exit,
     enforce_status_or_exit,
     NeotomaEvent,
     SSEClient,
@@ -284,17 +289,42 @@ async def _orchestrate_workflow_for(event) -> None:
             f"[{DAEMON_NAME}] dispatch gate {gate.gate_name} → {gate.owner_agent} "
             f"on {event.entity_id}"
         )
+        # Pin the exact agent_definition version at dispatch time (ateles#22). A
+        # definition that cannot be LOADED right now (a timeout, a server error)
+        # refuses this dispatch: the gate stays ready and is dispatched again on a
+        # later pass. A local SKILL.md cannot authorize an unregistered role;
+        # authoritative absence refuses this dispatch too.
+        try:
+            gate_agent_def = await asyncio.to_thread(
+                AgentLoader(gate.owner_agent).load
+            )
+            gate_agent_def = admit_agent_definition(gate_agent_def, gate.owner_agent)
+            # Pin governing policy before recording the dispatch too. A policy
+            # outage must leave this gate ready for retry, not recorded as a
+            # child that never launched.
+            gate_policy_prompt = await asyncio.to_thread(
+                AgentLoader(gate.owner_agent).render_policy_prompt,
+                agent_definition_id=gate_agent_def.entity_id,
+            )
+            if not isinstance(gate_policy_prompt, str):
+                raise AgentPolicyUnavailable(gate.owner_agent, "render", "bad_response")
+        except (AgentDefinitionUnavailable, AgentPolicyUnavailable) as exc:
+            log.error(
+                f"[{DAEMON_NAME}] gate {gate.gate_name} → {gate.owner_agent} "
+                f"NOT dispatched on {event.entity_id}: {exc}"
+            )
+            continue
         state[gate.gate_name].status = "dispatched"
-        # Pin the exact agent_definition version at dispatch time (ateles#22).
-        gate_agent_def = AgentLoader(gate.owner_agent).load()
         try:
             await participation.record_dispatched(
                 work_entity_id=event.entity_id,
                 workflow_definition_id=wf.entity_id,
                 gate_name=gate.gate_name,
                 agent=gate.owner_agent,
-                agent_definition_ref=gate_agent_def.entity_id,
-                agent_definition_observation_id=gate_agent_def.last_observation_id,
+                agent_definition_ref=gate_agent_def.entity_id if gate_agent_def else "",
+                agent_definition_observation_id=(
+                    gate_agent_def.last_observation_id if gate_agent_def else ""
+                ),
             )
         except participation.ParticipationWriteFailed as exc:
             # The dispatch bookkeeping failed to land. Spawn anyway — the agent
@@ -304,11 +334,8 @@ async def _orchestrate_workflow_for(event) -> None:
                 f"[{DAEMON_NAME}] failed to record dispatch of gate "
                 f"{gate.gate_name} on {event.entity_id}: {exc}"
             )
-        # Spawn the agent via claude CLI. The `--skill` flag does not exist;
-        # the working invocation is `--append-system-prompt` with the SKILL.md
-        # content. Code-writing agents need `--dangerously-skip-permissions`
-        # to avoid interactive prompts under launchd (per Tier 1 smoke test
-        # findings, 2026-05-25).
+        # Launch the same canonical version pinned above. Local skill text is
+        # supplementary context, never execution authority.
         job = _activity.started(
             f"dispatching gate {gate.gate_name} → {gate.owner_agent} on {event.entity_id}"
         )
@@ -318,6 +345,8 @@ async def _orchestrate_workflow_for(event) -> None:
                 work_entity_id=event.entity_id,
                 gate_name=gate.gate_name,
                 snapshot=snap,
+                agent_definition=gate_agent_def,
+                policy_prompt=gate_policy_prompt,
             )
             job.finished(
                 f"spawned {gate.owner_agent} for {gate.gate_name} on {event.entity_id}"
@@ -482,32 +511,44 @@ async def _label_gate_allows(event, snap: dict) -> bool:
     return False
 
 
-# Agents that need write access to the local filesystem or to call MCP servers
-# that prompt for permission. Anthus runs under launchd with no TTY, so these
-# must be invoked with --dangerously-skip-permissions.
-_AGENTS_NEEDING_SKIP_PERMISSIONS = frozenset(
-    {"cicada", "vanellus", "apus", "formica", "neotoma-agent"}
-)
-
-
 async def _spawn_agent(
     owner_agent: str,
     work_entity_id: str,
     gate_name: str,
     snapshot: dict,
+    agent_definition: AgentDefinition | None = None,
+    policy_prompt: str | None = None,
 ) -> None:
     """
-    Spawn an agent via `claude --print --append-system-prompt` with the agent's
-    SKILL.md content as the system prompt. Runs in the background; output is
-    logged but not awaited synchronously — the agent posts its artifact to the
-    GitHub issue/PR, and Anthus picks it up on the next SSE event.
+    Spawn an admitted canonical role with its declared tool surface. Runs in
+    the background; output is logged but not awaited synchronously. The agent
+    posts its artifact to the GitHub issue/PR, and Anthus picks it up on the next
+    SSE event.
 
-    The chosen invocation pattern matches the operator-driven Tier 1 workflow
-    so that operator-run and Anthus-run dispatches produce identical artifacts.
+    The canonical definition supplies authority; a local skill may only
+    supplement the role instructions.
     """
     import os
     import shutil
     from pathlib import Path
+
+    # The direct entry is guarded too; the orchestrator passes its already
+    # pinned canonical read so launch and participation cite one version.
+    if agent_definition is None:
+        agent_definition = await asyncio.to_thread(AgentLoader(owner_agent).load)
+    agent_definition = admit_agent_definition(agent_definition, owner_agent)
+    tools = agent_definition.tools
+
+    # A direct entry must satisfy the same live-policy admission as workflow
+    # dispatch. The orchestrator passes its pinned read from before its
+    # participation write; an indeterminate read raises before provider effects.
+    if policy_prompt is None:
+        policy_prompt = await asyncio.to_thread(
+            AgentLoader(owner_agent).render_policy_prompt,
+            agent_definition_id=agent_definition.entity_id,
+        )
+    if not isinstance(policy_prompt, str):
+        raise AgentPolicyUnavailable(owner_agent, "render", "bad_response")
 
     claude_bin = shutil.which("claude")
     if not claude_bin:
@@ -524,27 +565,15 @@ async def _spawn_agent(
         / owner_agent
         / "SKILL.md"
     )
-    if not skill_path.exists():
-        log.error(
-            f"[{DAEMON_NAME}] SKILL.md not found for {owner_agent} at {skill_path}"
-        )
-        return
+    skill_md = agent_definition.prompt_markdown
+    if skill_path.exists():
+        try:
+            skill_md += "\n\n" + skill_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            log.warning(f"[{DAEMON_NAME}] could not read skill supplement: {exc}")
 
-    try:
-        skill_md = skill_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        log.error(f"[{DAEMON_NAME}] failed to read {skill_path}: {exc}")
-        return
-
-    # Inject this agent's learned, agent-local policies (active + provisional)
-    # into the system prompt so generalized behaviour is actually applied at
-    # dispatch — not merely available to consult.
-    try:
-        policy_block = AgentLoader(owner_agent).render_policy_prompt()
-        if policy_block:
-            skill_md = skill_md + policy_block
-    except Exception as exc:  # noqa: BLE001
-        log.warning(f"[{DAEMON_NAME}] could not load policies for {owner_agent}: {exc}")
+    if policy_prompt:
+        skill_md += policy_prompt
 
     title = snapshot.get("title", "")
     body = snapshot.get("body", "")
@@ -577,14 +606,25 @@ async def _spawn_agent(
         "--append-system-prompt",
         skill_md,
     ]
-    if owner_agent in _AGENTS_NEEDING_SKIP_PERMISSIONS:
-        args.append("--dangerously-skip-permissions")
+    # --allowed-tools only pre-approves permission checks; it does not remove
+    # intrinsically available read tools. --tools also bounds the built-in
+    # surface. dontAsk denies unapproved MCP/write calls without a TTY, and
+    # disabling ambient settings prevents saved user/project allow rules from
+    # broadening this canonical grant. An explicit registered * stays broad.
+    builtin_tools = (
+        "default" if "*" in tools else ",".join(dict.fromkeys(
+            tool.split("(", 1)[0] for tool in tools if not tool.startswith("mcp__")
+        ))
+    )
+    args += [
+        "--tools", builtin_tools,
+        "--allowed-tools", ",".join(tools),
+        "--permission-mode", "dontAsk",
+        "--setting-sources", "",
+    ]
     args.append(prompt)
 
-    log.info(
-        f"[{DAEMON_NAME}] spawning {owner_agent} for {work_entity_id} "
-        f"(skip_perms={owner_agent in _AGENTS_NEEDING_SKIP_PERMISSIONS})"
-    )
+    log.info(f"[{DAEMON_NAME}] spawning admitted {owner_agent} for {work_entity_id}")
 
     # Fire-and-forget: agent runs as background subprocess. Its artifact is
     # posted to the GitHub issue/PR; Anthus picks up satisfaction on the next
@@ -776,7 +816,7 @@ async def main() -> None:
     log.info(f"[{DAEMON_NAME}] Starting up...")
 
     # 1. Load agent_definition from Neotoma
-    agent_def = AgentLoader(DAEMON_NAME).load()
+    agent_def = load_agent_definition_or_exit(DAEMON_NAME)
     log.info(
         f"[{DAEMON_NAME}] agent_definition: status={agent_def.status} "
         f"grant={agent_def.agent_grant} sub={agent_def.aauth_sub}"

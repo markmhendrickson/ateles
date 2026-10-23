@@ -16,9 +16,10 @@ SKILL.md, and (when the definition specifies a restricted tool_allowlist) passes
 Stage 2 (ateles#94): writes a harness_event to Neotoma at dispatch start,
 completion, and failure.
 
-Stage 5 (ateles#94): when no agent_definition loads (empty prompt_markdown),
-emits a notifier WARN and a harness_event with the degraded_generic_subagent
-marker so degraded dispatches are observable. Dispatch still proceeds.
+Canonical execution admission refuses absent, malformed or inactive role
+instructions before child construction. Historical prompt-formatting helpers
+still expose a degraded marker for introspection; that marker grants no
+execution authority.
 
 ateles#257: on a FAILED dispatch the complete child stdout AND stderr are
 persisted to a per-dispatch file under ``~/Library/Logs/ateles/dispatch-failures/``
@@ -35,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -63,7 +65,10 @@ from lib.credential_scrub import (  # noqa: E402
     AGENT_CHILD_MARKER_ENV,
     is_generation_credential,
 )
-from lib.daemon_runtime import AgentDefinition, AgentLoader  # noqa: E402
+from lib.daemon_runtime import (  # noqa: E402
+    AgentDefinition, AgentDefinitionUnavailable, AgentPolicyUnavailable,
+    AgentLoader, admit_agent_definition,
+)
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 from foundation import (  # noqa: E402
     SWARM_FOUNDATION_CONTRACT,  # noqa: F401 — re-exported beside the sibling contracts
@@ -246,7 +251,42 @@ CODEX_GATE_REQUIRED_READ_TOOLS: tuple[str, ...] = tuple(
 CODEX_GATE_DENIED_TOOLS: tuple[str, ...] = tuple(
     tool.removeprefix(CODEX_NEOTOMA_TOOL_PREFIX) for tool in GATE_OWNER_DENIED_TOOLS
 )
+# Explicit, semantically read-only tools, never a prefix or a server wildcard.
+# Codex's headless approval policy cannot answer an MCP prompt. Approve only
+# these reads when the existing role allowlist already exposes them; all
+# other tools retain prompt approval, including granted writes.
+CODEX_PREAPPROVED_READ_TOOLS = frozenset({
+    "get_session_identity", "retrieve_entities", "retrieve_entity_by_identifier",
+    "retrieve_entity_snapshot", "retrieve_related_entities",
+})
 GATE_OWNER_DENY_CAPABLE_PROVIDERS: tuple[str, ...] = ("claude", "codex")
+
+
+def _codex_read_approvals(enabled: tuple[str, ...] | list[str] | None) -> dict:
+    reads = CODEX_PREAPPROVED_READ_TOOLS
+    if enabled is not None:
+        reads = reads.intersection(enabled)
+    return {tool: {"approval_mode": "approve"} for tool in sorted(reads)}
+
+
+def _append_codex_read_approvals(lines: list[str], server: str,
+                               enabled: tuple[str, ...] | None) -> None:
+    lines.append('default_tools_approval_mode = "prompt"')
+    for tool in _codex_read_approvals(enabled):
+        lines.extend(["", f"[mcp_servers.{server}.tools.{tool}]",
+                      'approval_mode = "approve"'])
+
+
+def _codex_read_approval_error(server: dict) -> str | None:
+    if server.get("default_tools_approval_mode") != "prompt":
+        return "Codex MCP default approval must remain prompt"
+    enabled = server.get("enabled_tools")
+    if enabled is not None and (not isinstance(enabled, list)
+                               or not all(isinstance(t, str) for t in enabled)):
+        return "Codex MCP approval allowlist is not a string list"
+    if server.get("tools", {}) != _codex_read_approvals(enabled):
+        return "Codex MCP approval must preapprove exactly the granted known reads"
+    return None
 
 
 @dataclass(frozen=True)
@@ -296,6 +336,7 @@ def _codex_gate_config_text(base_url: str, agent_tools: list[str]) -> str:
     if enabled_tools is not None:
         lines.append(f"enabled_tools = {json.dumps(list(enabled_tools))}")
     lines.append(f"disabled_tools = {json.dumps(list(CODEX_GATE_DENIED_TOOLS))}")
+    _append_codex_read_approvals(lines, CODEX_NEOTOMA_SERVER_ID, enabled_tools)
     return "\n".join(lines) + "\n"
 
 
@@ -347,7 +388,7 @@ def _codex_gate_config_contract(config_path: Path, base_url: str) -> str | None:
                 "Codex gate-owner enabled_tools omits required reads: "
                 + ", ".join(sorted(missing_reads))
             )
-    return None
+    return _codex_read_approval_error(server)
 
 
 def _prepare_codex_gate_owner_config(
@@ -415,6 +456,320 @@ def _prepare_codex_gate_owner_config(
         shutil.rmtree(home, ignore_errors=True)
         raise
 
+
+# ── Isolated harness home for local Codex and Cursor dispatches ──────────────
+# A swarm child must not inherit the operator's personal harness
+# configuration: ~/.codex/config.toml and ~/.cursor/mcp.json declare MCP
+# servers for personal tools, a dev instance and a client's hosted instance.
+# Every local Codex and Cursor dispatch therefore runs with a generated,
+# per-dispatch home whose MCP servers are exactly the ones the role's tool
+# allowlist names: by default only the production Neotoma, reached over its
+# remote MCP endpoint with the ROLE's own token (never the operator's bearer).
+# Remote HTTP MCP is opened by the CLI itself, so no local stdio shim has to
+# start inside the dispatch sandbox. Only the CLI's own login capability is
+# carried over (Codex: a symlink to auth.json; Cursor: a link to the macOS
+# login keychain directory), plus Codex's non-secret model settings.
+#
+# Every place each CLI reads MCP servers from was checked against the
+# installed CLIs (see the PR). The home and the guards below cover each:
+# Codex: CODEX_HOME/config.toml (generated), project .codex/config.toml
+# layers (read only for a TRUSTED project; the generated config trusts none),
+# -c/--config overrides (refused), --profile (refused). Cursor: HOME's
+# .cursor/mcp.json and local plugins (generated home, no plugins), and the
+# project root's .cursor/mcp.json, where the project root is the git root of
+# --workspace or --workspace itself (a dispatch whose project root holds any
+# such file is refused, whatever it contains).
+
+HARNESS_ISOLATION_REFUSED = "harness isolation refused"
+# The child-only environment variable the isolated Codex config reads the
+# role's own Neotoma bearer from (the value never enters argv or a file).
+ROLE_NEOTOMA_BEARER_ENV = "ATELES_ROLE_NEOTOMA_TOKEN"
+# Non-secret Codex settings carried from the operator's config so the
+# default model behaves as before. Nothing else is copied.
+CODEX_CARRIED_SETTINGS = ("model", "model_reasoning_effort", "service_tier")
+ISOLATED_PROVIDERS = ("codex", "cursor")
+# Codex flags that would bring configuration from outside the isolated home.
+_CODEX_CONFIG_FLAGS = ("-c", "--config", "-p", "--profile")
+
+
+class IsolationRefusal(RuntimeError):
+    """The isolated home cannot be built: a CONFIGURATION REPAIR is needed
+    (not a wait). ``setting`` names what to fix; never a value."""
+
+    def __init__(self, message: str, *, setting: str):
+        super().__init__(message)
+        self.setting = setting
+
+
+@dataclass(frozen=True)
+class IsolatedHarnessHome:
+    """A generated, verified harness home for one local dispatch."""
+
+    home: Path
+    config_path: Path
+    servers: tuple[str, ...]
+    env: dict[str, str]
+
+
+def allowed_mcp_servers(agent_tools: list[str]) -> dict[str, tuple[str, ...] | None]:
+    """The MCP servers a role's tool allowlist grants: ``{server: enabled tool
+    names, or None for the server's whole tool set}``. Only Neotoma can be
+    provided; a role with no Neotoma tools gets no server at all."""
+    if "*" in agent_tools or f"{CODEX_NEOTOMA_TOOL_PREFIX}*" in agent_tools:
+        return {CODEX_NEOTOMA_SERVER_ID: None}
+    tools = tuple(
+        t.removeprefix(CODEX_NEOTOMA_TOOL_PREFIX)
+        for t in agent_tools if t.startswith(CODEX_NEOTOMA_TOOL_PREFIX)
+    )
+    return {CODEX_NEOTOMA_SERVER_ID: tools} if tools else {}
+
+
+def _role_neotoma_endpoint(role: str) -> tuple[str, str]:
+    """``(mcp url, the role's own token)`` for a role granted Neotoma tools.
+
+    Neotoma is a hard dependency for such a role (failure_posture): a missing
+    own token or an invalid endpoint refuses the launch (``IsolationRefusal``)
+    rather than running without memory. The shared bearer is never used."""
+    name = neotoma_token_env_name(role)
+    token = os.environ.get(name, "").strip()
+    if not token:
+        raise IsolationRefusal(
+            f"role {role!r} is granted Neotoma tools but has no Neotoma token of its own "
+            f"({name}); the operator's bearer is never used", setting=name)
+    base = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
+    if not _valid_https_endpoint(base):
+        raise IsolationRefusal(
+            f"role {role!r} is granted Neotoma tools but NEOTOMA_BASE_URL is not a valid "
+            "https endpoint", setting="NEOTOMA_BASE_URL")
+    return f"{base}/mcp", token
+
+
+_HOST_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_ENDPOINT_AUTHORITY = re.compile(
+    rf"(?:\[(?P<ipv6>[0-9A-Fa-f:.]+)\]|(?P<host>{_HOST_LABEL}(?:\.{_HOST_LABEL})*\.?))"
+    r"(?::(?P<port>[0-9]{1,5}))?"
+)
+
+
+def _valid_https_endpoint(base: str) -> bool:
+    """True only for an ``https://host[:port][/path]`` URL whose authority and
+    port are both well formed. Every parse failure is a False, never an
+    exception, so a malformed value always reaches the caller as a refusal."""
+    from urllib.parse import urlsplit
+
+    if not base or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in base):
+        return False
+    try:
+        parts = urlsplit(base)
+        host = parts.hostname
+        port = parts.port  # raises ValueError for a non-numeric or out-of-range port
+    except ValueError:
+        return False
+    if parts.scheme != "https" or not host or parts.query or parts.fragment:
+        return False
+    match = _ENDPOINT_AUTHORITY.fullmatch(parts.netloc)
+    if match is None:
+        return False
+    if match["ipv6"] is not None:
+        try:
+            ipaddress.IPv6Address(match["ipv6"])
+        except ValueError:
+            return False
+    if match["port"] is not None and not (port is not None and 1 <= port <= 65535):
+        return False
+    return True
+
+
+def _codex_carried_settings() -> dict[str, str]:
+    source = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "config.toml"
+    try:
+        with open(source, encoding="utf-8") as fh:
+            parsed = tomllib.loads(fh.read())
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    return {k: parsed[k] for k in CODEX_CARRIED_SETTINGS
+            if k in parsed and isinstance(parsed[k], str)}  # fmt: skip
+
+
+def _isolated_codex_config_text(servers: dict[str, tuple[str, ...] | None], url: str) -> str:
+    lines = ['cli_auth_credentials_store = "file"']
+    for key, value in _codex_carried_settings().items():
+        lines.append(f"{key} = {json.dumps(value)}")
+    for server, enabled in servers.items():
+        lines += ["", f"[mcp_servers.{server}]", f"url = {json.dumps(url)}",
+                  f"bearer_token_env_var = {json.dumps(ROLE_NEOTOMA_BEARER_ENV)}",
+                  "required = true"]  # fmt: skip
+        if enabled is not None:
+            lines.append(f"enabled_tools = {json.dumps(list(enabled))}")
+        _append_codex_read_approvals(lines, server, enabled)
+    return "\n".join(lines) + "\n"
+
+
+def effective_mcp_servers(provider: str, config_path: Path) -> set[str]:
+    """The MCP server ids a generated harness config declares (read back)."""
+    with open(config_path, encoding="utf-8") as fh:
+        text = fh.read()
+    if provider == "codex":
+        parsed = tomllib.loads(text)
+        servers = parsed["mcp_servers"] if "mcp_servers" in parsed else {}
+        for key in ("projects", "profiles", "profile"):
+            if key in parsed:  # trust or a profile would admit other config
+                raise RuntimeError(f"the generated Codex config must not declare {key!r}")
+    else:
+        parsed = json.loads(text)
+        servers = parsed["mcpServers"] if "mcpServers" in parsed else {}
+    if not isinstance(servers, dict):
+        raise RuntimeError("the generated MCP server table is not a table")
+    if provider == "codex":
+        for server in servers.values():
+            error = _codex_read_approval_error(server)
+            if error:
+                raise RuntimeError(error)
+    return set(servers)
+
+
+def cursor_project_mcp_files(workspace: str) -> list[str]:
+    """Every project-level MCP file the Cursor CLI could load for
+    ``--workspace``: ``.cursor/mcp.json`` at the project root, which Cursor
+    takes as the git root of the workspace, else the workspace itself. To be
+    sure of the same root, every candidate is checked: the workspace, its
+    ``git rev-parse`` top level and main worktree, and its nearest ancestor
+    holding a ``.git`` entry. Presence alone counts (a link or any content)."""
+    root = Path(workspace).resolve()
+    candidates = {root}
+    for args in (["rev-parse", "--show-toplevel"], ["rev-parse", "--git-common-dir"]):
+        try:
+            out = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                                 text=True, timeout=10, check=False)  # fmt: skip
+        except (OSError, subprocess.SubprocessError):
+            continue
+        value = out.stdout.strip()
+        if out.returncode == 0 and value:
+            path = Path(value) if os.path.isabs(value) else root / value
+            candidates.add(path.resolve().parent if args[1] == "--git-common-dir"
+                           else path.resolve())  # fmt: skip
+    for parent in (root, *root.parents):
+        if os.path.lexists(parent / ".git"):
+            candidates.add(parent)
+            break
+    return sorted(str(c / ".cursor" / "mcp.json") for c in candidates
+                  if os.path.lexists(c / ".cursor" / "mcp.json"))  # fmt: skip
+
+
+def resolve_dispatch_workspace(path: str) -> str:
+    """The one absolute, symlink-resolved workspace path a dispatch uses for
+    its guard, its child's cwd and its CLI workspace flag (the same
+    resolution ``cursor_project_mcp_files`` applies to the roots it walks)."""
+    return str(Path(path).resolve())
+
+
+def launch_workspace_mismatch(provider: str, cmd: list[str], workspace: str) -> str:
+    """Why the workspace the CLI will be told differs from *workspace* (the one
+    the guard checks), or ``""`` when they are the same absolute path."""
+    flag = {"cursor": "--workspace", "codex": "--cd"}.get(provider)
+    if flag is None or flag not in cmd:
+        return ""
+    i = cmd.index(flag)
+    value = cmd[i + 1] if i + 1 < len(cmd) else ""
+    if not os.path.isabs(value) or value != workspace:
+        return (f"the {provider} workspace flag does not name the checked workspace; "
+                "the launch is refused")  # fmt: skip
+    return ""
+
+
+def codex_config_overrides(cmd: list[str]) -> list[str]:
+    """Codex flags in *cmd* that would bring MCP servers, trust or a profile
+    from outside the isolated home (``-c mcp_servers...``, ``--profile``)."""
+    found = []
+    for i, arg in enumerate(cmd):
+        flag, _, inline = arg.partition("=")
+        if flag in ("-p", "--profile"):
+            found.append(flag)
+        elif flag in ("-c", "--config"):
+            value = inline or (cmd[i + 1] if i + 1 < len(cmd) else "")
+            if value.split("=", 1)[0].strip().split(".", 1)[0] in (
+                    "mcp_servers", "projects", "profiles", "profile"):  # fmt: skip
+                found.append(f"{flag} {value.split('=', 1)[0].strip()}")
+    return found
+
+
+def prepare_isolated_harness_home(provider: str, *, role: str, agent_tools: list[str],
+                                  cwd: str | None,
+                                  env_extra: dict[str, str] | None) -> IsolatedHarnessHome:  # fmt: skip
+    """Generate and verify a per-dispatch harness home for *provider*.
+
+    Raises ``IsolationRefusal`` (a configuration repair) or ``RuntimeError``;
+    either way nothing is launched. ``cwd`` is the Cursor workspace."""
+    granted = allowed_mcp_servers(agent_tools)
+    endpoint = _role_neotoma_endpoint(role) if granted else None
+    other = sorted({t.split("__")[1] for t in agent_tools
+                    if t.startswith("mcp__") and not t.startswith(CODEX_NEOTOMA_TOOL_PREFIX)
+                    and t.count("__") >= 2})  # fmt: skip
+    if other:
+        log.warning(f"[apis] {provider} child for {role!r}: MCP servers {other} in the "
+                    "allowlist are not provided to an isolated swarm child")  # fmt: skip
+    if provider == "cursor":
+        found = cursor_project_mcp_files(cwd or os.getcwd())
+        if found:
+            raise IsolationRefusal(
+                "the dispatch's workspace has its own Cursor MCP configuration at its project "
+                "root, which would add servers to an isolated child",
+                setting="the workspace project's .cursor/mcp.json")
+    tmp_value = (env_extra or {}).get("TMPDIR", "").strip()
+    tmp_parent = Path(tmp_value) if tmp_value else None
+    if tmp_parent is not None:
+        tmp_parent.mkdir(parents=True, exist_ok=True)
+    home = Path(tempfile.mkdtemp(prefix=f"apis_{provider}_home_",
+                                 dir=str(tmp_parent) if tmp_parent else None))  # fmt: skip
+    try:
+        os.chmod(home, 0o700)
+        env: dict[str, str] = {}
+        if provider == "codex":
+            auth_source = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "auth.json"
+            if not auth_source.is_file():
+                raise IsolationRefusal("the Codex subscription login is unavailable",
+                                       setting="Codex login (CODEX_HOME/auth.json)")  # fmt: skip
+            (home / "auth.json").symlink_to(auth_source.resolve(strict=True))
+            config_path = home / "config.toml"
+            with open(config_path, "w", encoding="utf-8") as fh:
+                fh.write(_isolated_codex_config_text(granted, endpoint[0] if endpoint else ""))
+            env["CODEX_HOME"] = str(home)
+        else:
+            cursor_dir = home / ".cursor"
+            cursor_dir.mkdir(mode=0o700)
+            config_path = cursor_dir / "mcp.json"
+            servers = {
+                server: {"url": endpoint[0], "headers": {"Authorization": f"Bearer {endpoint[1]}"}}
+                for server in granted
+            } if endpoint else {}  # fmt: skip
+            fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"mcpServers": servers}, fh)
+            keychains = Path.home() / "Library" / "Keychains"
+            if keychains.is_dir():
+                # Cursor keeps its login in the macOS login keychain, found
+                # under HOME: link that directory, nothing else.
+                (home / "Library").mkdir(mode=0o700)
+                (home / "Library" / "Keychains").symlink_to(keychains)
+            gitconfig = Path.home() / ".gitconfig"
+            if gitconfig.is_file():
+                env["GIT_CONFIG_GLOBAL"] = str(gitconfig)  # commits keep their identity
+            env["HOME"] = str(home)
+            env["CURSOR_CONFIG_DIR"] = str(cursor_dir)
+            if os.path.lexists(cursor_dir / "plugins"):
+                raise RuntimeError("the isolated Cursor home must hold no plugins")
+        os.chmod(config_path, 0o600)
+        declared = effective_mcp_servers(provider, config_path)
+        if declared != set(granted):
+            raise RuntimeError(f"the generated {provider} config declares {sorted(declared)}, "
+                               f"not exactly {sorted(granted)}")  # fmt: skip
+        if provider == "codex" and endpoint:
+            env[ROLE_NEOTOMA_BEARER_ENV] = endpoint[1]
+        return IsolatedHarnessHome(home=home, config_path=config_path,
+                                   servers=tuple(sorted(declared)), env=env)  # fmt: skip
+    except Exception:
+        shutil.rmtree(home, ignore_errors=True)
+        raise
 
 # ── Per-agent Neotoma credential (ateles#795) ─────────────────────────────────
 # A lens that owns a pre-impl gate is INSTRUCTED to record its own verdict by
@@ -559,21 +914,83 @@ def _notify_dropped_allowlist_rules(
 _agent_def_cache: dict[str, AgentDefinition] = {}
 
 
-def _load_agent_def(role: str) -> AgentDefinition:
-    """Load (and cache) an AgentDefinition for the given role name."""
-    if role not in _agent_def_cache:
-        _agent_def_cache[role] = AgentLoader(role).load()
-    return _agent_def_cache[role]
+def _load_agent_def(role: str, *, fresh: bool = False) -> AgentDefinition:
+    """Load (and cache) an AgentDefinition for the given role name.
+
+    Raises ``AgentDefinitionUnavailable`` when the definition cannot be loaded
+    (after the loader's short retry). A failure is never cached and never replaced
+    by a stand-in: the next dispatch asks Neotoma again.
+
+    A local SKILL.md does not supply authority for a missing canonical role.
+    Absence markers are refused even if a lower loader returns one.
+    """
+    if fresh:
+        requested = role.strip().lower() if isinstance(role, str) else ''
+        if not requested:
+            raise AgentDefinitionUnavailable(str(role), 'invalid_name', 1)
+        agent_def = admit_agent_definition(AgentLoader(requested).load(), requested)
+        if (not isinstance(agent_def.name, str)
+                or agent_def.name.strip().lower() != requested
+                or not isinstance(agent_def.entity_id, str)
+                or not agent_def.entity_id.strip()
+                or not isinstance(agent_def.status, str)
+                or agent_def.status.strip().lower() != 'active'
+                or agent_def.is_stub):
+            raise AgentDefinitionUnavailable(requested, 'bad_response', 1)
+        return agent_def
+    if role in _agent_def_cache:
+        return admit_agent_definition(_agent_def_cache[role], role)
+    agent_def = admit_agent_definition(AgentLoader(role).load(), role)
+    _agent_def_cache[role] = agent_def
+    return agent_def
 
 
-def _load_active_policy_prompt(role: str) -> str:
-    """Render the role's live Neotoma policy without caching it locally."""
+def canonical_role_fingerprint(role: str, agent_def: AgentDefinition) -> str:
+    """Hash the admitted role contract for two fresh reads of one dispatch.
+
+    This is an equality check, not a signature or an atomic server lease.
+    AgentDefinition.version has a local default; only raw source evidence can
+    contribute a revision.
+    """
+    snapshot = agent_def.raw.get('snapshot', {}) if isinstance(agent_def.raw, dict) else {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    original_tools = agent_def.tool_allowlist
+    if isinstance(original_tools, tuple):
+        original_tools = list(original_tools)
+    payload = {
+        'role': role.strip().lower(),
+        'name': agent_def.name.strip().lower(),
+        'entity_id': agent_def.entity_id,
+        'status': agent_def.status.strip().lower(),
+        'is_stub': agent_def.is_stub,
+        'prompt_markdown': agent_def.prompt_markdown,
+        'tool_allowlist': original_tools,
+        'tools': agent_def.tools,
+        'agent_grant': agent_def.agent_grant,
+        'aauth_sub': agent_def.aauth_sub,
+        'tier': agent_def.tier,
+        'override_policy': agent_def.override_policy,
+        'source_version': snapshot.get('version'),
+        'source_revision': snapshot.get('revision'),
+        'last_observation_id': agent_def.last_observation_id or None,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+
+
+def _load_active_policy_prompt(role: str, *, agent_definition_id: str | None = None) -> str:
+    """Read live policy on every admission; an unreadable corpus refuses execution."""
     try:
-        rendered = AgentLoader(role).render_policy_prompt()
-        return rendered if isinstance(rendered, str) else ""
-    except Exception as exc:  # noqa: BLE001 — policy outage must not kill dispatch
-        log.warning(f"[apis] live policy unavailable for role {role!r}: {exc}")
-        return ""
+        rendered = AgentLoader(role).render_policy_prompt(agent_definition_id=agent_definition_id)
+        if not isinstance(rendered, str):
+            raise ValueError("bad policy rendering")
+        return rendered
+    except AgentPolicyUnavailable:
+        raise
+    except Exception as exc:
+        from lib.daemon_runtime.agent_loader import load_failure_code
+        raise AgentPolicyUnavailable(role, "render", load_failure_code(exc)) from None
 
 
 # ── Review-verdict vocabulary (ateles#938 — one source, defined once) ─────────
@@ -1425,16 +1842,103 @@ class SkillResult:
     # (an uncertain launch, a lost wait, or a missing result record). An
     # unknown outcome is never a success and is never replayed locally.
     remote_outcome_unknown: bool = False
+    # The role's agent_definition could not be loaded, so NOTHING was dispatched.
+    # A repair state: not a success, not a provider capacity limit. It ends the
+    # whole dispatch (no failover to another provider, no cooldown), because every
+    # provider would hit the same missing definition; the task is retried later.
+    definition_unavailable: bool = False
+    # Same admission failure semantics for unreadable governing policies: no
+    # child, no provider cooldown/failover, retry after the read is repaired.
+    policy_unavailable: bool = False
     remote_run_id: str = ""
     remote_machine_state: str = ""
+    # A configuration the operator must repair before this dispatch can run
+    # (not a wait): per provider, naming the setting, never a value.
+    configuration_repair: str = ""
+    # A builder's Fly delivery (build_delivery.plan_fly_delivery): what the
+    # runner's record said, read back. ``fly_delivery_status`` is one of the
+    # runner's statuses, ``unknown`` (the run's outcome is unknown) or
+    # ``unreported`` (the record carries no delivery status); empty for every
+    # other dispatch. A launched delivery is terminal: never failed over,
+    # retried or re-run locally.
+    fly_delivery_status: str = ""
+    fly_delivery_reason: str = ""
+    fly_delivery_branch: str = ""
+    fly_delivery_commit: str = ""
+    fly_pr_number: int | None = None
+    fly_pr_url: str = ""
+    # Nothing was sent to Fly: the job was not eligible (including a refused
+    # delivery-token mint) or its launch provably did not take effect. A
+    # builder may then run its delivery locally, as it would without Fly.
+    fly_ineligible_before_launch: bool = False
     # A Fly run is not gated by the Mac's usage reading (operator ruling
     # 2026-10-15). When that reading WOULD have refused this provider
     # locally, what it said; empty when it would have allowed it.
     usage_gate_exempted: str = ""
 
 
+# Leads the error of a dispatch refused because the role's agent_definition could
+# not be loaded. Fixed text: callers and tests match on it, and it carries no
+# response content.
+DEFINITION_UNAVAILABLE_PREFIX = "agent_definition unavailable"
+POLICY_UNAVAILABLE_PREFIX = "agent_policy unavailable"
+
+
+_SHARED_NEOTOMA_BEARER_NAMES = ("NEOTOMA_BEARER_TOKEN", "NEOTOMA_BEARER_TOKEN_PROD")
+
+
+def _neotoma_identity_for_child(env: dict[str, str], role: str, *, granted: bool) -> None:
+    """A local Codex or Cursor child's Neotoma credentials, in place: the
+    shared daemon bearer, its production twin and every other role's token
+    are removed. A role with Neotoma tools keeps only its own token, also as
+    ``NEOTOMA_BEARER_TOKEN`` so a script in the child acts as the role; a role
+    without Neotoma tools gets no Neotoma credential at all."""
+    own_name = neotoma_token_env_name(role)
+    own = env.get(own_name, "").strip()
+    for name in [k for k in env if k.endswith("_NEOTOMA_TOKEN")]:
+        env.pop(name, None)
+    for name in _SHARED_NEOTOMA_BEARER_NAMES:
+        env.pop(name, None)
+    if granted and own:
+        env[own_name] = own
+        env["NEOTOMA_BEARER_TOKEN"] = own
+
+
+def _isolation_refusal_result(skill: str, provider: str, exc: "IsolationRefusal") -> SkillResult:
+    """A launch refused before any child for a configuration the operator must
+    repair (value-free, no cooldown; the provider loop fails over)."""
+    detail = f"{exc} (repair: {exc.setting})"
+    msg = f"{provider} launch failed: {HARNESS_ISOLATION_REFUSED}: {detail}"
+    log.error(f"[apis] {skill} dispatch refused before launch — {msg}")
+    return SkillResult(skill, False, None, "", "", error=msg, provider=provider,
+                       configuration_repair=f"{provider}: {detail}")  # fmt: skip
+
+
+def _fly_delivery_fields(job, *, unknown: bool) -> dict:
+    """The SkillResult fields of a Fly delivery: what its record said, or
+    ``unknown`` when the run's outcome is unknown. Empty for any other job."""
+    if job is None or job.delivery is None:
+        return {}
+    branch = job.delivery["branch"]
+    if unknown:
+        return {"fly_delivery_status": "unknown", "fly_delivery_branch": branch}
+    got = job.delivery_result or {"delivery_status": "unreported"}
+    return {
+        "fly_delivery_status": got["delivery_status"],
+        "fly_delivery_reason": got.get("delivery_reason") or "",
+        "fly_delivery_branch": got.get("delivery_branch") or branch,
+        "fly_delivery_commit": got.get("delivery_commit") or "",
+        "fly_pr_number": got.get("pr_number"),
+        "fly_pr_url": got.get("pr_url") or "",
+    }
+
+
 class _LocalSpawnError(Exception):
     """The local CLI could not be started (an OSError from the spawn)."""
+
+
+class _LocalIsolationRefused(_LocalSpawnError):
+    """The isolated harness home was refused before any child started."""
 
 
 # ── Harness adapters + capacity detection ─────────────────────────────────────
@@ -1977,6 +2481,7 @@ def _provider_command(
     only when no vendor_binding is configured at all, and this module never
     guesses a model alias in that case.
     """
+    model = model_tiering.validate_model_selector(model)
     if provider == "claude":
         return (
             [
@@ -2207,6 +2712,7 @@ async def _run_skill_once(
     *,
     provider: str,
     role: str | None = None,
+    expected_role_fingerprint: str | None = None,
     task_entity_id: str = "",
     agent_session_id: str = "",
     timeout: int | None = None,
@@ -2228,6 +2734,7 @@ async def _run_skill_once(
     runner: str | None = None,
     repository: str = "",
     local_fallback_check=None,
+    fly_delivery: dict | None = None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
@@ -2276,9 +2783,9 @@ async def _run_skill_once(
     passes ``action_class`` with no ``precomputed_tier`` still gets a fresh
     resolution, unchanged from before.
 
-    Stage 5: when agent_definition carries empty prompt_markdown, logs a WARN,
-    sends a notifier alert (when a notifier is supplied), and records a
-    degraded_generic_subagent harness_event. Dispatch still proceeds.
+    The canonical admission boundary refuses empty role instructions before
+    prompt formatting or provider construction; local skill text cannot supply
+    the missing authority.
 
     ``github_token`` (#109 — per-agent GitHub identity): when supplied and
     non-empty, the token is injected into subprocess_env as both
@@ -2349,17 +2856,18 @@ async def _run_skill_once(
 
     ``work_class`` (ateles task ent_71387d9c1d1d3d1eef9ecc01 — lean local
     prompt): when ``provider == local_provider.LOCAL_PROVIDER``, this replaces
-    the full agent_definition + live-policy system prompt with
+    the full agent_definition system prompt with
     ``local_provider.build_lean_prompt`` — role summary, the work class's own
-    hard rules, and the task's SKILL.md, nothing else. This keeps the local
-    prompt well under the local context ceiling regardless of how large the
-    frontier prompt (agent_definition + agent_policy) grows. It has no effect
+    hard rules, and the task's SKILL.md. Governing policies are still appended;
+    if that exceeds the local context ceiling the ceiling check refuses the
+    local attempt rather than omitting those policies. It has no effect
     on any other provider: a Claude/Codex/Cursor dispatch is built exactly as
     before, full stop, whether or not ``work_class`` is passed. After a local
     run, ``local_provider.verify_postcondition`` checks the work class's
     ground truth (where one exists) and fails the result over to a frontier
     provider rather than accepting a wrong local answer as ``ok``.
     """
+    model = model_tiering.validate_model_selector(model)
     _role = (role or skill).lower()
     timeout = timeout or DISPATCH_TIMEOUT_SECONDS
 
@@ -2395,8 +2903,47 @@ async def _run_skill_once(
             )
             return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
 
+    # The workspace is resolved to one absolute path here, before anything
+    # consumes it: the command's workspace flags, the git roots granted to
+    # the sandbox, the isolation guard and the child's cwd all use this value.
+    if cwd:
+        cwd = resolve_dispatch_workspace(cwd)
+
     # ── Load agent_definition (Stage 1) ───────────────────────────────────────
-    agent_def = await asyncio.to_thread(_load_agent_def, _role)
+    try:
+        if expected_role_fingerprint is not None:
+            if not isinstance(expected_role_fingerprint, str) or not re.fullmatch(r'[0-9a-f]{64}', expected_role_fingerprint):
+                raise AgentDefinitionUnavailable(_role, 'bad_response', 1)
+            agent_def = await asyncio.to_thread(_load_agent_def, _role, fresh=True)
+            if canonical_role_fingerprint(_role, agent_def) != expected_role_fingerprint:
+                raise AgentDefinitionUnavailable(_role, 'bad_response', 1)
+        else:
+            agent_def = await asyncio.to_thread(_load_agent_def, _role)
+    except AgentDefinitionUnavailable as exc:
+        msg = (
+            f"{DEFINITION_UNAVAILABLE_PREFIX}: {exc} — nothing was dispatched; "
+            "repair the load, the task is retried"
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(
+            skill, False, None, "", "", error=msg, provider=provider,
+            definition_unavailable=True,
+        )
+
+    # Policy is authority too. Read it before provider admission or any runner,
+    # even for the local adapter; cached definitions never cache policy reads.
+    try:
+        policy_prompt = await asyncio.to_thread(
+            _load_active_policy_prompt, _role, agent_definition_id=agent_def.entity_id
+        )
+    except AgentPolicyUnavailable as exc:
+        msg = (
+            f"{POLICY_UNAVAILABLE_PREFIX}: {exc} — nothing was dispatched; "
+            "repair the load, the task is retried"
+        )
+        log.error(f"[apis] {skill} dispatch refused — {msg}")
+        return SkillResult(skill, False, None, "", "", error=msg, provider=provider,
+                           policy_unavailable=True)
 
     binary = _provider_binaries().get(provider)
     if binary is None:
@@ -2591,13 +3138,13 @@ async def _run_skill_once(
         )
 
     # ── Build system prompt (Stage 1 + Stage 5) ────────────────────────────────
-    # claude-local gets the LEAN prompt (role + work-class hard rules + task),
-    # never the full agent_definition + live-policy rendering: that full
-    # prompt is sized for a frontier context window and does not fit a local
-    # one (ateles task ent_71387d9c1d1d3d1eef9ecc01). Every other provider is
-    # built exactly as before — this branch changes nothing for them.
+    # claude-local keeps its lean role/work-class prompt rather than the full
+    # frontier definition. Governing policies still apply; if they exceed its
+    # window, the existing ceiling guard refuses instead of dropping authority.
     if provider == local_provider.LOCAL_PROVIDER:
         system_prompt = local_provider.build_lean_prompt(work_class)
+        if policy_prompt:
+            system_prompt += "\n\n" + policy_prompt
         # `degraded` must reflect whether agent_def actually loaded (a stub
         # from AgentLoader's load-failure fallback has empty prompt_markdown
         # — see lib/daemon_runtime/agent_loader.py's `_stub()`), the same
@@ -2608,10 +3155,6 @@ async def _run_skill_once(
         # further down (`if not degraded and agent_def.aauth_sub:`).
         degraded = not (agent_def.prompt_markdown or "").strip()
     else:
-        # Fetch policy at dispatch time: unlike the stable agent definition,
-        # active rules may change between tasks and must not inherit the
-        # definition cache.
-        policy_prompt = await asyncio.to_thread(_load_active_policy_prompt, _role)
         system_prompt, degraded = build_system_prompt(
             agent_def,
             skill_md,
@@ -2786,6 +3329,7 @@ async def _run_skill_once(
     #   The temp file is cleaned up in a try/finally after the subprocess exits.
     _mcp_tmp_path: str | None = None
     _codex_gate_config: CodexGateOwnerConfig | None = None
+    _isolated_home: IsolatedHarnessHome | None = None
     _codex_gate_token = ""
     if provider == "claude" and local_review:
         # Claude otherwise merges project/user MCP configuration. A local
@@ -2866,18 +3410,14 @@ async def _run_skill_once(
             )
             _mcp_tmp_path = None
     elif provider == "codex" and owns_pending_gate:
-        _codex_gate_token, _ = neotoma_token_for_agent(_role)
-        if not _codex_gate_token:
-            msg = (
-                f"{provider} launch failed: {GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
-                "Codex gate-owner config "
-                "cannot bind the Neotoma record server because no bearer token "
-                "is available; refusing to launch"
-            )
-            log.error(f"[apis] {skill} dispatch refused — {msg}")
-            return SkillResult(
-                skill, False, None, "", "", error=msg, provider=provider
-            )
+        # The seated record server is bound to the role's OWN token at a valid
+        # https endpoint, exactly like every other local Codex or Cursor
+        # child: a missing, empty or blank token is a configuration repair
+        # before launch, never the shared bearer.
+        try:
+            _, _codex_gate_token = _role_neotoma_endpoint(_role)
+        except IsolationRefusal as exc:
+            return _isolation_refusal_result(skill, provider, exc)
         try:
             _codex_gate_config = _prepare_codex_gate_owner_config(
                 base_url=_require_neotoma_base_url(),
@@ -2885,15 +3425,12 @@ async def _run_skill_once(
                 env_extra=env_extra,
             )
         except (OSError, RuntimeError) as exc:
-            msg = (
-                f"{provider} launch failed: {GATE_OWNER_TOOL_DENY_UNAVAILABLE}: "
-                "Codex gate-owner config "
-                f"could not be created and verified ({exc}); refusing to launch"
-            )
-            log.error(f"[apis] {skill} dispatch refused — {msg}")
-            return SkillResult(
-                skill, False, None, "", "", error=msg, provider=provider
-            )
+            # Never launched without its verified config: a configuration
+            # repair (no cooldown; the dispatch fails over), value-free.
+            return _isolation_refusal_result(skill, provider, IsolationRefusal(
+                f"{GATE_OWNER_TOOL_DENY_UNAVAILABLE}: the seated review's isolated Codex "
+                f"config could not be created and verified ({type(exc).__name__})",
+                setting="Codex login (CODEX_HOME/auth.json) and NEOTOMA_BASE_URL"))
         cmd.insert(len(command_wrapper or []) + 1, "--strict-config")
         log.info(
             "[apis] Codex seated-review MCP contract verified: server=%s "
@@ -3038,6 +3575,11 @@ async def _run_skill_once(
         local_review_home=local_review_home or None,
         inference_only=inference_only,
     )
+    if provider in ISOLATED_PROVIDERS:
+        # Codex and Cursor only; Claude's environment is unchanged here.
+        _neotoma_identity_for_child(
+            subprocess_env, _role,
+            granted=bool(allowed_mcp_servers(agent_def.tools)) or owns_pending_gate)
     if local_cfg is not None:
         # Local inference: point the CLI at the loopback proxy and strip any
         # frontier OAuth credential so it cannot be sent there.
@@ -3049,6 +3591,26 @@ async def _run_skill_once(
         # config.toml.
         subprocess_env["CODEX_HOME"] = str(_codex_gate_config.home)
         subprocess_env[CODEX_GATE_BEARER_ENV] = _codex_gate_token
+    # A local Codex or Cursor child never gets the operator's personal harness
+    # configuration: just before it is spawned (``_run_local``), it gets a
+    # generated home whose MCP servers are exactly the role's allowed ones.
+    _ordinary_local = (
+        provider in ISOLATED_PROVIDERS
+        and _codex_gate_config is None  # a seated Codex review is isolated above
+        and local_cfg is None
+        and not local_review  # guarded lens runs bring their own isolated home
+        and not inference_only
+    )
+    # For an ordinary local Codex or Cursor child the generated, verified home
+    # is the only home: a CODEX_HOME / HOME in env_extra is refused at the
+    # local launch, never used in its place.
+    _home_key = "CODEX_HOME" if provider == "codex" else "HOME"
+    _home_override_refusal: IsolationRefusal | None = None
+    if _ordinary_local and (env_extra or {}).get(_home_key):
+        _home_override_refusal = IsolationRefusal(
+            "a caller-supplied harness home may not replace the generated, verified one",
+            setting=f"env_extra {_home_key}")
+    _isolation_wanted = _ordinary_local
 
     # ateles#109 / ateles#590 (PR #1334): inject the resolved per-agent GitHub
     # identity, if any. The fail-closed refusals for a network-enabled
@@ -3103,6 +3665,8 @@ async def _run_skill_once(
                 pass
         if _codex_gate_config is not None:
             shutil.rmtree(_codex_gate_config.home, ignore_errors=True)
+        if _isolated_home is not None:
+            shutil.rmtree(_isolated_home.home, ignore_errors=True)
 
     # ── Executor choice (ateles#1456) ──────────────────────────────────────────
     # Local is today's code, unchanged. The fly executor takes the SAME argv,
@@ -3115,6 +3679,10 @@ async def _run_skill_once(
     # revokes the job's GitHub token and settles the machine on every path.
     _fly_job = None
     _fly_note = ""
+    if fly_delivery is not None:
+        # A delivery runs on Fly or not at all here: the builder, not this
+        # function, falls back to its local worktree path.
+        runner = "fly"
     _fly_forced = runner == "fly"
     _fly_reason = ""
     # Fly is configured but a cost, capacity or time limit is invalid: a
@@ -3137,6 +3705,8 @@ async def _run_skill_once(
                 cwd=cwd,
                 owns_pending_gate=owns_pending_gate,
                 codex_outer_sandboxed=codex_outer_sandboxed,
+                delivery=fly_delivery,
+                neotoma_tools_granted=bool(allowed_mcp_servers(agent_def.tools)),
             )
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
@@ -3156,7 +3726,11 @@ async def _run_skill_once(
             # must not cool the provider or fail over as if it did.
             msg = f"fly runner refused: {reason}"
             log.error(f"[apis] {skill} dispatch refused — {msg}")
-            return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider,
+                fly_ineligible_before_launch=not _fly_disabled and reason.startswith(
+                    ("not eligible", "Fly launch failed")),
+            )  # fmt: skip
         if local_fallback_check is not None:
             # This provider was chosen WITHOUT the Mac's usage gate because
             # it was bound for Fly. Running locally instead, it gets the
@@ -3183,7 +3757,51 @@ async def _run_skill_once(
     proc = None
 
     async def _run_local() -> tuple[int | None, bytes, bytes]:
-        nonlocal proc
+        nonlocal proc, _isolated_home
+        spawn_cwd = cwd
+        if _home_override_refusal is not None:
+            exc = _home_override_refusal
+            raise _LocalIsolationRefused(f"{exc} (repair: {exc.setting})")
+        if _isolation_wanted and _isolated_home is None:
+            # ONE absolute workspace (resolved above, or the daemon's own
+            # directory) is what the guard checks, the child's cwd and the
+            # CLI's workspace flag; nothing is resolved twice.
+            workspace = cwd or resolve_dispatch_workspace(os.getcwd())
+            spawn_cwd = workspace
+            try:
+                overrides = codex_config_overrides(cmd) if provider == "codex" else []
+                if overrides:
+                    raise IsolationRefusal(
+                        f"the Codex command carries configuration overrides {overrides}",
+                        setting="codex command")
+                if provider == "cursor" and "--workspace" not in cmd:
+                    # Cursor takes its project MCP file from --workspace: name
+                    # the workspace the guard checks, never an implicit one.
+                    cmd.extend(["--workspace", workspace])
+                mismatch = launch_workspace_mismatch(provider, cmd, workspace)
+                if mismatch:
+                    raise RuntimeError(mismatch)
+                _isolated_home = prepare_isolated_harness_home(
+                    provider, role=_role, agent_tools=agent_def.tools, cwd=workspace,
+                    env_extra=env_extra,
+                )
+            except IsolationRefusal as exc:
+                raise _LocalIsolationRefused(f"{exc} (repair: {exc.setting})") from None
+            except (OSError, RuntimeError) as exc:
+                # A fixed reason and the exception's class: never its text,
+                # which can carry local paths or system detail.
+                raise _LocalIsolationRefused(
+                    "the isolated harness home could not be prepared and verified "
+                    f"({type(exc).__name__})") from None
+            except ValueError:
+                # Never let a malformed value escape as a generic error, and
+                # never echo it: it may be a credential-bearing setting.
+                raise _LocalIsolationRefused(
+                    "harness isolation could not be prepared from the current "
+                    "configuration") from None
+            subprocess_env.update(_isolated_home.env)
+            log.info(f"[apis] {provider} child for {_role!r} runs in an isolated harness "
+                     f"home; MCP servers: {list(_isolated_home.servers) or 'none'}")  # fmt: skip
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -3191,7 +3809,7 @@ async def _run_skill_once(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=subprocess_env,
-                cwd=cwd,  # QE3: qa lens runs in a PR-branch worktree
+                cwd=spawn_cwd,  # QE3: qa lens runs in a PR-branch worktree
                 start_new_session=True,
             )
         except OSError as exc:
@@ -3204,11 +3822,24 @@ async def _run_skill_once(
         )
         return proc.returncode, out, err
 
+    def _report_fly_capability(message: str) -> None:
+        log.warning("[apis] %s: %s", skill, message)
+        print(message, file=sys.stderr, flush=True)
+        if notifier is not None:
+            try:
+                from lib.notify import Priority
+
+                notifier.send(message, priority=Priority.WARN, handler="apis")
+            except Exception as exc:
+                log.debug(f"[apis] Fly capability notifier.send failed: {exc}")
+
     _start_ns = time.monotonic_ns()
     try:
         try:
             if _fly_job is not None:
                 try:
+                    if _fly_job.neotoma_tools_unavailable:
+                        _report_fly_capability(fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE)
                     returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
                 except fly_runner.FlyRefusal as exc:
                     msg = f"fly runner refused: {exc}"
@@ -3226,6 +3857,16 @@ async def _run_skill_once(
                     _refusal = _fly_refusal_or_fallback(reason)
                     if _refusal is not None:
                         return _refusal
+                    if _fly_job.neotoma_tools_unavailable:
+                        # FlyIneligible is raised BEFORE any launch is requested;
+                        # only FlyLaunchError means a launch was attempted.
+                        _report_fly_capability(
+                            "This run was not eligible for Fly, so it ran locally "
+                            "with its normal tools."
+                            if isinstance(exc, fly_runner.FlyIneligible)
+                            else "The Fly launch failed; this run fell back to a "
+                            "local run with its normal tools."
+                        )
                     _fly_job = None
                     _start_ns = time.monotonic_ns()
                     returncode, stdout, stderr = await _run_local()
@@ -3282,6 +3923,7 @@ async def _run_skill_once(
                         skill, False, None, "", "", error=msg, provider=provider,
                         remote_outcome_unknown=True, remote_run_id=_fly_job.run_id,
                         remote_machine_state=state,
+                        **_fly_delivery_fields(_fly_job, unknown=True),
                     )  # fmt: skip
                 finally:
                     if _fly_job is not None and _fly_job.machine_id:
@@ -3296,6 +3938,14 @@ async def _run_skill_once(
                         )
             else:
                 returncode, stdout, stderr = await _run_local()
+        except _LocalIsolationRefused as exc:
+            # A configuration repair, not a provider failure: no child started.
+            msg = f"{provider} launch failed: {HARNESS_ISOLATION_REFUSED}: {exc}"
+            log.error(f"[apis] {skill} dispatch refused before launch — {msg}")
+            return SkillResult(
+                skill, False, None, "", "", error=msg, provider=provider,
+                configuration_repair=f"{provider}: {exc}",
+            )
         except _LocalSpawnError as exc:
             msg = f"{provider} launch failed: {exc}"
             log.warning(f"[apis] {skill} dispatch skipped — {msg}")
@@ -3397,6 +4047,7 @@ async def _run_skill_once(
                 remote_machine_state=(
                     (_fly_job.remote_state or "unconfirmed") if _fly_job is not None else ""
                 ),
+                **_fly_delivery_fields(_fly_job, unknown=True),
             )
 
         duration_ms = int((time.monotonic_ns() - _start_ns) / 1_000_000)
@@ -3487,6 +4138,12 @@ async def _run_skill_once(
             ok=_dispatch_ok,
         )
 
+        if _fly_job is not None and _fly_job.neotoma_tools_unavailable:
+            _note = fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE
+            _stdout_text = f"{_stdout_text.rstrip()}\n{_note}\n"
+            _fly_note += f" {_note}"
+            log.warning("[apis] %s: %s", skill, _note)
+
         result = SkillResult(
             skill=skill,
             ok=_dispatch_ok,
@@ -3511,6 +4168,8 @@ async def _run_skill_once(
             remote_outcome_unknown=bool(_fly_job is not None and _fly_job.outcome_unknown),
             remote_run_id=_fly_job.run_id if _fly_job is not None else "",
             remote_machine_state=_fly_job.remote_state if _fly_job is not None else "",
+            **_fly_delivery_fields(
+                _fly_job, unknown=bool(_fly_job is not None and _fly_job.outcome_unknown)),
         )
         if _fly_job is not None and _fly_job.remote_state == "unconfirmed":
             log.warning(
@@ -3635,6 +4294,8 @@ async def _run_skill_once(
                 pass
         if _codex_gate_config is not None:
             shutil.rmtree(_codex_gate_config.home, ignore_errors=True)
+        if _isolated_home is not None:
+            shutil.rmtree(_isolated_home.home, ignore_errors=True)
 
 
 def usable_providers() -> set[str]:
@@ -3734,6 +4395,7 @@ async def run_skill(
     prompt: str,
     *,
     role: str | None = None,
+    expected_role_fingerprint: str | None = None,
     task_entity_id: str = "",
     agent_session_id: str = "",
     timeout: int | None = None,
@@ -3758,6 +4420,7 @@ async def run_skill(
     inference_only: bool = False,
     runner: str | None = None,
     repository: str = "",
+    fly_delivery: dict | None = None,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -3847,6 +4510,7 @@ async def run_skill(
     (every call site that predates this) leaves routing and model selection
     exactly as before.
     """
+    model = model_tiering.validate_model_selector(model)
     # One control, two reasons to apply it. The internal name stays
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
     # use it only for the deny and deny-capable routing.
@@ -3913,6 +4577,8 @@ async def run_skill(
         precomputed_tier = model_tiering.resolve_tier(
             action_class, signals=escalation_signals
         )
+    if fly_delivery is not None:
+        runner = "fly"  # a delivery runs on Fly or the builder runs it locally
     fly_bound, fly_extra = _fly_routing(runner, action_class)
 
     async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
@@ -3921,6 +4587,7 @@ async def run_skill(
             prompt,
             provider=selected,
             role=role,
+            expected_role_fingerprint=expected_role_fingerprint,
             task_entity_id=task_entity_id,
             timeout=timeout,
             env_extra=env_extra,
@@ -3941,6 +4608,7 @@ async def run_skill(
             inference_only=inference_only,
             runner=runner,
             repository=repository,
+            fly_delivery=fly_delivery,
             local_fallback_check=(
                 (lambda name: _local_fallback_refusal(name, pinned=provider is not None))
                 if selected in fly_bound else None
@@ -4266,6 +4934,7 @@ async def _run_provider_attempts(
         return SkillResult(skill, False, None, "", "", error=msg)
 
     attempted: list[str] = []
+    repairs: list[str] = []
     last_result: SkillResult | None = None
     # Local-first work has no silent frontier path. `fallback_models` is None
     # while claude-local is still ahead in the queue; once local has failed (or
@@ -4308,6 +4977,25 @@ async def _run_provider_attempts(
         # even when an infrastructure message resembles a provider failure.
         if result.remote_outcome_unknown:
             return result
+        # The role's definition or policy could not be loaded: nothing ran, and every other
+        # provider would hit the same failure. Ends the dispatch BEFORE any
+        # classification of its text, so it is never read as provider capacity and
+        # never cools a provider down.
+        if result.definition_unavailable or result.policy_unavailable:
+            return result
+        # A launched Fly delivery may have pushed: whatever its status, it
+        # ends the dispatch here too. Never failed over to another provider.
+        if result.fly_delivery_status:
+            return result
+        if result.configuration_repair:
+            # The isolated harness home was refused before any child started:
+            # a configuration the operator must repair, not a provider failure
+            # or a wait. No cooldown; the next provider may still run.
+            repairs.append(result.configuration_repair)
+            last_result = result
+            log.warning(f"[apis] {skill}: {selected} needs a configuration repair "
+                        f"({result.configuration_repair}); trying the next provider")  # fmt: skip
+            continue
         # _run_skill_once carries an explicit delivery-only signal only after
         # independently excluding provider diagnostics from stderr. Preserve
         # that result before scanning the child's large stdout transcript:
@@ -4442,6 +5130,15 @@ async def _run_provider_attempts(
         "all eligible subscription-backed harness providers were exhausted "
         f"after attempts: {', '.join(attempted)}"
     )
+    if repairs:
+        # Kept to the end: what to fix, per provider (names, never values).
+        last_result.configuration_repair = "; ".join(repairs)
+        if len(repairs) == len(attempted):
+            last_result.error = (
+                "dispatch not launched: configuration repair needed "
+                f"({last_result.configuration_repair}); attempted: {', '.join(attempted)}")
+        else:
+            last_result.error += f"; configuration repair needed: {last_result.configuration_repair}"
     windows = cooled_until_all({provider: binaries.get(provider)} if provider else binaries)
     if windows:
         # This dispatch's own refusals spent the last usable window: say when
@@ -4508,7 +5205,7 @@ async def run_review_prompt(
 
     async def attempt(provider: str) -> SkillResult:
         binary = binaries[provider]
-        model = models[provider].strip()
+        model = model_tiering.validate_model_selector(models[provider].strip())
         with tempfile.TemporaryDirectory(prefix="ateles-review-") as workdir:
             if provider == "claude":
                 cmd = [

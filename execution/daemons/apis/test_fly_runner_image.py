@@ -93,6 +93,19 @@ def _tracked_files() -> list[str]:
 
 
 class TestImageContext:
+    def test_legacy_daemon_runbook_stops_before_historical_provisioning(self):
+        """The superseded host must be visible before its accepted runbook (#1008)."""
+        readme = (_REPO_ROOT / "deploy/cloud/README.md").read_text()
+        notice, _history = readme.split("## Accepted decisions (2026-06-23)", 1)
+        assert "Superseded VM runbook" in notice
+        assert "no longer\n> current; Fly is the current cloud-runner target" in notice
+        assert "Do not provision the current" in notice
+        assert "target using M1 or `bootstrap-host.sh`" in notice
+        assert "../fly-runner/fly.toml" in notice
+        assert "../../docs/cloud_hosting.md" in notice
+        # The new stop has no instance binding or credential value.
+        assert not re.search(r"https?://|/Users/|/home/|\.fly\.dev", notice)
+
     def test_dockerfile_and_fly_toml_carry_no_secret_tooling(self):
         for name in ("Dockerfile", "fly.toml"):
             for line in _instruction_lines(_RUNNER_DIR / name):
@@ -262,6 +275,40 @@ def _deadline_in(seconds: float) -> str:
 
 
 class TestRunJob:
+    def test_key_only_child_has_no_neotoma_mcp_and_probes_unshipped_role_token(
+            self, tmp_path):
+        token_name = "LANIUS_NEOTOMA_TOKEN"
+        shared_bearer = "synthetic-shared-bearer"
+        job_dir = tmp_path / "job"
+        _write_job(
+            job_dir,
+            secrets={"NEOTOMA_AAUTH_PRIVATE_JWK": json.dumps(_test_jwk())},
+            spec={"probe_env_names": [token_name]},
+            argv=["claude", "--print", "--mcp-config", run_job.MCP_CONFIG_PLACEHOLDER,
+                  "--other"],
+        )  # fmt: skip
+        job = run_job.load_job(job_dir)
+        child_home = tmp_path / "child-home"
+        child_home.mkdir()
+        argv, child_env = run_job.prepare_child(
+            job, child_home,
+            {"PATH": "/usr/bin", "NEOTOMA_BEARER_TOKEN": shared_bearer,
+             token_name: shared_bearer},
+        )  # fmt: skip
+        assert argv == ["claude", "--print", "--other"]
+        assert token_name not in child_env
+        assert "NEOTOMA_BEARER_TOKEN" not in child_env
+        assert all(shared_bearer not in arg for arg in argv)
+        assert shared_bearer not in child_env.values()
+
+        report = run_job.credential_probe(
+            job, child_env, job_dir=tmp_path / "removed-job",
+            own_env={token_name: shared_bearer},
+        )
+        assert report["env"][token_name] == "present"
+        assert token_name in report["present"]
+        assert report["ok"] is False
+
     def test_a_readable_secret_path_fails_the_probe(self, tmp_path, monkeypatch):
         for name in run_job.DEFAULT_PROBE_ENV_NAMES:
             monkeypatch.delenv(name, raising=False)

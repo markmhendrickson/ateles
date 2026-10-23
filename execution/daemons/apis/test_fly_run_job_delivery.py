@@ -11,8 +11,10 @@ machine.
 from __future__ import annotations
 
 import importlib.util
+import errno
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -20,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+
+from fly_cleanup_test_support import assert_cleanup, cleanup_details, cleanup_error
 
 _RUNNER_DIR = Path(__file__).resolve().parents[3] / "deploy" / "fly-runner"
 
@@ -80,6 +84,26 @@ def world(tmp_path, monkeypatch):
                         lambda: (str(tmp_path / "operator.env"),))
     monkeypatch.setenv(run_job.DEADLINE_ENV, _deadline_in(900))
     api = {"calls": [], "open": [], "fail": {}, "disk": []}
+    cleanup_errors = []
+    real_clear, real_remove = rd._clear, rd.remove_work
+
+    def capture_clear(root):
+        try:
+            return real_clear(root)
+        except (OSError, ValueError, TypeError, UnicodeError) as exc:
+            cleanup_errors.append(cleanup_error(exc, boundary_error=rd.RepoWorkError))
+            raise
+
+    def capture_remove(root):
+        try:
+            return real_remove(root)
+        except rd.RepoWorkError as exc:
+            if not cleanup_errors:
+                cleanup_errors.append(cleanup_error(exc, boundary_error=rd.RepoWorkError))
+            raise
+
+    monkeypatch.setattr(rd, "_clear", capture_clear)
+    monkeypatch.setattr(rd, "remove_work", capture_remove)
 
     def fake_api(method, path, token, body=None):
         api["calls"].append((method, path, token, body))
@@ -96,7 +120,7 @@ def world(tmp_path, monkeypatch):
         return (201 if method == "POST" else 200), _pr(number)
 
     monkeypatch.setattr(rd, "_api", fake_api)
-    return {"home": home, "remote": remote, "work_root": work_root, "api": api, "tmp": tmp_path}
+    return {"home": home, "remote": remote, "work_root": work_root, "api": api, "tmp": tmp_path, "cleanup_errors": cleanup_errors}
 
 
 def _pr(number):
@@ -161,12 +185,21 @@ def _remote_ref(world, ref=f"refs/heads/{BRANCH}"):
     return done.stdout.decode().strip() or None
 
 
+def _cleanup_details(world):
+    return cleanup_details(world["work_root"], cleanup_errors=world["cleanup_errors"])
+
+
+def _assert_cleanup(world, *, absent=False, present=False):
+    assert_cleanup(world["work_root"], cleanup_errors=world["cleanup_errors"],
+                   absent=absent, present=present)
+
+
 def _no_secret_anywhere(record, world, *, disk=True):
     text = json.dumps(record)
     assert TOKEN not in text and HEADER not in text
     if disk:
         assert not any(world["api"]["disk"])  # never on disk while delivering
-    assert not world["work_root"].exists() or os.listdir(world["work_root"]) == []
+    _assert_cleanup(world)
 
 
 # ── No delivery: unchanged ───────────────────────────────────────────────────
@@ -182,7 +215,8 @@ def test_a_job_without_a_delivery_is_unchanged(world):
 
     rc, record = _run(job_dir, runner)
     assert rc == 0 and not any(k.startswith(("delivery_", "pr_")) for k in record)
-    assert not world["work_root"].exists() and world["api"]["calls"] == []
+    _assert_cleanup(world, absent=True)
+    assert world["api"]["calls"] == []
     assert seen["argv"] == ["codex", "exec", "-"]
 
 
@@ -261,7 +295,8 @@ def test_a_deadline_too_short_for_any_cli_refuses_without_cloning(world, monkeyp
     rc, record = _run(_job(world["tmp"], timeout=600),
                       lambda *a, **k: pytest.fail("the CLI must not run"))
     assert record["delivery_status"] == "no_time"
-    assert not world["work_root"].exists() and world["api"]["calls"] == []
+    _assert_cleanup(world, absent=True)
+    assert world["api"]["calls"] == []
     assert _remote_ref(world) is None
 
 
@@ -312,7 +347,7 @@ def test_a_deadline_that_expires_during_the_import_pushes_nothing(world, monkeyp
     assert record["delivery_reason"] == f"no_time: {rd.NO_TIME_REASON}"
     assert after == []  # no git process started after the deadline
     assert world["api"]["calls"] == [] and _remote_ref(world) is None
-    assert os.listdir(world["work_root"]) == []
+    _assert_cleanup(world, present=True)
 
 
 def test_a_deadline_that_expires_after_the_push_opens_no_pull_request(world, monkeypatch):
@@ -332,7 +367,7 @@ def test_a_deadline_spent_before_the_clone_never_starts_the_cli(world, monkeypat
     rc, record = _run(_job(world["tmp"]), lambda *a, **k: pytest.fail("the CLI must not run"))
     assert record["delivery_status"] == "no_time"
     assert rc == run_job.EXIT_DELIVERY_FAILED and world["api"]["calls"] == []
-    assert os.listdir(world["work_root"]) == []
+    _assert_cleanup(world, present=True)
 
 
 # ── Not delivered ────────────────────────────────────────────────────────────
@@ -423,7 +458,7 @@ def test_the_work_directory_is_removed_when_the_cli_raises(world):
     with pytest.raises(RuntimeError):
         run_job.main(_job(world["tmp"]), writer=lambda *a: True, runner=runner,
                      hard_exit=lambda code: None)
-    assert os.listdir(world["work_root"]) == []
+    _assert_cleanup(world, present=True)
 
 
 # ── Job validation ──────────────────────────────────────────────────────────
@@ -439,7 +474,7 @@ def test_an_unacceptable_delivery_is_refused_before_anything_runs(world, change)
     rc, record = _run(_job(world["tmp"], delivery=delivery),
                       lambda *a, **k: pytest.fail("nothing may run"))
     assert rc == run_job.EXIT_JOB_INVALID and record is None
-    assert not world["work_root"].exists()
+    _assert_cleanup(world, absent=True)
 
 
 def test_a_delivery_token_without_a_delivery_is_refused(world):
@@ -472,3 +507,191 @@ def test_the_header_form_of_the_token_is_a_job_secret(world):
     job = run_job.load_job(_job(world["tmp"]))
     assert job.secrets[run_job.DELIVERY_HEADER_SECRET_NAME] == HEADER
     assert run_job.DELIVERY_TOKEN_NAME not in job.child_credential_names
+
+
+def test_failed_cleanup_diagnostics_are_bound_to_the_real_entrypoint_and_value_free(world, monkeypatch):
+    real_remove = rd.shutil.rmtree
+
+    def cannot_remove(path, *args, **kwargs):
+        if Path(path) == world["work_root"] / "job-fly-deliver-1":
+            (Path(path) / TOKEN).mkdir(exist_ok=True)
+            raise OSError(errno.ENOTEMPTY, f"sensitive error {TOKEN}", str(path))
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(rd.shutil, "rmtree", cannot_remove)
+    rc, record = _run(_job(world["tmp"]), _agent(world))
+    assert rc == 0 and record["delivery_status"] == "opened"
+    with pytest.raises((AssertionError, pytest.fail.Exception)) as caught:
+        _no_secret_anywhere(record, world)
+    message = str(caught.value)
+    assert message.startswith("delivery cleanup failed: ")
+    details = json.loads(message.removeprefix("delivery cleanup failed: "))
+    assert details["errors"] == [{"type": "OSError", "errno": errno.ENOTEMPTY}]
+    # prepare_work respects the caller's umask; verify the actual planted mode.
+    job_mode = stat.S_IMODE((world["work_root"] / "job-fly-deliver-1").lstat().st_mode)
+    assert any(row["relative"] == "job-fly-deliver-1" and row["mode"] == f"{job_mode:04o}"
+               and row["kind"] == "directory" for row in details["leftovers"])
+    assert any("<entry>" in row["relative"] for row in details["leftovers"])
+    assert all(secret not in message for secret in (TOKEN, HEADER, ROLE_TOKEN, str(world["tmp"])))
+
+
+def test_cleanup_diagnostics_do_not_follow_a_link_at_the_work_root(world):
+    outside = world["tmp"] / "outside"
+    outside.mkdir()
+    (outside / TOKEN).write_text(ROLE_TOKEN)
+    world["work_root"].symlink_to(outside, target_is_directory=True)
+    details = _cleanup_details(world)
+    link_mode = stat.S_IMODE(world["work_root"].lstat().st_mode)
+    assert details["leftovers"] == [{"relative": ".", "mode": f"{link_mode:04o}", "kind": "link"}]
+
+
+# These controls drive the same assertion paths as delivery tests, not only the
+# formatter. Synthetic filenames and error text must never reach their output.
+def _assert_safe_cleanup_failure(call, world):
+    with pytest.raises((OSError, AssertionError, pytest.fail.Exception)) as caught:
+        call()
+    message = str(caught.value)
+    assert message.startswith("delivery cleanup failed: ")
+    assert all(value not in message for value in (TOKEN, HEADER, ROLE_TOKEN, str(world["tmp"])))
+    return json.loads(message.removeprefix("delivery cleanup failed: "))
+
+
+@pytest.mark.parametrize("target_state", ["empty", "populated", "dangling"])
+def test_cleanup_assertion_never_probes_a_linked_root(world, monkeypatch, target_state):
+    outside = world["tmp"] / "outside"
+    if target_state != "dangling":
+        outside.mkdir()
+        if target_state == "populated":
+            (outside / TOKEN).write_text(ROLE_TOKEN)
+    world["work_root"].symlink_to(outside, target_is_directory=True)
+    real_listdir = os.listdir
+    probes = []
+
+    def listdir(path):
+        if Path(path) == world["work_root"]:
+            probes.append(True)
+            raise OSError(errno.EACCES, TOKEN, str(path))
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", listdir)
+    details = _assert_safe_cleanup_failure(lambda: _no_secret_anywhere({}, world), world)
+    assert probes == []
+    link_mode = stat.S_IMODE(world["work_root"].lstat().st_mode)
+    assert details["leftovers"] == [{"relative": ".", "mode": f"{link_mode:04o}", "kind": "link"}]
+
+
+@pytest.mark.parametrize("failure_site", ["root_lstat", "listdir", "entry_lstat", "walk", "walk_raise", "scandir"])
+def test_cleanup_assertion_sanitizes_probe_and_traversal_errors(world, monkeypatch, failure_site):
+    root = world["work_root"]
+    root.mkdir()
+    (root / TOKEN).touch()
+    real_lstat, real_listdir, real_walk, real_scandir = Path.lstat, os.listdir, os.walk, os.scandir
+    if failure_site == "scandir":
+        (root / TOKEN).unlink()
+        (root / TOKEN).mkdir()
+
+    def fail(path):
+        raise OSError(errno.EACCES, TOKEN + HEADER + ROLE_TOKEN, str(path))
+
+    def lstat(path, *args, **kwargs):
+        if (failure_site == "root_lstat" and path == root or
+                failure_site == "entry_lstat" and path == root / TOKEN):
+            return fail(path)
+        return real_lstat(path, *args, **kwargs)
+
+    def listdir(path):
+        if Path(path) == root and failure_site == "listdir":
+            return fail(path)
+        return real_listdir(path)
+
+    def walk(path, *args, **kwargs):
+        if Path(path) == root and failure_site == "walk_raise":
+            return fail(root / TOKEN)
+        if Path(path) == root and failure_site == "walk":
+            error = OSError(errno.EACCES, TOKEN, str(root / HEADER))
+            if kwargs.get("onerror"):
+                kwargs["onerror"](error)
+            return iter(())
+        return real_walk(path, *args, **kwargs)
+
+    def scandir(path):
+        if Path(path) == root / TOKEN and failure_site == "scandir":
+            return fail(path)
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(os, "listdir", listdir)
+    monkeypatch.setattr(os, "walk", walk)
+    details = _assert_safe_cleanup_failure(lambda: _no_secret_anywhere({}, world), world)
+    assert details["incomplete"] is True
+    errors = details["errors"] + details["leftovers"]
+    assert any(row.get("type") == "PermissionError" and row.get("errno") == errno.EACCES
+               for row in errors)
+
+
+@pytest.mark.parametrize("test_name", [
+    "test_a_deadline_that_expires_during_the_import_pushes_nothing",
+    "test_a_deadline_spent_before_the_clone_never_starts_the_cli",
+    "test_the_work_directory_is_removed_when_the_cli_raises",
+])
+def test_all_delivery_cleanup_assertion_sinks_use_safe_evidence(world, monkeypatch, test_name):
+    real_main = run_job.main
+
+    def leave_after_main(*args, **kwargs):
+        try:
+            return real_main(*args, **kwargs)
+        finally:
+            world["work_root"].mkdir(exist_ok=True)
+            (world["work_root"] / TOKEN).touch()
+
+    monkeypatch.setattr(run_job, "main", leave_after_main)
+    test = globals()[test_name]
+    def call():
+        if "monkeypatch" in test.__code__.co_varnames[:test.__code__.co_argcount]:
+            test(world, monkeypatch)
+        else:
+            test(world)
+    details = _assert_safe_cleanup_failure(call, world)
+    planted_mode = stat.S_IMODE((world["work_root"] / TOKEN).lstat().st_mode)
+    assert details["leftovers"] == [{"relative": "<entry>", "mode": f"{planted_mode:04o}", "kind": "file"}]
+
+
+@pytest.mark.parametrize("count", [64, 65, 200])
+def test_cleanup_assertion_bounds_and_redacts_more_than_64_rows(world, count):
+    root = world["work_root"]
+    root.mkdir()
+    for i in range(count):
+        (root / f"{TOKEN}-{i:03}").touch()
+    details = _assert_safe_cleanup_failure(lambda: _no_secret_anywhere({}, world), world)
+    assert len(details["leftovers"]) == 64
+    assert all(row["relative"] == "<entry>" for row in details["leftovers"])
+    assert details["truncated"] is (count > 64)
+
+
+def test_cleanup_assertion_preserves_missing_empty_and_absent_root_contracts(world):
+    _assert_cleanup(world, absent=True)
+    missing = _assert_safe_cleanup_failure(lambda: _assert_cleanup(world, present=True), world)
+    assert missing["root"] is None
+    world["work_root"].mkdir()
+    _assert_cleanup(world)
+    details = _assert_safe_cleanup_failure(lambda: _assert_cleanup(world, absent=True), world)
+    assert details["root"]["kind"] == "directory" and details["leftovers"] == []
+
+
+def test_cleanup_assertion_records_nested_links_without_reading_targets(world, monkeypatch):
+    root = world["work_root"]
+    root.mkdir()
+    outside = world["tmp"] / TOKEN
+    outside.mkdir()
+    (outside / HEADER).write_text(ROLE_TOKEN)
+    (root / "checkout").symlink_to(outside, target_is_directory=True)
+    real_scandir = os.scandir
+    def scandir(path):
+        if Path(path) in (outside, root / "checkout"):
+            pytest.fail("nested target was traversed")
+        return real_scandir(path)
+    monkeypatch.setattr(os, "scandir", scandir)
+    details = _assert_safe_cleanup_failure(lambda: _no_secret_anywhere({}, world), world)
+    assert len(details["leftovers"]) == 1 and details["leftovers"][0]["kind"] == "link"
+    assert details["incomplete"] is False and details["truncated"] is False

@@ -539,10 +539,12 @@ def _bind_v2_authorization(
     *,
     action_type: str,
     policy: ExecutionPolicy,
+    declared: bool = True,
 ) -> dict:
     """Model a creation-observation authority, frozen before later mutation."""
     task_record = records[task_id]
-    task_record["snapshot"]["action_type"] = action_type
+    if declared:
+        task_record["snapshot"]["action_type"] = action_type
     decision = evaluate_gate(
         confidence=float(task_record["snapshot"].get("confidence", 0.5)),
         action_type=action_type,
@@ -1537,9 +1539,9 @@ def test_denial_store_startup_fails_closed_when_unconfigured(monkeypatch):
 async def test_main_refuses_to_start_without_denial_store(monkeypatch):
     monkeypatch.delenv("APIS_CHECKPOINT_DENIAL_DIR", raising=False)
     monkeypatch.setattr(
-        apis.AgentLoader,
-        "load",
-        lambda self: pytest.fail("startup advanced past denial-store validation"),
+        apis,
+        "load_agent_definition_or_exit",
+        lambda name: pytest.fail("startup advanced past denial-store validation"),
     )
 
     with pytest.raises(RuntimeError, match="APIS_CHECKPOINT_DENIAL_DIR"):
@@ -1780,3 +1782,55 @@ async def test_reject_still_declines_without_dispatch(monkeypatch, release_store
     assert result["new_status"] == "rejected"
     assert records[task_id]["snapshot"]["status"] == "declined"
     assert dispatches == []
+
+
+@pytest.mark.asyncio
+async def test_release_rechecks_inferred_action_under_changed_effective_policy(
+    monkeypatch, release_store
+):
+    # Same task text and policy identity, but the effective action sets changed
+    # since approval. Recompute inference under the new policy, then require
+    # fresh authority before any dispatch can reach the spawn sink.
+    records, brief_id, task_id = release_store
+    task = records[task_id]["snapshot"]
+    task.update(assigned_to="fringilla", title="Open a PR for the change")
+    task.pop("action_type")
+    original = gating_module._parse_policy("default", {
+        "confidence_threshold": 1.0,
+        "low_blast_action_types": ["compute_only_analysis", "open_or_merge_pr"],
+        "high_blast_action_types": ["payment"],
+    })
+    assert apis._resolve_gate_action_type("fringilla", task, original).value == "compute_only_analysis"
+    _bind_v2_authorization(
+        monkeypatch, records, brief_id, task_id,
+        action_type="compute_only_analysis", policy=original, declared=False,
+    )
+    current = gating_module._parse_policy("default", {
+        "confidence_threshold": 1.0,
+        "low_blast_action_types": ["compute_only_analysis"],
+        "high_blast_action_types": ["open_or_merge_pr"],
+    })
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: current)
+    resolved = []
+    real_resolve = apis._resolve_gate_action_type
+
+    def observe(skill, snapshot, policy):
+        result = real_resolve(skill, snapshot, policy)
+        resolved.append((result.value, result.source, policy.blast_radius_for(result.value).value))
+        return result
+
+    monkeypatch.setattr(apis, "_resolve_gate_action_type", observe)
+    dispatches = []
+
+    async def spy_dispatch(*args, **kwargs):
+        dispatches.append((args, kwargs))
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "approved"
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+    assert released is False
+    assert dispatches == []
+    assert resolved == [("open_or_merge_pr", "content", "high")]
+    assert brief["resolved_dispatched"] is False
+    assert brief["status"] == "approved_requires_fresh_approval"

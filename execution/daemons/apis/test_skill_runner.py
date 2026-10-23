@@ -163,7 +163,7 @@ class TestAgentDefCache:
     def test_cache_populated_on_first_load(self) -> None:
         fake_def = _make_def(name="monedula")
         with patch("skill_runner.AgentLoader") as MockLoader:
-            instance = MagicMock()
+            instance = _loader_with_no_policies()
             instance.load.return_value = fake_def
             MockLoader.return_value = instance
 
@@ -174,20 +174,196 @@ class TestAgentDefCache:
     def test_second_call_uses_cache(self) -> None:
         fake_def = _make_def(name="monedula")
         with patch("skill_runner.AgentLoader") as MockLoader:
-            instance = MagicMock()
+            instance = _loader_with_no_policies()
             instance.load.return_value = fake_def
             MockLoader.return_value = instance
 
             skill_runner._load_agent_def("monedula")
             skill_runner._load_agent_def("monedula")
-            # AgentLoader should only have been instantiated once
             assert MockLoader.call_count == 1
+
+    def test_fresh_binding_ignores_and_preserves_process_cache(self) -> None:
+        stale = _make_def(name="pavo", prompt_markdown="stale")
+        fresh = _make_def(name="pavo", prompt_markdown="fresh")
+        skill_runner._agent_def_cache["pavo"] = stale
+        with patch("skill_runner.AgentLoader") as loader:
+            loader.return_value.load.return_value = fresh
+            assert skill_runner._load_agent_def(" PAVO ", fresh=True) is fresh
+        assert skill_runner._agent_def_cache == {"pavo": stale}
+
+    def test_concurrent_fresh_bindings_leave_cache_unchanged(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        stale = _make_def(name="pavo", prompt_markdown="stale")
+        fresh = _make_def(name="pavo", prompt_markdown="fresh")
+        skill_runner._agent_def_cache["pavo"] = stale
+        with patch("skill_runner.AgentLoader") as loader:
+            loader.return_value.load.return_value = fresh
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                loaded = list(pool.map(
+                    lambda _: skill_runner._load_agent_def("pavo", fresh=True), range(2)
+                ))
+        assert loaded == [fresh, fresh]
+        assert skill_runner._agent_def_cache == {"pavo": stale}
+
+    @pytest.mark.parametrize("change", [
+        {"name": "other"}, {"entity_id": ""}, {"status": "disabled"},
+        {"status": "planned"}, {"is_stub": True},
+        {"prompt_markdown": "  "}, {"tool_allowlist": []},
+    ])
+    def test_fresh_binding_refuses_invalid_role(self, change) -> None:
+        role = _make_def(name="pavo")
+        for key, value in change.items():
+            setattr(role, key, value)
+        with patch("skill_runner.AgentLoader") as loader:
+            loader.return_value.load.return_value = role
+            with pytest.raises(skill_runner.AgentDefinitionUnavailable):
+                skill_runner._load_agent_def("pavo", fresh=True)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("entity_id", "ent_other"), ("prompt_markdown", "changed\n"),
+    ("tool_allowlist", "Read, Bash"), ("aauth_sub", "other@ateles"),
+    ("agent_grant", "operator"), ("tier", "top"),
+    ("override_policy", "different"), ("last_observation_id", "obs_other"),
+])
+def test_canonical_role_fingerprint_binds_each_contract_field(field, value):
+    role = _make_def(name="pavo")
+    original = skill_runner.canonical_role_fingerprint("pavo", role)
+    setattr(role, field, value)
+    assert skill_runner.canonical_role_fingerprint("pavo", role) != original
+
+
+def test_canonical_role_fingerprint_uses_only_real_version_evidence():
+    role = _make_def(name="pavo")
+    original = skill_runner.canonical_role_fingerprint("pavo", role)
+    role.version = "local-default-changed"
+    assert skill_runner.canonical_role_fingerprint("pavo", role) == original
+    role.raw = {"snapshot": {"version": "server-revision"}}
+    assert skill_runner.canonical_role_fingerprint("pavo", role) != original
+
+
+@pytest.mark.parametrize("field,value", [
+    ("entity_id", "ent_changed"), ("prompt_markdown", "changed\n"),
+    ("tool_allowlist", ["Bash"]), ("status", "disabled"),
+    ("aauth_sub", "changed@ateles"), ("agent_grant", "operator"),
+    ("tier", "top"), ("override_policy", "changed"),
+    ("last_observation_id", "obs_changed"),
+    ("raw", {"snapshot": {"version": "changed"}}),
+])
+def test_expected_role_change_refuses_before_provider_or_policy(monkeypatch, field, value):
+    original = _make_def(name="pavo")
+    expectation = skill_runner.canonical_role_fingerprint("pavo", original)
+    changed = _make_def(name="pavo")
+    setattr(changed, field, value)
+    effects = []
+    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda role, *, fresh: changed)
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda *a, **k: effects.append("policy"))
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: effects.append("provider"))
+    result = asyncio.run(skill_runner._run_skill_once(
+        "pavo", "task", provider="claude", role="pavo",
+        expected_role_fingerprint=expectation,
+    ))
+    assert result.definition_unavailable and not result.ok
+    assert effects == []
+
+
+@pytest.mark.parametrize("expectation", ["", "bad", "A" * 64])
+def test_bad_role_expectation_refuses_before_loader(monkeypatch, expectation):
+    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda *a, **k: pytest.fail("loader called"))
+    result = asyncio.run(skill_runner._run_skill_once(
+        "pavo", "task", provider="claude", role="pavo",
+        expected_role_fingerprint=expectation,
+    ))
+    assert result.definition_unavailable
+
+
+def test_matching_fresh_role_still_reads_live_policy_for_exact_entity(monkeypatch):
+    role = _make_def(name="pavo")
+    expectation = skill_runner.canonical_role_fingerprint("pavo", role)
+    seen = []
+    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda name, *, fresh: role)
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt",
+                        lambda name, *, agent_definition_id: seen.append(agent_definition_id) or "")
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {})
+    result = asyncio.run(skill_runner._run_skill_once(
+        "pavo", "task", provider="claude", role="pavo",
+        expected_role_fingerprint=expectation,
+    ))
+    assert seen == [role.entity_id]
+    assert not result.ok
+
+
+def test_matching_fresh_role_refuses_failed_live_policy(monkeypatch):
+    role = _make_def(name="pavo")
+    expectation = skill_runner.canonical_role_fingerprint("pavo", role)
+    monkeypatch.setattr(skill_runner, "_load_agent_def", lambda name, *, fresh: role)
+    def unavailable(*a, **k):
+        raise skill_runner.AgentPolicyUnavailable("pavo", "query", "bad_response")
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", unavailable)
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: pytest.fail("provider reached"))
+    result = asyncio.run(skill_runner._run_skill_once(
+        "pavo", "task", provider="claude", role="pavo",
+        expected_role_fingerprint=expectation,
+    ))
+    assert result.policy_unavailable and not result.ok
+
+
+def test_run_skill_forwards_role_expectation_to_provider_attempt(monkeypatch):
+    seen = []
+    async def attempt(skill, prompt, **kwargs):
+        seen.append(kwargs.get("expected_role_fingerprint"))
+        return skill_runner.SkillResult(skill, True, 0, "ok", "", provider="claude")
+    monkeypatch.setattr(skill_runner, "_run_skill_once", attempt)
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {"claude": "/fixture/claude"})
+    monkeypatch.setattr(skill_runner, "_refresh_usage_snapshot", lambda binaries: None)
+    harness_router.record_probe_available("claude", source="test_fixture",
+                                          detail="intercepted attempt")
+    expectation = "a" * 64
+    result = asyncio.run(skill_runner.run_skill(
+        "pavo", "task", role="pavo", provider="claude",
+        expected_role_fingerprint=expectation,
+    ))
+    assert result.ok
+    assert seen == [expectation]
+
+
+def test_role_mismatch_ends_failover_without_cooldown(monkeypatch, tmp_path):
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex")
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"cursor": 1.0, "codex": 1.0}')
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json"))
+    harness_router.reset_state()
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: {
+        "cursor": "/fixture/cursor", "codex": "/fixture/codex",
+    })
+    for provider in ("cursor", "codex"):
+        harness_router.record_probe_available(provider, source="test_fixture",
+                                              detail="intercepted attempt")
+    seen = []
+    async def mismatch(skill, prompt, **kwargs):
+        seen.append((kwargs["provider"], kwargs["expected_role_fingerprint"]))
+        return skill_runner.SkillResult(
+            skill, False, None, "", "", provider=kwargs["provider"],
+            definition_unavailable=True,
+        )
+    monkeypatch.setattr(skill_runner, "_run_skill_once", mismatch)
+    monkeypatch.setattr(skill_runner, "cool_down", lambda *a, **k: pytest.fail("cooldown"))
+    result = asyncio.run(skill_runner.run_skill(
+        "pavo", "task", role="pavo", expected_role_fingerprint="a" * 64,
+    ))
+    assert result.definition_unavailable
+    assert len(seen) == 1 and seen[0][1] == "a" * 64
+
+def _loader_with_no_policies():
+    """Unrelated runner tests supply a verified empty rendered policy result."""
+    loader = MagicMock()
+    loader.render_policy_prompt.return_value = ""
+    return loader
 
 
 class TestActivePolicyCarrier:
     def test_policy_is_rendered_fresh_for_every_dispatch(self) -> None:
         with patch("skill_runner.AgentLoader") as MockLoader:
-            instance = MagicMock()
+            instance = _loader_with_no_policies()
             instance.render_policy_prompt.side_effect = ["first", "second"]
             MockLoader.return_value = instance
 
@@ -196,12 +372,13 @@ class TestActivePolicyCarrier:
 
         assert MockLoader.call_count == 2
 
-    def test_policy_render_failure_degrades_to_empty_prompt(self) -> None:
+    def test_policy_render_failure_refuses_dispatch(self) -> None:
         with patch("skill_runner.AgentLoader") as MockLoader:
             MockLoader.return_value.render_policy_prompt.side_effect = RuntimeError(
                 "unavailable"
             )
-            assert skill_runner._load_active_policy_prompt("cicada") == ""
+            with pytest.raises(skill_runner.AgentPolicyUnavailable):
+                skill_runner._load_active_policy_prompt("cicada")
 
 
 # ── run_skill — full integration (mocked subprocess + Neotoma) ────────────────
@@ -233,7 +410,7 @@ class TestRunSkill:
             prompt_markdown="Review only.",
             tool_allowlist="Read,Bash,mcp__mcpsrv_neotoma__*",
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
         for key, value in {
@@ -304,7 +481,7 @@ class TestRunSkill:
         """When agent_definition has prompt_markdown, the spawned system prompt
         must contain BOTH the definition text and the SKILL.md text."""
         fake_def = _make_def(prompt_markdown="Role: Gryllus. You are an issue worker.")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         instance.render_policy_prompt.return_value = "LIVE POLICY CANARY"
         MockLoader.return_value = instance
@@ -348,12 +525,12 @@ class TestRunSkill:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_skill_md_only_when_no_definition(
+    def test_skill_md_does_not_authorize_missing_definition(
         self, MockLoader, mock_write_harness
     ) -> None:
-        """When prompt_markdown is empty, the system prompt is SKILL.md alone."""
+        """A local skill cannot authorize a role with no canonical prompt."""
         stub = _stub_def()
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = stub
         MockLoader.return_value = instance
 
@@ -386,20 +563,18 @@ class TestRunSkill:
                 )
             )
 
-        assert result.ok
-        sys_prompt_idx = captured_cmd.index("--append-system-prompt") + 1
-        system_prompt_arg = captured_cmd[sys_prompt_idx]
-        assert system_prompt_arg == skill_md_content
+        assert not result.ok and result.definition_unavailable
+        assert captured_cmd == []
+        mock_write_harness.assert_not_called()
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_degraded_produces_harness_event_with_marker(
+    def test_missing_definition_never_records_degraded_execution(
         self, MockLoader, mock_write_harness
     ) -> None:
-        """Empty prompt_markdown must produce a harness_event with
-        output_summary containing 'degraded_generic_subagent'."""
+        """Missing authority is a refusal, never a degraded execution event."""
         stub = _stub_def()
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = stub
         MockLoader.return_value = instance
 
@@ -417,9 +592,9 @@ class TestRunSkill:
             patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill content"),
-            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec) as spawn,
         ):
-            self._run(
+            result = self._run(
                 skill_runner.run_skill(
                     "gryllus",
                     "work prompt",
@@ -428,15 +603,9 @@ class TestRunSkill:
                 )
             )
 
-        # Find the degraded harness_event call
-        degraded_calls = [
-            call
-            for call in mock_write_harness.call_args_list
-            if "degraded_generic_subagent" in (call.kwargs.get("output_summary") or "")
-        ]
-        assert len(degraded_calls) >= 1, (
-            "Expected at least one harness_event with output_summary='degraded_generic_subagent'"
-        )
+        assert not result.ok and result.definition_unavailable
+        spawn.assert_not_called()
+        mock_write_harness.assert_not_called()
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -448,7 +617,7 @@ class TestRunSkill:
             prompt_markdown="Restricted agent.",
             tool_allowlist="Bash,Read,Write",
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = restricted_def
         MockLoader.return_value = instance
 
@@ -502,7 +671,7 @@ class TestRunSkill:
         not narrowed; the three writeback tools are named so the write lands.
         """
         wide_def = _make_def(prompt_markdown="Full-tool agent.", tool_allowlist="*")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = wide_def
         MockLoader.return_value = instance
 
@@ -549,7 +718,7 @@ class TestRunSkill:
     ) -> None:
         """A successful dispatch must produce at least start + completion harness_events."""
         full_def = _make_def()
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = full_def
         MockLoader.return_value = instance
 
@@ -592,7 +761,7 @@ class TestRunSkill:
     def test_harness_event_on_failure(self, MockLoader, mock_write_harness) -> None:
         """A failing dispatch (non-zero rc) must produce a harness_event with success='false'."""
         full_def = _make_def()
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = full_def
         MockLoader.return_value = instance
 
@@ -636,7 +805,7 @@ class TestRunSkill:
     ) -> None:
         """A harness_event write failure must not propagate and crash the dispatch."""
         full_def = _make_def()
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = full_def
         MockLoader.return_value = instance
 
@@ -742,7 +911,7 @@ class TestRoleSigningEnvInjection:
         fake_def = _make_def(
             prompt_markdown="Role: Gryllus.", aauth_sub="gryllus@ateles-swarm"
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -801,7 +970,7 @@ class TestRoleSigningEnvInjection:
         fake_def = _make_def(
             prompt_markdown="Role: Gryllus.", aauth_sub="gryllus@ateles-swarm"
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -854,7 +1023,7 @@ class TestRoleSigningEnvInjection:
         """When agent_def is degraded (empty prompt_markdown), none of the signer
         vars should be injected regardless of whether the JWK file exists."""
         stub = _stub_def()
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = stub
         MockLoader.return_value = instance
 
@@ -954,7 +1123,7 @@ class TestNeotomaMcpConfigInjection:
         command must include --mcp-config, and the config file must contain the
         neotoma http server pointing at <base>/mcp with the Authorization header."""
         fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -1010,7 +1179,7 @@ class TestNeotomaMcpConfigInjection:
         the child process.
         """
         fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -1039,7 +1208,7 @@ class TestNeotomaMcpConfigInjection:
         unset one — the same silent-empty-string gap ateles#1071 fixed for
         GH_TOKEN, but here at the Neotoma MCP config construction site."""
         fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -1074,7 +1243,7 @@ class TestNeotomaMcpConfigInjection:
         import tempfile as _tempfile
 
         fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -1150,7 +1319,7 @@ class TestNeotomaMcpConfigInjection:
             prompt_markdown="Restricted agent.",
             tool_allowlist="Bash,Read,Write",
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = restricted_def
         MockLoader.return_value = instance
 
@@ -1200,7 +1369,7 @@ class TestNeotomaMcpConfigInjection:
         absent.
         """
         wide_def = _make_def(prompt_markdown="Full-tool agent.", tool_allowlist="*")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = wide_def
         MockLoader.return_value = instance
 
@@ -1428,7 +1597,7 @@ class TestGithubTokenInjection:
         """When github_token='ghp_agent_pat' is supplied, subprocess_env must carry
         GITHUB_TOKEN=<token> and GH_TOKEN=<token>."""
         fake_def = _make_def(prompt_markdown="Role: Pavo.", tool_allowlist="*")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -1475,7 +1644,7 @@ class TestGithubTokenInjection:
         """NO-OP: when github_token is not passed (None), GITHUB_TOKEN and GH_TOKEN
         in subprocess_env must match the ambient daemon env — no override."""
         fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -1537,7 +1706,7 @@ class TestGithubTokenInjection:
         ("no per-agent token was requested at all," still a no-op — see
         test_github_token_not_injected_when_none)."""
         fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -1679,7 +1848,7 @@ class TestSwarmGithubContractInjection:
         """When run_skill is called with include_github_contract=True, the
         spawned system prompt arg must contain SWARM_GITHUB_CONTRACT."""
         fake_def = _make_def(prompt_markdown="Role: Gryllus.")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -1736,7 +1905,7 @@ class TestSwarmGithubContractInjection:
         """Default run_skill call (no include_github_contract): SWARM_GITHUB_CONTRACT
         must NOT appear — preserves byte-identical pre-contract behaviour."""
         fake_def = _make_def(prompt_markdown="Role: Gryllus.")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -1779,13 +1948,12 @@ class TestSwarmGithubContractInjection:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_run_skill_degraded_with_contract(
+    def test_github_contract_does_not_authorize_missing_definition(
         self, MockLoader, mock_write_harness
     ) -> None:
-        """Degraded + include_github_contract=True: contract + skill_md in prompt,
-        dispatch still proceeds (degraded=True returned by build_system_prompt)."""
+        """Even an explicit delivery contract cannot supply role authority."""
         stub = _stub_def()
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = stub
         MockLoader.return_value = instance
 
@@ -1822,21 +1990,9 @@ class TestSwarmGithubContractInjection:
                 )
             )
 
-        # Dispatch still succeeds despite degraded.
-        assert result.ok
-        sys_prompt_idx = captured_cmd.index("--append-system-prompt") + 1
-        system_prompt_arg = captured_cmd[sys_prompt_idx]
-        assert skill_runner.SWARM_GITHUB_CONTRACT in system_prompt_arg, (
-            "Contract must still be injected even in degraded mode"
-        )
-        assert skill_md_content in system_prompt_arg
-        # The degraded harness_event is also emitted (the degraded branch ran).
-        degraded_calls = [
-            call
-            for call in mock_write_harness.call_args_list
-            if "degraded_generic_subagent" in (call.kwargs.get("output_summary") or "")
-        ]
-        assert len(degraded_calls) >= 1
+        assert not result.ok and result.definition_unavailable
+        assert captured_cmd == []
+        mock_write_harness.assert_not_called()
 
 
 # ── ateles#590 security repair (PR #1334): GitHub delivery credential boundary ─
@@ -1897,7 +2053,7 @@ class TestGithubDeliveryCredentialBoundary:
         monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
         monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
         fake_def = _make_def(prompt_markdown="Role: Gryllus.")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -1938,7 +2094,7 @@ class TestGithubDeliveryCredentialBoundary:
         monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
         monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
         fake_def = _make_def(prompt_markdown="Role: Gryllus.")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -1976,7 +2132,7 @@ class TestGithubDeliveryCredentialBoundary:
         monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
         monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
         fake_def = _make_def(prompt_markdown="Role: Gryllus.")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -2016,7 +2172,7 @@ class TestGithubDeliveryCredentialBoundary:
         monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
         monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
         fake_def = _make_def(prompt_markdown="Role: Gryllus.")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -2053,7 +2209,7 @@ class TestGithubDeliveryCredentialBoundary:
         monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
         monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
         fake_def = _make_def(prompt_markdown="Role: Gryllus.")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -2179,8 +2335,8 @@ class TestAnthropicAuthPrecedence:
         skill_runner._agent_def_cache.clear()
 
     def _spawn_and_capture_env(self, env_overrides: dict) -> dict:
-        instance = MagicMock()
-        instance.load.return_value = _stub_def()
+        instance = _loader_with_no_policies()
+        instance.load.return_value = _make_def()
         captured: dict = {}
 
         async def fake_exec(*cmd, **kwargs):
@@ -2203,11 +2359,13 @@ class TestAnthropicAuthPrecedence:
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
             patch.dict("os.environ", env_overrides, clear=False),
         ):
-            asyncio.run(
+            result = asyncio.run(
                 skill_runner.run_skill(
                     "gryllus", "p", role="gryllus", task_entity_id="ent_x"
                 )
             )
+        assert result.ok, result.error
+        assert captured, "auth test must reach the actual child boundary"
         return captured
 
     def test_oauth_token_present_drops_api_key(self) -> None:
@@ -2365,7 +2523,7 @@ class TestRunSkillDroppedAllowlistNotification:
 
     def _run_with_stderr(self, stderr_bytes: bytes, notifier, tmp_path):
         fake_def = _make_def(prompt_markdown="Role prompt.")
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
 
         async def fake_exec(*cmd, **kwargs):
@@ -2470,7 +2628,7 @@ class TestDispatchFailureDiagnostics:
         Returns (result, harness_calls, log_dir).
         """
         fake_def = _make_def(prompt_markdown="Role: Gryllus.")
-        loader_instance = MagicMock()
+        loader_instance = _loader_with_no_policies()
         loader_instance.load.return_value = fake_def
 
         async def fake_exec(*cmd, **kwargs):
@@ -2761,7 +2919,7 @@ class TestDispatchFailureDiagnostics:
     def test_timeout_notifies_operator(self, tmp_path) -> None:
         """A timed-out dispatch is the same silent-failure class."""
         fake_def = _make_def(prompt_markdown="Role: Gryllus.")
-        loader_instance = MagicMock()
+        loader_instance = _loader_with_no_policies()
         loader_instance.load.return_value = fake_def
         notifier = MagicMock()
 
@@ -2834,7 +2992,7 @@ class TestDispatchFailureDiagnostics:
         )
         launcher.chmod(0o755)
         fake_def = _make_def(prompt_markdown="Role: Gryllus.")
-        loader_instance = MagicMock()
+        loader_instance = _loader_with_no_policies()
         loader_instance.load.return_value = fake_def
 
         with (
@@ -3589,7 +3747,7 @@ class TestDeliveryFailureIsReportedAsFailure:
         `stderr` is where git actually writes its denial lines, and is the only
         stream the detector reads — see test_quoted_denial_on_stdout_is_not_a_denial.
         """
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = _make_def()
 
         async def fake_exec(*cmd, **kwargs):
@@ -4008,7 +4166,7 @@ class TestDispatchUsageRecording:
         return asyncio.run(coro)
 
     def _dispatch(self, mock_write_harness, MockLoader, stdout: bytes, rc: int = 0):
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
 
@@ -4635,7 +4793,7 @@ class TestGateOwnerIdentity:
             aauth_sub="accipiter@ateles-swarm",
             name="accipiter",
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -4713,7 +4871,7 @@ class TestGateOwnerIdentity:
             aauth_sub="accipiter@ateles-swarm",
             name="accipiter",
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -4776,7 +4934,7 @@ class TestGateOwnerIdentity:
             aauth_sub="falco@ateles-swarm",
             name="falco",
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
 
@@ -4857,7 +5015,7 @@ class TestGateOwnerToolDenyAcrossProviders:
             aauth_sub="waxwing@ateles-swarm",
             name="waxwing",
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
@@ -4917,7 +5075,7 @@ class TestGateOwnerToolDenyAcrossProviders:
             aauth_sub="pavo@ateles-swarm",
             name="pavo",
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
@@ -4982,7 +5140,7 @@ class TestGateOwnerToolDenyAcrossProviders:
             aauth_sub="falco@ateles-swarm",
             name="falco",
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
@@ -5046,10 +5204,11 @@ class TestGateOwnerToolDenyAcrossProviders:
             aauth_sub="waxwing@ateles-swarm",
             name="waxwing",
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.setenv("WAXWING_NEOTOMA_TOKEN", "waxwing-own-token")
         monkeypatch.setenv("NEOTOMA_BASE_URL", "https://record.example")
         source_home = tmp_path / "source-codex-home"
         source_home.mkdir()
@@ -5121,7 +5280,7 @@ class TestGateOwnerToolDenyAcrossProviders:
         )
         assert "correct" not in effective
         assert set(skill_runner.CODEX_GATE_REQUIRED_READ_TOOLS) <= effective
-        assert observed["bearer"] == "shared-daemon-token"
+        assert observed["bearer"] == "waxwing-own-token"  # the role's own, never shared
         assert observed["auth_is_symlink"] is True
         assert json.loads(source_auth.read_text(encoding="utf-8")) == {
             "refreshed": True
@@ -5140,10 +5299,11 @@ class TestGateOwnerToolDenyAcrossProviders:
             aauth_sub="waxwing@ateles-swarm",
             name="waxwing",
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
+        monkeypatch.setenv("WAXWING_NEOTOMA_TOKEN", "waxwing-own-token")
         monkeypatch.setenv("NEOTOMA_BASE_URL", "https://record.example")
         source_home = tmp_path / "source-codex-home"
         source_home.mkdir()
@@ -5195,27 +5355,33 @@ class TestGateOwnerToolDenyAcrossProviders:
 
         assert not result.ok and launched == []
         assert skill_runner.GATE_OWNER_TOOL_DENY_UNAVAILABLE in result.error
-        assert "disabled_tools must deny exactly" in result.error
+        # A fixed reason and the exception class only: the contract's own
+        # detail stays out of every surface the repair reaches.
+        assert "(RuntimeError)" in result.error
+        assert "disabled_tools must deny exactly" not in result.error
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_non_gate_codex_keeps_the_effective_codex_home(
+    def test_non_gate_codex_gets_an_isolated_home_with_the_effective_login(
         self, MockLoader, mock_write_harness, monkeypatch, tmp_path
     ) -> None:
-        """Ordinary Codex runs retain their ambient command/config behavior."""
+        """Ordinary Codex runs never use the operator's CODEX_HOME (its MCP
+        servers): they get an isolated home whose auth links to its login."""
         fake_def = _make_def(
             prompt_markdown="Role: Falco.",
             tool_allowlist="*",
             aauth_sub="falco@ateles-swarm",
             name="falco",
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
         source_home = tmp_path / "source-codex-home"
         source_home.mkdir()
         (source_home / "auth.json").write_text("{}", encoding="utf-8")
         monkeypatch.setenv("CODEX_HOME", str(source_home))
+        monkeypatch.setenv("FALCO_NEOTOMA_TOKEN", "falco-own-token")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
         skill_root = tmp_path / ".claude" / "skills" / "falco"
         skill_root.mkdir(parents=True)
         (skill_root / "SKILL.md").write_text("skill md", encoding="utf-8")
@@ -5224,6 +5390,8 @@ class TestGateOwnerToolDenyAcrossProviders:
 
         async def fake_exec(*cmd, **kwargs):
             observed["codex_home"] = kwargs["env"]["CODEX_HOME"]
+            observed["auth_target"] = str(
+                (Path(kwargs["env"]["CODEX_HOME"]) / "auth.json").resolve())
             proc = MagicMock()
             proc.returncode = 0
 
@@ -5248,7 +5416,8 @@ class TestGateOwnerToolDenyAcrossProviders:
             )
 
         assert result.ok
-        assert observed["codex_home"] == str(source_home)
+        assert observed["codex_home"] != str(source_home)
+        assert observed["auth_target"] == str((source_home / "auth.json").resolve())
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -5266,7 +5435,7 @@ class TestGateOwnerToolDenyAcrossProviders:
             aauth_sub="accipiter@ateles-swarm",
             name="accipiter",
         )
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
         MockLoader.return_value = instance
         monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "shared-daemon-token")
@@ -5602,7 +5771,7 @@ class TestModelTieringDispatch:
     ) -> None:
         """An explicit `model=` override (no action_class needed) reaches the
         real child argv end to end."""
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         captured: dict = {}
@@ -5639,7 +5808,7 @@ class TestModelTieringDispatch:
     ) -> None:
         """End-to-end: action_class -> action_policy -> tier -> vendor_binding
         -> model -> real child argv. No 'auto' anywhere in the command."""
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         captured: dict = {}
@@ -5682,7 +5851,7 @@ class TestModelTieringDispatch:
     ) -> None:
         """action_class=None (every call site that predates this) must not
         add a --model flag — exact prior behaviour, no regression."""
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         captured: dict = {}
@@ -5714,7 +5883,7 @@ class TestModelTieringDispatch:
     ) -> None:
         """A tier with no bound model for this provider must refuse loudly —
         never fall back to the ambient default or a different tier's model."""
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
@@ -5764,7 +5933,7 @@ class TestModelTieringDispatch:
         POSTed harness_event body on the success path."""
         import json as _json
 
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
@@ -5815,7 +5984,7 @@ class TestModelTieringDispatch:
         import json as _json
         import logging
 
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         ledger = tmp_path / "tier-ledger.jsonl"
@@ -5864,7 +6033,7 @@ class TestModelTieringDispatch:
         the report shows how much still runs on the provider default."""
         import json as _json
 
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         ledger = tmp_path / "tier-ledger.jsonl"
@@ -5899,7 +6068,7 @@ class TestModelTieringDispatch:
         """A dispatch that fails over from cursor to codex is tiered
         identically on both — the tier is a property of the work, not of
         which provider ends up running it."""
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex")
@@ -5910,7 +6079,8 @@ class TestModelTieringDispatch:
             "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
         )
         harness_router.reset_state()
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+        monkeypatch.setenv("CICADA_NEOTOMA_TOKEN", "cicada-own-token")
         monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
         monkeypatch.setenv(
             "APIS_VENDOR_BINDING",
@@ -5970,7 +6140,7 @@ class TestModelTieringDispatch:
         be tried first. The unbound provider must never be attempted — its
         in-attempt UnboundTierError refusal is not a failover signal, so
         reaching it would end the dispatch instead of running on codex."""
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex")
@@ -5981,7 +6151,8 @@ class TestModelTieringDispatch:
             "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
         )
         harness_router.reset_state()
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+        monkeypatch.setenv("CICADA_NEOTOMA_TOKEN", "cicada-own-token")
         monkeypatch.setenv("APIS_ACTION_POLICY", '{"build": "mid"}')
         monkeypatch.setenv(
             "APIS_VENDOR_BINDING", '{"codex": {"mid": "codex-mid-model"}}'
@@ -6014,7 +6185,7 @@ class TestModelTieringDispatch:
         assert cmd[cmd.index("--model") + 1] == "codex-mid-model"
 
     def _run_unbound_scenario(self, MockLoader, monkeypatch, tmp_path, *, providers, binding, **kwargs):
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         monkeypatch.setenv("APIS_HARNESS_PROVIDERS", providers)
@@ -6094,7 +6265,7 @@ class TestModelTieringDispatch:
         proves the fix: mutate the live policy file between the two attempts
         and assert the SECOND attempt still resolves to the tier read at the
         START of run_skill, not the changed one."""
-        instance = MagicMock()
+        instance = _loader_with_no_policies()
         instance.load.return_value = _make_def()
         MockLoader.return_value = instance
         monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "cursor,codex")
@@ -6103,7 +6274,8 @@ class TestModelTieringDispatch:
             "APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "missing.json")
         )
         harness_router.reset_state()
-        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://localhost:9180")
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.test")
+        monkeypatch.setenv("CICADA_NEOTOMA_TOKEN", "cicada-own-token")
 
         policy_path = tmp_path / "action-policy.json"
         policy_path.write_text('{"build": "mid"}')

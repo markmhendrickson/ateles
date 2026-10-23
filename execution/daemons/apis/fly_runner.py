@@ -71,6 +71,9 @@ RESULT_ENTITY_TYPE = "fly_runner_result"
 # run_job.py keeps the LAST this-many bytes of stdout (STDOUT_CAP_BYTES there).
 RUNNER_STDOUT_CAP_BYTES = 256 * 1024
 MCP_CONFIG_PLACEHOLDER = "@@ATELES_JOB_MCP_CONFIG@@"
+KEY_ONLY_NEOTOMA_TOOLS_NOTE = (
+    "Ran on Fly with the role's AAuth key only: this run had no Neotoma MCP tools."
+)
 # Where Claude's system prompt file goes in argv; run_job.py writes the file
 # (shipped as a job file) and puts its path here.
 SYSTEM_PROMPT_PLACEHOLDER = "@@ATELES_JOB_SYSTEM_PROMPT@@"
@@ -417,7 +420,23 @@ def _csv(raw: str) -> list[str]:
 # remote outcome as terminal (no retry, no re-dispatch, no failover). Only
 # these can be opted in through APIS_FLY_RUNNER_CLASSES; adding one means
 # checking every retry lane that can re-dispatch it.
-FLY_VETTED_CLASSES: frozenset[str] = frozenset({"carry_forward_check"})
+FLY_VETTED_CLASSES: frozenset[str] = frozenset({"carry_forward_check", "open_or_merge_pr"})
+# Classes that may be listed (the operator's opt-in) but are never routed by
+# class alone: only a builder's delivery path, which forces ``runner="fly"``
+# with a delivery spec, sends them to Fly. Every retry lane that can re-run a
+# builder treats a launched delivery's outcome as terminal (tested in
+# test_fly_delivery_dispatch.py), which is what vetting this class required.
+DELIVERY_ONLY_CLASSES: frozenset[str] = frozenset({"open_or_merge_pr"})
+# The job-only credential name of a delivery's GitHub token, and the stdin
+# and argv placeholders the job runner fills in (deploy/fly-runner/run_job.py
+# defines the same names; a test pins them together).
+DELIVERY_TOKEN_NAME = "ATELES_DELIVERY_GITHUB_TOKEN"
+WORKSPACE_PLACEHOLDER = "@@ATELES_JOB_WORKSPACE@@"
+PR_FILE_PLACEHOLDER = "@@ATELES_JOB_PR_FILE@@"
+DELIVERY_SPEC_KEYS = ("branch", "base_branch", "author_name", "author_email")
+# The fly_runner_result fields a delivering job's record carries.
+DELIVERY_RESULT_FIELDS = ("delivery_status", "delivery_reason", "delivery_branch",
+                          "delivery_commit", "pr_number", "pr_url")  # fmt: skip
 
 
 def runner_classes() -> frozenset[str]:
@@ -434,6 +453,12 @@ def runner_classes() -> frozenset[str]:
     return listed & FLY_VETTED_CLASSES
 
 
+def delivery_opted_in() -> bool:
+    """Whether the operator opted builder deliveries onto Fly: the delivery
+    class is listed in ``APIS_FLY_RUNNER_CLASSES``. Unset, it is False."""
+    return bool(DELIVERY_ONLY_CLASSES & runner_classes())
+
+
 def wants_fly(runner: str | None, action_class: str | None) -> bool:
     """Whether this dispatch should try the fly executor at all.
 
@@ -445,7 +470,8 @@ def wants_fly(runner: str | None, action_class: str | None) -> bool:
         return False
     if runner == "fly":
         return True
-    return bool(action_class) and action_class in runner_classes()
+    return (bool(action_class) and action_class in runner_classes()
+            and action_class not in DELIVERY_ONLY_CLASSES)  # fmt: skip
 
 
 @dataclass
@@ -673,6 +699,7 @@ class LedgerSnapshot:
     local_fallbacks: int
     entries: dict[str, dict]
     owners: dict[str, dict]
+    deliveries: dict[str, dict] = field(default_factory=dict)
 
     def outstanding_usd(self) -> float:
         """The reserved maximum cost of every reservation still held,
@@ -708,6 +735,7 @@ class LedgerSnapshot:
             "month": self.month, "day": self.day, "spend_usd": self.spend_usd,
             "launches_today": self.launches_today, "local_fallbacks": self.local_fallbacks,
             "in_flight": copy.deepcopy(self.entries), "owners": copy.deepcopy(self.owners),
+            **({"deliveries": copy.deepcopy(self.deliveries)} if self.deliveries else {}),
         }  # fmt: skip
 
 
@@ -814,13 +842,20 @@ class FlyLedger:
             if record["id"] != key:
                 raise FlyLedgerError(f"Fly ledger {name}: owner {key} names another owner")
             owners[key] = copy.deepcopy(record)
+        deliveries = raw.get("deliveries", {})
+        if not isinstance(deliveries, dict) or not all(
+            isinstance(key, str) and isinstance(value, dict)
+            and isinstance(value.get("status"), str)
+            for key, value in deliveries.items()
+        ):
+            raise FlyLedgerError(f"Fly ledger {name}: delivery receipts are unreadable")
         period = {"month": raw["month"], "day": raw["day"], "spend_usd": raw["spend_usd"],
                   "launches_today": raw["launches_today"]}  # fmt: skip
         self._roll(period, now)  # refuses a later period; resets only on a rollover
         snap = LedgerSnapshot(
             month=period["month"], day=period["day"], spend_usd=float(period["spend_usd"]),
             launches_today=period["launches_today"], local_fallbacks=raw["local_fallbacks"],
-            entries=entries, owners=owners,
+            entries=entries, owners=owners, deliveries=copy.deepcopy(deliveries),
         )
         if admission:
             if config is None:
@@ -857,8 +892,116 @@ class FlyLedger:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.chmod(tmp, 0o600)
         os.replace(tmp, self.path)
+        directory = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def delivery_receipts(self) -> dict[str, dict]:
+        """Durable issue/task → run bindings, kept when accounting settles.
+
+        Retained across period rollovers: spending resets do not prove that a
+        previous job pushed nothing. The receipt contains only the executor's
+        observed result fields and never any credential.
+        """
+        if not self.path.exists():
+            return {}
+        with self._locked():
+            return self._snapshot(self._clock()).deliveries
+
+    def _write_delivery(self, key: str, write) -> bool:
+        """Apply *write(receipts)* to the delivery receipts under the ledger lock
+        and read the result back. *write* returns False to change nothing."""
+        with self._locked():
+            data = self._load()
+            if "deliveries" not in data:
+                data["deliveries"] = {}
+            receipts = data["deliveries"]
+            if not write(receipts):
+                return False
+            self._save(data)
+            if self._snapshot(self._clock()).deliveries.get(key) != receipts.get(key):
+                raise FlyLedgerError("delivery receipt did not read back")
+            return True
+
+    def reserve_delivery(self, key: str, entry: dict) -> bool:
+        """Create the receipt for *key* if there is none (False if one exists,
+        whatever its status). A read-back is required before the caller may send
+        anything to Fly. Accounting and reaper writes preserve receipts through
+        ``LedgerSnapshot.document``."""
+        if not isinstance(entry.get("status"), str):
+            raise FlyLedgerError("delivery receipt has no status")
+
+        def write(receipts: dict) -> bool:
+            if key in receipts:
+                return False
+            receipts[key] = entry
+            return True
+
+        return self._write_delivery(key, write)
+
+    def settle_delivery(self, key: str, token: str, entry: dict) -> bool:
+        """Replace the receipt for *key* with *entry* only if the stored receipt
+        is still the reservation *token* made (compare-and-set); otherwise leave
+        it untouched and return False. *entry* carries the same token."""
+        if not isinstance(entry.get("status"), str) or entry.get("token") != token:
+            raise FlyLedgerError("delivery receipt does not carry its reservation token")
+
+        def write(receipts: dict) -> bool:
+            if key not in receipts or receipts[key].get("token") != token:
+                return False
+            receipts[key] = entry
+            return True
+
+        return self._write_delivery(key, write)
+
+    def release_delivery(self, key: str, token: str) -> bool:
+        """Remove the receipt for *key* only if it is still the reservation
+        *token* made and still ``launching`` (compare-and-remove); otherwise
+        leave it untouched and return False. For a dispatch that provably
+        launched nothing."""
+
+        def write(receipts: dict) -> bool:
+            held = receipts.get(key)
+            if held is None or held.get("token") != token or held.get("status") != "launching":
+                return False
+            receipts.pop(key)
+            return True
+
+        return self._write_delivery(key, write)
+
+    def clear_delivery(self, key: str, expected: dict, *, before=None) -> bool:
+        """Remove one delivery receipt, only if it still equals *expected*.
+
+        The operator's reconcile step (``fly_delivery_receipt.py``): under the
+        ledger's own lock and atomic write, nothing else is touched, and a
+        receipt that changed since it was shown is left alone (False). *before*
+        is called under the same lock once the receipt has been compared and
+        matched, and before anything is written: if it raises, nothing is
+        removed. A malformed ledger raises ``FlyLedgerError``. An exception
+        raised from the write may come after the file was replaced, so a caller
+        decides what happened by reading the ledger again. No code path calls
+        this automatically.
+        """
+        with self._locked():
+            data = self._load()
+            if "deliveries" not in data:
+                return False
+            receipts = data["deliveries"]
+            if receipts.get(key) != expected:
+                return False
+            if before is not None:
+                before()
+            receipts.pop(key)
+            self._save(data)
+            if key in self._snapshot(self._clock()).deliveries:
+                raise FlyLedgerError("delivery receipt was not removed")
+            return True
 
     def _roll(self, data: dict, now: float) -> None:
         """Start a new period only on a genuine rollover: a VALID marker
@@ -1548,6 +1691,25 @@ async def read_result_record(run_id: str, *, transport: httpx.AsyncBaseTransport
     raise FlyResultUnreadable(f"result record for run {run_id} could not be read")
 
 
+DELIVERY_STATUSES = frozenset({"opened", "updated", "no_changes", "clone_failed",
+                               "not_delivered", "push_failed", "pr_failed", "no_time"})
+
+
+def delivery_result_from_record(record: dict) -> dict:
+    """A delivering job's six result fields, type-checked. A record without a
+    recognised ``delivery_status`` (for example, fields the record store does
+    not hold yet) reads as ``unreported``: never as a delivery outcome."""
+    status = record.get("delivery_status")
+    out = {"delivery_status": status if isinstance(status, str) and status in DELIVERY_STATUSES else "unreported"}
+    for name in ("delivery_reason", "delivery_branch", "delivery_commit", "pr_url"):
+        value = record.get(name)
+        out[name] = value if isinstance(value, str) else ""
+    number = record.get("pr_number")
+    out["pr_number"] = number if isinstance(number, int) and not isinstance(number, bool) \
+        and number > 0 else None  # fmt: skip
+    return out
+
+
 # ── Job assembly ─────────────────────────────────────────────────────────────
 
 
@@ -1567,6 +1729,7 @@ class FlyJob:
     neotoma_token_name: str = ""
     neotoma_jwk_name: str = ""
     neotoma_base_url: str = ""
+    neotoma_tools_unavailable: bool = False
     probe_env_names: list[str] = field(default_factory=list)
     # Claude's system prompt, shipped as a job file instead of an argument.
     system_prompt: str = field(repr=False, default="")
@@ -1582,6 +1745,12 @@ class FlyJob:
     # Set the moment a create/start request is sent: from then on the job
     # may have run, so any failure surfaces as an unknown outcome.
     launch_requested: bool = False
+    # A builder's delivery (branch, base_branch, author_name, author_email):
+    # the job runner clones, runs the CLI in the checkout, then pushes and
+    # opens the pull request with a delivery token minted at launch.
+    delivery: dict | None = None
+    # What the record said about the delivery (DELIVERY_RESULT_FIELDS), once read.
+    delivery_result: dict | None = None
 
     @property
     def login(self) -> bool:
@@ -1626,6 +1795,36 @@ def role_jwk_path(role: str) -> Path | None:
     return path if path.is_file() else None
 
 
+def _validated_role_jwk(role: str, jwk: Any) -> bool:
+    """Check the role's P-256 private key before it can be sent to a runner."""
+    if not isinstance(jwk, dict) or jwk.get("kty") != "EC" or jwk.get("crv") != "P-256":
+        return False
+    if jwk.get("sub") != f"{role}@ateles-swarm":
+        return False
+    coordinates = []
+    for name in ("x", "y", "d"):
+        value = jwk.get(name)
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+            return False
+        try:
+            raw = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_",
+                                   validate=True)  # fmt: skip
+        except ValueError:
+            return False
+        if not raw:
+            return False
+        coordinates.append(int.from_bytes(raw, "big"))
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ec
+    except ImportError:
+        raise FlyIneligible("cannot verify the role key: the cryptography package is unavailable") from None
+    try:
+        public = ec.derive_private_key(coordinates[2], ec.SECP256R1()).public_key().public_numbers()
+    except ValueError:
+        return False
+    return (public.x, public.y) == tuple(coordinates[:2])
+
+
 def build_job(
     *,
     provider: str,
@@ -1643,9 +1842,15 @@ def build_job(
     owns_pending_gate: bool = False,
     codex_outer_sandboxed: bool = False,
     config: FlyConfig | None = None,
+    delivery: dict | None = None,
+    neotoma_tools_granted: bool = False,
 ) -> FlyJob:
     """Check eligibility and assemble the job, minus the GitHub token (which
-    is minted at launch). Raises ``FlyIneligible`` with the reason."""
+    is minted at launch). Raises ``FlyIneligible`` with the reason.
+
+    ``delivery``: a builder's delivery spec (``DELIVERY_SPEC_KEYS``). The job
+    then carries no read-class token; a delivery token for the one repository
+    is minted at launch instead, and never reaches the CLI."""
     from skill_runner import neotoma_token_env_name
 
     config = config or FlyConfig.from_env()
@@ -1679,8 +1884,12 @@ def build_job(
     shared_bearer = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
     token_name = neotoma_token_env_name(role)
     own_token = os.environ.get(token_name, "").strip()
-    if own_token and shared_bearer and own_token == shared_bearer.strip():
-        raise FlyIneligible(f"{token_name} is the shared daemon bearer, not the role's own")
+    token_is_shared = bool(own_token and shared_bearer and own_token == shared_bearer.strip())
+    if token_is_shared:
+        own_token = ""  # The shared daemon bearer must never enter a Fly job.
+    shared_token_without_key = (
+        f"{token_name} equals the shared daemon bearer and no valid AAuth key exists for {role!r}"
+    )
     jwk_path = role_jwk_path(role)
     jwk_text = ""
     if jwk_path is not None:
@@ -1688,10 +1897,20 @@ def build_job(
             jwk_text = jwk_path.read_text(encoding="utf-8").strip()
             jwk = json.loads(jwk_text)
         except (OSError, ValueError):
+            if token_is_shared:
+                raise FlyIneligible(shared_token_without_key) from None
             raise FlyIneligible(f"the AAuth key file for {role!r} is unreadable") from None
-        if str(jwk.get("sub") or "") != f"{role}@ateles-swarm" or not jwk.get("d"):
+        if not isinstance(jwk, dict):
+            if token_is_shared:
+                raise FlyIneligible(shared_token_without_key)
+            raise FlyIneligible(f"the AAuth key file for {role!r} is unreadable")
+        if not _validated_role_jwk(role, jwk):
+            if token_is_shared:
+                raise FlyIneligible(shared_token_without_key)
             raise FlyIneligible(f"the AAuth key file for {role!r} is not that role's private key")
     if not own_token and not jwk_text:
+        if token_is_shared:
+            raise FlyIneligible(shared_token_without_key)
         raise FlyIneligible(
             f"role {role!r} has no Neotoma identity of its own ({token_name} or an AAuth "
             "key); the shared daemon bearer never leaves the Mac"
@@ -1718,11 +1937,16 @@ def build_job(
         # Every other role's PAT by name, plus the operator's canary name(s).
         *sorted(n for n in os.environ if n.endswith("_AGENT_PAT")),
         *sorted(n for n in os.environ if n.endswith("_NEOTOMA_TOKEN") and n != token_name),
+        *([token_name] if not own_token else []),
         *config.extra_probe_env_names,
     ]))  # fmt: skip
 
     argv = runner_argv(provider, cmd, mcp_config_path)
     argv, system_prompt = externalize_system_prompt(provider, argv)
+    if delivery is not None:
+        delivery = _check_delivery(delivery, repository=repository, stdin=stdin,
+                                   github_requested=github_requested, timeout=timeout)  # fmt: skip
+        argv = with_workspace(provider, argv)
     largest = max((len(a.encode("utf-8")) for a in argv), default=0)
     if largest > MAX_ARGV_ELEMENT_BYTES:
         # Refused before any token, reservation or machine.
@@ -1741,9 +1965,46 @@ def build_job(
         neotoma_token_name=token_name if own_token else "",
         neotoma_jwk_name=AAUTH_JWK_JOB_NAME if jwk_text else "",
         neotoma_base_url=base_url,
+        neotoma_tools_unavailable=bool(neotoma_tools_granted and not own_token),
         probe_env_names=probe,
         system_prompt=system_prompt,
+        delivery=delivery,
     )
+
+
+def _check_delivery(delivery: Any, *, repository: str, stdin: bytes, github_requested: bool,
+                    timeout: float) -> dict:  # fmt: skip
+    """A delivery spec the job runner will accept, or ``FlyIneligible`` (the
+    builder then runs locally, as today)."""
+    if not isinstance(delivery, dict) or tuple(sorted(delivery)) != tuple(sorted(DELIVERY_SPEC_KEYS)):
+        raise FlyIneligible("the delivery spec is malformed")
+    if not all(isinstance(delivery[k], str) and delivery[k] for k in DELIVERY_SPEC_KEYS):
+        raise FlyIneligible("the delivery spec has an empty field")
+    _delivery_repository(repository)
+    if github_requested:
+        raise FlyIneligible("a delivering job carries no read-class GitHub token")
+    if not isinstance(stdin, bytes) or PR_FILE_PLACEHOLDER.encode() not in stdin:
+        raise FlyIneligible("the delivery prompt is not the Fly variant")
+    now = time.time()
+    if not delivery_fits_token_life(timeout, now + GITHUB_TOKEN_LIFETIME_SECONDS, now):
+        raise FlyIneligible(
+            f"a delivery with a {int(timeout)}s timeout could outlive its GitHub token")
+    return dict(delivery)
+
+
+def with_workspace(provider: str, argv: list[str]) -> list[str]:
+    """The CLI's workspace flag naming the job's checkout (filled in on the
+    machine): Codex ``--cd`` before its prompt-from-stdin marker, Cursor
+    ``--workspace``. Claude takes its working directory, which the runner sets."""
+    if provider == "codex":
+        if argv[-1:] != ["-"] or "--cd" in argv:
+            raise FlyIneligible("the codex command is not the expected shape for a delivery")
+        return [*argv[:-1], "--cd", WORKSPACE_PLACEHOLDER, "-"]
+    if provider == "cursor":
+        if "--workspace" in argv:
+            raise FlyIneligible("the cursor command already names a workspace")
+        return [*argv, "--workspace", WORKSPACE_PLACEHOLDER]
+    return argv
 
 
 def _b64(data: bytes | str) -> str:
@@ -1766,6 +2027,7 @@ def job_files(job: FlyJob, config: FlyConfig) -> list[dict]:
         "neotoma_jwk_name": job.neotoma_jwk_name,
         "neotoma_base_url": job.neotoma_base_url,
         "probe_env_names": job.probe_env_names,
+        **({"delivery": job.delivery} if job.delivery is not None else {}),
     }
     if job.provider == "claude" and job.login:
         spec["claude_token_file"] = CLAUDE_TOKEN_FILE
@@ -1940,8 +2202,10 @@ class FlyExecutor:
         revoke: Callable[[str], None] = revoke_job_github_token,
         read_result: Callable[[str], Any] = read_result_record,
         clock: Callable[[], float] = time.time,
+        mint_delivery: Callable[..., "DeliveryToken"] = mint_delivery_github_token,
     ):
         self.config = config
+        self._mint_delivery = mint_delivery
         self.client = client or FlyMachinesClient(config)
         self.ledger = ledger or FlyLedger(config.ledger_path)
         self._mint = mint
@@ -2052,6 +2316,15 @@ class FlyExecutor:
 
         return await asyncio.to_thread(mint_and_register)
 
+    async def _mint_delivery_owned(self, job: FlyJob, tokens: _TokenOwner) -> str:
+        def mint_and_register() -> str:
+            minted = self._mint_delivery(job.repository, timeout=job.timeout,
+                                         revoke=self._revoke)  # fmt: skip
+            tokens.add(minted.token)  # revoked by run() on every exit path
+            return minted.token
+
+        return await asyncio.to_thread(mint_and_register)
+
     async def _revoke_shielded(self, token: str) -> None:
         """Revoke one token; a cancellation does not stop the revocation."""
         if not token:
@@ -2081,6 +2354,9 @@ class FlyExecutor:
     async def _launch(self, job: FlyJob, tokens: _TokenOwner, launch: _LaunchState) -> FlyHandle:
         await self.maybe_reap()
         max_run = job.timeout + APIS_DEADLINE_GRACE_SECONDS
+        if job.delivery is not None:
+            # The deadline the token's life was checked against (#1469).
+            max_run = int(delivery_run_seconds(job.timeout))
         if job.login:
             lock = _login_lock(job.provider)
             try:
@@ -2094,7 +2370,11 @@ class FlyExecutor:
                     _render_wall(self._clock() + 300),
                 ) from None
             launch.lock = lock
-        if job.needs_github:
+        if job.delivery is not None:
+            # A refused or mismatched mint raises FlyIneligible here, before
+            # any reservation or machine: the builder runs locally instead.
+            job.secrets[DELIVERY_TOKEN_NAME] = await self._mint_delivery_owned(job, tokens)
+        elif job.needs_github:
             token = await self._mint_owned(job, tokens)
             job.secrets["GITHUB_TOKEN"] = token
             job.secrets["GH_TOKEN"] = token
@@ -2411,6 +2691,15 @@ class FlyExecutor:
         if record["run_id"] != job.run_id:
             raise FlyResultUnreadable("result record does not belong to this run")
         rc = record["exit_code"]
+        if job.delivery is not None:
+            got = delivery_result_from_record(record)
+            if got["delivery_status"] in {"opened", "updated"}:
+                expected_url = f"https://github.com/{job.repository}/pull/{got['pr_number']}"
+                if (got["pr_url"] != expected_url or got["pr_number"] is None
+                        or got["delivery_branch"] != job.delivery["branch"]
+                        or re.fullmatch(r"[0-9a-f]{40}", got["delivery_commit"]) is None):
+                    raise FlyResultUnreadable("delivery artifact does not match its job")
+            job.delivery_result = got
         if record["probe_ok"] is False:
             log.error(f"[fly] run={job.run_id} credential probe failed: {record['refused']}")
         stdout = redact_nonces(record["stdout"])
