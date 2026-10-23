@@ -13,7 +13,6 @@ import asyncio
 import builtins
 import importlib.util
 import contextlib
-from dataclasses import replace
 import io
 import json
 from pathlib import Path
@@ -162,6 +161,17 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         mp.setattr(active_runner.harness_router, "_current_weights", {})
         mp.setattr(skill_runner, "CODEX_BIN", str(child))
         mp.setattr(skill_runner, "CURSOR_BIN", str(child))
+        if mutation == "drop_model":
+            native_command = skill_runner._provider_command
+
+            def command_without_model(*args, **kwargs):
+                command, payload = native_command(*args, **kwargs)
+                model_index = command.index("--model")
+                return command[:model_index] + command[model_index + 2:], payload
+
+            # Mutate the last model propagation step. Admission and dispatch
+            # remain valid, but the synthetic native child sees no model flag.
+            mp.setattr(skill_runner, "_provider_command", command_without_model)
         mp.setattr(skill_runner, "ATELES_REPO", ROOT)
         mp.setattr(active_runner.dispatch_role, "ATELES_REPO", ROOT)
         mp.setattr(skill_runner, "TRUSTED_MACOS_SANDBOX_EXEC", wrapper)
@@ -222,15 +232,7 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         real_dispatch = active_runner.dispatch_role.dispatch
 
         async def dispatch(role, task, **kw):
-            if mutation == "drop_model":
-                # The admission now carries the effective model independently
-                # of the selector. Lose both at the child boundary so this
-                # mutation actually removes the provider's --model flag.
-                kw["model"] = None
-                kw["provider_admission"] = replace(
-                    kw["provider_admission"], resolved_model="",
-                )
-            elif mutation == "drop_action_class":
+            if mutation == "drop_action_class":
                 kw.pop("action_class", None)
             obs["dispatch_calls"].append({k: kw.get(k) for k in (
                 "provider", "model", "action_class", "local_review", "seated_reviewer", "task_entity_id",
