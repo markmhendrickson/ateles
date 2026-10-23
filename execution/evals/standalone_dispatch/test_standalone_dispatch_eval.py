@@ -13,6 +13,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from lib.daemon_runtime import AgentDefinition
 
 REPO = Path(__file__).resolve().parents[3]
@@ -38,7 +40,11 @@ VERDICT = (
 )
 
 
-def _run_qa_dispatch(tmp_path, monkeypatch):
+def _run_qa_dispatch(
+    tmp_path, monkeypatch, *, historical_zero_gate=False, effects=None
+):
+    if effects is None:
+        effects = {"worktree_creates": 0, "child_calls": []}
     policy = tmp_path / "apis.plist"
     with policy.open("wb") as output:
         plistlib.dump(
@@ -77,9 +83,25 @@ def _run_qa_dispatch(tmp_path, monkeypatch):
     )
     assert harness_router.headroom_resolution(now_wall=now)["codex"][0] == 0.0
 
+    if historical_zero_gate:
+        # This reinstates the unconditional entrance that run_one had before
+        # resolver admission. At zero headroom it must refuse before any
+        # worktree or child process is reached.
+        resolve_provider_admission = harness_router.resolve_provider_admission
+
+        def resolve_after_historical_zero_gate(provider, **kwargs):
+            lens_runner.check_headroom(provider)
+            return resolve_provider_admission(provider, **kwargs)
+
+        monkeypatch.setattr(
+            harness_router,
+            "resolve_provider_admission",
+            resolve_after_historical_zero_gate,
+        )
+
     repo = tmp_path / "repo"
     skill = repo / ".claude" / "skills" / "phoenicurus" / "SKILL.md"
-    skill.parent.mkdir(parents=True)
+    skill.parent.mkdir(parents=True, exist_ok=True)
     skill.write_text("# synthetic QA role\n", encoding="utf-8")
     monkeypatch.setattr(skill_runner, "ATELES_REPO", repo)
     monkeypatch.setattr(dispatch_role, "ATELES_REPO", repo)
@@ -134,6 +156,7 @@ def _run_qa_dispatch(tmp_path, monkeypatch):
 
     def create_worktree(self, *, head):
         assert head == HEAD
+        effects["worktree_creates"] += 1
         self._created = True
         self.path.mkdir(parents=True)
 
@@ -152,6 +175,7 @@ def _run_qa_dispatch(tmp_path, monkeypatch):
 
     async def child(*argv, **kwargs):
         child_calls.append(list(argv))
+        effects["child_calls"].append(list(argv))
 
         class Process:
             returncode = 0
@@ -203,8 +227,24 @@ def _judge(report, child_calls, wrapper):
 def test_standalone_qa_dispatch_produces_a_validated_review_at_zero_usage_headroom(
     tmp_path, monkeypatch
 ):
+    historical_effects = {"worktree_creates": 0, "child_calls": []}
+    # The temporary historical entrance is the counterfactual RED: the same
+    # zero-headroom fixture refuses before setup reaches either side effect.
+    with monkeypatch.context() as historical_patch:
+        with pytest.raises(
+            lens_runner.HeadroomExhausted,
+            match=r"provider 'codex' has headroom=0",
+        ):
+            _run_qa_dispatch(
+                tmp_path,
+                historical_patch,
+                historical_zero_gate=True,
+                effects=historical_effects,
+            )
+    assert historical_effects == {"worktree_creates": 0, "child_calls": []}
+
+    # The context restores the current resolver path. With the same semantic
+    # fixture, explicitly ungated codex reaches the bound child and validated
+    # QA verdict instead of the historical zero-headroom refusal.
     report, child_calls, wrapper = _run_qa_dispatch(tmp_path, monkeypatch)
     assert _judge(report, child_calls, wrapper), report
-    # Remove the observable child-model effect: the eval must go red.
-    command_without_binding = [arg for arg in child_calls[0] if arg != MODEL]
-    assert not _judge(report, [command_without_binding], wrapper)
