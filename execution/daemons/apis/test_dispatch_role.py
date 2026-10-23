@@ -446,10 +446,17 @@ def test_standalone_plist_and_zero_usage_headroom_reach_bound_child_argv(
     root.mkdir()
     profile = root / "profile.sb"
     profile.write_text("synthetic profile\n")
+    trusted_wrapper = root / "sandbox-exec"
+    trusted_wrapper.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    trusted_wrapper.chmod(0o755)
+    # The child process is captured below. Supply an inert executable for the
+    # exact-wrapper guard so this fixture also exercises the path on Linux.
+    monkeypatch.setattr(hlr, "TRUSTED_MACOS_SANDBOX_EXEC", trusted_wrapper)
+    monkeypatch.setattr(skill_runner, "TRUSTED_MACOS_SANDBOX_EXEC", trusted_wrapper)
     sandbox = hlr.HarnessSandbox(
         provider="codex", root=root,
         env_extra={"CODEX_HOME": str(root), "ATELES_LOCAL_REVIEW_HOME": str(root)},
-        command_wrapper=["/usr/bin/sandbox-exec", "-f", str(profile)],
+        command_wrapper=[str(trusted_wrapper), "-f", str(profile)],
         credential_read_denied=True, credential_binding_protected=True,
         user_config_write_denied=True, git_stash_denied=True,
         authentication_ready=True, unavailable_guards=(),
