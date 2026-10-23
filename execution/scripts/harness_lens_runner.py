@@ -218,7 +218,10 @@ to filter on):
         --lens pm --provider claude \\
         --brief <path-to-lens-brief> --task-entity-id ent_... \\
         [--post] [--dry-run] [--compare claude,codex]
-        [--model MODEL] [--action-class ACTION_CLASS]
+        [--model MODEL] [--action-class lens_review:pm]
+
+Omitting both selectors derives lens_review:<lens> and requires a bound model
+for that class. An explicit --action-class must match the selected lens.
 
 The one command a session runs to MONITOR it — purely from Neotoma, no
 access to this process or its stdout required — via the Neotoma MCP/REST
@@ -1946,7 +1949,7 @@ def dry_run_report(
     """
     model = validate_model_selector(model)
     # Use the same live tier and vendor-binding resolvers as run_skill.
-    # An explicit model wins; omitting both selectors keeps the provider default.
+    # An explicit model wins; the review entry point resolves its policy class.
     selected_model = model
     selected_tier = None
     model_refusal = None
@@ -1961,7 +1964,7 @@ def dry_run_report(
     if admission is not None:
         selected_model = admission.resolved_model
         selected_tier = (
-            None if not admission.resolved_tier
+            None if admission.explicit_model_override or not admission.resolved_tier
             else dispatch_role.model_tiering.ResolvedTier(
                 tier=admission.resolved_tier,
                 source=admission.tier_source,
@@ -3055,13 +3058,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--model", default=None, type=_cli_model_selector,
         help="Explicit provider model identifier without whitespace/control characters; "
-        "overrides --action-class tier selection. "
-        "Omit both selectors to retain the provider's existing default.",
+        "overrides the model bound to the review's policy tier. "
+        "Without --model, the matching lens_review:<lens> class requires a bound model.",
     )
     parser.add_argument(
         "--action-class", default=None,
-        help="Resolve a model through the existing live action_policy/vendor_binding, "
-        "e.g. lens_review:arch. --model takes precedence.",
+        help="Policy class must match the selected lens (e.g. lens_review:arch); "
+        "defaults to lens_review:<lens>. --model takes precedence for model selection.",
     )
     parser.add_argument(
         "--provider", choices=list(HARNESSES), help="Single-provider run"

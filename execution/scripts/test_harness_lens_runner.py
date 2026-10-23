@@ -1352,14 +1352,21 @@ def test_dry_run_tier_matches_shared_admission_for_both_model_shapes(
         model=explicit_model, action_class="lens_review:arch",
     )
 
-    assert report["tier"] == report["resolved_tier"] == "top"
+    assert report["resolved_tier"] == "top"
+    assert report["provider_admission"]["resolved_tier"] == "top"
+    assert report["provider_admission"]["explicit_model_override"] is (explicit_model is not None)
+    assert report["tier"] == (None if explicit_model else "top")
     assert report["model"] == report["resolved_model"] == (
         explicit_model or "sol-test"
     )
 
 
+@pytest.mark.parametrize("model,action_class", [
+    (None, None), ("preview-model", "lens_review:pm"),
+])
 def test_dry_run_makes_no_model_call_and_reports_command(
-    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox,
+    model, action_class,
 ):
     dispatch_called = False
 
@@ -1393,15 +1400,18 @@ def test_dry_run_makes_no_model_call_and_reports_command(
             scratch_root=tmp_path,
             brief_path=brief_file,
             timeout=None,
-            model="preview-model",
-            action_class="lens_review:pm",
+            model=model,
+            action_class=action_class,
         )
     )
 
     assert dispatch_called is False
-    assert report["model"] == "preview-model"
+    assert report["model"] == (model or "terra-test")
     assert report["action_class"] == "lens_review:pm"
-    assert report["example_command"][report["example_command"].index("--model") + 1] == "preview-model"
+    assert report["resolved_tier"] == "mid"
+    assert report["provider_admission"]["explicit_model_override"] is (model is not None)
+    assert report["tier"] == (None if model else "mid")
+    assert report["example_command"][report["example_command"].index("--model") + 1] == report["model"]
     assert report["dry_run"] is True
     assert report["ok"] is (report["would_refuse"] is None)
     assert report["no_model_call_made"] is True
@@ -5007,6 +5017,16 @@ def test_cli_forwards_model_selectors_to_every_provider(
     assert [call["provider"] for call in seen] == providers
     assert all(call["model"] == model for call in seen)
     assert all(call["action_class"] == action_class for call in seen)
+
+
+def test_cli_help_describes_bound_review_model_and_matching_class(capsys):
+    with pytest.raises(SystemExit) as exc:
+        hlr.main(["--help"])
+    assert exc.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "Without --model, the matching lens_review:<lens> class requires a bound model" in help_text
+    assert "Policy class must match the selected lens" in help_text
+    assert "defaults to lens_review:<lens>" in help_text
 
 
 def test_dry_run_reports_unbound_model_as_refusal(
