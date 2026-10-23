@@ -4417,6 +4417,7 @@ async def run_skill(
     model: str | None = None,
     resolved_tier: "model_tiering.ResolvedTier | None" = None,
     provider_admission: ProviderAdmission | None = None,
+    provider_admissions: dict[str, ProviderAdmission] | None = None,
     inference_only: bool = False,
     runner: str | None = None,
     repository: str = "",
@@ -4511,6 +4512,17 @@ async def run_skill(
     exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    if provider_admissions is not None:
+        if provider is not None or provider_admission is not None or not provider_admissions:
+            return SkillResult(skill, False, None, "", "", error="invalid unpinned lens admissions")
+        if any(
+            not admission.admitted
+            or candidate != admission.requested_provider
+            or action_class != admission.action_class
+            or not admission.resolved_model
+            for candidate, admission in provider_admissions.items()
+        ):
+            return SkillResult(skill, False, None, "", "", error="mismatched lens admissions")
     # One control, two reasons to apply it. The internal name stays
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
     # use it only for the deny and deny-capable routing.
@@ -4582,6 +4594,19 @@ async def run_skill(
     fly_bound, fly_extra = _fly_routing(runner, action_class)
 
     async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
+        selected_admission = (
+            provider_admissions.get(selected) if provider_admissions is not None else None
+        )
+        if provider_admissions is not None and selected_admission is None:
+            return SkillResult(skill, False, None, "", "", error="unadmitted lens provider", provider=selected)
+        selected_tier = precomputed_tier
+        if selected_admission is not None:
+            selected_tier = model_tiering.ResolvedTier(
+                tier=selected_admission.resolved_tier,
+                source=selected_admission.tier_source,
+                action_class=selected_admission.action_class,
+                escalation_reasons=selected_admission.escalation_reasons,
+            )
         result = await _run_skill_once(
             skill,
             prompt,
@@ -4603,8 +4628,9 @@ async def run_skill(
             work_class=work_class,
             action_class=action_class,
             escalation_signals=escalation_signals,
-            model=fallback_model or model,
-            precomputed_tier=precomputed_tier,
+            model=(selected_admission.resolved_model if selected_admission is not None
+                   else fallback_model or model),
+            precomputed_tier=selected_tier,
             inference_only=inference_only,
             runner=runner,
             repository=repository,
@@ -4651,9 +4677,14 @@ async def run_skill(
         fallback_models_for=(
             (lambda names: {name: model for name in names}) if model else None
         ),
-        binaries=_tier_bound_binaries(
-            _provider_binaries(), precomputed_tier, provider,
-            fly_bound=fly_bound, fly_extra=fly_extra,
+        binaries=(
+            {name: path for name, path in _provider_binaries().items()
+             if name in provider_admissions}
+            if provider_admissions is not None else
+            _tier_bound_binaries(
+                _provider_binaries(), precomputed_tier, provider,
+                fly_bound=fly_bound, fly_extra=fly_extra,
+            )
         ),
         provider=provider,
         role=role,

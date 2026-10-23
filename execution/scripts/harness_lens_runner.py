@@ -2580,7 +2580,20 @@ async def run_one(
             "ok": False, "provider": provider, "reason": reason,
             "refusal_reason": reason, "no_model_call_made": True, "posted": False,
         }
-    action_class = action_class or f"lens_review:{target.lens.strip().lower()}"
+    canonical_lens = target.lens.strip().lower()
+    if canonical_lens not in dispatch_role.model_tiering.KNOWN_LENSES:
+        reason = f"unknown review lens {target.lens!r}"
+        return {"ok": False, "provider": provider, "reason": reason,
+                "refusal_reason": reason, "no_model_call_made": True, "posted": False}
+    expected_action_class = dispatch_role.model_tiering.lens_review_class(canonical_lens)
+    if action_class is not None and action_class != expected_action_class:
+        reason = (
+            f"review lens {canonical_lens!r} requires action class "
+            f"{expected_action_class!r}; got {action_class!r}"
+        )
+        return {"ok": False, "provider": provider, "reason": reason,
+                "refusal_reason": reason, "no_model_call_made": True, "posted": False}
+    action_class = expected_action_class
     admission = harness_router.resolve_provider_admission(
         provider,
         action_class=action_class,

@@ -4142,14 +4142,21 @@ def test_lens_by_name_agent_mapping_matches_registry_for_pm_and_arch():
 # ── Worktree lifecycle: guards reach the real dispatch boundary -----------------
 
 
-@pytest.mark.parametrize("model,action_class", [
-    (None, None), ("review-model", None), (None, "lens_review:arch"),
-    ("review-model", "lens_review:arch"),
+@pytest.mark.parametrize("model,action_class,lens", [
+    (None, None, "pm"), ("review-model", None, "pm"),
+    (None, "lens_review:pm", "pm"),
+    ("review-model", "lens_review:pm", "pm"),
+    (None, None, "security"),
 ])
 def test_run_one_passes_sandbox_env_extra_to_dispatch(
-    monkeypatch, tmp_path, target, brief_file, model, action_class
+    monkeypatch, tmp_path, target, brief_file, model, action_class, lens
 ):
     seen = {}
+    if lens == "security":
+        target = hlr.LensTarget(
+            repo=target.repo, pr=target.pr, head=target.head,
+            lens="security", agent="falco",
+        )
 
     # This is a plumbing test, not another platform probe. Supply a sandbox
     # whose guards are already proven so the test remains meaningful on Linux,
@@ -4177,8 +4184,14 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
     async def _dispatch(role, task, **kwargs):
         seen.update(kwargs)
         verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
-        verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
-        return SkillResult(role, True, 0, SIGNED_OFF_VERDICT, "", provider="codex")
+        verdict = (
+            f"<!-- review:security commit={SAMPLE_HEAD} -->\n"
+            "**🤖 Falco — Ateles swarm, security reviewer**\n"
+            "**APPROVE**\n\nSummary: no finding.\n"
+            if lens == "security" else SIGNED_OFF_VERDICT
+        )
+        verdict_path.write_text(verdict, encoding="utf-8")
+        return SkillResult(role, True, 0, verdict, "", provider="codex")
 
     monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
 
@@ -4187,7 +4200,7 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
         self.path.mkdir(parents=True, exist_ok=True)
         agents_dir = self.path / "docs" / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
-        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+        (agents_dir / f"{target.agent}.md").write_text("# synthetic prompt\n", encoding="utf-8")
 
     monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
     monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
@@ -4214,10 +4227,8 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
         )
     )
 
-    expected_action_class = action_class or "lens_review:pm"
-    expected_model = model or (
-        "sol-test" if expected_action_class == "lens_review:arch" else "terra-test"
-    )
+    expected_action_class = action_class or f"lens_review:{lens}"
+    expected_model = model or ("sol-test" if lens == "security" else "terra-test")
     assert seen["model"] == model
     assert seen["action_class"] == expected_action_class
     assert seen["provider_admission"].action_class == expected_action_class
@@ -4229,6 +4240,36 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
     assert seen["seated_reviewer"] is False
     assert seen["local_review"] is True
     assert seen["provider"] == "codex"
+
+
+def test_run_one_rejects_a_foreign_lens_class_before_worktree_or_child(
+    monkeypatch, tmp_path, target, brief_file
+):
+    target = hlr.LensTarget(
+        repo=target.repo, pr=target.pr, head=target.head,
+        lens="security", agent="falco",
+    )
+    effects = {"worktree": 0, "child": 0}
+
+    def create(self, *, head):
+        effects["worktree"] += 1
+        raise AssertionError("foreign class reached worktree setup")
+
+    async def dispatch(*args, **kwargs):
+        effects["child"] += 1
+        raise AssertionError("foreign class reached child dispatch")
+
+    monkeypatch.setattr(hlr.Worktree, "create", create)
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", dispatch)
+    report = asyncio.run(hlr.run_one(
+        target, provider="codex", post=False, dry_run=False,
+        repo_worktree_name="ateles", scratch_root=tmp_path,
+        brief_path=brief_file, timeout=None, action_class="lens_review:pm",
+    ))
+    assert not report["ok"]
+    assert report["no_model_call_made"] is True
+    assert "requires action class 'lens_review:security'" in report["reason"]
+    assert effects == {"worktree": 0, "child": 0}
 
 
 def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(

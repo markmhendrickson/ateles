@@ -1030,6 +1030,16 @@ def persisted_cooling(
     }
 
 
+def reported_exhaustion(
+    provider: str, *, now_wall: float | None = None
+) -> float | None:
+    """Return a live provider-reported exhaustion reset, independent of usage pacing."""
+    moment = time.time() if now_wall is None else now_wall
+    entry = _read_json_object(_usage_path()).get(provider)
+    until = _wall_from_iso(entry.get("exhausted_until")) if isinstance(entry, dict) else None
+    return until if until is not None and until > moment else None
+
+
 def usage_windows(provider: str) -> list[dict[str, object]]:
     """Return the recorded usage windows (session, weekly, ...) for a provider."""
     entry = _read_json_object(_usage_path()).get(provider)
@@ -1409,6 +1419,12 @@ def _provider_exclusion_reason(
     (a real rate-limit answer) still apply."""
     if not available.get(provider):
         return "binary unavailable"
+    exhausted_until = reported_exhaustion(provider, now_wall=moment_wall)
+    if exhausted_until is not None and provider not in fly_bound:
+        return (
+            f"headroom=0.000 from provider reported limit until "
+            f"{render_wall(exhausted_until)}"
+        )
     gate = None if provider in fly_bound else usage_gate(provider, now_wall=moment_wall)
     if gate is not None and not gate.allowed:
         return gate.message
@@ -1584,6 +1600,18 @@ def resolve_provider_admission(
         )
 
     moment_wall = time.time() if now_wall is None else now_wall
+    exhausted_until = reported_exhaustion(normalized, now_wall=moment_wall)
+    if exhausted_until is not None:
+        return decision(
+            False,
+            "provider_limit",
+            f"provider {normalized!r} reported a limit until "
+            f"{render_wall(exhausted_until)}",
+            tier=resolved_tier.tier,
+            tier_source=resolved_tier.source,
+            model=resolved_model,
+            escalation_reasons=resolved_tier.escalation_reasons,
+        )
     if normalized in policy.usage_gated_providers:
         gate = usage_gate(normalized, now_wall=moment_wall)
         if gate is not None and not gate.allowed:

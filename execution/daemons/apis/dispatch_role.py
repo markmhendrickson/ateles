@@ -344,6 +344,36 @@ async def dispatch(
     them every class runs on the model path exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    provider_admissions: dict[str, ProviderAdmission] | None = None
+    if (
+        provider_admission is None
+        and provider is None
+        and action_class is not None
+        and action_class.startswith("lens_review:")
+    ):
+        decisions = {
+            candidate: resolve_provider_admission(
+                candidate,
+                action_class=action_class,
+                signals=escalation_signals,
+                required_policy=True,
+            )
+            for candidate in configured_providers()
+        }
+        provider_admissions = {
+            candidate: replace(decision, resolved_model=model) if model else decision
+            for candidate, decision in decisions.items()
+            if decision.admitted
+        }
+        if not provider_admissions:
+            reasons = "; ".join(
+                f"{candidate}: {decision.reason}"
+                for candidate, decision in decisions.items()
+            ) or "no active provider"
+            return SkillResult(
+                role, False, None, "", "",
+                error=f"strict lens admission refused: {reasons}",
+            )
     if (
         provider_admission is None
         and provider is not None
@@ -377,6 +407,7 @@ async def dispatch(
         escalation_signals=escalation_signals,
         model=model,
         provider_admission=provider_admission,
+        provider_admissions=provider_admissions,
         expected_role_fingerprint=expected_role_fingerprint,
     )
     if runner is not None:
