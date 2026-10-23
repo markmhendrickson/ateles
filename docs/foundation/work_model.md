@@ -20,8 +20,10 @@ State how work is created, taken, executed, and returned: pull-only delivery; as
 claim and lease as one primitive (lease as relationship); liveness derived at read time; no assignment
 log; a task carries only status and edges; intake is every workflow-entering task's first workflow, while
 an aggregate parent remains outside claim and enters none; tasks go through
-workflows in batches, are attached to and detached from them, and nest under parents; a batch is opened
-by a closing verdict naming a successor and goes through exactly one workflow; a batch may hold on a
+workflows in batches, are attached to and detached from them, and nest under parents; one intake batch opens atomically
+with each workflow-entering task and its `ADDRESSED_BY` edge at creation (plus the persistent `classify` finding
+when assembly is incomplete); a successor batch is opened by a closing verdict naming it and goes through
+exactly one workflow; a batch may hold on a
 condition discovered mid-flight, and may depend on a task it created, under its held lease and with no held
 state; a change to the swarm's own operation is a task like any other, governed by the action gate the
 governance writes already reach, and reserved to the operator by default; artifacts are records a batch
@@ -1435,8 +1437,9 @@ model is not a new type but the parent task, since a parent is exactly a task th
 workflow and groups the tasks that do (`#parent-and-child-tasks`). It is not forbidden by principle 11:
 a declaration is not derived state and needs no process to keep it true. It is rejected because it is a
 second thing that supplies nothing the instance does not. Grouping, the parent's purpose, is already the
-`FOLLOWS` history. The parent's one derived read, completion when every child is terminal, is meaningless
-for a series that ends only by a decision. And propagation, the reason one usually wants a template — a
+`FOLLOWS` history. The parent's derived completion read requires every child terminal and landed and
+applicable planning criterion evidence; it cannot express a series whose end is a decision. And propagation,
+the reason one usually wants a template — a
 change to the rule reaching every future occurrence — is what duplication already does: the next
 instance copies the live instance's rule, so correcting the rule on the live instance *is* the change to
 every instance after it, and the completed ones keep the rule they were created under, which is the

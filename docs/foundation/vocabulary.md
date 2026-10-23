@@ -331,7 +331,8 @@ Reads: "the tasks entered the feature workflow", "the batch is at `qa`", "the ba
 
 ### parent task
 **Definition:** a [task](#task) that groups [child tasks](#child-task) through `PART_OF` [edges](#edge) from each child, whose completion is
-derived from its children's terminal states and which never enters a [workflow](#workflow).
+derived when every child is terminal and landed and applicable planning `completion_criteria[]` have effect evidence,
+and which never enters a [workflow](#workflow).
 **See:** [`work_model.md#parent-and-child-tasks`](work_model.md#parent-and-child-tasks).
 **Never:** "epic", "umbrella".
 **Not for:** a stored parent status.

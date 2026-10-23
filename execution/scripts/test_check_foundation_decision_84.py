@@ -153,6 +153,60 @@ def test_complete_carry_passes(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("name", "current", "contradiction", "diagnostic"),
+    [
+        (
+            "scenarios.md",
+            "every child being terminal and landed, plus effect evidence for the applicable planning `completion_criteria[]`",
+            "the children's terminal states",
+            "aggregate-parent-scenario",
+        ),
+        (
+            "scenarios.md",
+            "all children terminal and landed?",
+            "all children terminal?",
+            "aggregate-parent-scenario",
+        ),
+        (
+            "data_model.md",
+            "parent completion (every child terminal and landed, with effect evidence satisfying applicable planning `completion_criteria[]`)",
+            "parent completion (all children terminal)",
+            "part-of-parent-completion",
+        ),
+        (
+            "vocabulary.md",
+            "derived when every child is terminal and landed and applicable planning `completion_criteria[]` have effect evidence",
+            "derived from its children's terminal states",
+            "parent-vocabulary-completion",
+        ),
+        (
+            "conformance_suite.md",
+            "one child terminal but unlanded, then all children terminal and landed with unmet `completion_criteria[]`",
+            "complete two children",
+            "aggregate-parent-wm-35-cases",
+        ),
+        (
+            "work_model.md",
+            "one intake batch opens atomically with each workflow-entering task and its `ADDRESSED_BY` edge at creation (plus the persistent `classify` finding when assembly is incomplete); a successor batch is opened by a closing verdict naming it",
+            "a batch is opened by a closing verdict naming a successor",
+            "purpose-batch-opening",
+        ),
+        (
+            "work_model.md",
+            "The parent's derived completion read requires every child terminal and landed and applicable planning criterion evidence",
+            "The parent's one derived read, completion when every child is terminal",
+            "recurrence-parent-completion",
+        ),
+    ],
+)
+def test_current_corpus_rejects_arch_contradictions(
+    tmp_path: Path, name: str, current: str, contradiction: str, diagnostic: str
+) -> None:
+    problems = mutate_real_corpus_normalized(tmp_path, name, current, contradiction)
+    assert any(diagnostic in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
     ("name", "old", "new", "location"),
     [
         (
@@ -566,8 +620,8 @@ def test_real_parent_scenario_adjacent_paragraph_qualification_fails(
     problems = mutate_real_corpus(
         tmp_path,
         "scenarios.md",
-        "stored nowhere.\n\n```mermaid",
-        "stored nowhere.\n\nDespite that exception, the aggregate parent may "
+        "proves completion.\n\n```mermaid",
+        "proves completion.\n\nDespite that exception, the aggregate parent may "
         "enter a workflow after publication.\n\n```mermaid",
     )
     assert any("aggregate-parent-scenario" in problem for problem in problems)

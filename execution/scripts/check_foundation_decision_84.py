@@ -184,7 +184,10 @@ AGGREGATE_PARENT_SCENARIO_PARAGRAPH = (
     "through its own batch on its own schedule. The "
     + AGGREGATE_PARENT_SCENARIO_CLAUSE
     + " When a reader asks whether the parent is complete, the answer is derived "
-    "from the children's terminal states at that moment and is stored nowhere."
+    "at that moment from every child being terminal and landed, plus effect evidence "
+    "for the applicable planning `completion_criteria[]` where the parent is under "
+    "a planning record. Neither terminal status alone nor a stored parent status "
+    "proves completion."
 )
 AGGREGATE_PARENT_SCENARIO_DIAGRAM = """```mermaid
 flowchart TD
@@ -195,10 +198,13 @@ flowchart TD
     C1 -->|ADDRESSED_BY| R1[batch 1]
     C2 -->|ADDRESSED_BY| R2[batch 2]
     C3 -->|ADDRESSED_BY| R3[batch 3]
-    R1 --> D{all children terminal?}
+    R1 --> D{all children terminal and landed?}
     R2 --> D
     R3 --> D
-    D -->|derived at read| PC[parent reads complete]
+    D -->|no| NC[parent remains incomplete]
+    D -->|yes| E{applicable planning criteria have effect evidence?}
+    E -->|no| NC
+    E -->|yes, derived at read| PC[parent reads complete]
 ```"""
 AGGREGATE_PARENT_SCENARIO_INVARIANTS = (
     "**Invariants:** [`work_model.md#parent-and-child-tasks`]"
@@ -610,6 +616,7 @@ def check(root: Path) -> list[str]:
     wm31a = _line(texts["conformance_suite.md"], r"^\|\s*WM-31a\s*\|.*$")
     wm27 = _line(texts["conformance_suite.md"], r"^\|\s*WM-27\s*\|.*$")
     wm35 = _line(texts["conformance_suite.md"], r"^\|\s*WM-35\s*\|.*$")
+    part_of = _line(texts["data_model.md"], r"^\|\s*`PART_OF`\s*\|.*$")
     wm39 = _line(texts["conformance_suite.md"], r"^\|\s*WM-39\s*\|.*$")
     creation_row_names = ("WM-13", "WM-14", "WM-21", "WM-32b", "WM-35a", "WM-39")
     creation_row_map = {
@@ -697,6 +704,15 @@ def check(root: Path) -> list[str]:
         texts["work_model.md"],
         "How a batch is formed, and what chooses its workflow",
         "A batch may hold on a condition discovered mid-flight",
+    )
+    purpose = _heading_section(texts["work_model.md"], "## Purpose", "## Scope")
+    recurrence_model = _heading_section(
+        texts["work_model.md"],
+        "### A recurring task is one live instance, and its completion creates the next",
+        "### Where tasks come from: every source, indexed",
+    )
+    parent_vocabulary = _heading_section(
+        texts["vocabulary.md"], "### parent task", "### child task"
     )
 
     problems: list[str] = []
@@ -812,10 +828,70 @@ def check(root: Path) -> list[str]:
         scenario_f,
         AGGREGATE_PARENT_SCENARIO_SECTION,
     )
+    problems += _require(
+        "part-of-parent-completion",
+        _table_cell(part_of, 3),
+        (
+            ("every child terminal and landed",),
+            ("effect evidence",),
+            ("`completion_criteria[]`",),
+        ),
+    )
+    problems += _forbid(
+        "part-of-parent-completion",
+        _table_cell(part_of, 3),
+        ("parent completion (all children terminal)",),
+    )
+    problems += _require(
+        "parent-vocabulary-completion",
+        parent_vocabulary,
+        (
+            ("every child is terminal and landed",),
+            ("`completion_criteria[]`",),
+            ("effect evidence",),
+        ),
+    )
+    problems += _forbid(
+        "parent-vocabulary-completion",
+        parent_vocabulary,
+        ("children's terminal states",),
+    )
+    problems += _require(
+        "recurrence-parent-completion",
+        recurrence_model,
+        (("every child terminal and landed",), ("planning criterion evidence",)),
+    )
+    problems += _forbid(
+        "recurrence-parent-completion",
+        recurrence_model,
+        ("completion when every child is terminal",),
+    )
     problems += _require_exact_cell(
         "aggregate-parent-wm-35",
         _table_cell(wm35, 1),
         WM35_REQUIREMENT,
+    )
+    problems += _require(
+        "aggregate-parent-wm-35-cases",
+        " ".join(_table_cell(wm35, index) for index in (2, 3, 4)),
+        (
+            ("terminal but unlanded",),
+            ("unmet `completion_criteria[]`",),
+            ("refuses completion",),
+        ),
+    )
+    problems += _require(
+        "purpose-batch-opening",
+        purpose,
+        (
+            ("intake batch opens atomically",),
+            ("successor batch is opened by a closing verdict",),
+        ),
+    )
+    problems += _forbid(
+        "purpose-batch-opening",
+        purpose,
+        ("a batch is opened by a closing verdict naming a successor",),
     )
     problems += _require_exact_section_digest(
         "batch-opening-model",
@@ -911,7 +987,12 @@ _PROBLEM_LOCATIONS = {
     "intake-workflow-atomic-entry": "docs/foundation/workflows.md — section intake",
     "aggregate-parent-model": "docs/foundation/work_model.md — section Parent and child tasks",
     "aggregate-parent-scenario": "docs/foundation/scenarios.md — section (f)",
+    "part-of-parent-completion": "docs/foundation/data_model.md — row PART_OF",
+    "parent-vocabulary-completion": "docs/foundation/vocabulary.md — parent task",
+    "recurrence-parent-completion": "docs/foundation/work_model.md — recurring task section",
     "aggregate-parent-wm-35": "docs/foundation/conformance_suite.md — row WM-35",
+    "aggregate-parent-wm-35-cases": "docs/foundation/conformance_suite.md — row WM-35",
+    "purpose-batch-opening": "docs/foundation/work_model.md — Purpose",
     "batch-opening-model": "docs/foundation/work_model.md — section How a batch is formed",
     "wm-27": "docs/foundation/conformance_suite.md — row WM-27",
     "scenario-intake-node": "docs/foundation/scenarios.md — section (j)",

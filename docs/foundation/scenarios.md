@@ -205,7 +205,9 @@ A parent task is created as the grouping of a piece of work; three child tasks e
 edge to it. Each child is claimed, executed, and goes through its own batch on its own schedule. The
 **aggregate parent is the explicit workflow-entry exception: it is not claimable, never enters a workflow,
 and has no intake batch or `ADDRESSED_BY` edge.** When a reader asks whether the parent is complete,
-the answer is derived from the children's terminal states at that moment and is stored nowhere.
+the answer is derived at that moment from every child being terminal and landed, plus effect evidence
+for the applicable planning `completion_criteria[]` where the parent is under a planning record.
+Neither terminal status alone nor a stored parent status proves completion.
 
 ```mermaid
 flowchart TD
@@ -216,10 +218,13 @@ flowchart TD
     C1 -->|ADDRESSED_BY| R1[batch 1]
     C2 -->|ADDRESSED_BY| R2[batch 2]
     C3 -->|ADDRESSED_BY| R3[batch 3]
-    R1 --> D{all children terminal?}
+    R1 --> D{all children terminal and landed?}
     R2 --> D
     R3 --> D
-    D -->|derived at read| PC[parent reads complete]
+    D -->|no| NC[parent remains incomplete]
+    D -->|yes| E{applicable planning criteria have effect evidence?}
+    E -->|no| NC
+    E -->|yes, derived at read| PC[parent reads complete]
 ```
 
 **Invariants:** [`work_model.md#parent-and-child-tasks`](work_model.md#parent-and-child-tasks);
