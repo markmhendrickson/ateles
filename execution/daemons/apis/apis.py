@@ -2350,57 +2350,73 @@ async def dispatch_task(
         run_conversation_id: str | None = None
         run_agent_session_id: str | None = None
         run_session = None
+        recovery_reason = "Verifying run records (up to 45 seconds); worker not started"
+        prior_reason = snapshot.get("blocked_reason") or ""
+
+        async def _settle_cancelled_prelaunch() -> None:
+            current = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+            if (
+                current
+                and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
+                and current.get("blocked_reason", "") in {prior_reason, recovery_reason, ""}
+            ):
+                await asyncio.to_thread(
+                    set_task_status, entity_id, TaskStatus.FAILED,
+                    handler=DAEMON_NAME, from_status=TaskStatus.EXECUTING.value,
+                    reason="Dispatch cancelled during run verification; worker not started",
+                    key_suffix=f"{run_key}-cancelled",
+                )
+
+        async def _prelaunch_io(fn, *args, **kwargs):
+            operation = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+            try:
+                return await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                # Let an in-flight write/read finish before deciding which
+                # task state still belongs to this cancelled dispatch.
+                try:
+                    await operation
+                except Exception:  # noqa: BLE001 — settle from current state
+                    pass
+                await _settle_cancelled_prelaunch()
+                raise
+
         if RUN_CONVERSATIONS:
-            recovery_reason = (
-                "Verifying run records (up to 45 seconds); worker not started"
-            )
-            recovery_visible = await asyncio.to_thread(
+            recovery_visible = await _prelaunch_io(
                 set_task_status, entity_id, TaskStatus.EXECUTING,
                 handler=DAEMON_NAME, from_status=TaskStatus.EXECUTING.value,
                 reason=recovery_reason, key_suffix=f"{run_key}-recovering",
             )
             if recovery_visible:
-                current = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+                current = await _prelaunch_io(fetch_task_snapshot, entity_id)
                 recovery_visible = bool(
                     current and current.get("blocked_reason") == recovery_reason
                     and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
                 )
             if recovery_visible:
-                try:
-                    run_session = await asyncio.to_thread(
-                        create_run_session,
-                        task_id=entity_id,
-                        plan_id=snapshot.get("plan_id") or None,
-                        agent=skill,
-                        run_key=run_key,
-                        title=f"{skill} run · {title[:60]}",
-                    )
-                except asyncio.CancelledError:
-                    # The thread may finish its bounded readback, but the
-                    # cancelled coroutine must never continue to a launch.
-                    await asyncio.to_thread(
-                        set_task_status, entity_id, TaskStatus.FAILED,
-                        handler=DAEMON_NAME,
-                        from_status=TaskStatus.EXECUTING.value,
-                        reason="Dispatch cancelled during run verification; worker not started",
-                        key_suffix=f"{run_key}-cancelled",
-                    )
-                    raise
+                run_session = await _prelaunch_io(
+                    create_run_session,
+                    task_id=entity_id,
+                    plan_id=snapshot.get("plan_id") or None,
+                    agent=skill,
+                    run_key=run_key,
+                    title=f"{skill} run · {title[:60]}",
+                )
             if run_session:
-                current = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+                current = await _prelaunch_io(fetch_task_snapshot, entity_id)
                 if not (
                     current and current.get("blocked_reason") == recovery_reason
                     and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
                 ):
                     job.failed(f"task {entity_id} changed during run verification; not started")
                     return
-                cleared = await asyncio.to_thread(
+                cleared = await _prelaunch_io(
                     set_task_status, entity_id, TaskStatus.EXECUTING,
                     handler=DAEMON_NAME, from_status=TaskStatus.EXECUTING.value,
                     reason="", key_suffix=f"{run_key}-verified",
                 )
                 if cleared:
-                    current = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+                    current = await _prelaunch_io(fetch_task_snapshot, entity_id)
                     cleared = bool(
                         current and current.get("blocked_reason") == ""
                         and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
@@ -2423,12 +2439,14 @@ async def dispatch_task(
                 log.error(
                     f"[{DAEMON_NAME}] task {entity_id} {reason} — not spawning"
                 )
-                current = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+                current = await _prelaunch_io(fetch_task_snapshot, entity_id)
                 if (
-                    current and current.get("blocked_reason") == recovery_reason
+                    current and current.get("blocked_reason", "") in {
+                        prior_reason, recovery_reason, ""
+                    }
                     and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
                 ):
-                    await asyncio.to_thread(
+                    await _prelaunch_io(
                         set_task_status, entity_id, TaskStatus.FAILED,
                         handler=DAEMON_NAME,
                         from_status=TaskStatus.EXECUTING.value,

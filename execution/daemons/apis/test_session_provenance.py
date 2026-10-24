@@ -129,7 +129,8 @@ async def test_delayed_run_recovery_keeps_other_dispatch_responsive(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_cancelled_recovery_cannot_launch_after_thread_finishes(monkeypatch):
+@pytest.mark.parametrize("held", [False, True])
+async def test_cancelled_recovery_cannot_launch_after_thread_finishes(monkeypatch, held):
     started = threading.Event()
     release = threading.Event()
     state = {}
@@ -167,12 +168,90 @@ async def test_cancelled_recovery_cannot_launch_after_thread_finishes(monkeypatc
         "approved", _Notifier(), gate_override=True,
     ))
     assert await asyncio.to_thread(started.wait, 1)
+    if held:
+        state.update(status="blocked", blocked_reason="held by another gate")
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     release.set()
     await asyncio.sleep(0.03)
     assert spawned == []
+    if held:
+        assert state == {"status": "blocked", "blocked_reason": "held by another gate"}
+    else:
+        assert state["status"] == "failed"
+        assert "cancelled" in state["blocked_reason"]
+
+
+@pytest.mark.asyncio
+async def test_partial_recovery_marker_settles_without_launch(monkeypatch):
+    state = {"status": "awaiting_approval", "blocked_reason": ""}
+    spawned = []
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", True)
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(apis, "_activity", SimpleNamespace(started=lambda *_a: _Job()))
+    monkeypatch.setattr(apis, "_release_lifecycle_proven", lambda *_a: True)
+
+    def status(_id, value, **kwargs):
+        state["status"] = value.value
+        if kwargs.get("key_suffix", "").endswith("-recovering"):
+            return False  # status committed, companion reason did not
+        if kwargs.get("reason") is not None:
+            state["blocked_reason"] = kwargs["reason"]
+        return True
+
+    monkeypatch.setattr(apis, "set_task_status", status)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: dict(state))
+    monkeypatch.setattr(apis, "create_run_session", lambda **_kw:
+                        (_ for _ in ()).throw(AssertionError("no store")))
+
+    async def spawn(*_args, **_kwargs):
+        spawned.append(True)
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", spawn)
+    await apis.dispatch_task(
+        "ent_task", {"title": "Task", "assigned_to": "cicada",
+                     "repo": "markmhendrickson/ateles", "status": "awaiting_approval"},
+        "approved", _Notifier(), gate_override=True,
+    )
+    assert spawned == []
+    assert state["status"] == "failed"
+    assert "provenance" in state["blocked_reason"]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_marker_write_settles_after_write(monkeypatch):
+    state = {"status": "awaiting_approval", "blocked_reason": ""}
+    started = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", True)
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(apis, "_activity", SimpleNamespace(started=lambda *_a: _Job()))
+    monkeypatch.setattr(apis, "_release_lifecycle_proven", lambda *_a: True)
+
+    def status(_id, value, **kwargs):
+        if kwargs.get("key_suffix", "").endswith("-recovering"):
+            started.set()
+            release.wait(1)
+        state["status"] = value.value
+        if kwargs.get("reason") is not None:
+            state["blocked_reason"] = kwargs["reason"]
+        return True
+
+    monkeypatch.setattr(apis, "set_task_status", status)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: dict(state))
+    monkeypatch.setattr(apis, "create_run_session", lambda **_kw:
+                        (_ for _ in ()).throw(AssertionError("no store")))
+    task = asyncio.create_task(apis.dispatch_task(
+        "ent_task", {"title": "Task", "assigned_to": "cicada",
+                     "repo": "markmhendrickson/ateles", "status": "awaiting_approval"},
+        "approved", _Notifier(), gate_override=True,
+    ))
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     assert state["status"] == "failed"
     assert "cancelled" in state["blocked_reason"]
 
