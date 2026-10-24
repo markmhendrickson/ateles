@@ -27,14 +27,14 @@ Generated from `conformance_suite.md`'s conformance matrix by `execution/scripts
 | `gates_and_workflows.md` | 59 | 10,654 | under |
 | `github.md` | 19 | 4,728 | under |
 | `gmail.md` | 11 | 3,504 | under |
-| `lenses.md` | — | 4,383 | n/a — an index, never a selected reading |
+| `lenses.md` | — | 4,391 | n/a — an index, never a selected reading |
 | `migration.md` | 13 | 6,134 | under |
 | `payments.md` | 30 | 9,554 | under |
 | `planning_model.md` | 17 | 5,065 | under |
 | `principles.md` | 11 | 3,017 | under |
 | `telegram.md` | 17 | 4,779 | under |
 | `vocabulary.md` | 4 | 939 | under |
-| `work_model.md` | 53 | 10,151 | under |
+| `work_model.md` | 54 | 11,995 | under |
 | `workflows.md` | 26 | 6,248 | under |
 
-400 rules projected, 100,268 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.
+401 rules projected, 102,112 chars in total across the set. `MAX_DOC_CHARS` = 12,000 bounds each file above; `MAX_BLOCK_CHARS` = 40,000 bounds one review's block, which is the kernel plus the documents keyed to the changed paths — never the whole set.
