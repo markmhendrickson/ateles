@@ -396,7 +396,9 @@ async def test_watchdog_reconciles_terminal_provenance_without_repeating_effect(
         return _delivered_pr()
 
     monkeypatch.setattr(apis, "_spawn_harness_skill", execute_effect)
-    monkeypatch.setattr(tw, "_query_tasks", lambda _limit: [("ent_task", snapshot)])
+    monkeypatch.setattr(tw, "_query_tasks", lambda _limit, _cursor=None: (
+        [("ent_task", snapshot)], None
+    ))
     monkeypatch.setattr(tw, "set_task_status", write_status)
     monkeypatch.setattr(tw, "recover_run_session", lambda **_kwargs: run)
     monkeypatch.setattr(tw, "update_run_session_status", terminal_update)
