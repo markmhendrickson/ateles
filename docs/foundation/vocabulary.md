@@ -1637,21 +1637,20 @@ principal itself.
 **Not for:** identity for the principal; account for a credential.
 
 ### principal binding
-**Definition:** the [edge](#edge) recorded as `principal_binding`, in one of two admitted shapes. A
-presented [credential](#credential) → the [principal](#principal) it identifies is one edge per credential,
-carrying `credential_kind`, `credential_value`, `credential_issuer`, and `expires_at` (decision 101). An
-[agent](#agent) → [operator](#operator) acts-as binding is a second edge of the same relationship type,
-carrying only `credential_kind: acts_as`; it is traversed after the agent's presented credential resolves
-and is never itself presented (decision 107). The AAuth edge carries `credential_kind: aauth_sub` with the
-agent's `sub` and `iss` and ends at the **agent**, the principal that credential identifies; the acts-as
-edge ends at the **operator**. This pair joins the two credential systems without making the acts-as
-relationship a credential. A complete traversal after valid credential resolution must yield exactly one
-current agent → operator link; zero current, multiple current, unreadable current or malformed current
-links stop without a fallback principal. A properly ended historical link does not invalidate the one
-valid current link; an ended-only diagnosis needs separately admitted history inspection. No traversal
-link carries credential value, issuer or expiry. Agent → agent acts-as is
-forbidden in favour of [delegation](#delegation), and an operator may not source an acts-as edge
-(decisions 108 and 109).
+**Definition:** the [edge](#edge) recorded as `principal_binding`. Its presentable credential-key
+variant binds a [credential](#credential) to the [principal](#principal) it identifies — one edge per
+credential, carrying `credential_kind`, nonsecret identifier/verifier `credential_value`,
+`credential_issuer` where required, and optional `expires_at` (decision 101). The proposed physical secret-bearing variant also carries typed, custody-issued `verifier_key_version` in every write/[observation](#observation)/read/list/snapshot; public identifiers omit it, including null. Ordinary acts-as writes require source agent = current authenticated writing principal, with only the closed original-creation ledger proposing a different writer. The proposed versioned
+physical strategy for the globally ruled `acts_as` variant is traversal-only, from an already authenticated [agent](#agent) to an
+[operator](#operator) exactly; it carries only `credential_kind: acts_as`, no `credential_value`, `credential_issuer`, `expires_at`, or `verifier_key_version`, and cannot resolve a presented credential. Any presented `acts_as` is refused as non-presentable before matching or malformed-presentation handling. Agent-to-agent [authority](#authority) uses `delegation_edge`; agent-to-agent and operator-sourced acts-as writes are refused.
+Both variants use the one edge type, but they are distinct edges identified by a persisted versioned key.
+An agent acting in a human's interest holds both: its own presentable AAuth credential binding and
+its separate nonpresentable acts-as binding. The AAuth edge
+carries `credential_kind: aauth_sub` with that agent's `sub` and `iss` and ends at the **agent**, the
+principal that credential identifies; the acts-as edge ends at the **[operator](#operator)**. This pair is
+what joins the two credential systems — an AAuth `sub` binds to the agent that presented it and reaches the
+human principal only through that agent's separate acts-as binding.
+A complete current traversal read must yield exactly one valid agent → operator link; zero, multiple, unreadable, or malformed current links refuse without a fallback principal. A properly ended historical link does not invalidate the one valid current link; ended-only diagnosis needs separately admitted history inspection.
 It carries one rule the design turns on: **for a [quorum](#quorum) or a
 [separation-of-duties](#separation-of-duties) check, an agent counts as the principal its acts-as binding
 names** — one interest, so two agents bound to one [operator](#operator) cannot satisfy a check meant to

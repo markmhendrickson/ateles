@@ -714,7 +714,7 @@ the limitation is stated rather than mechanized, and what the design says about 
 already says elsewhere. **The first declaration is an operator act**, of the same kind as issuing a
 credential or widening a grant: provisioning is operator-only and out of band
 (`authority_model.md#grants`), an agent neither performs it nor is empowered to have it performed by
-raising a checkpoint. The set of such acts is closed and enumerated — the thirteen-record table of
+raising a checkpoint. The historical set is closed as thirteen numbered record families. Decision 161’s approved bounded `native-original-creation-v1` ledger explicitly adds source, finding/edge and completion members; decision 161 approves this bounded nonproduction design; it confers no runtime authority until reviewed normative merge, canonical readback and installation. The operative membership and readback test is the versioned table of
 `conformance_suite.md#the-minimal-record-set-in-order`, each member read back — and a write to any of those
 kinds of record after the set exists is not provisioning, and the operator's own governance write after
 bootstrap is gated like any other — held, resolved by the operator, and marked as a self-resolution (decision 43,

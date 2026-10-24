@@ -232,7 +232,7 @@ retroactively reshape or minimize what these rows already hold; it declares the 
 | `agent_policy` | keep | `agent_policy` | the design names it as the authoritative home of skill bodies and agent behavioural rules, and as one target of a standing finding. Prompts and skills rendered from it still carry retired words; the correction is to the entities, then a re-render (`conformance.md#direction-of-truth-per-class-of-record`) |
 | `agent_strategy` | keep | — | outside the four models. Each names an agent by credential rather than by role, which population's phase 1 will want to read; not migrated |
 | `operator_profile` | keep | `operator_profile`, descriptive | the design keeps it descriptive and hangs no authority edge on it (`authority_model.md#principals`) |
-| `operator` (the human principal), `principal_binding`, `ownership_grant`, `delegation_edge` | introduce | themselves | the one `operator` entity is the first write of the bootstrap and the first operator act. Each `agent` then carries a traversal-only `principal_binding` to the operator with `credential_kind: acts_as`; each registered type carries one `ownership_grant` to it. Presented credentials (a store identity, a host login, an address, a chat identity) bind many-to-one to the principal they identify through a second `principal_binding` variant carrying decision 101's four fields (G17) |
+| `operator` (the human principal), `principal_binding`, `ownership_grant`, `delegation_edge` | introduce | themselves | the one `operator` entity is the first write of the bootstrap and the first operator act. Each `agent` then carries a traversal-only `principal_binding` to the operator with `credential_kind: acts_as`; each registered type carries one `ownership_grant` to it. Presented credentials (a store identity, a host login, an address, a chat identity) bind many-to-one to the principal they identify through a second `principal_binding` variant carrying decision 101's four fields (G17); the proposed `principal-binding-v2` direct-human physical variant is not registered |
 
 ### Operational records
 
@@ -586,7 +586,7 @@ The foundation resolves it by naming the first declaration an operator act, out 
 as issuing a credential. This document takes that resolution and draws the line as narrowly as the
 recursion requires, in two legs.
 
-**Leg one, the bootstrap, is an operator act.** It is the smallest set of writes without which no step of
+**Leg one, the bootstrap, is an operator act.** The historical thirteen numbered families remain the ruled baseline. A native `native-original-creation-v1` run may use the expanded ledger in `conformance_suite.md#the-minimal-record-set-in-order` under decision 161 only after reviewed normative merge, canonical readback and atomic Neotoma contract installation. Manifest source, first-designation finding/edge, and completion action/result source/confirmation are explicit members, never incidental writes. One outer transaction, immutable actor evidence and sealed readback are required; separate registration and store endpoints are not that transaction. It is the smallest set of writes without which no step of
 any workflow can open: the registry entries for the design's types and edge types, each with its
 `ownership_grant`; the `operator` entity and the credential bindings that let a later write resolve to a
 principal; the instance's first `action_policy`, which must list the classes the migration's own

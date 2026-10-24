@@ -128,6 +128,8 @@ A sweep on 2026-10-20 over `origin/main`, every origin branch, and the diff of e
 | 134 | the builder-never-reviews ruling of 2026-10-13 | decision 143 extends decision 49 to a pair read over the verdict, not a checkpoint: the agent that built an artifact never signs a review step on it, read on the agent's own binding and so the one pair that does not apply decision 48's counting rule; decision 48's section points to the exception; the extension of decision 49 attributed to a default applied by consistency and not to the operator's ruling; prevent-self-review noted as applying to the pair |
 | 135 | the conditioned-payment ruling of 2026-10-13 | decision 144 applied: the list of exceptions to decision 48's counting rule gains the payer and verifier of a payment released without a checkpoint, read on the agent's own binding as decision 143 reads its pair, and the tuple's conditions row names a payment's per-payee cap; the decision 143 note rewrapped, its over-long sentence split across lines; the payer and verifier check is stated with its operands, the `prepare` signer and the roster's `pay` principals at the first evaluation and the presenting credential at the take, and with the verifier holding none of the payer-slot leases; the decision 144 paragraph labelled as a default applied by consistency with decision 143 that meets the reopening clause of decision 49 again |
 | 146 | the application-on-an-instance pass of 2026-10-20 | three sections added: a client's staff member as an `operator` of the instance scoped by grants (decision 146, ruled); the acts the design reserves to the operator held by the instance owner alone with no grant extension (decision 158, ruled 2026-10-22, which amends decision 47's self-resolution exception), with the instance owner defined apart from `ownership_grant`; and an application that resolves checkpoints and holds no approval state, with the edit-and-approve gesture bound at the record (decision 147, ruled); decision 47's section carries a marked amendment narrowing its exception to the instance owner; the edit-and-approve text no longer treats authoring an edit as raising its checkpoint; the rules lists gain the entries; round 3: the instance owner mark gets a record-level admission rule (only a principal already carrying it sets or clears it; sync, reissue, merge, split, and `principal_binding` never do; the last mark cannot be cleared), the paths to an owner's identity and ownerless recovery are named, the halt and per-payee cap rows are marked ruled (decisions 159 and 160), a reading rule for "the operator resolves" is added, and decision 47's heading and sentence say the instance owner |
+| 147 | the bounded native original-creation approval pass of 2026-10-24 | decision 161 approves the bounded native-original-creation-v1 design for isolated nonproduction implementation/testing; independent actor proof through step 3, typed verifier-version custody, shared-sink acts-as writer equality, step-6 closed-ledger construction and restrictive resolution are specified, while physical/API installation and ordinary lifecycle authority remain pending |
+
 
 ## `adapters.md`
 
@@ -273,6 +275,8 @@ A sweep on 2026-10-20 over `origin/main`, every origin branch, and the diff of e
 | 146 | the application-on-an-instance pass of 2026-10-20 | decisions 145 to 157 registered as ruled (155 to 157 on 2026-10-20), each row separating the operator's ruling from requirements carried from the issue's gap list; `application.md` registered in `conformance.md#scope` as an authored companion; two rows added to the direction-of-truth table (an application's composition on an instance, and the authoritative side of a business record class during a cutover); decision 158 registered as ruled (2026-10-22) and decision 47's and decision 146's rows corrected to say 47 is amended by 158; decisions 159 (halt) and 160 (per-payee cap) registered as ruled and row 158 notes which parts of its mechanism are derived |
 | 147 | the PR1129 ARCH consistency repair of 2026-10-23 | mechanical Decision 84 check now fails when the purpose summary contradicts atomic intake opening or when the parent scenario, PART_OF row, or WM-35 drops landing and applicable criterion evidence; no ruling changed |
 | 148 | the PR1129 aggregate-parent admission repair of 2026-10-24 | Decision 84 records immutable creator-time admission class as the aggregate-parent exception, including childless reads and fail-closed legacy classification. |
+| 149 | the bounded native original-creation approval pass of 2026-10-24 | decision 43 now records its historical thirteen-family baseline and the separately approved, uninstalled bounded amendment; decision 161 registers the exact operator approval, source hash, scope, preserved decisions and outstanding installation/review/effect gates without replacing prior decision chronology |
+
 
 ## `conformance_suite.md`
 
@@ -297,6 +301,8 @@ A sweep on 2026-10-20 over `origin/main`, every origin branch, and the diff of e
 | 135 | the conditioned-payment ruling of 2026-10-13 | PY-8, PY-10 and PY-12 restated so that no count of payments graduates one, the ceiling is a policy value, and a checkpoint carries the destination and any schedule entries; PY-16 to PY-21 added (the positive control, one refusal per condition, the bound on releases, the reference checkpoint, comparands the payer wrote, the absent cap, the verifier and its lease and order, the take-time re-read with the destination submitted as written, the money rules, and the unreadable condition), each refusal case changing one thing from the positive control and required to write a `gate_hold` checkpoint; the `pol(...)` fixture extended; WF-17's `consent` case extended; GW-41 restated so that the advisory path resolves a `payment` as held and only the enforcing path may release it; the period, route-membership, reading-home, concurrent-take, ordering and timed-out-checkpoint cells added to PY-10, PY-16b to PY-16g and PY-19 |
 | 147 | the PR1129 ARCH consistency repair of 2026-10-23 | WM-35 plants a terminal-but-unlanded child and unmet planning criterion, and requires the derived parent completion read to refuse each until landing and effect evidence are present |
 | 148 | the PR1129 aggregate-parent admission repair of 2026-10-24 | WM-13 and WM-35 cover positive workflow peers, childless and last-child-removed parents, fail-closed classification, live/frontier exclusion, and nonvacuous completion. |
+| 149 | the bounded native original-creation approval pass of 2026-10-24 | the approved bounded ledger enumerates manifest source, first-designation finding/edge and completion records around the existing 1–13 families; native HTTP/MCP/CLI outcome parity, independent admission, AU-30/31 and ordinary mutation tests are specified, while PR 1149’s G25/cycle-policy, AU-29 and AU-32 contributions remain |
+
 
 ## `data_model.md`
 
@@ -332,6 +338,8 @@ A sweep on 2026-10-20 over `origin/main`, every origin branch, and the diff of e
 | 146 | the application-on-an-instance pass of 2026-10-20 | two concepts rows added: `console_module` (which holds no source of truth) and the display profile (`display_profile`, a provisional name until the record registers it); the principal row notes the provisional `instance_owner` mark on an `operator`; the `self_resolved`, `waived`, and `payee_caps[]` cells test the resolver as an instance owner |
 | 147 | the PR1129 ARCH consistency repair of 2026-10-23 | PART_OF derived parent completion now requires every child terminal and landed and applicable planning criterion effect evidence; no field or edge changed |
 | 148 | the PR1129 aggregate-parent admission repair of 2026-10-24 | The task row declares immutable admission_class; PART_OF and LEASE rows constrain parent targets and claims, and completion requires a current child. |
+| 149 | the bounded native original-creation approval pass of 2026-10-24 | the proposed physical principal-binding-v2 tagged union and bootstrap-only schema exceptions are stated beside the ruled logical edge shape; the first-flow G25 cycle-policy fixture remains a separate qualified registration path |
+
 
 ## `failure_posture.md`
 
@@ -350,6 +358,8 @@ A sweep on 2026-10-20 over `origin/main`, every origin branch, and the diff of e
 | 99 | the retired-name binding pass of 2026-09-08 | the checkpoint section names the retired `blocked` status as retired where it states what the status meant |
 | 118 | the decision-35 vocabulary pass of 2026-09-15 | the binding that names the announcement path substituted to `vendor_binding`; no claim changed |
 | 146 | the application-on-an-instance pass of 2026-10-20 | the refuse-resume-by-replay section states that a governance write applied to another instance is a reissue, a first take through that instance's own gate, and not a resume by replay; the halt section states who may invoke and who may lift a halt (decision 159, ruled 2026-10-22) |
+| 147 | the bounded native original-creation approval pass of 2026-10-24 | decision 161 carries a bounded, uninstalled native admission design: independently protected native_required state and exact-generation capsule checks refuse serving on missing, ambiguous or mismatched evidence; production custodian trust remains separate |
+
 
 ## `gates_and_workflows.md`
 
@@ -436,6 +446,8 @@ A sweep on 2026-10-20 over `origin/main`, every origin branch, and the diff of e
 | 127 | the reference-workflows-and-no-core-promotion pass of 2026-09-26 | "twelve core workflows" and "a core workflow of `workflows.md`" reworded to "twelve reference workflows" and "a reference workflow of `workflows.md`", following the operator's 2026-09-26 ruling that the named workflows there are reference designs, none live by default, with intake alone core; no claim about the population plan's phases or the skill-mapping table changes |
 | 133 | the roles-as-slots ruling of 2026-10-13 | the roster row points to `docs/swarm_role_set.md`, outside this directory, and says the roster and workflow-declaration entities govern over it; recorded late, in the follow-up that also restored the 133 rows for `principles.md` |
 | 148 | the PR1129 aggregate-parent admission repair of 2026-10-24 | Historical tasks without admission_class stay visible but cannot be claimed until creation evidence supports reconciliation; current child count is insufficient. |
+| 149 | the bounded native original-creation approval pass of 2026-10-24 | the first-flow operator/bootstrap mapping retains the ruled decision-43 baseline and points the approved bounded ledger to decision 161, reviewed normative merge, canonical readback and atomic contract installation |
+
 
 ## `multi_tenant.md`
 
@@ -559,6 +571,8 @@ A sweep on 2026-10-20 over `origin/main`, every origin branch, and the diff of e
 | 146 | the application-on-an-instance pass of 2026-10-20 | `application`, `environment`, `business record`, `business matter`, and `reissue` added, each swap-tested against its nearest term (stated in the pull request); the `replay` entry states that a reissue is not a replay; the `operator` entry and the `waived` conclusion state that reserved acts belong to the instance owner and no grant extends them; `instance owner` added with a sixth row in the Owner table; the Owner section counts six meanings |
 | 147 | the PR1129 ARCH consistency repair of 2026-10-23 | the parent task definition now requires children terminal and landed and applicable planning criterion effect evidence for derived completion |
 | 148 | the PR1129 aggregate-parent admission repair of 2026-10-24 | Claimable and parent task definitions use immutable admission class and require a current child for completion. |
+| 149 | the bounded native original-creation approval pass of 2026-10-24 | principal binding distinguishes the globally ruled direct-human acts-as shape from the uninstalled versioned physical key/verifier strategy and retains complete traversal-read refusal semantics |
+
 
 ## `work_model.md`
 
@@ -593,6 +607,8 @@ A sweep on 2026-10-20 over `origin/main`, every origin branch, and the diff of e
 | 146 | the application-on-an-instance pass of 2026-10-20 | one section added: a business matter is a record that tasks refer to and is not itself a task (decision 152, ruled), with its open or closed state derived from its tasks and stored only where no task stands behind it (decision 156, ruled 2026-10-20); the invariants rules list gains it |
 | 147 | the PR1129 ARCH consistency repair of 2026-10-23 | Purpose distinguishes the atomic task/intake/ADDRESSED_BY creation boundary and persistent assembly finding from the closing verdict that opens a successor batch; the recurrence discussion uses the full parent completion predicate |
 | 148 | the PR1129 aggregate-parent admission repair of 2026-10-24 | Admission, claim, active/live reads, parent membership and completion use one stable creator-time class; childless parents remain visible and incomplete. |
+| 149 | the bounded native original-creation approval pass of 2026-10-24 | the versioned original-creation membership note records decision 161’s bounded approval while requiring reviewed normative merge, canonical readback and installation before runtime authority |
+
 
 ## `workflows.md`
 

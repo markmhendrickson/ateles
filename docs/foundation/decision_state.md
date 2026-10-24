@@ -151,4 +151,5 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 158 | who holds the acts the design reserves to the operator now that … | yes | yes | unknown | nothing in the design beyond the amendment below; the rule that the waiver is … |
 | 159 | who may invoke the operator's halt and who may lift it, now … | yes | yes | unknown | nothing in the design; the halt's read-back is unchanged |
 | 160 | who sets or changes a per-payee payment cap — the cap is … | yes | yes | unknown | nothing in the design; the five conditions of decision 144 and the take-time read … |
+| 161 | whether the closed original-creation boundary may admit the exact versioned fresh-generation native … | yes | yes | unknown | decision 43’s historical thirteen numbered families remain intact; decisions 99, 102 and 107–109 remain … |
 
