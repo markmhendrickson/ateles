@@ -417,13 +417,31 @@ def _query_tasks(limit: int, cursor: str | None = None) -> tuple[list[tuple[str,
     data = resp.json()
     if not isinstance(data, dict):
         raise QueryUnavailableError("malformed task query response")
-    rows = data.get("entities") or data.get("results") or []
+    if "entities" in data:
+        rows = data["entities"]
+    elif "results" in data:
+        rows = data["results"]
+    else:
+        raise QueryUnavailableError("task query has no rows collection")
+    if not isinstance(rows, list):
+        raise QueryUnavailableError("malformed task rows collection")
     out: list[tuple[str, dict]] = []
     for row in rows:
+        if not isinstance(row, dict):
+            raise QueryUnavailableError("malformed task row")
+        if "snapshot" in row and not isinstance(row["snapshot"], dict):
+            raise QueryUnavailableError("malformed task row snapshot")
+        if (isinstance(row.get("snapshot"), dict)
+                and "snapshot" in row["snapshot"]
+                and not isinstance(row["snapshot"]["snapshot"], dict)):
+            raise QueryUnavailableError("malformed task row snapshot")
         eid = row.get("entity_id") or row.get("id")
         snap = _unwrap_snapshot(row)
-        if eid and isinstance(snap, dict):
-            out.append((eid, snap))
+        if (not isinstance(eid, str) or not eid or not isinstance(snap, dict)
+                or not isinstance(snap.get("status"), str)
+                or not snap["status"]):
+            raise QueryUnavailableError("malformed task row")
+        out.append((eid, snap))
     next_cursor = data.get("next_cursor")
     if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor):
         raise QueryUnavailableError("malformed task continuation cursor")

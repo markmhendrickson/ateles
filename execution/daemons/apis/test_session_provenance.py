@@ -214,6 +214,7 @@ async def test_dispatch_refuses_to_spawn_without_verified_session_provenance(
     )
     monkeypatch.setattr(apis, "_release_lifecycle_proven", lambda *_args: True)
     monkeypatch.setattr(session_finalize, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(session_finalize, "RUN_SESSION_RECOVERY_SECONDS", 0.01)
 
     if failure_mode == "store_failure":
         monkeypatch.setattr(
@@ -286,6 +287,91 @@ async def test_dispatch_refuses_to_spawn_without_verified_session_provenance(
     assert "provenance" in task_statuses[-1][1]["reason"]
     assert job.finished_events == []
     assert job.failed_events
+
+
+@pytest.mark.asyncio
+async def test_timed_out_prelaunch_store_recovers_late_exact_run_once(monkeypatch):
+    native_id = "ent_task:approved-2"
+    stores = []
+    query_rounds = 0
+    spawned = []
+    statuses = []
+
+    def post(url, **kwargs):
+        nonlocal query_rounds
+        if url.endswith("/store"):
+            stores.append(kwargs["json"])
+            raise RuntimeError("response lost")
+        assert url.endswith("/entities/query")
+        if kwargs["json"]["entity_type"] == "agent_session":
+            query_rounds += 1
+        if query_rounds < 3:
+            return _Response({"entities": []})
+        if kwargs["json"]["entity_type"] == "agent_session":
+            return _Response({"entities": [{"entity_id": "ent_session", "snapshot": {
+                "harness": "ateles-swarm", "native_session_id": native_id,
+                "trigger_ref": "ent_task",
+            }}]})
+        return _Response({"entities": [{"entity_id": "ent_conversation", "snapshot": {
+            "conversation_id": native_id, "session_id": native_id,
+        }}]})
+
+    def get(url, **_kwargs):
+        if url.endswith("/entities/ent_session"):
+            return _Response({"entity_type": "agent_session", "snapshot": {
+                "harness": "ateles-swarm", "native_session_id": native_id,
+                "trigger_ref": "ent_task",
+            }})
+        if url.endswith("/entities/ent_conversation"):
+            return _Response({"entity_type": "conversation", "snapshot": {
+                "conversation_id": native_id, "session_id": native_id,
+            }})
+        source = url.split("/entities/", 1)[1].split("/", 1)[0]
+        targets = {"ent_session": ["ent_task"],
+                   "ent_conversation": ["ent_task", "ent_session"]}
+        return _Response({"relationships": [{
+            "source_entity_id": source, "target_entity_id": target,
+            "relationship_type": "REFERS_TO",
+        } for target in targets[source]]})
+
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", True)
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(apis, "_activity", SimpleNamespace(started=lambda *_a: _Job()))
+    monkeypatch.setattr(apis, "set_task_status", lambda _id, status, **_kw:
+                        statuses.append(status) or True)
+    monkeypatch.setattr(apis, "_release_lifecycle_proven", lambda *_a: True)
+    monkeypatch.setattr(apis, "append_turn", lambda **_kw: True)
+    monkeypatch.setattr(apis, "update_run_session_status", lambda *_a, **_kw: True)
+    monkeypatch.setattr(session_finalize, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(session_finalize, "RUN_SESSION_RECOVERY_SECONDS", 1)
+    monkeypatch.setattr(session_finalize, "RUN_SESSION_RECOVERY_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(session_finalize.httpx, "post", post)
+    monkeypatch.setattr(session_finalize.httpx, "get", get)
+
+    async def spawn(*_args, **kwargs):
+        spawned.append(kwargs)
+        return SimpleNamespace(
+            stdout="[cicada] pull_request_link: BLOCKED — test", stderr="",
+            ok=True, returncode=0,
+        )
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", spawn)
+    await apis.dispatch_task(
+        "ent_task", {"title": "Implement it", "assigned_to": "cicada",
+                     "repo": "markmhendrickson/ateles", "status": "awaiting_approval",
+                     "attempt": 2},
+        "approved", _Notifier(), gate_override=True,
+    )
+
+    assert query_rounds >= 3
+    assert len(stores) == 1
+    assert stores[0]["idempotency_key"] == "run-session-ent_task-approved-2"
+    assert spawned == [{
+        "role": "cicada", "run_conversation_id": "ent_conversation",
+        "run_agent_session_id": "ent_session",
+    }]
+    assert apis.TaskStatus.EXECUTING in statuses
+    assert apis.TaskStatus.FAILED not in statuses[:statuses.index(apis.TaskStatus.EXECUTING) + 1]
 
 
 @pytest.mark.asyncio

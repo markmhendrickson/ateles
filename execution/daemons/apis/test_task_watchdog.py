@@ -7,6 +7,8 @@ import inspect
 import os
 import sys
 
+import pytest
+
 # This daemon module imports siblings by bare name and `lib.*` absolutely; put
 # both the daemon dir and the repo root on the path so the test runs from
 # anywhere (mirrors how apis.py bootstraps at runtime).
@@ -426,6 +428,74 @@ def test_query_refuses_incomplete_page_without_cursor(monkeypatch):
         pass
     else:
         raise AssertionError("partial page without continuation must not look complete")
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"entities": None}, {"entities": {}}, {"entities": "bad"},
+    {"entities": [None]}, {"entities": [{"entity_id": "ent_x", "snapshot": None}]},
+    {"entities": [{"entity_id": "ent_x", "snapshot": {"snapshot": None}}]},
+    {"entities": [{"entity_id": "ent_x", "snapshot": {}}]},
+])
+def test_query_rejects_malformed_rows_envelope(monkeypatch, payload):
+    monkeypatch.setattr(tw, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    monkeypatch.setattr(tw.httpx, "post", lambda *_a, **_k: Response())
+    with pytest.raises(tw.QueryUnavailableError):
+        tw._query_tasks(500, "next")
+
+
+def test_query_accepts_canonical_and_legacy_empty_pages(monkeypatch):
+    monkeypatch.setattr(tw, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    for payload in ({"entities": [], "next_cursor": None}, {"results": []}):
+        monkeypatch.setattr(tw.httpx, "post", lambda *_a, **_k: Response(payload))
+        assert tw._query_tasks(500) == ([], None)
+
+
+def test_malformed_query_does_not_complete_watchdog_scan(monkeypatch):
+    monkeypatch.setattr(tw, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(tw.httpx, "post", lambda *_a, **_k: Response())
+
+    async def dispatch(*_args):
+        raise AssertionError("malformed page must not dispatch")
+
+    watchdog = tw.TaskWatchdog()
+    watchdog._cursor = "next"
+    counts = asyncio.run(watchdog.sweep(object(), dispatch))
+    assert counts["query_unavailable"] == 1
+    assert counts["scan_complete"] is False
+    assert watchdog._cursor == "next"
 
 
 def test_cursor_error_is_distinct_from_other_bad_requests(monkeypatch):

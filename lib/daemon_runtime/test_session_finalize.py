@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from lib.daemon_runtime import session_finalize as sf
 
 
@@ -215,7 +217,8 @@ def test_create_run_session_reads_back_both_records_and_task_link(monkeypatch):
         if url.endswith("/entities/ent_session99"):
             return _Response({"entity_id": "ent_session99", "entity_type": "agent_session",
                               "snapshot": {"harness": "ateles-swarm",
-                                           "native_session_id": "ent_task:created-0"}})
+                                           "native_session_id": "ent_task:created-0",
+                                           "trigger_ref": "ent_task"}})
         source_entity_id = url.split("/entities/", 1)[1].split("/", 1)[0]
         targets = {
             "ent_conv99": ["ent_task", "ent_session99"],
@@ -230,10 +233,22 @@ def test_create_run_session_reads_back_both_records_and_task_link(monkeypatch):
             for target_entity_id in targets[source_entity_id]
         ]})
     monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "tok")
-    monkeypatch.setattr(sf.httpx, "post", lambda *a, **k: _Response({"entities": [
-        {"entity_type": "conversation", "entity_id": "ent_conv99"},
-        {"entity_type": "agent_session", "entity_id": "ent_session99"},
-    ]}))
+    def fake_post(url, **kwargs):
+        if url.endswith("/entities/query"):
+            entity_type = kwargs["json"]["entity_type"]
+            if entity_type == "conversation":
+                return _Response({"entities": [{"entity_id": "ent_conv99", "snapshot": {
+                    "conversation_id": "ent_task:created-0", "session_id": "ent_task:created-0",
+                }}]})
+            return _Response({"entities": [{"entity_id": "ent_session99", "snapshot": {
+                "harness": "ateles-swarm", "native_session_id": "ent_task:created-0",
+                "trigger_ref": "ent_task",
+            }}]})
+        return _Response({"entities": [
+            {"entity_type": "conversation", "entity_id": "ent_conv99"},
+            {"entity_type": "agent_session", "entity_id": "ent_session99"},
+        ]})
+    monkeypatch.setattr(sf.httpx, "post", fake_post)
     monkeypatch.setattr(sf.httpx, "get", fake_get)
     run = sf.create_run_session(task_id="ent_task", plan_id="ent_plan",
                                 agent="cicada", run_key="created-0")
@@ -287,6 +302,7 @@ def test_recover_run_session_finds_exact_existing_run_and_verifies_links(monkeyp
                 "snapshot": {
                     "harness": "ateles-swarm",
                     "native_session_id": native_session_id,
+                    "trigger_ref": "ent_task",
                     "status": "active",
                 },
             }]})
@@ -318,6 +334,7 @@ def test_recover_run_session_finds_exact_existing_run_and_verifies_links(monkeyp
                 "snapshot": {
                     "harness": "ateles-swarm",
                     "native_session_id": native_session_id,
+                    "trigger_ref": "ent_task",
                 },
             })
         source_entity_id = url.split("/entities/", 1)[1].split("/", 1)[0]
@@ -349,6 +366,58 @@ def test_recover_run_session_rejects_identity_from_another_task(monkeypatch):
     assert sf.recover_run_session(
         task_id="ent_task",
         native_session_id="ent_other:approved-2",
+    ) is None
+
+
+@pytest.mark.parametrize("session_rows", [
+    None,
+    [{"entity_id": "ent_session", "snapshot": {
+        "harness": "ateles-swarm", "native_session_id": "ent_task:approved-2",
+        "trigger_ref": "ent_other",
+    }}],
+    [{"entity_id": "ent_session", "snapshot": {
+        "harness": "ateles-swarm", "native_session_id": "ent_task:approved-2",
+        "trigger_ref": "ent_task",
+    }}, {"entity_id": "ent_duplicate", "snapshot": {
+        "harness": "ateles-swarm", "native_session_id": "ent_task:approved-2",
+        "trigger_ref": "ent_task",
+    }}],
+])
+def test_recover_run_session_rejects_unavailable_foreign_or_ambiguous_rows(
+    monkeypatch, session_rows,
+):
+    def rows(entity_type, **_kwargs):
+        if entity_type == "agent_session":
+            return session_rows
+        return [{"entity_id": "ent_conversation", "snapshot": {
+            "conversation_id": "ent_task:approved-2",
+            "session_id": "ent_task:approved-2",
+        }}]
+
+    monkeypatch.setattr(sf, "_query_entity_rows", rows)
+    monkeypatch.setattr(sf, "_entity_readback_matches", lambda *_a, **_kw:
+                        (_ for _ in ()).throw(AssertionError("must not trust row")))
+    assert sf.recover_run_session(
+        task_id="ent_task", native_session_id="ent_task:approved-2",
+    ) is None
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"entities": {}}, {"entities": [{}], "next_cursor": "next"},
+])
+def test_recovery_query_rejects_malformed_or_incomplete_envelope(monkeypatch, payload):
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(sf.httpx, "post", lambda *_a, **_kw: Response())
+    assert sf._query_entity_rows(
+        "agent_session", identity_field="native_session_id",
+        identity_value="ent_task:approved-2",
     ) is None
 
 

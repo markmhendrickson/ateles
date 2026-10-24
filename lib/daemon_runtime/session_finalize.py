@@ -23,12 +23,16 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import httpx
 
 log = logging.getLogger("daemon_runtime.finalize")
+
+RUN_SESSION_RECOVERY_SECONDS = 45
+RUN_SESSION_RECOVERY_INTERVAL_SECONDS = 1
 
 NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
@@ -302,13 +306,14 @@ def _entity_readback_matches(
     *,
     entity_type: str,
     required_fields: dict[str, str],
+    deadline: float | None = None,
 ) -> bool:
     """Read an entity after write and verify the fields carrying identity."""
     try:
         response = httpx.get(
             f"{NEOTOMA_BASE_URL}/entities/{entity_id}",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            timeout=10,
+            timeout=_read_timeout(deadline, 10),
         )
         response.raise_for_status()
         data = response.json()
@@ -332,13 +337,14 @@ def _relationship_readback_matches(
     *,
     target_entity_id: str,
     relationship_type: str,
+    deadline: float | None = None,
 ) -> bool:
     """Verify a relationship created by the same store write."""
     try:
         response = httpx.get(
             f"{NEOTOMA_BASE_URL}/entities/{source_entity_id}/relationships",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            timeout=10,
+            timeout=_read_timeout(deadline, 10),
         )
         response.raise_for_status()
         return any(
@@ -352,6 +358,15 @@ def _relationship_readback_matches(
         return False
 
 
+def _read_timeout(deadline: float | None, cap: float) -> float:
+    if deadline is None:
+        return cap
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("run session recovery deadline elapsed")
+    return min(cap, remaining)
+
+
 def create_run_session(
     *,
     task_id: str,
@@ -363,65 +378,33 @@ def create_run_session(
 ) -> RunSession | None:
     """Open and verify the conversation and agent_session for one run."""
     native_session_id = f"{task_id}:{run_key}"
-    data = _post_store(build_run_session_payload(
+    _post_store(build_run_session_payload(
         task_id=task_id, plan_id=plan_id, agent=agent,
         run_key=run_key, title=title, summary=summary,
     ))
-    if not data:
+    if not NEOTOMA_BEARER_TOKEN:
         return None
-    ids = {
-        e.get("entity_type"): e.get("entity_id")
-        for e in data.get("entities", [])
-        if e.get("entity_id")
-    }
-    conversation_id = ids.get("conversation")
-    agent_session_id = ids.get("agent_session")
-    if not conversation_id or not agent_session_id:
-        return None
-    if not _entity_readback_matches(
-        conversation_id,
-        entity_type="conversation",
-        required_fields={
-            "conversation_id": native_session_id,
-            "session_id": native_session_id,
-        },
-    ):
-        return None
-    if not _entity_readback_matches(
-        agent_session_id,
-        entity_type="agent_session",
-        required_fields={
-            "harness": "ateles-swarm",
-            "native_session_id": native_session_id,
-        },
-    ):
-        return None
-    required_relationships = (
-        (conversation_id, task_id),
-        (agent_session_id, task_id),
-        (conversation_id, agent_session_id),
-    )
-    for source_entity_id, target_entity_id in required_relationships:
-        if not _relationship_readback_matches(
-            source_entity_id,
-            target_entity_id=target_entity_id,
-            relationship_type="REFERS_TO",
-        ):
+    deadline = time.monotonic() + RUN_SESSION_RECOVERY_SECONDS
+    while True:
+        run = recover_run_session(
+            task_id=task_id, native_session_id=native_session_id, deadline=deadline,
+        )
+        if run is not None:
+            return run
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             return None
-    return RunSession(
-        conversation_id=conversation_id,
-        agent_session_id=agent_session_id,
-        native_session_id=native_session_id,
-    )
+        time.sleep(min(RUN_SESSION_RECOVERY_INTERVAL_SECONDS, remaining))
 
 
 def _query_entity_rows(
-    entity_type: str, *, identity_field: str, identity_value: str
-) -> list[dict]:
+    entity_type: str, *, identity_field: str, identity_value: str,
+    deadline: float | None = None,
+) -> list[dict] | None:
     """Return matching entity rows from the canonical Neotoma read route."""
     if not NEOTOMA_BEARER_TOKEN:
         log.warning("[finalize] no bearer token — entity query skipped")
-        return []
+        return None
     try:
         response = httpx.post(
             f"{NEOTOMA_BASE_URL}/entities/query",
@@ -434,13 +417,25 @@ def _query_entity_rows(
                 "limit": 25,
                 "include_snapshots": True,
             },
-            timeout=20,
+            timeout=_read_timeout(deadline, 20),
         )
         response.raise_for_status()
-        return response.json().get("entities", [])
+        data = response.json()
+        rows = data.get("entities") if isinstance(data, dict) else None
+        if (
+            not isinstance(rows, list)
+            or len(rows) >= 25
+            or data.get("next_cursor") is not None
+            or data.get("has_more") is True
+            or data.get("truncated") is True
+            or not all(isinstance(row, dict) for row in rows)
+        ):
+            log.warning("[finalize] malformed or incomplete %s query", entity_type)
+            return None
+        return rows
     except Exception as exc:  # noqa: BLE001 — recovery retries on the next sweep
         log.warning("[finalize] %s query failed: %s", entity_type, exc)
-        return []
+        return None
 
 
 def _row_snapshot(row: dict) -> dict:
@@ -454,7 +449,7 @@ def _row_snapshot(row: dict) -> dict:
 
 
 def recover_run_session(
-    *, task_id: str, native_session_id: str
+    *, task_id: str, native_session_id: str, deadline: float | None = None,
 ) -> RunSession | None:
     """Find and verify an already-created run without creating another one.
 
@@ -471,27 +466,35 @@ def recover_run_session(
         )
         return None
 
-    session_matches: list[tuple[str, dict]] = []
-    for row in _query_entity_rows(
+    session_rows = _query_entity_rows(
         "agent_session",
         identity_field="native_session_id",
         identity_value=native_session_id,
-    ):
+        deadline=deadline,
+    )
+    conversation_rows = _query_entity_rows(
+        "conversation",
+        identity_field="conversation_id",
+        identity_value=native_session_id,
+        deadline=deadline,
+    )
+    if session_rows is None or conversation_rows is None:
+        return None
+
+    session_matches: list[tuple[str, dict]] = []
+    for row in session_rows:
         snapshot = _row_snapshot(row)
         entity_id = row.get("entity_id") or row.get("id")
         if (
             entity_id
             and snapshot.get("harness") == "ateles-swarm"
             and snapshot.get("native_session_id") == native_session_id
+            and snapshot.get("trigger_ref") == task_id
         ):
             session_matches.append((entity_id, snapshot))
 
     conversation_matches: list[tuple[str, dict]] = []
-    for row in _query_entity_rows(
-        "conversation",
-        identity_field="conversation_id",
-        identity_value=native_session_id,
-    ):
+    for row in conversation_rows:
         snapshot = _row_snapshot(row)
         entity_id = row.get("entity_id") or row.get("id")
         if (
@@ -501,7 +504,10 @@ def recover_run_session(
         ):
             conversation_matches.append((entity_id, snapshot))
 
-    if len(session_matches) != 1 or len(conversation_matches) != 1:
+    if (
+        len(session_rows) != 1 or len(conversation_rows) != 1
+        or len(session_matches) != 1 or len(conversation_matches) != 1
+    ):
         log.warning(
             "[finalize] run recovery is ambiguous for %s: sessions=%d conversations=%d",
             native_session_id,
@@ -519,6 +525,7 @@ def recover_run_session(
             "conversation_id": native_session_id,
             "session_id": native_session_id,
         },
+        deadline=deadline,
     ):
         return None
     if not _entity_readback_matches(
@@ -527,7 +534,9 @@ def recover_run_session(
         required_fields={
             "harness": "ateles-swarm",
             "native_session_id": native_session_id,
+            "trigger_ref": task_id,
         },
+        deadline=deadline,
     ):
         return None
     for source_entity_id, target_entity_id in (
@@ -539,6 +548,7 @@ def recover_run_session(
             source_entity_id,
             target_entity_id=target_entity_id,
             relationship_type="REFERS_TO",
+            deadline=deadline,
         ):
             return None
     return RunSession(
