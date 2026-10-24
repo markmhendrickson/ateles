@@ -63,6 +63,7 @@ from lib.daemon_runtime import (  # noqa: E402
     enforce_status_or_exit,
     SSEClient,  # noqa: F401 — imported for consistency; Turdus uses polling not SSE
 )
+from lib.daemon_runtime.memory_guard import NeotomaGuard, AMG_AVAILABLE  # noqa: E402
 from lib.notify import Notifier, Priority  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -513,27 +514,37 @@ async def _store_email_entity(message: dict) -> str | None:
         return None
 
     msg_id = message.get("id", "unknown")
+    entity = {
+        # /store reads entity fields FLAT off this object. A nested
+        # "snapshot" key is not a recognized field, so every field under
+        # it is silently dropped and the entity lands carrying only its
+        # canonical_name. (The deprecated /observations endpoint this was
+        # migrated from in #190 did take a nested snapshot — the nesting
+        # was carried over unchanged and nothing failed loudly.)
+        "entity_type": "email_message",
+        "canonical_name": f"email_message:gmail:{msg_id}",
+        "message_id": message.get("id", ""),
+        "sender": message.get("sender", ""),
+        "subject": message.get("subject", ""),
+        "snippet": message.get("snippet", ""),
+        "date": message.get("date_iso", ""),
+        "labels": message.get("labels", []),
+        "classification": message.get("classification", "informational"),
+        "source": "gmail",
+    }
+
+    # Screen through AMG before storing
+    if AMG_AVAILABLE:
+        try:
+            from agent_memory_guard import PolicyViolation, SourceClass
+            guard = NeotomaGuard()
+            guard.screen_entity(entity, source_class=SourceClass.EXTERNAL_TOOL, daemon=DAEMON_NAME)
+        except (PolicyViolation, RuntimeError) as exc:
+            log.error(f"[{DAEMON_NAME}] Email entity blocked by memory guard: {exc}")
+            return None
+
     payload = {
-        "entities": [
-            {
-                # /store reads entity fields FLAT off this object. A nested
-                # "snapshot" key is not a recognized field, so every field under
-                # it is silently dropped and the entity lands carrying only its
-                # canonical_name. (The deprecated /observations endpoint this was
-                # migrated from in #190 did take a nested snapshot — the nesting
-                # was carried over unchanged and nothing failed loudly.)
-                "entity_type": "email_message",
-                "canonical_name": f"email_message:gmail:{msg_id}",
-                "message_id": message.get("id", ""),
-                "sender": message.get("sender", ""),
-                "subject": message.get("subject", ""),
-                "snippet": message.get("snippet", ""),
-                "date": message.get("date_iso", ""),
-                "labels": message.get("labels", []),
-                "classification": message.get("classification", "informational"),
-                "source": "gmail",
-            }
-        ],
+        "entities": [entity],
         "idempotency_key": f"turdus-email-{msg_id}",
     }
 

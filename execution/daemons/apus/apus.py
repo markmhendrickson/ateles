@@ -66,6 +66,7 @@ from lib.daemon_runtime import (  # noqa: E402
     load_agent_definition_or_exit,
     enforce_status_or_exit,
 )
+from lib.daemon_runtime.memory_guard import NeotomaGuard, AMG_AVAILABLE  # noqa: E402
 from lib.notify import Notifier, Priority  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -427,7 +428,8 @@ def _log_delivery_to_neotoma(
     if not bearer:
         return
 
-    payload = {
+    entity = {
+        "entity_type": "mirror_delivery",
         "delivery_id": delivery_id,
         "profile": profile,
         "commit_sha": commit_sha,
@@ -435,10 +437,21 @@ def _log_delivery_to_neotoma(
         "daemon": DAEMON_NAME,
         **({"error": error[:500]} if error else {}),
     }
+
+    # Screen through AMG before storing
+    if AMG_AVAILABLE:
+        try:
+            from agent_memory_guard import PolicyViolation, SourceClass
+            guard = NeotomaGuard()
+            guard.screen_entity(entity, source_class=SourceClass.EXTERNAL_TOOL, daemon=DAEMON_NAME)
+        except (PolicyViolation, RuntimeError) as exc:
+            log.debug(f"[apus] Delivery log blocked by memory guard: {exc}")
+            return
+
     try:
         httpx.post(
             f"{neotoma_url}/store",
-            json={"entity_type": "mirror_delivery", **payload},
+            json=entity,
             headers={"Authorization": f"Bearer {bearer}"},
             timeout=5,
         )
