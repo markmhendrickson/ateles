@@ -426,7 +426,7 @@ A sweep on 2026-10-20 over `origin/main`, every origin branch, and the diff of e
 | 121 | the task-assembly ruling of 2026-09-21 | the batch-introduction row no longer treats a legacy task's absent intake batch as the current entry condition: new workflow-entering tasks get the batch atomically at creation, aggregate parents need none, and pre-existing executable tasks remain held under G24 until a governed carrying rule supplies a conforming admission path |
 | 127 | the reference-workflows-and-no-core-promotion pass of 2026-09-26 | "twelve core workflows" and "a core workflow of `workflows.md`" reworded to "twelve reference workflows" and "a reference workflow of `workflows.md`", following the operator's 2026-09-26 ruling that the named workflows there are reference designs, none live by default, with intake alone core; no claim about the population plan's phases or the skill-mapping table changes |
 | 133 | the roles-as-slots ruling of 2026-10-13 | the roster row points to `docs/swarm_role_set.md`, outside this directory, and says the roster and workflow-declaration entities govern over it; recorded late, in the follow-up that also restored the 133 rows for `principles.md` |
-| 148 | the PR1129 aggregate-parent admission repair of 2026-10-24 | Historical tasks without admission_class stay visible but unclaimable until creation evidence supports reconciliation; current child count is insufficient. |
+| 148 | the PR1129 aggregate-parent admission repair of 2026-10-24 | Historical tasks without admission_class stay visible but cannot be claimed until creation evidence supports reconciliation; current child count is insufficient. |
 
 ## `multi_tenant.md`
 

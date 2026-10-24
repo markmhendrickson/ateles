@@ -249,7 +249,7 @@ def test_parent_admission_contradictions_fail_in_natural_sources(
         ),
         (
             "conformance_suite.md",
-            "one child terminal but unlanded, then all landed with unmet `completion_criteria[]`",
+            "terminal but unlanded child; landed children with unmet `completion_criteria[]`",
             "complete two children",
             "aggregate-parent-wm-35-cases",
         ),

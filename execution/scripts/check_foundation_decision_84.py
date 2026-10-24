@@ -51,8 +51,8 @@ PARENT_VOCABULARY_SECTION_SHA256 = (
     "7a5f519f82dcd3a340ea12d4f33ea74463be173acd29d23d91b676dc4e64a14d"
 )
 PART_OF_ROW_SHA256 = "396c415f9ec68360b0eebd027250275128be06367e37c2dc4d413e91bf7ec5cb"
-WM13_ROW_SHA256 = "50d5a2d64655f9f8e96c53dc0090bc81799661f38a8414ec5c953bc286d40e06"
-WM35_ROW_SHA256 = "28156649ffaca0801e1e8df29f8a6c696f614a1dc3e91562e452f797d4024645"
+WM13_ROW_SHA256 = "e91cb9eb063039a9c95ff0d7b1dfb32f39c2af08e56d13cd27ed0611d9af596a"
+WM35_ROW_SHA256 = "9a23e4262b4824d27b4b344aa9177167eb9eb285bc8e57b5bd7ddfa5df92c426"
 SCENARIO_J_SECTION_SHA256 = (
     "7ff3b9b0cd3a0888d2ed6ec2d546648391fa690350e5c6d5313213e627e2098b"
 )
@@ -62,9 +62,9 @@ HOLD_MODEL_SECTION_SHA256 = (
 FINDING_SCHEMA_ROW_SHA256 = (
     "24056643959d3cb6f24b35943bb4caa242cca205e32c210c75181a7fd3831500"
 )
-WM14A_ROW_SHA256 = "1b3c03b571c2a44ccab30b99bb06746774b9eada13f86551d30066878914c76e"
+WM14A_ROW_SHA256 = "c07b7f903fa53c0daf10ce9d770582bab19ea74159414739cf665218255c0a35"
 
-WM13_REQUIREMENT = "`work_model.md#intake-is-every-tasks-first-workflow`: creator-time immutable `admission_class` positively selects `workflow_entering` or `aggregate_parent`; every workflow-entering task atomically gets one intake batch and `ADDRESSED_BY` at creation; an aggregate parent gets neither and is not claimable, even before children exist or after the last child is removed"
+WM13_REQUIREMENT = '`work_model.md#intake-is-every-tasks-first-workflow`: immutable creator-time `admission_class` positively selects `workflow_entering` or `aggregate_parent`; every workflow-entering task atomically gets one intake batch and `ADDRESSED_BY` at creation; parents get neither and cannot be claimed before children exist or after the last is removed'
 INTAKE_ENTRY_PARAGRAPH = """**Entry condition:** every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at
 creation. Its immutable creator-time `admission_class: workflow_entering` is part of that unit. The only
 other admitted value is `aggregate_parent`, which has no batch or `ADDRESSED_BY`; missing or ambiguous
@@ -212,7 +212,7 @@ AGGREGATE_PARENT_SCENARIO_SECTION = (
     + "\n\n"
     + AGGREGATE_PARENT_SCENARIO_INVARIANTS
 )
-WM35_REQUIREMENT = "`work_model.md#parent-and-child-tasks`: immutable `admission_class: aggregate_parent` makes a parent nonclaimable, outside live execution and the frontier, without intake batch or `ADDRESSED_BY` before any child exists and after its last child is removed; children are workflow-entering tasks; completion requires at least one child, all children terminal and landed, and applicable criterion evidence"
+WM35_REQUIREMENT = '`work_model.md#parent-and-child-tasks`: immutable `admission_class: aggregate_parent` excludes parents from claims, live execution and the frontier, with no intake batch or `ADDRESSED_BY`, before children exist and after the last is removed; children are workflow-entering; completion needs a current child, every child terminal and landed, and applicable criterion evidence'
 
 
 class CorpusProblem(Exception):
