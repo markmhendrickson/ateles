@@ -114,17 +114,17 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 96 | how the proxy authenticates to the instance on an agent's behalf — … | yes | yes | unknown | decision 97, which ruled that a proxy is permitted and never the enforcement point, … |
 | 97 | where the enforcement point for an agent's read and write to the … | yes | yes | unknown | decision 56, which ruled the enforcement point at the record for a governance write … |
 | 98 | whether an instance's planning records are per instance — each instance of … | yes | yes | unknown | decision 91, whose controlling instance is the candidate home for any swarm-level planning; decision … |
-| 99 | whether a swarm configured with several instances of the record has planning … | no | no | unknown | decision 91, which supplies a controlling instance as a candidate home without supplying a … |
+| 99 | whether a swarm configured with several instances of the record has planning … | yes | yes | unknown | decision 91, which supplies a controlling instance as a candidate home; decision 98, which … |
 | 100 | whether a newly declared workflow is proven before it binds production work, … | yes | yes | unknown | nothing in the design; and `migration.md#ordering-and-the-cutover-for-the-skills`, whose claim that its cutover batch is the … |
 | 101 | what fields the credential-binding edge carries, and what resolving a credential to … | yes | yes | unknown | stage 1 of the migration, which registers `principal_binding` among thirteen relationship types and cannot … |
-| 102 | whether acyclicity is a property of a relationship type or of the … | no | no | unknown | stage 1 of the migration, since a check applied without regard to type governs … |
+| 102 | whether acyclicity is a property of a relationship type or of the … | yes | yes | unknown | stage 1 of the migration; G25, which holds the same stage on the record … |
 | 103 | whether a step's declaration is a floor or a ceiling, and whether … | no | no | unknown | decision 41 and decision 94, which rule admission per entity type per principal, default-deny, … |
 | 104 | what a reader of adapter-sourced state in the record may rely on … | no | no | unknown | nothing in the design; and the placement of a claim `calendar.md#a-series-and-its-occurrences-are-each-artifacts-related-by-part_of` already makes in … |
 | 105 | where a credential comes from before the custody rules reach it, and … | no | no | unknown | decision 90, which already makes the target host and the record instance parameters of … |
 | 106 | whether an issue is a pinned-state kind, and what a conclusion on … | no | no | unknown | decision 72, which named the record and its `conclusion` field and whose pinning rule … |
-| 107 | what a principal's **acts-as** `principal_binding` carries, and whether that edge is presented … | no | no | unknown | nothing blocks it: stage 1 registers the edge type and its four fields, not … |
-| 108 | whether an `agent` may hold an **acts-as** `principal_binding` to another `agent` — … | no | no | unknown | decision 48, whose counting rule reads this edge and reasons about interests without stating … |
-| 109 | whether an `operator` may hold an **acts-as** `principal_binding` — the corpus says … | no | no | unknown | decision 48's counting rule, which would read such an edge and count two operators … |
+| 107 | what a principal's **acts-as** `principal_binding` carries, and whether that edge is presented … | yes | yes | unknown | decision 101's two-edge shape and stage 1's one-way registration |
+| 108 | whether an `agent` may hold an **acts-as** `principal_binding` to another `agent` | yes | yes | unknown | decision 48's one-interest counting rule and the unbounded chain the permissive candidates create |
+| 109 | whether an `operator` may hold an **acts-as** `principal_binding` | yes | yes | unknown | decision 48's counting rule, which would otherwise collapse two independent operators into one interest |
 | 110 | whether a **role** may be seated to review what a principal produced … | yes | yes | unknown | nothing in the design; a declaration whose steps seat a producing role and a … |
 | 111 | whether a rule's end may be a **condition** rather than a date … | yes | yes | unknown | the live rows that carry a condition in `scope`, which both defeats that field's … |
 | 114 | where a rule that binds **every agent's behaviour** lives, and whether the … | yes | yes | unknown | nothing in the design blocks it, and it blocks nothing: G34's resolution is the … |
@@ -151,4 +151,5 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 158 | who holds the acts the design reserves to the operator now that … | yes | yes | unknown | nothing in the design beyond the amendment below; the rule that the waiver is … |
 | 159 | who may invoke the operator's halt and who may lift it, now … | yes | yes | unknown | nothing in the design; the halt's read-back is unchanged |
 | 160 | who sets or changes a per-payee payment cap — the cap is … | yes | yes | unknown | nothing in the design; the five conditions of decision 144 and the take-time read … |
+| 161 | whether the closed original-creation boundary may admit the exact versioned fresh-generation native … | yes | yes | unknown | decision 43’s historical thirteen numbered families remain intact; decisions 99, 102 and 107–109 remain … |
 

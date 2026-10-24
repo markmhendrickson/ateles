@@ -232,7 +232,7 @@ retroactively reshape or minimize what these rows already hold; it declares the 
 | `agent_policy` | keep | `agent_policy` | the design names it as the authoritative home of skill bodies and agent behavioural rules, and as one target of a standing finding. Prompts and skills rendered from it still carry retired words; the correction is to the entities, then a re-render (`conformance.md#direction-of-truth-per-class-of-record`) |
 | `agent_strategy` | keep | — | outside the four models. Each names an agent by credential rather than by role, which population's phase 1 will want to read; not migrated |
 | `operator_profile` | keep | `operator_profile`, descriptive | the design keeps it descriptive and hangs no authority edge on it (`authority_model.md#principals`) |
-| `operator` (the human principal), `principal_binding`, `ownership_grant`, `delegation_edge` | introduce | themselves | the one `operator` entity is the first write of the bootstrap and the first operator act. Each `agent` then carries a `principal_binding` to it; each registered type carries one `ownership_grant` to it. Credentials (a store identity, a host login, an address, a chat identity) bind to it many-to-one — through an edge the design has not named (G17) |
+| `operator` (the human principal), `principal_binding`, `ownership_grant`, `delegation_edge` | introduce | themselves | the one `operator` entity is the first write of the bootstrap and the first operator act. Each `agent` then carries a traversal-only `principal_binding` to the operator with `credential_kind: acts_as`; each registered type carries one `ownership_grant` to it. Presented credentials (a store identity, a host login, an address, a chat identity) bind many-to-one to the principal they identify through a second `principal_binding` variant carrying decision 101's four fields (G17); the proposed `principal-binding-v2` direct-human physical variant is not registered |
 
 ### Operational records
 
@@ -586,7 +586,9 @@ The foundation resolves it by naming the first declaration an operator act, out 
 as issuing a credential. This document takes that resolution and draws the line as narrowly as the
 recursion requires, in two legs.
 
-**Leg one, the bootstrap, is an operator act.** It is the smallest set of writes without which no step of
+**Proposed record implementation mapping for the bounded original-creation operation.** The HTTP name is `POST /bootstrap/original-creation` (`operationId: bootstrapOriginalCreation`), the MCP tool is `bootstrap_original_creation`, and the CLI form is `neotoma bootstrap original-creation --request-file <canonical-json-path> --output json --api-only`. All carry `protocol: native-original-creation-v1`; none is installed. The record can extend the existing scoped database transaction used by Neotoma correction transaction and conditional store. Current `/store`, `/register_schema`, and `/register_relationship_type` are separate endpoints and do not provide the required atomic operation. OpenAPI-first delivery adds the operation to `openapi.yaml`, regenerates `src/shared/openapi_types.ts`, maps it as `both` in `src/shared/contract_mappings.ts`, wires HTTP in `src/actions.ts`, MCP in `src/tool_definitions.ts` and `src/server.ts`, CLI in `src/cli/index.ts`, and updates `docs/developer/mcp/tool_descriptions.yaml`, the canonical Neotoma MCP behavior source `docs/developer/mcp/instructions.md`, the thin CLI pointer `docs/developer/cli_agent_instructions.md`, `neotoma instructions print`/CLI help, and contract/parity tests before use.
+
+**Leg one, the bootstrap, is an operator act.** The historical thirteen numbered families remain the ruled baseline. A native `native-original-creation-v1` run may use the expanded ledger in `conformance_suite.md#the-minimal-record-set-in-order` under decision 161 only after reviewed normative merge, canonical readback and atomic Neotoma contract installation. Manifest source, first-designation finding/edge, and completion action/result source/confirmation are explicit members, never incidental writes. One outer transaction, immutable actor evidence and sealed readback are required; separate registration and store endpoints are not that transaction. It is the smallest set of writes without which no step of
 any workflow can open: the registry entries for the design's types and edge types, each with its
 `ownership_grant`; the `operator` entity and the credential bindings that let a later write resolve to a
 principal; the instance's first `action_policy`, which must list the classes the migration's own
@@ -674,12 +676,74 @@ against each other is measured before either is treated as evidence of anything.
 `action`, `checkpoint`, `artifact`, `action_policy`, each with `reducer_config` and version, and the
 relationship types `LEASE`, `ADDRESSED_BY`, `FOLLOWS`, `CLOSES`, `SIGNED_BY`, `PRODUCES`, `CHECKPOINTS`,
 `AWAITS`, `RESOLVED_BY`, `RAISED_BY`, `principal_binding`, `ownership_grant`, `delegation_edge`
-(`DEPENDS_ON`, `PART_OF`, `REFERS_TO`, and `DUPLICATE_OF` the record already has). Create the `operator`
-entity; write one `ownership_grant` from each registered type to it. **Depends on** the record admitting
-new relationship types at all: the relationship-type vocabulary the record exposes is a closed list that
-holds one of the design's new edges and none of the other thirteen, and the record offers no primitive
-that registers one (gap G25). Until the team that builds the record ships that, stage 1 cannot complete and nothing
-below it can start; it is the first dependency in the plan and it is not this repository's to resolve.
+(`DEPENDS_ON`, `PART_OF`, `REFERS_TO`, and `DUPLICATE_OF` the record already has). Every relationship type
+is registered with its decision-102 declaration, exactly one of `acyclic` or `cycles_admitted`; a missing,
+malformed, or unknown declaration is refused before any edge of that type can be written. The proposed
+`data_model.md#proposed-first-flow-instance-cycle-policy-fixture` names exactly these 18
+closed original types plus the later `GOVERNS` type in a 19-type target census; the actual
+G25 registration list is read, not assumed complete.
+The G25/#921 owner performs complete existing-registration preflight for the 18 original
+types, including zero-edge types. Matching rows pass; known-absent rows may be registered
+only through G25's separately admitted path with record-owned atomic still-absent
+qualification at the append; existing mismatch, malformed declaration or
+unknown/incomplete read HOLDS. Read back the effective type, selected scope, explicit
+`acyclic` declaration and stable server-issued `registry_version` for all 18 before any
+original graph row. Fixture version and target instance identify audit evidence, not G25
+request fields. `GOVERNS` is not a stage-1 prerequisite: no row in the original bootstrap
+requires its edge. A later G25 registration cannot be counted as a member of decision 43's
+closed step-1 ledger. Never use a backend default, silent migration, alternative writer,
+pre-bootstrap authority or second ledger to pass the check. Create the `operator`
+entity; write one `ownership_grant` from each registered type to it. **Depends on** G25
+registration and decision-102 enforcement being installed together on the target,
+including atomic absence-to-append qualification, current-effective-policy checks at
+every first-flow graph sink, and the separate seeded-policy reconciliation with
+authorized complete-state preservation, an atomic effective-head fence and qualified
+readback. A limited readback cannot discharge the complete-state dependency. The record owner must
+prove the selected effective registration, complete explicit policy, authority, atomic
+at-write qualification and no-effect refusal on conflict or uncertainty before stage 1
+or any downstream graph row is admitted. The existing registration operation and shared
+relationship-write sink must enforce the contract on every natural exposed surface,
+with structured repair guidance and effect-level tests. Source checks and a fixture do
+not establish runtime enforcement; no new API, permission or bootstrap exception is
+implied here.
+
+A present effective registration with a missing, malformed or mismatched explicit
+`acyclic` policy is a **mismatch HOLD**, not known absence. Independently authorized,
+append-only G25 reconciliation outside the closed original bootstrap ledger must prove
+the presenting principal, active exact registration grant, selected scope and any
+required global permission, and existing-edge compatibility. Before replacement it
+must prove and preserve the complete prior semantic definition, unrelated declared
+fields, opaque user and registry metadata, and immutable prior-row history. A new row
+receives its own server-issued identity, version, time and actual authenticated creator;
+the historical row and its provenance remain unchanged. Limited or unavailable state
+is unknown and HOLDS before any append, version change or effect. Qualified complete-state
+readback, followed by the full 18-type preflight, is required before original graph writes.
+
+For a known-absent type, complete authorized preflight covers relevant user/global
+resolution, inactive registrations, retained history, canonical identity and shadowing.
+It is tentative evidence only. At the append, the record owner must atomically prove
+that absence still holds. For a present mismatch, it must atomically compare the proved
+current effective head and resolution state with the then-current state and preserve
+complete state in the same qualified append. Both fences cover every writer and change
+that can alter effective resolution. Conflict, stale proof or uncertainty HOLDS with no
+new registry version, source row, event or graph effect. Recovery requires fresh complete
+authorized preflight and, where needed, fresh preservation proof. A record-owned atomic
+transaction, conditional operation or proved exclusion window must cover the full
+preflight-to-append interval; an empty instance is not proof of exclusivity. The later
+`GOVERNS` registration has separate grant admission and the same at-write obligations.
+No API, conditional field, raw database access, grant or scope is selected here.
+
+After every original registration reads back against the selected scope, explicit policy
+and stable server-issued version, each original-bootstrap and later `GOVERNS` graph effect
+must independently qualify at the shared record-owned sink. That qualification atomically
+resolves the then-effective registration and policy, checks admitted principal and
+edge-write authority without inventing a pre-bootstrap grant, checks decision-102 cycle
+and other edge invariants against current graph state, and commits only while all remain
+true. Changed, malformed, unauthorized, unavailable or conflicting state refuses with no
+graph effect and requires fresh qualification. A source assertion, registration receipt
+or earlier vocabulary readback is not proof of this effect-level behavior. Do not use client
+registration to repair a missing built-in type or infer a grant from the original operator act.
+
 Additive: the retired engine reads none of these types.
 
 **Stage 2 — the first declarations and the first policy (operator act).** Declare `*|intake` and the
@@ -690,7 +754,21 @@ review steps, and implementer to agents that have credentials; write the grants 
 new types, and widen the grants of every daemon that will write a new type alongside its retired one.
 **Depends on** stage 1. Additive. The declaration-time check runs here: every `owner_role` in both
 declarations resolves to an `agent` with a credential, or the declaration is a defect and the stage is not
-complete. Leg one ends when the conformance suite's bootstrap read-backs hold.
+complete. Leg one ends when all conformance-suite original bootstrap readbacks hold; none requires
+`GOVERNS`.
+
+After that complete readback, and before the first migrated `agent_policy` `GOVERNS` edge,
+G25/#921 first demonstrates the presenting admitted principal, its active, exact
+`register_relationship_type` grant and selected scope, then performs a separate preflight of
+the effective `GOVERNS` registration. A matching compatible type needs no registration
+append but still needs current policy/authority/cycle qualification at its edge sink.
+Known absence may be registered only if any existing registration is compatible **and**
+the record-owned atomic still-absent predicate holds at append. Use G25's declared request fields, capture
+the server-issued `registry_version`, and read back type, scope, explicit policy and the same
+version. Unknown state, mismatch, malformed policy, absent authority, incompatible scope or
+failed readback HOLDS this later phase before its edge; it does not retroactively invalidate
+the original bootstrap. The source supplies no concrete principal, grant, trust exception
+or alternative writer for it.
 
 **Stage 3 — bindings and grants (workflow; governance writes).** Every `agent_grant` naming a retired type
 is widened to name the new type alongside it. Each roster role is checked against an `agent` with a
@@ -814,7 +892,7 @@ pointer is what makes that hold, and the read-back that proves it is an as-of re
 
 | Write | Reversible | How, or what is checked first |
 |---|---|---|
-| a schema registration (stage 1) | no | the registry is permanent; a field can be removed and restored, a type cannot be retired (G26). Checked first: the type's name and fields against `data_model.md#concepts`, the `reducer_config` against the field's writers, and the `ownership_grant` present; registered once, by the operator, read back against the registry |
+| a schema registration (stage 1) | no | the registry is permanent; a field can be removed and restored, a type cannot be retired (G26). Checked first: the type's name and fields against `data_model.md#concepts`, the `reducer_config` against the field's writers, the `ownership_grant` present, and — for every relationship type — one recognized acyclicity declaration; absence is a refused precheck, never a default. Registered once, by the operator, read back against the registry |
 | a correction (stages 3, 5, 6, 10) | yes | a further correction; the superseded value stays readable as an observation |
 | a relationship (stages 1, 5, 7, 8) | yes | a soft delete, restorable; the edge's own timestamps record the interval it held |
 | a derivation (stages 5, 7, 8) | yes | the derived rows are new entities with provenance to the source, and the source is untouched; reversing is ending them |
@@ -832,8 +910,8 @@ the `verify` step of the migration's workflow re-reads independently of the `app
 | Stage | What proves it landed |
 |---|---|
 | 0 | the inventory in `status.md` carries a date and an instrument for every figure, and the parity measurement of the two retired step records reports a number rather than an absence |
-| 1 | the registry describes each type with the fields and version written; a relationship of each new edge type can be written and read back on two test-owned entities that are then ended, never on production entities; each type's `ownership_grant` resolves to the `operator` |
-| 2 | both declarations are retrievable, every `owner_role` in them resolves through the roster to an `agent` with a credential, and the `action_policy` resolves every migration class to a tier that is not the unclassified default; the conformance suite's bootstrap read-backs hold |
+| 1 | the registry describes each entity type with the fields and version written and each of the 18 original relationship types with its written `acyclic` or `cycles_admitted` declaration; complete authorized preflight covers effective user/global resolution, inactive rows and retained history and distinguishes matching, qualified known absence, inactive, mismatch and unknown; only qualified known absence attempts an atomic record-owned still-absent append (an unqualified registration HOLDS), while a present policy mismatch waits for separate authorized atomically fenced append-only reconciliation preserving semantic definition, opaque metadata and immutable history with truthful new-row provenance and qualified readback (unproved metadata HOLDS before append) and a full preflight rerun; all 18 effective types match selected scope, explicit policy and stable server-issued `registry_version` on readback before original graph writes, and the shared graph sink atomically requalifies the then-effective policy, authority, cycle and graph state at each effect, otherwise stage 1 holds; a registration omitting or corrupting that declaration is refused on readback; a relationship of each new original edge type can be written and read back on two test-owned entities then ended, never on production entities; for an `acyclic` test type a cycle-closing edge is refused, and a declared-cycles-admitted test type accepts its cycle; each original type's `ownership_grant` resolves to the `operator` |
+| 2 | both declarations are retrievable, every `owner_role` in them resolves through the roster to an `agent` with a credential, and the `action_policy` resolves every migration class to a tier other than the unclassified default; all original conformance-suite bootstrap readbacks hold without `GOVERNS`. Before the first `agent_policy` `GOVERNS` edge, the separate later G25 preflight and, if known absent, atomic still-absent authorized registration establish the admitted principal, active exact `register_relationship_type` grant, selected scope and compatible effective row; type, scope, explicit policy and server-issued version read back. Only then is the full 19-type fixture current; the `GOVERNS` edge still requires then-effective policy, authority and cycle qualification at its shared graph sink, and any failed check holds that edge |
 | 3 | every grant that named a retired type now names both; a read of each grant lists the new type; the roster's unresolved roles are listed, and the list is what the operator expects |
 | 4 | (a) no task's retired liveness value changes and no step record is written over the window; (b) each `workflow` resolves by its new id, each retired id resolves with a merge pointer to it, and an as-of read on the retired id at a time before the merge returns the pre-merge content; the count of `workflow` equals the count of retired declarations less the retired smoke-test one; (c) the first claim under the design writes a `LEASE` edge whose `runner_id` the lease holder reads back as its own |
 | 5 | every open held decision with a subject has exactly one `checkpoint` whose `CHECKPOINTS` edge names an action or a task and whose `AWAITS` names the operator; the retired open count is zero for those with a subject and terminal for those without; the operator's queue lists them once, not twice |
@@ -968,7 +1046,7 @@ numbers are separate and only two of these are opened as decisions below.
   merges name pull requests the record holds as typed rows but not as `artifact`; deriving their
   checkpoints needs an artifact that no adapter read produced. Either the derivation is allowed to mint
   from the record's own reference, or those held decisions cannot be carried.
-- **G17 — the credential binding has no edge type. RULED by decision 101 (2026-09-10): the edge is `principal_binding`, one per credential, carrying `credential_kind`, `credential_value`, `credential_issuer`, and `expires_at`; what remains is registering it, which is stage 1's work.** `data_model.md#concepts` says credentials bind to a
+- **G17 — the credential binding has no edge type. RULED by decision 101 (2026-09-10), as narrowed by decisions 107–109: the edge is `principal_binding`; its presented-credential variant is one edge per credential carrying `credential_kind`, `credential_value`, `credential_issuer`, and `expires_at`, while its traversal-only `acts_as` variant carries only its kind and is agent → operator. What remains is registering both admitted variants, which is stage 1’s work.** `data_model.md#concepts` says credentials bind to a
   principal many-to-one; the relationships table names no edge for it, and the instance holds the
   bindings as fields on the agent and on the grant.
 - **G18 — `agent_grant.expires_at`, `sub`, `iss` versus the source's field names.** A tolerant-reader
@@ -1015,16 +1093,14 @@ numbers are separate and only two of these are opened as decisions below.
   inferred answer — every pre-existing task simply re-enters intake — would invent a third opener and is no
   longer admissible after decision 84. Pre-existing workflow-entering tasks stay held as migration drift
   until a governed carrying rule closes this gap; aggregate parents remain outside claim and need no batch.
-- **G25 — the record's relationship-type vocabulary is closed and contains one of the design's edges.**
-  Of the edge types the design introduces, only `DEPENDS_ON` (and `PART_OF`, `REFERS_TO`, `DUPLICATE_OF`,
-  which the design reuses) is in the vocabulary the record exposes; `LEASE`, `ADDRESSED_BY`, `FOLLOWS`,
-  `CLOSES`, `SIGNED_BY`, `PRODUCES`, `CHECKPOINTS`, `AWAITS`, `RESOLVED_BY`, `RAISED_BY`,
-  `principal_binding`, `ownership_grant`, and `delegation_edge` cannot be written on the instance, and no
-  primitive registers a relationship type. This is the first dependency of the whole plan and belongs to
-  the team that builds the record, not this one. `conformance.md`'s decision 67 names this the same shape as
-  neotoma#1972's three hand-kept `relationship_type` copies already diverging (28, 28, 8 members) — one
-  registry read replacing several literals — and assigns it to the substrate on that basis; this gap is
-  the design-side symptom of the same missing mechanism, not a second instance of it to fix separately.
+- **G25 — first-flow qualification remains a dependency.**
+  The 2026-09-05 inventory found a closed relationship-type list and no registration primitive. G25
+  registration has since shipped, so the first flow uses its existing operation rather than another
+  registration API. Stage 1 and the suite HOLD until the record owner proves complete authorized
+  preflight, explicit policy, admitted authority, complete-state preservation, atomic current-state
+  qualification, no-effect refusal and fresh graph-sink qualification across every exposed entrance.
+  The original inventory and `conformance.md` decision 67 explain why the registry belongs in the
+  record, not a second design-side registration mechanism.
 - **G26 — a type cannot be retired in the registry.** Fields can be removed and restored; a type,
   once registered, has no deprecated state. The freeze of stage 10 is therefore held by writers and
   verified by counts, which is weaker than the design's own rule about test types in the shared registry

@@ -119,6 +119,8 @@ a `delegation_edge` endpoint, a quorum seat, and a separation-of-duties constrai
 entity, never to the profile. A descriptive record that also carries authority is a record two unrelated
 changes can touch, and one of them changes who may act.
 
+**Proposed original-creation attribution exception (owning review required).** Only on a fresh instance whose deployment custodian has independently fixed the creation-selected operator and verified run-credential presentation, every original row carries immutable actor evidence and receipt attribution to that credential acting for that operator. Through and including step 3, this evidence must be independent of the binding; later rows use ordinary resolution only after the independent proof and binding both validate. The step-3 binding observation cannot prove its own writer by resolving itself; require the protected creation record and verified presentation before its creation, then positive readback of its actor fields and the receipt before any ordinary resolver is used. Immutable `authenticated_actor_id`, verified presentation digest, `actor_principal_id`, and `attribution_basis: original_creation_v1` are read back from each original row and the transaction receipt. These actor fields are separate from `source_id`, `observation_source`, `data_origin` and provenance linking source material; no source label or current `user_id` proves the actor. This is not credential resolution for ordinary writes and does not turn an unbound `store_user_id` into an operator. If the chosen source or registration primitive cannot preserve original attribution, bootstrap refuses rather than rewriting an unattributed row after step 3. Step 3's unique live binding must agree with that independent proof; only members after step 3 use the ordinary resolver, and only inside the closed transaction until full admission.
+
 **The mapping down.** A [credential](vocabulary.md#credential) binds to the `operator`, many-to-one, as
 every credential binds to a principal. Two of them are already excluded from being the principal
 themselves, and this is where they attach instead: the store's `user_id` is an authenticated credential
@@ -163,7 +165,7 @@ questions.
 **Why not, and it turns on what those four concepts actually are.** Three of the four are not identity
 questions, and the corpus says so in its own definitions rather than by inference:
 
-- **Provenance names sources, not principals.** The record's provenance links an observation to the source
+- **Source provenance names sources, not principals.** The record's provenance links an observation to the source
   it was interpreted from, and where the value was extracted rather than transcribed, to the interpretation
   that produced it (`adapters.md#what-the-record-supplies-and-what-an-adapter-therefore-never-builds`). What
   the corpus writes into it is an adapter, an external system, a delivery id, a rule, a change, and a read's
@@ -457,7 +459,11 @@ and enforced where the record decides (decision 97):
   gate it, so its authority is the bootstrap's. Recovery of an ownerless instance, for example when every owner
   credential has expired, is the same bootstrap-level act outside the record and never an act inside it. Each is
   recorded as a finding, written by the credential that performs the bootstrap or the recovery (the run credential
-  the minimal record set binds at its third record), as its first write after the mark, and read back.
+  the minimal record set binds at its third record), as its first write after the mark, and read back. The first-designation finding is a
+`non_blocking` finding with `scope: instance`, no `kind` or `step_name`, and a `REFERS_TO` edge to the
+marked operator. Its closed evidence selects the protected original creation and the mark's first observation,
+without credential material. Recovery keeps its own original history and authority; this first-flow
+addition does not retroactively designate an owner or turn a provenance label into a signature.
 
 **Why a record-level rule and not a governance type.** The alternative was to hold the designation on an existing
 governance type so that it inherits engine-only write, gating, and inert sync. None fits: `agent_grant` is the form
@@ -536,6 +542,7 @@ for the payment class. They are added to `conformance_suite.md` in a later chang
 - Rotation is staged, never a flag day.
 - A swarm-run rotation verifies with a live check before retiring the old credential, and rolls back if the check fails (operator ruling, 2026-09-26).
 - Revocation's reach is every grant that matched the credential, and it is only as fast as the check that reads it.
+- A presented credential resolves to its principal; an agent's acts-as binding is then traversed, never presented, and is agent → operator exactly (decisions 107–109).
 
 An `agent_grant` is matched on the credential (`sub`, `iss`) and lists capabilities as operation × entity
 types × repositories with parameter constraints; a human's grant is bound to a principal and a tenant, never
@@ -680,7 +687,8 @@ repositories with zero grants deny, and decision 41 already calls a wildcard ove
 shape, not an allowlist," which a wildcard over relationship types would be too.
 
 **Two bounding conditions, part of the ruling and not separable from it.** A relationship write inside
-decision 43's closed thirteen-record bootstrap set is admitted by membership in that set and by nothing
+decision 43's historical thirteen-family bootstrap set, or inside decision 161's approved bounded
+versioned ledger once installed, is admitted by membership in its exact closed set and by nothing
 else — no standing operator bypass, so the operator's own credential binding (bootstrap step 3, written
 before any grant exists to admit it) stays admitted the way it is admitted today. And the register did not
 read **ruled** while G25 was unlanded: a grant cannot name a type the record has no registry for. G25 merged
@@ -824,27 +832,40 @@ value it held.
 
 ### What the credential binding carries, and what a check reads to resolve a credential to a principal
 
-**Ruled** (decision 101, 2026-09-10): **`principal_binding` carries `credential_kind`, `credential_value`,
-`credential_issuer`, and `expires_at`, and a principal holding several credentials holds several edges.**
-One edge per credential, properties on the edge, and no separate credential entity. Field vocabulary:
+**Ruled** (decision 101, 2026-09-10): **the presented-credential `principal_binding` carries
+`credential_kind`, `credential_value`, `credential_issuer`, and `expires_at`, and a principal holding
+several credentials holds several presented-credential edges.** One edge per presented credential,
+properties on the edge, and no separate credential entity. The same relationship type admits the
+traversal-only `acts_as` variant decision 107 rules below; that second variant carries only its kind. Field
+vocabulary for the presented-credential variant:
 
 | Field | Holds | AAuth map | Host / operator map |
 |---|---|---|---|
 | `credential_kind` | credential family / system class | e.g. `aauth_sub` | e.g. `github_login`, `store_user_id`, `email_address`, `chat_id` |
-| `credential_value` | the presented subject value | `sub` | the login, user id, address, or chat id |
+| `credential_value` | the presented nonsecret subject identifier; proposed v2 secret-bearing kinds store only a keyed verifier | `sub` | a canonical nonsecret login, user id, address or chat id; for a secret-bearing kind, a tenant-scoped verifier, never raw secret bytes |
+| `verifier_key_version` | proposed v2 nonempty, custody-issued version identifier, required exactly for a registered secret-bearing `credential_kind`; absent for every public-identifier kind and `acts_as` | absent for public-identifier `aauth_sub` | the version of the retained custody key that computed `credential_value`, never a caller-selected key |
 | `credential_issuer` | the issuer or namespace that makes the value unique | `iss` | the external system or host namespace; absent only when the kind's namespace is already unique without one |
 | `expires_at` | optional expiry bound read at check time | as the issuer states | as the issuer states |
 
-**What the acts-as edge carries is open (decision 107).** The table above maps the AAuth and the host /
-operator credential. It does not map the **acts-as** edge, and no kind is named for it anywhere: the two
-edges are told apart by `credential_kind`, and only one of the two kinds has a value. Two readings of that
-edge sit unreconciled in this document — the resolver sentence below treats it as matched from a
-presentation ("the acts-as kind yields the operator"), while `data_model.md#relationships` lists the
-agent's acts-as principal as a read *from* the edge, which is a traversal from the agent and no
-presentation at all. The difference is not cosmetic: `Deny (malformed presentation)` below fires on a
-missing `credential_value`, so under the first reading an acts-as edge needs a value and under the second
-it must not be judged by that rule at all. Registered as decision 107 rather than settled here; stage 1
-registers the type and not the kind vocabulary, so the question survives registration.
+**Approved bounded physical design (decision 161; unregistered and subject to independent implementation review).** `principal-binding-v2` is a tagged union on the one `principal_binding` relationship type, not a new edge or credential entity. The authoritative persisted identity is `relationship_key`, versioned and tenant-scoped: for `source_kind: credential_key`, `principal-binding-v2:<tenant>:credential_key:<credential_kind>:<canonical issuer>:<verifier-key version>:<credential verifier>` for secret-bearing values (or an explicit nonsecret-identifier version for public identifiers); for `source_kind: agent`, `principal-binding-v2:<tenant>:agent:<source_entity_id>:acts_as`. Use length-delimited canonical components or an equivalent collision-resistant encoding, not string concatenation of unescaped caller input. The write path derives this key, stores it in the existing relationship-observation/snapshot identity field, and enforces one live target per key atomically. An identical write to the same target is idempotent; a live key with another target is refused, not silently retargeted. Dual-admit credential rotation uses different credential-key keys to one target. Do not derive identity from the current generic `type:source:target` key: it collapses two credentials with the same endpoints. This is a narrow identity-strategy change for `principal_binding` only; all other relationship keys retain their current rule.
+
+The proposed normalized write, relationship observation, read, list and snapshot shapes share `relationship_type: principal_binding`, physical `source_entity_id` and `target_entity_id`, `binding_shape_version: principal-binding-v2`, `source_kind`, `presentation_mode`, and `credential_kind`. A read/list/snapshot also returns the server-derived persisted `relationship_key` and relationship ID. The registered `credential_kind`, rather than a caller-supplied secret/public flag, selects exactly one of three field sets. A presentable **secret-bearing** `credential_key` carries `credential_value` (only the keyed verifier), `verifier_key_version` (a nonempty typed string naming the actual custody key version), `credential_issuer` when the registered kind requires one, and optional `expires_at`. A presentable **public-identifier** `credential_key` carries canonical `credential_value`, issuer when required and optional expiry, but MUST omit `verifier_key_version`, including explicit null. The traversal-only `agent`/`acts_as` variant MUST omit `credential_value`, `credential_issuer`, `expires_at`, and `verifier_key_version`, including explicit nulls. An observation, snapshot, list or readback missing the secret-bearing version or carrying it on either other variant fails admission. Undeclared fields and aliases supplied as writable duplicates fail at the common sink; `relationship_key` is server-derived, never caller-selected.
+
+For the secret-bearing variant, existing credential custody verifies the actual presentation and returns an inseparable `(verifier_key_version, credential_value)` pair: the nonsecret version identifies the retained key custody actually used to compute the domain-separated, tenant-scoped verifier. The server constructs the normalized write and its observation from that pair; an external REST, MCP, CLI, `store` or interpretation caller cannot select a version, substitute a verifier, or attest its own computation. If an entrance accepts an asserted version, it must compare it with custody's returned version and reject mismatch; it never uses the assertion to choose a key. The version is validated against the registered kind's custody key set before the relationship identity is derived, then bound as a typed component of the existing versioned `relationship_key`, not parsed back out of that opaque key as an authorization API. A mismatched version/verifier/key identity, unavailable custody result, or unknown version refuses without a binding write. `credential_value` never contains raw credential bytes or a reversible copy, and neither the graph nor capsule stores the key. During resolution, for every live candidate of the verified secret-bearing kind, load the retained custody key named by that candidate's typed `verifier_key_version`, recompute the verifier from the verified presentation under the candidate's version and tenant/domain, and compare without echoing it. An unknown or unavailable retained version or a disagreement among typed version, stored verifier and derived relationship identity makes the read `Indeterminate` and enforcement denies; a matching newer-version edge cannot hide an unreadable older live candidate. Dual-admit rotation may keep old and new versions live to the same principal, with matching and readback for both. Custody-approved key rotation, migration and positive readback of every still-live version are installation prerequisites; no key, grant or rotation is created by this proposal. Retire an old custody key only after its live bindings are ended or migrated and verified. Public identifiers use their canonical identifier and the explicit nonsecret-identifier identity version, with no verifier-key field.
+
+Both physical endpoints are tenant-owned. For `credential_key`, set `source_entity_id = target_entity_id` to the identified principal and `presentation_mode: presented`; this self-edge is a storage endpoint, never an acts-as traversal. `aauth_sub` requires a nonempty `sub` and `iss` and targets the authenticated `agent`; registered operator kinds target `operator` under their issuer rule. For an ordinary `agent`/`acts_as` write, resolve the **current authenticated writing principal** through its own presentable credential binding and require it to equal the requested `source_entity_id`, already authenticated as an agent. The comparison is made at the shared relationship-write sink for every entrance, before mutation and before interest traversal. A broad relationship-write capability and evidence that the named source authenticated at some earlier time do not authorize agent A to write an edge naming agent B. `target_entity_id` must be the direct-human `operator`, `credential_kind: acts_as`, and `presentation_mode: traversal`; derive `source_agent_id` and `target_principal_id` read aliases from the physical endpoints, never from caller fields. No cross-source ordinary-write exception is inferred from the currently open edge-property `param_constraints` question or from a wildcard grant. A future administrator path would require a separately ruled and installed narrow `param_constraints` predicate naming both the writing actor and allowed source agent, checked with the current grant at the same sink; absent or unreadable constraints deny. The **only** proposed different-writer path here is the approved bounded, still-uninstalled original-creation ledger: its authenticated run-credential writer may construct step-6 for the declared agent before step-8 AAuth, but this does not authenticate that agent or permit traversal before full admission. The globally ruled acts-as shape allows one live target per agent; conflicting second targets, agent-to-agent and operator-source edges refuse. Agent-to-agent authority uses `delegation_edge`. Unknown version, source kind, mode, kind, endpoint type, field combination or undeclared property refuses at admission.
+The exception must be installed in the relationship registry strategy and the shared relationship write/read path, including observation creation, snapshot reduction, list/filter and every REST, MCP, CLI, `store` and interpretation entrance; an advisory endpoint hint or metadata-only convention cannot enforce it. For this type alone the sink accepts the derived self-edge or authenticated agent→operator edge, allows distinct credential keys on the same physical endpoint pair, and uses the versioned key for uniqueness, readback and idempotency. It still checks both endpoints' tenant ownership and ordinary relationship-write capability. Until the schema, API and projections carry these fields and round-trip them, no first-flow binding is admitted. Neither this prose nor a rendered table installs it. Decisions 107–109 are globally ruled; this proposal adds only the uninstalled physical key, storage and API strategy.
+
+**Ruled (decision 107, 2026-09-21): the acts-as edge is traversal-only and non-presentable.** It carries
+`credential_kind: acts_as` as the discriminator decision 101 requires, and carries no
+`credential_value`, `credential_issuer`, or `expires_at`. No caller presents it to a resolver. After a
+presented credential resolves to an agent, the authority read traverses that agent's acts-as edge to its
+operator. The presentation resolver therefore excludes `credential_kind: acts_as`, and the absence of a
+credential value on that edge is its valid shape, never `Deny (malformed presentation)`. A request that
+does present `acts_as` is denied as a non-presentable kind before any edge match. This reconciles the two
+prior readings in favour of the traversal `data_model.md#relationships` already described.
+
+**Original-creation construction under the approved bounded amendment.** The authenticated run-credential writer may provision step 6 for the declared agent before step-8 AAuth only inside the closed original-creation ledger. This does not authenticate that agent or permit traversal before the step-8 binding, grant, both edge readbacks, and full generation admission. A partial ledger never opens traversal.
 
 **Endpoint / source.** No credential entity is introduced; the relationship's endpoint is the principal
 reached by the presented credential, with the credential identity carried in those edge fields. For an
@@ -852,32 +873,29 @@ AAuth credential, the binding resolves `credential_value` + `credential_issuer` 
 `agent`; the human operator is then reached through that agent's **separate acts-as** `principal_binding`,
 a second edge of this type whose endpoint is the `operator`. An agent acting in a human's interest
 therefore holds two edges of this type, told apart by `credential_kind`; a resolver takes the endpoint
-of the edge whose kind matches what was presented, so the AAuth kind yields the agent (attribution,
-A-for-B) and the acts-as kind yields the operator (decision 48's counting rule). For an operator
+of the edge whose kind matches what was presented, so a presented AAuth kind yields the agent (attribution, A-for-B). The separate nonpresentable
+`acts_as` edge is traversed from that authenticated agent to the operator for decision 48's interest
+counting; it is excluded from presented-credential resolution. For an operator
 credential, the binding resolves the credential directly to the `operator`.
 
-**Which endpoints an acts-as edge may take is open (decisions 108 and 109).** Every statement above
-describes the case this design was drawn for — an agent acting in a *human's* interest — and the endpoint
-declared in `data_model.md#relationships` is the generic `principal`, which admits an `agent` as readily as
-an `operator`. Nothing written rejects an agent's acts-as edge to **another agent** (decision 108), and
-decision 48's counting rule reasons about interests without stating a depth, so permitting one turns
-interest resolution into a chain walk with no bound; and nothing written rejects an **operator** holding one
-(decision 109) — "operator credentials resolve directly to the `operator`" says what a presented operator
-credential resolves to, not what edges an `operator` may hold. Both are stated as open rather than ruled
-because the corpus implies no answer to either, and registering the type does not close them: what stage 1
-registers is the edge, not a constraint on its endpoints.
+**Acts-as endpoints (decisions 108 and 109, globally ruled 2026-09-21).** An acts-as edge is
+`agent` → `operator` exactly. An agent-to-agent acts-as write is refused; agent-to-agent authority uses
+`delegation_edge`, whose scope and expiry express the transfer. An operator-sourced acts-as write is also
+refused. Operator credentials resolve directly to the operator. This keeps interest resolution one
+traversal deep and preserves each operator as an independent human interest. The proposed physical
+strategy above must enforce these already-settled constraints on every write entrance.
 
-**Expiry / end.** `expires_at` is a read-time liveness bound, not maintained state. A binding is live when
-the edge is unended and `now < expires_at` when present; retiring a credential writes or ends the edge,
+**Expiry / end.** Only a presentable credential binding may carry `expires_at`; it is a read-time liveness bound, not maintained state. A presentable binding is live when
+the edge is unended and `now < expires_at` when present. An acts-as traversal edge has no expiry field and is live only while unended and otherwise admitted; retiring a credential writes or ends its presentable edge,
 exactly like other ended relationships. No sweeper is required to flip a status when the clock passes
 (invariant 11).
 
-A check resolving a credential to a principal reads the unended, unexpired `principal_binding` edges whose
-`credential_kind`, `credential_value`, and `credential_issuer` (when the kind requires one) match what was
-presented, and takes the principal at the other end. Where several match — which the rotation rule requires
+A check first refuses every presented `acts_as` as `Deny (non-presentable kind)` before edge matching or malformed-presentation handling, including when the value is missing or invented. For another registered presentable kind it reads only live `binding_shape_version: principal-binding-v2`, `source_kind: credential_key`, `presentation_mode: presented` `principal_binding` edges whose
+`credential_kind`, the canonical nonsecret identifier/verifier in `credential_value`, and `credential_issuer` (when the kind requires one) match the verified presentation, with the typed `verifier_key_version` validated and used for every secret-bearing candidate as above, and takes the principal at the physical target endpoint. Where several match — which the rotation rule requires
 during the dual-admit window — every one of them resolves to the same principal, because the many-to-one is
 a property of the shape rather than of the read. Grant match and binding resolution use the same comparison:
 AAuth `(sub, iss)` is `credential_value` + `credential_issuer` under `credential_kind` `aauth_sub`.
+It never includes `credential_kind: acts_as`; that kind is traversed only after an agent has resolved.
 
 **Resolver outcomes.** The check returns one of the three values the grant checker already uses
 (`Permit` / `Deny` / `Indeterminate`). Enforcement maps `Indeterminate` to deny; the recorded decision keeps
@@ -886,12 +904,64 @@ principal id and `credential_kind`; they never echo raw `credential_value`.
 
 | Resolver outcome | Because | What the enforcement point does |
 |---|---|---|
-| `Permit` (resolved) | ≥1 live (unended, unexpired) `principal_binding` matches the presented `credential_kind` + `credential_value` (+ `credential_issuer` when required), and every match targets the **same** principal | Continue to grant match / attribution on that principal. Diagnostic may name principal id + credential kind; never echo `credential_value`. |
+| `Permit` (resolved) | ≥1 live presentable (unended, unexpired) `principal_binding` matches the presented `credential_kind` + `credential_value` (+ `credential_issuer` when required), and every match targets the **same** principal | Continue to grant match / attribution on that principal. Diagnostic may name principal id + credential kind; never echo `credential_value`. |
 | `Deny` (no binding) | No matching edge for the presented key | Refuse the write / admission. Record as **unattributed** (`#principals`) — never default to the operator. Surface: `[COPY: no principal_binding for this credential kind — create or restore the binding]`. |
 | `Deny` (expired-only) | Matching edges exist but all are ended or `now ≥ expires_at` | Distinct from no-binding. Surface expiry/retirement, not "unknown credential". Hint: `[COPY: binding expired or ended — rotate / dual-admit a live edge before presenting]`. |
-| `Indeterminate` (binding source unreadable / partial) | Relationship store unreachable, timed out, or read incomplete | Treat as Deny at the enforcement point (same posture as grant-load `Indeterminate` above). Keep the third value in logs/diagnostics — do not coerce to a plain `Deny` in the recorded decision. Hint: `[COPY: binding source unavailable — retry after record health; do not guess a principal]`. |
+| `Indeterminate` (binding source unreadable / partial) | Relationship store unreachable, timed out, read incomplete, or a live secret-bearing binding has missing, unknown or unavailable `verifier_key_version` or cannot be reconciled with its keyed verifier and persisted identity | Treat as Deny at the enforcement point (same posture as grant-load `Indeterminate` above). Keep the third value in logs/diagnostics — do not coerce to a plain `Deny` in the recorded decision. Hint: `[COPY: binding source unavailable — retry after record health; do not guess a principal]`. |
 | `Deny` (ambiguous / conflicting) | ≥2 live matching edges target **different** principals | Fail closed; do not pick first edge. Surface conflict with redacted fingerprints / principal ids only. Hint: `[COPY: conflicting principal_binding edges — operator must end the wrong edge(s)]`. |
-| `Deny` (malformed presentation) | Presented credential missing required key parts (`credential_kind` / `credential_value` / issuer when the kind requires it), or kind unrecognized | Restrictive default (principle 5). Hint: `[COPY: credential presentation malformed or kind unrecognized — fix caller shape]`. |
+| `Deny` (non-presentable kind) | A caller presents `credential_kind: acts_as`, with missing or invented `credential_value` | Refuse before edge matching and before malformed-presentation handling. Hint: `[COPY: acts_as is not presentable — resolve the agent credential, then traverse its acts-as binding]`. |
+| `Deny` (malformed presentation) | Presented credential of a presentable kind missing required key parts (`credential_kind` / `credential_value` / issuer when the kind requires it), or kind unrecognized | Restrictive default (principle 5). Hint: `[COPY: credential presentation malformed or kind unrecognized — fix caller shape]`. |
+
+**Acts-as interest traversal after a valid presented credential resolves to an agent.** The
+presented credential's resolution and the subsequent `acts_as` read are separate checks. A presented
+`acts_as` is refused as `Deny (non-presentable kind)` **before** malformed-presentation handling and
+never reaches this table. For a resolved agent, use the existing canonical relationship resolver to read
+the **complete** current `principal_binding` candidates sourced by that authenticated agent, classify their logical shape, and exclude only a well-formed presentable credential-key physical self-edge. An unknown or malformed current discriminator is not filtered out before validation. A valid acts-as edge is direct
+`agent` → `operator`, carries only `credential_kind: acts_as`, and omits `credential_value`,
+`credential_issuer`, `expires_at` and any proposed verifier-version field, including explicit nulls.
+Its liveness is the existing unended relationship state; there is no traversal expiry or extra hop.
+The agent remains the authenticated A-for-B actor. The operator is only the interest decision 48 counts;
+traversal creates no grant or new operator actor. A presentable credential-key physical self-edge, if the
+versioned storage proposal is later admitted, is never a logical `acts_as` candidate.
+
+| Complete traversal result | Existing outcome and enforcement | Authorized diagnostic-surface recovery copy |
+|---|---|---|
+| Exactly one valid current live edge, with no malformed current candidate; properly ended historical edges may also exist | `Permit` for interest resolution only; continue existing grant and policy checks as the agent. Ended history is not a second current link. | No recovery copy. |
+| No current logical acts-as edge after a complete current read | `Deny` (no current acts-as binding); stop with no fallback principal or effect. The current read alone cannot say whether ended history exists. | `[COPY: This agent has no current acts-as link to an operator. The action stopped. An authorized operator can inspect admitted bindings and establish the intended link through the existing permitted relationship-write path. If inspection or repair is not admitted, complete that prerequisite first.]` |
+| More than one distinct current live logical edge, including different edge identities to the same endpoint | `Deny` (ambiguous acts-as); never choose by read order or endpoint equality. | `[COPY: This agent's acts-as link is ambiguous. The action stopped. An authorized operator can inspect admitted bindings and correct the unintended link through the existing permitted relationship-write path before retrying.]` |
+| Unreachable, timed out, partial or otherwise incomplete **current** candidate read | `Indeterminate` (source unavailable); enforcement denies while the recorded diagnostic **retains** `Indeterminate`; existing record-unreachable halt applies. | `[COPY: The agent's acts-as link could not be verified. The action stopped. Check record health and retry after a complete read; if it remains unavailable, use the admitted recovery path.]` |
+| Any malformed or forbidden **current** candidate, with or without one otherwise valid current edge | `Deny` (invalid acts-as); never ignore the candidate, use a credential fallback or traverse another principal. Forbidden endpoint or field shape includes explicit-null credential or expiry fields. | `[COPY: This agent's current acts-as link is invalid. The action stopped. An authorized operator can inspect the binding shape and repair it through the existing permitted path before retrying.]` |
+
+The enforcement read is the complete **current** logical set; ended snapshots are not current
+candidates. An authorized diagnostic may report “only ended links” only after a **separate,
+complete, history-inclusive** read establishes that fact under admitted history-inspection rights.
+If that read is absent, unavailable, incomplete or unauthorized, retain the generic “no current
+link” diagnosis; never borrow bootstrap or other principal scope for inspection. An unavailable
+history inspection does not turn an otherwise complete current read into `Indeterminate`, while a
+partial current read always does. Only after the authorized complete history read proves every
+matching link ended may the diagnostic instead use `[COPY: This agent has only ended acts-as
+links. The action stopped. An authorized operator can inspect the admitted history and establish
+the intended current link through the existing permitted relationship-write path.]`
+
+These are reason categories within the existing `Permit`/`Deny`/`Indeterminate` outcome and shared
+canonical error envelope, not a second resolver or public error primitive. Only a diagnostic
+surface with admitted inspection rights receives applicable recovery copy. Other callers receive
+the same generic refusal; no response or diagnostic leaks credential material, unrelated principal
+identity, candidate counts, fingerprints, hashes or relationship keys. Repair still needs its own
+admitted write right. Missing inspection or repair rights keep recovery closed. The table admits
+no new administrator, lifecycle or cross-source writer authority; it does not select the pending
+physical write strategy.
+
+**Conditional ordinary-writer integration note (AU-31 design, uninstalled).** If an ordinary
+`acts_as` lifecycle writer is later admitted, one shared generalized relationship-mutation guard
+must compare the requested logical source agent with the **current authenticated writing agent**
+before every create, delete and restore entrance; restoration writes a new observation. Cover single
+and bulk create, `store`, interpretation, HTTP, MCP and CLI entrances where exposed, plus
+delete/restore natural calls. The original closed-ledger step-6 bootstrap binding has only its
+separately ruled original-creation admission; it is not an ordinary lifecycle exception or an
+ordinary agent credential. The first flow neither installs this writer nor assumes a grant,
+fixture, cross-source override or backend branch tied to one source type. If a shared predicate
+cannot cover every admitted entrance, hold that future writer.
 
 **Examples.**
 
@@ -982,12 +1052,13 @@ attribution, is what this decision has to say rather than leave to whichever cal
    in a design that already resolves credentials at the grant, and it has to say what the credential entity
    holds that the grant's `sub` and `iss` do not.
 
-2. **Properties on the binding edge itself, one edge per credential.** *(Historical candidate — chosen.)*
-   `principal_binding` stays the edge type and carries the credential's identifying values — its kind, its
+2. **Properties on the presented-credential binding edge itself, one edge per credential.** *(Historical
+   candidate — chosen for that variant.)* `principal_binding` stays the edge type and its
+   presented-credential variant carries the credential's identifying values — its kind, its
    issuer, and an expiry where the issuer states one — so a principal has as many edges as it has
    credentials and rotation writes a second edge before ending the first. This is the shape
    `conformance_suite.md#what-the-documents-leave-unspecified-here-and-how-each-is-recorded` already
-   derives — an edge type carrying the credential kind and value, the principal, and an expiry — and that
+   derives — an edge variant carrying the credential kind and value, the principal, and an expiry — and that
    derivation is recorded there as proposed rather than assumed, which is the vacancy this row registers.
    Candidate 2 owed two answers the ruling above closes: the edge's source is not a credential entity —
    credential identity lives in edge fields (`credential_kind`, `credential_value`, `credential_issuer`)
