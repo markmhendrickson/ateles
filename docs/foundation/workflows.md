@@ -205,10 +205,15 @@ The list itself is kept outside this directory, as the reference implementation'
 **Purpose:** turn a created task into a routed one: classified, linked to the records it concerns,
 deduplicated, prioritized, and handed to exactly one successor workflow, to none, or to the operator.
 
-**Entry condition:** a task exists in the record and has no intake batch. Creation is publication
-(`work_model.md#the-transition-vocabulary`), so every task meets this condition once, at creation, and no
-task meets it twice. A task with no intake batch is by that fact unrouted; there is no separate unrouted
-state (`work_model.md#intake-is-every-tasks-first-workflow`).
+**Entry condition:** every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at
+creation. Its immutable creator-time `admission_class: workflow_entering` is part of that unit. The only
+other admitted value is `aggregate_parent`, which has no batch or `ADDRESSED_BY`; missing or ambiguous
+classification refuses admission rather than defaulting to intake. Creation is publication (`work_model.md#the-transition-vocabulary`), so this boundary is crossed
+once and no workflow-entering task enters intake twice. The aggregate parent is the explicit exception: it
+is not claimable, never enters a workflow, and has no intake batch. Decision 84's assembly exception differs
+only by adding the persistent
+`classify` hold finding to that same creation unit. A task is unrouted while its intake batch has no closing
+`route` verdict; there is no separate unrouted state (`work_model.md#intake-is-every-tasks-first-workflow`).
 
 **Steps**
 
@@ -223,6 +228,12 @@ state (`work_model.md#intake-is-every-tasks-first-workflow`).
 | 5 | `route` | `pm` step owner | yes | | the closing verdict names one successor workflow, or none, or `operator-only` |
 
 <!-- /rendered -->
+
+`classify` does not change `admission_class`: its name is for action classes, assignment and placement.
+If the work proves to need an aggregate, an authorized task creator admits a distinct
+`aggregate_parent` task and relates workflow-entering children to it through `PART_OF`; it cannot turn
+the already admitted workflow peer into a parent by adding child edges. The task-creation authority and
+the ordinary `PART_OF` checks still apply; this rule grants neither a new creator nor a new step owner.
 
 The steps exist because each failure they prevent has a name. Without `classify`, blast radius is inferred
 from the handling agent at the moment the action is taken (`gates_and_workflows.md#confidence-and-three-blast-tiers`).
@@ -1501,7 +1512,9 @@ that the field is dropped and the prose is kept; it does not touch what the pros
 
 ## What no workflow in this document does
 
-None lets a task that has no intake batch enter it, except intake itself. None names two successors.
+None admits a `workflow_entering` task without its intake batch; `admission_class: aggregate_parent`
+is fixed at creation, is not claimable, and enters no workflow at all. None lets an assembling task enter another workflow while
+decision 84's persistent hold stands. None names two successors.
 None takes a step on an issue or a pull request rather than on the batch's tasks. None takes an outward
 effect outside the action gate, none carries a second gate beside it, and none raises task-level failure
 anywhere but the checkpoint queue.

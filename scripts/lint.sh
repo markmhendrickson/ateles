@@ -120,6 +120,8 @@ python3 execution/scripts/check_foundation_anchors.py || ERRORS=$((ERRORS + 1))
 
 echo "  - Checking foundation decision 78 is ruled in the corpus..."
 python3 execution/scripts/check_foundation_decision_78.py || ERRORS=$((ERRORS + 1))
+echo "  - Checking foundation decision 84 persistent assembly exclusion..."
+python3 execution/scripts/check_foundation_decision_84.py || ERRORS=$((ERRORS + 1))
 echo "  - Checking foundation decisions 99 and 107-109 are effect-bound..."
 python3 execution/scripts/check_foundation_decisions_99_107_109.py || ERRORS=$((ERRORS + 1))
 echo "  - Checking decision 101 ruling is bound to the corpus..."

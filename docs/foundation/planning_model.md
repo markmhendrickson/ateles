@@ -292,8 +292,9 @@ than a state the swarm guesses between. Commissioning a parent reaches every des
 **The frontier is derived from dependencies and the controls above each leaf.** `DEPENDS_ON` may run from
 a task or planning record to a task or planning record; a dependency on a planning record is satisfied
 only by that record's proved completion, never by its cancellation. The **dependency-ready frontier** of
-a commissioned record is the set of non-terminal, non-parent task leaves beneath it that are otherwise
-claimable, whose own outbound dependencies and every dependency on their ascent are satisfied, and whose
+a commissioned record is the set of non-terminal task leaves beneath it with immutable creator-time
+`admission_class: workflow_entering` that are otherwise claimable, whose own outbound dependencies and
+every dependency on their ascent are satisfied, and whose
 ascent contains no pause or cancellation. A dependency from a planning record blocks that record's whole
 subtree. The live `planning` task is the control loop and is excluded from the delivery frontier. The
 **maximum safe parallelism** is the largest subset of that frontier whose simultaneous claims satisfy the

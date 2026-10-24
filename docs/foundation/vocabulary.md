@@ -224,10 +224,16 @@ The task's own transition vocabulary is `created` plus its status; [lease](#leas
 **Not for:** published as a separate state; routed, claimed, or released as task transitions.
 
 ### claimable
-**Definition:** the derived property of a [task](#task) whose status is not terminal, on which no [lease](#lease) is
-held, which no open [checkpoint](#checkpoint) holds from claim (every task-subject [reason class](#reason-class) but
-`unclaimed_step` — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), and whose
-`assigned_to` is unset or names the [principal](#principal) about to [claim](#claim).
+**Definition:** the derived property of a [task](#task) with immutable creator-time
+`admission_class: workflow_entering` whose status is not terminal, which carries no unresolved
+persistent assembly exclusion, on which no [lease](#lease) is held, which no open [checkpoint](#checkpoint) holds
+from claim (every task-subject [reason class](#reason-class) but `unclaimed_step` —
+`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), and whose `assigned_to` is unset or names the
+[principal](#principal) about to [claim](#claim). An unresolved persistent assembly exclusion has one narrow
+exception: only its open [`classify` step](#step) is claimable, and only by the principal that resolves as the
+[intake](#intake) declaration's [`pm` step owner](#step-owner); it exposes no ordinary task claim.
+An `admission_class: aggregate_parent` is never claimable; a missing or ambiguous class is refused pending
+reconciliation. Current child [edges](#edge) cannot change this read.
 **See:** [`work_model.md#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
 **Never:** `blocked` as a stored [task](#task) status (retired: see [Retired names](#retired-names)). The
 ordinary verb and adjective are untouched — a [step](#step) blocked on its owner, a blocked claim, a change
@@ -327,8 +333,11 @@ Reads: "the tasks entered the feature workflow", "the batch is at `qa`", "the ba
 **Not for:** run for a batch; instance for a batch, unqualified; bundle for a batch.
 
 ### parent task
-**Definition:** a [task](#task) that groups [child tasks](#child-task) through `PART_OF` [edges](#edge) from each child, whose completion is
-derived from its children's terminal states and which never enters a [workflow](#workflow).
+**Definition:** a [task](#task) with immutable creator-time `admission_class: aggregate_parent` that groups
+[child tasks](#child-task) through `PART_OF` [edges](#edge) from each child, whose completion is derived only
+with at least one current child, every child terminal and landed, and applicable planning `completion_criteria[]`
+having effect evidence. It remains a parent before its first child and after its last child is removed;
+both childless reads are incomplete. It never enters a [workflow](#workflow).
 **See:** [`work_model.md#parent-and-child-tasks`](work_model.md#parent-and-child-tasks).
 **Never:** "epic", "umbrella".
 **Not for:** a stored parent status.

@@ -99,7 +99,7 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 81 | whether within-tenant default visibility is private-first ("see only my own book") or … | yes | yes | unknown | the soft-wall of that document's section 5 |
 | 82 | whether the fork case is a single hosted instance serving many forkers … | yes | yes | unknown | whether that document's section 3 is a hedge or a requirement |
 | 83 | the capability ceiling of a non-owner operator within a tenant: whether minting … | yes | yes | unknown | the shape of grants minted before the org's own ceiling is enforced |
-| 84 | what distinguishes a task with no intake batch because it is still … | no | no | unknown | nothing in the design; whether an assembling task is claimable before it is finished … |
+| 84 | what distinguishes a workflow-entering task still being assembled — several agents each … | yes | yes | unknown | whether an assembling task is claimable before it is finished being written without creating … |
 | 85 | where an artifact a principal produces about an issue or a pull … | no | no | unknown | nothing in the design; which outbound row of `github.md` a principal's own artifact takes, … |
 | 86 | by what grammar a capability names a tool, and therefore what the … | yes | yes | unknown | — |
 | 87 | whether a harness may provide a principal any capability its grant does … | yes | yes | unknown | decision 86, which supplied the grammar this rule is stated in and deliberately admitted … |

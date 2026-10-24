@@ -33,6 +33,7 @@ import server as srv  # noqa: E402
 
 
 _TEST_RESOLVER_JKT = "A" * 43
+_DEFAULT_OBSERVATION_OWNER = object()
 _DUMMY_RESOLVER_HEADERS = {
     "signature-key": "caller-proof",
     "signature-input": "caller-proof",
@@ -393,12 +394,54 @@ class TestRouteTask(unittest.TestCase):
         self.assertEqual(result["matched_agent"], "vanellus")
 
 
+class TestCheckpointOwnerAuthority(unittest.TestCase):
+    OWNER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    OTHER = "22222222-2222-4222-8222-222222222222"
+
+    def authority(self, record, observation_owner=_DEFAULT_OBSERVATION_OWNER):
+        if observation_owner is _DEFAULT_OBSERVATION_OWNER:
+            observation_owner = self.OWNER
+        with patch(
+            "lib.daemon_runtime.gating.read_authenticated_checkpoint_authorization",
+            return_value={
+                "required_approver_sub": "resolver@example.test",
+                "required_approver_jkt": _TEST_RESOLVER_JKT,
+                "user_id": self.OWNER,
+            },
+        ), patch(
+            "lib.daemon_runtime.gating.fetch_entity_user_id",
+            return_value=observation_owner,
+        ):
+            return srv._checkpoint_resolver_authority("ent_checkpoint", record)
+
+    def test_neotoma_response_without_root_owner_uses_observation_owner(self):
+        self.assertIsNotNone(self.authority({"snapshot": {}}))
+        self.assertIsNotNone(self.authority({"snapshot": {"snapshot": {}}}))
+        self.assertIsNone(
+            self.authority({"user_id": self.OWNER, "snapshot": {}}, observation_owner="")
+        )
+
+    def test_missing_malformed_cross_tenant_observation_owner_fails_closed(self):
+        for owner in (None, "", False, [], {}, "tenant", " " + self.OWNER, self.OTHER, self.OWNER.upper()):
+            with self.subTest(owner=owner):
+                self.assertIsNone(self.authority({"snapshot": {}}, observation_owner=owner))
+
+    def test_present_nested_owner_must_match_even_when_falsey(self):
+        for nested in (None, "", False, [], {}, self.OTHER):
+            for snapshot in ({"user_id": nested}, {"snapshot": {"user_id": nested}}):
+                with self.subTest(snapshot=snapshot):
+                    self.assertIsNone(self.authority({"snapshot": snapshot}))
+        self.assertIsNotNone(self.authority({"snapshot": {"user_id": self.OWNER}}))
+
+
 class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
+    OWNER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    OTHER = "22222222-2222-4222-8222-222222222222"
 
     def setUp(self):
         authority = patch(
             "server._checkpoint_resolver_authority",
-            return_value=("ateles@ateles-swarm", _TEST_RESOLVER_JKT, "tenant-a"),
+            return_value=("ateles@ateles-swarm", _TEST_RESOLVER_JKT, self.OWNER),
         )
         authenticated = patch(
             "server._authenticate_checkpoint_resolver",
@@ -408,12 +451,18 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
             "lib.daemon_runtime.gating.read_authenticated_checkpoint_resolution",
             return_value={"principal_sub": "ateles@ateles-swarm"},
         )
+        owner = patch(
+            "lib.daemon_runtime.gating.fetch_entity_user_id",
+            return_value=self.OWNER,
+        )
         authority.start()
         authenticated.start()
         readback.start()
+        owner.start()
         self.addCleanup(authority.stop)
         self.addCleanup(authenticated.stop)
         self.addCleanup(readback.stop)
+        self.addCleanup(owner.stop)
 
     @patch("server._get")
     async def test_missing_authenticated_resolver_context_cannot_resolve(
@@ -522,7 +571,7 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
                     "status": "awaiting_operator",
                     "task_entity_id": "ent_task_1",
                     "gate_action": "checkpoint_plan_approval",
-                    "user_id": "tenant-a",
+                    "user_id": self.OWNER,
                 },
             },
             {
@@ -531,7 +580,7 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
                     "status": "approved",
                     "task_entity_id": "ent_task_1",
                     "gate_action": "checkpoint_plan_approval",
-                    "user_id": "tenant-a",
+                    "user_id": self.OWNER,
                 },
             },
             {
@@ -541,7 +590,7 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
                     "resolved_dispatched": True,
                     "task_entity_id": "ent_task_1",
                     "gate_action": "checkpoint_plan_approval",
-                    "user_id": "tenant-a",
+                    "user_id": self.OWNER,
                 },
             },
             {
@@ -549,7 +598,7 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
                 "snapshot": {
                     "status": "routed",
                     "blocked_reason": "",
-                    "user_id": "tenant-a",
+                    "user_id": self.OWNER,
                 },
             },
         ]
@@ -563,6 +612,64 @@ class TestResolveCheckpoint(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task re-dispatched", result["action_taken"])
         mock_correct.assert_called_once()
         mock_consume.assert_awaited_once()
+
+    @patch("server._consume_checkpoint_resolution")
+    @patch("server._correct")
+    @patch("server._get")
+    async def test_approve_does_not_confirm_conflicting_readback_owner(
+        self, mock_get, mock_correct, mock_consume
+    ):
+        mock_correct.return_value = True
+        mock_consume.return_value = True
+        for conflicting_record in ("checkpoint", "task"):
+            with self.subTest(conflicting_record=conflicting_record):
+                consumed_owner = (
+                    self.OTHER if conflicting_record == "checkpoint" else self.OWNER
+                )
+                task_owner = self.OTHER if conflicting_record == "task" else self.OWNER
+                mock_get.side_effect = [
+                    {
+                        "entity_type": "checkpoint_brief",
+                        "snapshot": {
+                            "status": "awaiting_operator",
+                            "task_entity_id": "ent_task_1",
+                        },
+                    },
+                    {
+                        "entity_type": "checkpoint_brief",
+                        "snapshot": {
+                            "status": "approved",
+                            "task_entity_id": "ent_task_1",
+                        },
+                    },
+                    {
+                        "entity_type": "checkpoint_brief",
+                        "snapshot": {
+                            "status": "approved",
+                            "resolved_dispatched": True,
+                            "task_entity_id": "ent_task_1",
+                            "user_id": consumed_owner,
+                        },
+                    },
+                    {
+                        "entity_type": "task",
+                        "snapshot": {
+                            "status": "routed",
+                            "blocked_reason": "",
+                            "user_id": task_owner,
+                        },
+                    },
+                ]
+
+                result = await srv._resolve_checkpoint(
+                    "ent_cp1", "approve", _DUMMY_RESOLVER_HEADERS
+                )
+
+                self.assertEqual(result["new_status"], "approved")
+                self.assertEqual(
+                    result["action_taken"],
+                    "approved — task release not confirmed by read-back",
+                )
 
     @patch("server._consume_checkpoint_resolution")
     @patch("server._correct")
