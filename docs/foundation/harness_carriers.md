@@ -291,8 +291,10 @@ no hook. The Codex row is also measured: with a repository-owned user-scope hook
 Codex home, Codex CLI 0.153.4 ran `SessionStart` and placed its stdout in model context; the model returned an
 opaque `agent_policy` entity identifier present only in that stdout. The same run observed
 `UserPromptSubmit` firing. Codex's local instruction file remains a fallback until that hook definition is
-installed and trusted; it is retired once the hook binds. Project-local hook discovery was not observed in
-the same client run, so the repository installer targets user scope. The Cursor hook cell remains
+installed and trusted; it is retired once the hook binds. A later desktop observation found project-local
+and user-scope definitions both firing, consistent with Codex's documented rule that matching hooks from
+multiple files all run concurrently. The repository keeps both carriers and collapses identical lifecycle
+revision/content receipts atomically. The Cursor hook cell remains
 `unverified`: a hook package exists in the Neotoma repository, but no source establishes that its
 session-start output reaches model context. Sources: #1254 and PR #1255 (the Claude Code observations);
 revision 128's measurement; plan decision `harness_delivery_ladder`; the Neotoma repository's harness hook
@@ -477,17 +479,19 @@ both `SessionStart` and `UserPromptSubmit` as completed, and the model returned 
 the session-start output. That establishes the Codex hook cell above as `yes`; a configuration file's
 presence alone is not the evidence.
 
-The same run did not observe the repository-local hook definition firing without the user-scope install.
-That negative observation does not lower Codex's rung because the installed user-scope hook does bind, but
-it constrains the install path to the measured carrier until a project-local positive exists. The committed
-effect test also executes each configured renderer or guard against synthetic input, including a planted
-live-rule positive and a blocked `git stash`, so wiring drift fails the repository check.
+The original run did not observe the repository-local hook definition firing without the user-scope
+install. A later desktop observation did: the same rule index arrived twice at root and child lifecycle
+points because the project and user definitions both matched, exactly as current Codex documentation says
+multi-file matches are launched concurrently. The delivery-state effect test now executes both carriers
+at once and fails unless one lifecycle revision/content hash reaches context exactly once; it also proves a
+later lifecycle revision still delivers. Other effect cases retain the planted live-rule positive and
+blocked `git stash`, so wiring drift fails the repository check.
 
-- **Last verified:** 2026-09-26, Codex CLI 0.153.4.
+- **Last verified:** 2026-10-01, Codex desktop hook composition plus Codex hook documentation.
 - **Invalidated by:** a Codex hook lifecycle change, a client release that stops placing command stdout in
-  model context, or a controlled project-local positive that permits the installer scope to narrow.
+  model context, or a client-provided unique lifecycle invocation id that can replace the bounded receipt.
 - Sources: Ateles #981; the controlled scratch-home run and red-first effect test recorded by revision 128;
-  Codex hook documentation, read 2026-09-26.
+  Codex hook documentation, read 2026-10-01; task `ent_8ef6743f00b589400259f6b5`.
 
 ### 8. Open questions
 
@@ -500,8 +504,6 @@ which cells move.
   call.** No cell changes until a known client connects that way.
 - **Whether Cursor places session-start hook output in the model's context.** If yes, it moves to the first
   rung (`#the-harnesses-evaluated`).
-- **Whether Codex project-local hook discovery can produce a controlled positive.** The user-scope hook
-  already puts Codex on the first rung; this answer can narrow installation scope but does not move a cell.
 - **Whether a Claude chat project's instructions act as a local instruction file.** If yes, rules and
   session-start context become `guaranteed` there through a generated file.
 - **Which integrations and bundle formats render MCP Apps and honour the Tasks extension** (the

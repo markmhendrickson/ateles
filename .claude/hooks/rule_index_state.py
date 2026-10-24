@@ -30,18 +30,30 @@ proxy for it.
 Stdlib-only (hashlib, json). No Neotoma access here — callers already have
 the rows from `fetch_active_policy_rows`.
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import time
 
 STATE_KEY = "rule_index_delivered"  # shared per-session state key
+LIFECYCLE_RECEIPTS_KEY = "rule_index_lifecycle_receipts"
+_DUPLICATE_WINDOW_SECONDS = 60
+_MAX_LIFECYCLE_RECEIPTS = 32
 
 # The fields whose content defines a row's delivered identity. Anything
 # outside this set (status, rationale, canonical_name, ...) does not affect
 # what a session is told, so a change to it must not trigger a re-delivery.
 _CONTENT_FIELDS = (
-    "rule", "title", "applies_when", "scope", "agent_sub", "rule_kind", "domain",
+    "rule",
+    "title",
+    "applies_when",
+    "scope",
+    "agent_sub",
+    "rule_kind",
+    "domain",
 )
 
 
@@ -94,7 +106,9 @@ def record_delivery(state: dict, rows: list[dict]) -> dict:
     return state
 
 
-def record_delivered_subset(state: dict, rows: list[dict], delivered_ids: set[str]) -> dict:
+def record_delivered_subset(
+    state: dict, rows: list[dict], delivered_ids: set[str]
+) -> dict:
     """Like `record_delivery`, but only for the rows in `rows` whose entity
     id is in `delivered_ids` — the rest are simply absent from the recorded
     signature, so a later prompt (or the next SessionStart) treats them as
@@ -109,6 +123,112 @@ def last_delivered(state: dict) -> tuple[str | None, dict[str, str]]:
     when this session has never recorded a delivery."""
     delivered = state.get(STATE_KEY) or {}
     return delivered.get("hash"), (delivered.get("rows") or {})
+
+
+def delivered_subset_hash(rows: list[dict], delivered_ids: set[str]) -> str:
+    """Content hash for exactly the rows the renderer says it emitted."""
+    return hash_signature(
+        row_signature([r for r in rows if _entity_id(r) in delivered_ids])
+    )
+
+
+def lifecycle_revision(event: dict) -> str:
+    """Hash the documented fields that identify one Codex lifecycle point.
+
+    SessionStart has no hook-call id.  The start source plus a metadata-only
+    transcript revision distinguishes startup/resume/compact occurrences;
+    SubagentStart additionally has stable turn and agent ids.  Paths are
+    hashed, never persisted in clear text.
+    """
+    transcript = event.get("transcript_path")
+    transcript_revision: tuple[int, int] | None = None
+    if transcript:
+        try:
+            stat = os.stat(transcript)
+            transcript_revision = (stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            pass
+    fields = {
+        "hook_event_name": event.get("hook_event_name"),
+        "source": event.get("source"),
+        "turn_id": event.get("turn_id"),
+        "agent_id": event.get("agent_id"),
+        "agent_type": event.get("agent_type"),
+        "transcript_path_hash": (
+            hashlib.sha256(str(transcript).encode()).hexdigest() if transcript else None
+        ),
+        "transcript_revision": transcript_revision,
+    }
+    return hashlib.sha256(
+        json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _lifecycle_receipt_key(event: dict, content_hash: str) -> str:
+    """Stable JSON-object key for one lifecycle revision and payload."""
+    blob = json.dumps([lifecycle_revision(event), content_hash], separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _recent_lifecycle_receipts(state: dict, observed_at: float) -> dict:
+    """Return live, well-formed receipts and self-migrate malformed state.
+
+    The previous singular receipt key is intentionally ignored. Receipt state
+    is ephemeral, so treating legacy or malformed data as empty preserves the
+    fail-open delivery contract.
+    """
+    stored = state.get(LIFECYCLE_RECEIPTS_KEY)
+    if not isinstance(stored, dict):
+        return {}
+
+    recent: dict[str, dict[str, float]] = {}
+    for key, receipt in stored.items():
+        if not isinstance(key, str) or not isinstance(receipt, dict):
+            continue
+        try:
+            recorded_at = float(receipt["recorded_at"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        age = observed_at - recorded_at
+        if 0 <= age <= _DUPLICATE_WINDOW_SECONDS:
+            recent[key] = {"recorded_at": recorded_at}
+    return recent
+
+
+def _store_lifecycle_receipts(state: dict, receipts: dict) -> dict:
+    """Persist only the newest bounded set of live receipts."""
+    newest = sorted(
+        receipts.items(),
+        key=lambda item: item[1]["recorded_at"],
+        reverse=True,
+    )[:_MAX_LIFECYCLE_RECEIPTS]
+    state[LIFECYCLE_RECEIPTS_KEY] = dict(newest)
+    return state[LIFECYCLE_RECEIPTS_KEY]
+
+
+def lifecycle_delivery_is_duplicate(
+    state: dict, event: dict, content_hash: str, *, now: float | None = None
+) -> bool:
+    """Whether this exact lifecycle revision/content was just delivered.
+
+    The bounded window collapses concurrently launched project+user handlers
+    without permanently consuming a legitimate later resume whose documented
+    input happens to be byte-for-byte identical.
+    """
+    observed_at = time.time() if now is None else now
+    receipts = _recent_lifecycle_receipts(state, observed_at)
+    _store_lifecycle_receipts(state, receipts)
+    return _lifecycle_receipt_key(event, content_hash) in receipts
+
+
+def record_lifecycle_delivery(
+    state: dict, event: dict, content_hash: str, *, now: float | None = None
+) -> dict:
+    observed_at = time.time() if now is None else now
+    receipts = _recent_lifecycle_receipts(state, observed_at)
+    receipts[_lifecycle_receipt_key(event, content_hash)] = {"recorded_at": observed_at}
+    _store_lifecycle_receipts(state, receipts)
+    return state
 
 
 # NOTE (ateles#1323 follow-up, Falco security review, task
