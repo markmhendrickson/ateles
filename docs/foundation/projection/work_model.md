@@ -81,7 +81,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 - **WM-22b** — the same: the class covering `action_policy` writes is itself reserved *[M]*
 - **WM-23** — the same: an agent cannot widen its own grant *[M]*
 - **WM-24** — the same: `operator_only` on a governance class cannot be demoted *[M]*
-- **WM-25** — historical decision 43 closed thirteen numbered families; decision 161 approves the bounded `native-original-creation-v1` source, finding/edge and completion ledger above *[M (decision 161 approves only the bounded design; reviewed normative merge, canonical readback and installed contract remain required; later governance writes remain gated under 43/47)]*
+- **WM-25** — decision 43: thirteen families; decision 161: bounded native source, finding/edge and completion ledger *[M (source approval only; reviewed merge, canonical readback and installation gate effects; later governance writes remain gated under 43/47)]*
 
 ## [What goes through a workflow is a batch of tasks](../work_model.md#what-goes-through-a-workflow-is-a-batch-of-tasks)
 

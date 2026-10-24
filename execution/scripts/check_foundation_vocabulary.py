@@ -151,7 +151,7 @@ ALLOWLIST_WORDS = frozenset(
     request answer defect confirmed release
     absent accepted added applied classes data entities foundation like place target draft next mark part
     acts admitted shared writer
-    changed fails
+    changed fails lands current ordinary
     """.split()
 )
 # `fields` tipped the advisory bound on ateles#899 (decision-93 ruling prose merged with main);
@@ -166,7 +166,8 @@ ALLOWLIST_WORDS = frozenset(
 # contract's bound terms remain registration, principal, and record-owned write qualification.
 # `draft` and `next` crossed it with the review fixes to that pass, on the same ground.
 # `mark` and `part` crossed it with the instance-owner section, on the same ground.
-# `those` and `else` are function words; `changed` and `fails` are ordinary inflected verbs.
+# `those` and `else` are function words; `changed`, `fails`, and `lands` are ordinary
+# inflected verbs. `current` and `ordinary` are descriptive adjectives, not bound terms.
 # Their base nouns (`change`, `failure`) remain candidates for a human to assess.
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z']*")
