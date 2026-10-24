@@ -15,6 +15,14 @@ for p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 
 
 @pytest.fixture(autouse=True)
+def _daemon_policy_context(monkeypatch):
+    """Most daemon tests exercise its own process, whose environment is canonical."""
+    import harness_router
+
+    monkeypatch.setattr(harness_router, "_daemon_runtime_context", True)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_dispatch_failure_logs(monkeypatch, tmp_path):
     """Never let a test write diagnostics into the operator's real log directory.
 

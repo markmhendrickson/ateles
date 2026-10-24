@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import plistlib
 import re
 import subprocess
 import sys
@@ -102,6 +103,52 @@ def _default_full_headroom(monkeypatch, tmp_path):
     monkeypatch.setenv(
         "APIS_HARNESS_HEADROOM_FILE", "/nonexistent/harness-headroom.json"
     )
+    monkeypatch.delenv("APIS_HARNESS_PROVIDERS", raising=False)
+    monkeypatch.delenv("APIS_USAGE_GATED_PROVIDERS", raising=False)
+    provider_policy = tmp_path / "apis.plist"
+    with provider_policy.open("wb") as handle:
+        plistlib.dump(
+            {
+                "EnvironmentVariables": {
+                    "APIS_HARNESS_PROVIDERS": "claude,codex,cursor",
+                    "APIS_USAGE_GATED_PROVIDERS": "claude,codex,cursor",
+                }
+            },
+            handle,
+        )
+    monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(provider_policy))
+    action_policy = tmp_path / "action-policy.json"
+    action_policy.write_text(
+        json.dumps(
+            {
+                "lens_review:pm": "mid",
+                "lens_review:qa": "mid",
+                "lens_review:arch": "top",
+                "lens_review:security": "top",
+            }
+        ),
+        encoding="utf-8",
+    )
+    vendor_binding = tmp_path / "vendor-binding.json"
+    vendor_binding.write_text(
+        json.dumps(
+            {
+                "claude": {"mid": "sonnet-test", "top": "opus-test"},
+                "codex": {"mid": "terra-test", "top": "sol-test"},
+                "cursor": {"mid": "terra-cursor-test", "top": "sol-cursor-test"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(action_policy))
+    monkeypatch.setenv("APIS_VENDOR_BINDING_FILE", str(vendor_binding))
+    with provider_policy.open("wb") as handle:
+        plistlib.dump({"EnvironmentVariables": {
+            "APIS_HARNESS_PROVIDERS": "claude,codex,cursor",
+            "APIS_USAGE_GATED_PROVIDERS": "claude,codex,cursor",
+            "APIS_ACTION_POLICY_FILE": str(action_policy),
+            "APIS_VENDOR_BINDING_FILE": str(vendor_binding),
+        }}, handle)
     # The router also folds the live plan-usage snapshot
     # (~/.config/ateles/harness-usage.json) into configured_headroom(); a
     # host whose real snapshot shows a provider exhausted would otherwise
@@ -1271,6 +1318,9 @@ def test_dry_run_report_marks_missing_authentication_not_ok(tmp_path, target):
     report = hlr.dry_run_report(
         target,
         provider="codex",
+        admission=harness_router.resolve_provider_admission(
+            "codex", action_class="lens_review:pm", required_policy=True
+        ),
         sandbox=sandbox,
         task_text="review task",
         worktree_path=tmp_path / "review-worktree",
@@ -1282,8 +1332,41 @@ def test_dry_run_report_marks_missing_authentication_not_ok(tmp_path, target):
     assert report["no_model_call_made"] is True
 
 
+@pytest.mark.parametrize("explicit_model", [None, "explicit-review"])
+def test_dry_run_tier_matches_shared_admission_for_both_model_shapes(
+    tmp_path, target, mock_ready_sandbox, explicit_model
+):
+    admission = harness_router.resolve_provider_admission(
+        "codex", action_class="lens_review:arch", required_policy=True
+    )
+    assert admission.admitted
+    if explicit_model is not None:
+        admission = hlr.replace(
+            admission, resolved_model=explicit_model,
+            explicit_model_override=True,
+        )
+    report = hlr.dry_run_report(
+        target, provider="codex", admission=admission,
+        sandbox=hlr.HarnessSandbox.build("codex", tmp_path),
+        task_text="review", worktree_path=tmp_path,
+        model=explicit_model, action_class="lens_review:arch",
+    )
+
+    assert report["resolved_tier"] == "top"
+    assert report["provider_admission"]["resolved_tier"] == "top"
+    assert report["provider_admission"]["explicit_model_override"] is (explicit_model is not None)
+    assert report["tier"] == (None if explicit_model else "top")
+    assert report["model"] == report["resolved_model"] == (
+        explicit_model or "sol-test"
+    )
+
+
+@pytest.mark.parametrize("model,action_class", [
+    (None, None), ("preview-model", "lens_review:pm"),
+])
 def test_dry_run_makes_no_model_call_and_reports_command(
-    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
+    monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox,
+    model, action_class,
 ):
     dispatch_called = False
 
@@ -1317,15 +1400,18 @@ def test_dry_run_makes_no_model_call_and_reports_command(
             scratch_root=tmp_path,
             brief_path=brief_file,
             timeout=None,
-            model="preview-model",
-            action_class="lens_review:pm",
+            model=model,
+            action_class=action_class,
         )
     )
 
     assert dispatch_called is False
-    assert report["model"] == "preview-model"
+    assert report["model"] == (model or "terra-test")
     assert report["action_class"] == "lens_review:pm"
-    assert report["example_command"][report["example_command"].index("--model") + 1] == "preview-model"
+    assert report["resolved_tier"] == "mid"
+    assert report["provider_admission"]["explicit_model_override"] is (model is not None)
+    assert report["tier"] == (None if model else "mid")
+    assert report["example_command"][report["example_command"].index("--model") + 1] == report["model"]
     assert report["dry_run"] is True
     assert report["ok"] is (report["would_refuse"] is None)
     assert report["no_model_call_made"] is True
@@ -1345,6 +1431,159 @@ def test_dry_run_makes_no_model_call_and_reports_command(
         == (report["command_wrapper"])
     )
     assert "danger-full-access" in report["example_command"]
+
+
+def test_standalone_qa_uses_launchd_policy_and_bound_codex_model_above_pace(
+    monkeypatch, tmp_path, brief_file, mock_ready_sandbox
+):
+    """Regression for #1480: standalone reads the daemon's plist policy.
+
+    Codex is active but not usage-gated, so a weekly reading above the generic
+    pace line reaches dispatch with the QA tier's vendor-bound model.
+    """
+    qa_target = hlr.LensTarget(
+        repo="markmhendrickson/ateles",
+        pr=1234,
+        head=SAMPLE_HEAD,
+        lens="qa",
+        agent="phoenicurus",
+    )
+    _install_minimal_lens_worktree(monkeypatch, qa_target)
+    policy_path = Path(os.environ["APIS_PROVIDER_POLICY_PLIST"])
+    with policy_path.open("wb") as handle:
+        plistlib.dump(
+            {
+                "EnvironmentVariables": {
+                    "APIS_HARNESS_PROVIDERS": "codex,cursor",
+                    "APIS_USAGE_GATED_PROVIDERS": "claude",
+                    "APIS_ACTION_POLICY_FILE": os.environ["APIS_ACTION_POLICY_FILE"],
+                    "APIS_VENDOR_BINDING_FILE": os.environ["APIS_VENDOR_BINDING_FILE"],
+                }
+            },
+            handle,
+        )
+    now = time.time()
+    harness_router.record_usage(
+        "codex",
+        [
+            {
+                "name": "weekly_all",
+                "used_percent": 80,
+                "resets_at": harness_router._iso_from_wall(now + 6 * 86400),
+            }
+        ],
+        observed_at=now,
+    )
+    seen = {}
+    verdict = (
+        SIGNED_OFF_VERDICT.replace("review:pm", "review:qa")
+        .replace("Pavo", "Phoenicurus")
+        .replace("pm lens", "qa lens")
+    )
+
+    async def _dispatch(role, task, **kwargs):
+        seen.update(kwargs)
+        verdict_path = Path(kwargs["cwd"]) / f"qa{qa_target.pr}_verdict.md"
+        verdict_path.write_text(verdict, encoding="utf-8")
+        return SkillResult(role, True, 0, verdict, "", provider="codex")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **kwargs: SAMPLE_HEAD)
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            qa_target,
+            provider="codex",
+            post=False,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    admission = seen["provider_admission"]
+    assert report["ok"] is True
+    assert report["posted"] is False
+    assert seen["action_class"] == "lens_review:qa"
+    assert admission.admitted is True
+    assert admission.active_providers == ("codex", "cursor")
+    assert admission.usage_gated_providers == ("claude",)
+    assert admission.resolved_tier == "mid"
+    assert admission.resolved_model == "terra-test"
+    assert admission.policy_source.startswith(f"launchd plist {policy_path}")
+    assert seen["local_review"] is True
+    assert seen["command_wrapper"][0] == "/usr/bin/sandbox-exec"
+    assert report["artifact_binding"]["expected"] == {
+        "lens": "qa",
+        "head": SAMPLE_HEAD,
+    }
+
+
+@pytest.mark.parametrize(
+    "policy_case",
+    ["missing", "malformed", "partial", "blank_path", "whitespace_path", "model_location"],
+)
+def test_standalone_refuses_required_policy_errors_before_worktree_or_dispatch(
+    monkeypatch, tmp_path, target, brief_file, policy_case
+):
+    policy_path = Path(os.environ["APIS_PROVIDER_POLICY_PLIST"])
+    if policy_case == "missing":
+        policy_path.unlink()
+    elif policy_case == "blank_path":
+        monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", "   ")
+    elif policy_case == "whitespace_path":
+        monkeypatch.setenv("APIS_PROVIDER_POLICY_PLIST", str(policy_path) + " ")
+    elif policy_case == "model_location":
+        other = tmp_path / "other-action.json"
+        other.write_text('{"lens_review:pm": "top"}', encoding="utf-8")
+        monkeypatch.setenv("APIS_ACTION_POLICY_FILE", str(other))
+    elif policy_case == "malformed":
+        policy_path.write_bytes(b"not a plist")
+    else:
+        with policy_path.open("wb") as handle:
+            plistlib.dump(
+                {"EnvironmentVariables": {"APIS_HARNESS_PROVIDERS": "codex,cursor"}},
+                handle,
+            )
+
+    monkeypatch.setattr(
+        hlr.Worktree,
+        "create",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("policy refusal must precede worktree creation")
+        ),
+    )
+
+    async def _dispatch(*args, **kwargs):
+        raise AssertionError("policy refusal must precede dispatch")
+
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
+
+    import asyncio
+
+    report = asyncio.run(
+        hlr.run_one(
+            target,
+            provider="codex",
+            post=False,
+            dry_run=False,
+            repo_worktree_name="ateles",
+            scratch_root=tmp_path,
+            brief_path=brief_file,
+            timeout=None,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["posted"] is False
+    assert report["provider_admission"]["reason_code"] == "configuration_error"
+    assert report["provider_admission"]["requested_provider"] == "codex"
+    if policy_case not in ("blank_path", "whitespace_path"):
+        assert str(policy_path) in report["provider_admission"]["policy_source"]
 
 
 def test_dry_run_claude_provider_uses_outer_sandbox_and_pins_cwd_to_the_worktree(
@@ -1412,6 +1651,8 @@ def test_dry_run_claude_provider_uses_outer_sandbox_and_pins_cwd_to_the_worktree
         *report["command_wrapper"],
         "claude",
         "--print",
+        "--model",
+        "sonnet-test",
         "--append-system-prompt",
         "<system prompt>",
     ]
@@ -2162,13 +2403,26 @@ def test_invalid_verdict_text_is_withheld_from_the_report(
     assert report["verdict_text_withheld"] is True
 
 
+def _use_codex_only_daemon_policy(monkeypatch) -> None:
+    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "codex")
+    path = Path(os.environ["APIS_PROVIDER_POLICY_PLIST"])
+    with path.open("wb") as handle:
+        plistlib.dump({"EnvironmentVariables": {
+            "APIS_HARNESS_PROVIDERS": "codex",
+            "APIS_USAGE_GATED_PROVIDERS": "codex",
+            "APIS_ACTION_POLICY_FILE": os.environ["APIS_ACTION_POLICY_FILE"],
+            "APIS_VENDOR_BINDING_FILE": os.environ["APIS_VENDOR_BINDING_FILE"],
+        }}, handle)
+
+
 def test_router_preserved_delivery_denial_reaches_parent_gate(
     monkeypatch, tmp_path, target, brief_file, mock_ready_sandbox
 ):
     """Exercise the real router result shape observed in the live PM run."""
     _install_minimal_lens_worktree(monkeypatch, target)
     harness_router.reset_state()
-    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    _use_codex_only_daemon_policy(monkeypatch)
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
 
     async def _dispatch(role, task, **kwargs):
@@ -2225,7 +2479,7 @@ def test_router_mixed_delivery_and_capacity_refuses_valid_local_artifact(
 ):
     _install_minimal_lens_worktree(monkeypatch, target)
     harness_router.reset_state()
-    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    _use_codex_only_daemon_policy(monkeypatch)
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
 
     async def _dispatch(role, task, **kwargs):
@@ -2367,7 +2621,7 @@ def test_mixed_delivery_diagnostics_never_reach_parent_recovery_or_publication(
 ):
     _install_minimal_lens_worktree(monkeypatch, target)
     harness_router.reset_state()
-    monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
+    _use_codex_only_daemon_policy(monkeypatch)
     monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", str(tmp_path / "none"))
     delivery = (
         "fatal: unable to access 'https://github.com/o/r/': "
@@ -3955,14 +4209,21 @@ def test_lens_by_name_agent_mapping_matches_registry_for_pm_and_arch():
 # ── Worktree lifecycle: guards reach the real dispatch boundary -----------------
 
 
-@pytest.mark.parametrize("model,action_class", [
-    (None, None), ("review-model", None), (None, "lens_review:arch"),
-    ("review-model", "lens_review:arch"),
+@pytest.mark.parametrize("model,action_class,lens", [
+    (None, None, "pm"), ("review-model", None, "pm"),
+    (None, "lens_review:pm", "pm"),
+    ("review-model", "lens_review:pm", "pm"),
+    (None, None, "security"),
 ])
 def test_run_one_passes_sandbox_env_extra_to_dispatch(
-    monkeypatch, tmp_path, target, brief_file, model, action_class
+    monkeypatch, tmp_path, target, brief_file, model, action_class, lens
 ):
     seen = {}
+    if lens == "security":
+        target = hlr.LensTarget(
+            repo=target.repo, pr=target.pr, head=target.head,
+            lens="security", agent="falco",
+        )
 
     # This is a plumbing test, not another platform probe. Supply a sandbox
     # whose guards are already proven so the test remains meaningful on Linux,
@@ -3990,8 +4251,14 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
     async def _dispatch(role, task, **kwargs):
         seen.update(kwargs)
         verdict_path = Path(kwargs["cwd"]) / f"{target.lens}{target.pr}_verdict.md"
-        verdict_path.write_text(SIGNED_OFF_VERDICT, encoding="utf-8")
-        return SkillResult(role, True, 0, SIGNED_OFF_VERDICT, "", provider="codex")
+        verdict = (
+            f"<!-- review:security commit={SAMPLE_HEAD} -->\n"
+            "**🤖 Falco — Ateles swarm, security reviewer**\n"
+            "**APPROVE**\n\nSummary: no finding.\n"
+            if lens == "security" else SIGNED_OFF_VERDICT
+        )
+        verdict_path.write_text(verdict, encoding="utf-8")
+        return SkillResult(role, True, 0, verdict, "", provider="codex")
 
     monkeypatch.setattr(hlr.dispatch_role, "dispatch", _dispatch)
 
@@ -4000,7 +4267,7 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
         self.path.mkdir(parents=True, exist_ok=True)
         agents_dir = self.path / "docs" / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
-        (agents_dir / "pavo.md").write_text("# pavo prompt\n", encoding="utf-8")
+        (agents_dir / f"{target.agent}.md").write_text("# synthetic prompt\n", encoding="utf-8")
 
     monkeypatch.setattr(hlr.Worktree, "create", _fake_create)
     monkeypatch.setattr(hlr.Worktree, "remove", lambda self: None)
@@ -4009,10 +4276,12 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
         "capture_stash_ref_state",
         lambda worktree: hlr.StashRefState(resolved_oid=None, packed_oid=None),
     )
+    monkeypatch.setattr(hlr, "verify_stash_ref_unchanged_after_dispatch", lambda *a: None)
+    monkeypatch.setattr(hlr, "current_pr_head", lambda **k: target.head)
 
     import asyncio
 
-    asyncio.run(
+    report = asyncio.run(
         hlr.run_one(
             target,
             provider="codex",
@@ -4027,8 +4296,13 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
         )
     )
 
+    expected_action_class = action_class or f"lens_review:{lens}"
+    expected_model = model or ("sol-test" if lens == "security" else "terra-test")
+    assert report["ok"], report
     assert seen["model"] == model
-    assert seen["action_class"] == action_class
+    assert seen["action_class"] == expected_action_class
+    assert seen["provider_admission"].action_class == expected_action_class
+    assert seen["provider_admission"].resolved_model == expected_model
     assert "CODEX_HOME" in seen["env_extra"]
     assert seen["command_wrapper"]
     assert seen["command_wrapper"][0] == "/usr/bin/sandbox-exec"
@@ -4036,6 +4310,69 @@ def test_run_one_passes_sandbox_env_extra_to_dispatch(
     assert seen["seated_reviewer"] is False
     assert seen["local_review"] is True
     assert seen["provider"] == "codex"
+
+
+@pytest.mark.parametrize("model", [None, "explicit-review"])
+def test_run_one_rejects_a_foreign_lens_class_before_worktree_or_child(
+    monkeypatch, tmp_path, target, brief_file, model
+):
+    target = hlr.LensTarget(
+        repo=target.repo, pr=target.pr, head=target.head,
+        lens="security", agent="falco",
+    )
+    effects = {"worktree": 0, "child": 0}
+
+    def create(self, *, head):
+        effects["worktree"] += 1
+        raise AssertionError("foreign class reached worktree setup")
+
+    async def dispatch(*args, **kwargs):
+        effects["child"] += 1
+        raise AssertionError("foreign class reached child dispatch")
+
+    monkeypatch.setattr(hlr.Worktree, "create", create)
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", dispatch)
+    report = asyncio.run(hlr.run_one(
+        target, provider="codex", post=False, dry_run=False,
+        repo_worktree_name="ateles", scratch_root=tmp_path,
+        brief_path=brief_file, timeout=None, action_class="lens_review:pm",
+        model=model,
+    ))
+    assert not report["ok"]
+    assert report["no_model_call_made"] is True
+    assert "requires action class 'lens_review:security'" in report["reason"]
+    assert effects == {"worktree": 0, "child": 0}
+
+
+def test_run_one_rejects_explicit_foreign_agent_before_preparation(
+    monkeypatch, tmp_path, target, brief_file
+):
+    target = hlr.LensTarget(
+        repo=target.repo, pr=target.pr, head=target.head,
+        lens="pm", agent="falco",
+    )
+    effects = {"worktree": 0, "child": 0}
+
+    def create(self, *, head):
+        effects["worktree"] += 1
+        raise AssertionError("foreign agent reached worktree setup")
+
+    async def dispatch(*args, **kwargs):
+        effects["child"] += 1
+        raise AssertionError("foreign agent reached child dispatch")
+
+    monkeypatch.setattr(hlr.Worktree, "create", create)
+    monkeypatch.setattr(hlr.dispatch_role, "dispatch", dispatch)
+    report = asyncio.run(hlr.run_one(
+        target, provider="codex", post=False, dry_run=False,
+        repo_worktree_name="ateles", scratch_root=tmp_path,
+        brief_path=brief_file, timeout=None,
+    ))
+
+    assert not report["ok"]
+    assert report["no_model_call_made"] is True
+    assert "canonical action class" in report["reason"]
+    assert effects == {"worktree": 0, "child": 0}
 
 
 def test_run_one_passes_task_entity_id_to_dispatch_for_neotoma_monitoring(
@@ -4680,6 +5017,16 @@ def test_cli_forwards_model_selectors_to_every_provider(
     assert [call["provider"] for call in seen] == providers
     assert all(call["model"] == model for call in seen)
     assert all(call["action_class"] == action_class for call in seen)
+
+
+def test_cli_help_describes_bound_review_model_and_matching_class(capsys):
+    with pytest.raises(SystemExit) as exc:
+        hlr.main(["--help"])
+    assert exc.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "Without --model, the matching lens_review:<lens> class requires a bound model" in help_text
+    assert "Policy class must match the selected lens" in help_text
+    assert "defaults to lens_review:<lens>" in help_text
 
 
 def test_dry_run_reports_unbound_model_as_refusal(

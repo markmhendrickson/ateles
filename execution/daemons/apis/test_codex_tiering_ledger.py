@@ -9,6 +9,9 @@ pin that at the real subprocess boundary for the cheaper tiers, pin what happens
 when a tier has no Codex model, and pin the ledger's usage rows.
 """
 
+# Imported pytest fixtures intentionally share names with test parameters.
+# ruff: noqa: F811
+
 from __future__ import annotations
 
 import asyncio
@@ -33,6 +36,20 @@ POLICY = {
     "lens_review:pm": "mid",
     "ci_log_triage": "mechanical",
 }
+
+
+@pytest.fixture(autouse=True)
+def _isolated_model_policy_sources(monkeypatch, tmp_path):
+    monkeypatch.delenv("APIS_ACTION_POLICY_FILE", raising=False)
+    monkeypatch.delenv("APIS_VENDOR_BINDING_FILE", raising=False)
+    monkeypatch.setattr(
+        model_tiering, "_DEFAULT_ACTION_POLICY_PATH",
+        tmp_path / "missing-action-policy.json",
+    )
+    monkeypatch.setattr(
+        model_tiering, "_DEFAULT_VENDOR_BINDING_PATH",
+        tmp_path / "missing-vendor-binding.json",
+    )
 
 
 @pytest.fixture
@@ -73,8 +90,9 @@ def test_codex_dispatch_runs_the_model_its_tier_maps_to(
     captured_codex_dispatches, ledger, monkeypatch, action_class, extra, model, tier
 ) -> None:
     _configure(monkeypatch)
+    role = "pavo" if action_class == "lens_review:pm" else "cicada"
     rc = dispatch_role.main(
-        ["--role", "cicada", "--task", "t", "--action-class", action_class, *extra]
+        ["--role", role, "--task", "t", "--action-class", action_class, *extra]
     )
     assert rc == 0
     assert _model_of(captured_codex_dispatches[0]) == model

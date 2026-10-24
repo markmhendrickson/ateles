@@ -49,7 +49,7 @@ import tempfile
 import time
 import tomllib
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -80,7 +80,9 @@ import fly_runner  # noqa: E402
 from harness_router import (  # noqa: E402
     FRONTIER_PROVIDERS,
     MAC_READING_SOURCES,
+    ProviderAdmission,
     configured_providers,
+    resolve_provider_admission,
     cool_down,
     cooled_until_all,
     cooling_providers,
@@ -88,6 +90,7 @@ from harness_router import (  # noqa: E402
     minimum_headroom,
     provider_candidates,
     provider_exclusion_reason,
+    provider_policy,
     record_cooling,
     render_wall,
     usable_provider_names,
@@ -4415,6 +4418,8 @@ async def run_skill(
     escalation_signals: "model_tiering.EscalationSignals | None" = None,
     model: str | None = None,
     resolved_tier: "model_tiering.ResolvedTier | None" = None,
+    provider_admission: ProviderAdmission | None = None,
+    provider_admissions: dict[str, ProviderAdmission] | None = None,
     inference_only: bool = False,
     runner: str | None = None,
     repository: str = "",
@@ -4431,6 +4436,14 @@ async def run_skill(
     validated is the tier that runs. ``inference_only``: run with no tools
     (see ``INFERENCE_ONLY_PROVIDER``); requires ``local_review`` and a pinned
     ``provider`` of that adapter.
+
+    ``provider_admission`` is a strict decision from
+    ``harness_router.resolve_provider_admission``. Guarded standalone
+    entrypoints pass it through unchanged; this function refuses any mismatch
+    and launches only its resolved provider/tier/model.
+    ``provider_admissions`` holds the equivalent decisions for an unpinned
+    lens. Candidate selection and failover stay with the shared router, while
+    each attempt uses its own admitted tier and model.
 
     ``command_wrapper``: forwarded verbatim to ``_run_skill_once`` on every
     attempt — see that function's docstring. Unrelated to provider selection;
@@ -4504,10 +4517,141 @@ async def run_skill(
     exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    if fly_delivery is not None:
+        runner = "fly"  # a delivery runs on Fly or the builder runs it locally
+    fly_bound, fly_extra = _fly_routing(runner, action_class)
+    if provider_admissions is not None and (
+        provider is not None or provider_admission is not None
+    ):
+        return SkillResult(skill, False, None, "", "", error="invalid unpinned lens admissions")
+    if action_class and action_class.startswith(model_tiering.LENS_REVIEW_PREFIX):
+        identity_error = model_tiering.review_identity_error(skill, action_class)
+        if role not in (None, skill):
+            identity_error = "review role does not match the canonical agent"
+        if identity_error:
+            return SkillResult(skill, False, None, "", "", error=identity_error)
+        candidates = (
+            [provider] if provider is not None else
+            list(provider_admissions) if provider_admissions is not None else
+            [provider_admission.requested_provider] if provider_admission is not None else
+            [*configured_providers(), *fly_extra]
+        )
+        policy = provider_policy(required=True)
+        if policy.error:
+            return SkillResult(
+                skill, False, None, "", "",
+                error=f"strict review admission refused: {policy.error}; "
+                      f"policy_source={policy.source}",
+            )
+        current = {
+            candidate: resolve_provider_admission(
+                candidate, action_class=action_class,
+                signals=escalation_signals, required_policy=True,
+                fly_bound=fly_bound, fly_extra=fly_extra,
+            )
+            for candidate in candidates
+        }
+        if provider_admission is not None:
+            expected = current.get(provider_admission.requested_provider)
+            if expected is None or provider_admission != (
+                replace(expected, resolved_model=model, explicit_model_override=True)
+                if provider_admission.explicit_model_override and model else expected
+            ):
+                return SkillResult(skill, False, None, "", "", error="stale review admission")
+        if provider_admissions is not None:
+            for candidate, admitted in provider_admissions.items():
+                expected = current.get(candidate)
+                if expected is None:
+                    return SkillResult(skill, False, None, "", "", error="stale review admissions")
+                if admitted != (
+                    replace(expected, resolved_model=model, explicit_model_override=True)
+                    if admitted.explicit_model_override and model else expected
+                ):
+                    return SkillResult(skill, False, None, "", "", error="stale review admissions")
+        if provider_admission is None and provider_admissions is None:
+            if provider is not None:
+                provider_admission = current[provider]
+                if provider_admission.admitted and model is not None:
+                    provider_admission = replace(
+                        provider_admission, resolved_model=model,
+                        explicit_model_override=True,
+                    )
+            else:
+                provider_admissions = {
+                    candidate: replace(
+                        admitted, resolved_model=model,
+                        explicit_model_override=True,
+                    ) if model else admitted
+                    for candidate, admitted in current.items() if admitted.admitted
+                }
+                if not provider_admissions:
+                    return SkillResult(skill, False, None, "", "", error="strict review admission refused")
+    if provider_admissions is not None:
+        if provider is not None or provider_admission is not None or not provider_admissions:
+            return SkillResult(skill, False, None, "", "", error="invalid unpinned lens admissions")
+        if any(
+            not admission.admitted
+            or candidate != admission.requested_provider
+            or action_class != admission.action_class
+            or not admission.resolved_model
+            for candidate, admission in provider_admissions.items()
+        ):
+            return SkillResult(skill, False, None, "", "", error="mismatched lens admissions")
     # One control, two reasons to apply it. The internal name stays
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
     # use it only for the deny and deny-capable routing.
     deny_correct = owns_pending_gate or seated_reviewer
+
+    if provider_admission is not None:
+        if not provider_admission.admitted:
+            return SkillResult(
+                skill,
+                False,
+                None,
+                "",
+                "",
+                error=provider_admission.reason,
+                provider=provider_admission.requested_provider,
+            )
+        mismatch = ""
+        if provider not in (None, provider_admission.requested_provider):
+            mismatch = (
+                f"provider admission is for {provider_admission.requested_provider!r}, "
+                f"but dispatch requested {provider!r}"
+            )
+        elif action_class != provider_admission.action_class:
+            mismatch = (
+                f"provider admission is for action_class "
+                f"{provider_admission.action_class!r}, but dispatch requested "
+                f"{action_class!r}"
+            )
+        elif model not in (None, provider_admission.resolved_model):
+            mismatch = (
+                f"provider admission resolved model "
+                f"{provider_admission.resolved_model!r}, but dispatch overrode "
+                f"it with {model!r}"
+            )
+        if mismatch:
+            return SkillResult(
+                skill,
+                False,
+                None,
+                "",
+                "",
+                error=f"provider admission mismatch: {mismatch}",
+                provider=provider or provider_admission.requested_provider,
+            )
+        provider = provider_admission.requested_provider
+        model = provider_admission.resolved_model
+        if not provider_admission.explicit_model_override:
+            resolved_tier = model_tiering.ResolvedTier(
+                tier=provider_admission.resolved_tier,
+                source=provider_admission.tier_source,
+                action_class=provider_admission.action_class,
+                escalation_reasons=provider_admission.escalation_reasons,
+            )
+        else:
+            resolved_tier = None
 
     # Refresh the usage snapshot BEFORE anything reads provider selection:
     # `_tier_bound_binaries` below consults the usage gate through
@@ -4522,11 +4666,39 @@ async def run_skill(
         precomputed_tier = model_tiering.resolve_tier(
             action_class, signals=escalation_signals
         )
-    if fly_delivery is not None:
-        runner = "fly"  # a delivery runs on Fly or the builder runs it locally
-    fly_bound, fly_extra = _fly_routing(runner, action_class)
-
     async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
+        selected_admission = (
+            provider_admissions.get(selected) if provider_admissions is not None else None
+        )
+        if provider_admissions is not None and selected_admission is None:
+            return SkillResult(skill, False, None, "", "", error="unadmitted lens provider", provider=selected)
+        if action_class and action_class.startswith(model_tiering.LENS_REVIEW_PREFIX):
+            admitted = selected_admission or provider_admission
+            if admitted is None or admitted.requested_provider != selected:
+                return SkillResult(skill, False, None, "", "", error="unadmitted review provider", provider=selected)
+            fresh = resolve_provider_admission(
+                selected, action_class=action_class,
+                signals=escalation_signals, required_policy=True,
+                fly_bound=fly_bound, fly_extra=fly_extra,
+            )
+            expected = (
+                replace(fresh, resolved_model=admitted.resolved_model,
+                        explicit_model_override=True)
+                if admitted.explicit_model_override and fresh.admitted else fresh
+            )
+            if admitted != expected or not fresh.admitted:
+                return SkillResult(skill, False, None, "", "", error="stale review admission", provider=selected)
+        selected_tier = precomputed_tier
+        if selected_admission is not None:
+            selected_tier = (
+                None if selected_admission.explicit_model_override else
+                model_tiering.ResolvedTier(
+                    tier=selected_admission.resolved_tier,
+                    source=selected_admission.tier_source,
+                    action_class=selected_admission.action_class,
+                    escalation_reasons=selected_admission.escalation_reasons,
+                )
+            )
         result = await _run_skill_once(
             skill,
             prompt,
@@ -4548,8 +4720,9 @@ async def run_skill(
             work_class=work_class,
             action_class=action_class,
             escalation_signals=escalation_signals,
-            model=fallback_model or model,
-            precomputed_tier=precomputed_tier,
+            model=(selected_admission.resolved_model if selected_admission is not None
+                   else fallback_model or model),
+            precomputed_tier=selected_tier,
             inference_only=inference_only,
             runner=runner,
             repository=repository,
@@ -4596,9 +4769,14 @@ async def run_skill(
         fallback_models_for=(
             (lambda names: {name: model for name in names}) if model else None
         ),
-        binaries=_tier_bound_binaries(
-            _provider_binaries(), precomputed_tier, provider,
-            fly_bound=fly_bound, fly_extra=fly_extra,
+        binaries=(
+            {name: path for name, path in _provider_binaries().items()
+             if name in provider_admissions}
+            if provider_admissions is not None else
+            _tier_bound_binaries(
+                _provider_binaries(), precomputed_tier, provider,
+                fly_bound=fly_bound, fly_extra=fly_extra,
+            )
         ),
         provider=provider,
         role=role,

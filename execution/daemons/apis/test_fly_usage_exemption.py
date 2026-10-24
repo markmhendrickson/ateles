@@ -279,15 +279,6 @@ def test_an_expired_dated_override_no_longer_refuses(tmp_path, provider):
     assert hr.provider_candidates(BINARIES, preferred=provider, fly_bound=FLY) == []
 
 
-def _exemption_after_resolution(fly_bound=(), *, now_wall=None):
-    """The rejected design: resolve first, then rewrite a Mac-read value."""
-    return {
-        provider: (1.0 if provider in fly_bound and source in hr.MAC_READING_SOURCES
-                   else value)
-        for provider, (value, source) in hr.headroom_resolution(now_wall=now_wall).items()
-    }  # fmt: skip
-
-
 @pytest.mark.parametrize("kind,state", [("undated", "exhausted"), ("dated", "healthy")])
 def test_an_exemption_applied_after_resolution_would_admit_it(tmp_path, monkeypatch,
                                                               kind, state):  # fmt: skip
@@ -296,7 +287,21 @@ def test_an_exemption_applied_after_resolution_would_admit_it(tmp_path, monkeypa
     _override_zero(tmp_path, "codex", kind)
     _mac_reading("codex", state)
     assert hr.provider_candidates(BINARIES, preferred="codex", fly_bound=FLY) == []
-    monkeypatch.setattr(hr, "_headroom_for", _exemption_after_resolution)
+    original_resolution = hr.headroom_resolution
+
+    def exemption_after_resolution(*, now_wall=None, without_mac_readings=()):
+        # Mutate the seam provider_candidates actually reads. Resolve with the
+        # Mac evidence first, then wrongly replace that reading for Fly.
+        return {
+            provider: (1.0, source)
+            if provider in without_mac_readings and source in hr.MAC_READING_SOURCES
+            else (value, source)
+            for provider, (value, source) in original_resolution(
+                now_wall=now_wall
+            ).items()
+        }
+
+    monkeypatch.setattr(hr, "headroom_resolution", exemption_after_resolution)
     assert hr.provider_candidates(BINARIES, preferred="codex", fly_bound=FLY) == ["codex"]
 
 

@@ -225,6 +225,8 @@ _DAEMON_DIR = Path(__file__).resolve().parent
 if str(_DAEMON_DIR) not in sys.path:
     sys.path.insert(0, str(_DAEMON_DIR))
 
+import harness_router  # noqa: E402
+
 from checkpoint_denial_store import (  # noqa: E402
     require_checkpoint_denial_store as _require_checkpoint_denial_store,
 )
@@ -4175,6 +4177,7 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
 
 async def main() -> None:
     denial_store = _require_checkpoint_denial_store()
+    harness_router.establish_daemon_runtime_context()
     log.info(f"[{DAEMON_NAME}] Starting up...")
     log.info(f"[{DAEMON_NAME}] checkpoint_denial_store={denial_store}")
     log.info(f"[{DAEMON_NAME}] ateles_repo={ATELES_REPO}")

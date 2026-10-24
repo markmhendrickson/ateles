@@ -57,6 +57,7 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -177,52 +178,133 @@ def _higher_tier(a: str, b: str) -> str:
     return a if _tier_index(a) >= _tier_index(b) else b
 
 
-def _read_json_config(env_var: str, file_env_var: str, default_path: Path) -> dict:
+class ModelPolicyUnavailable(ValueError):
+    """A declared model policy source cannot authorize a strict dispatch."""
+
+
+def _read_json_config(
+    env_var: str, file_env_var: str, default_path: Path, *, strict: bool = False,
+    authoritative_path: Path | None = None,
+) -> dict:
     """File-then-env JSON read, matching ``harness_router.configured_headroom``
     and ``local_provider``'s config precedence exactly: an operator can change
     either without restarting Apis, and a stale file always wins over env so a
     forgotten export cannot silently override a maintained file.
 
-    Malformed or unreadable input degrades to ``{}`` (unresolved), never
-    raises — same posture as every other Apis policy reader. Unlike headroom,
-    an empty result here does NOT mean "permissive default": callers resolve
-    an unresolved class to ``DEFAULT_TIER``, not to "no floor".
+    Legacy reads degrade malformed or unreadable input to ``{}`` (unresolved).
+    Strict review admission raises on a declared, unusable source before it can
+    fall through to a lower-priority environment value.
     """
     configured_path = os.environ.get(file_env_var, "").strip()
-    path = Path(configured_path).expanduser() if configured_path else default_path
+    path = authoritative_path or (
+        Path(configured_path).expanduser() if configured_path else default_path
+    )
     file_raw = ""
+    if strict and authoritative_path is not None and not path.is_file():
+        raise ModelPolicyUnavailable("authoritative model policy file is unavailable")
+    if strict and configured_path and not path.is_file():
+        raise ModelPolicyUnavailable("declared model policy file is unavailable")
     if path.is_file():
         try:
             file_raw = path.read_text(encoding="utf-8").strip()
         except OSError:
-            pass
+            if strict:
+                raise ModelPolicyUnavailable("model policy file is unreadable") from None
     env_raw = os.environ.get(env_var, "").strip()
     # Labelled explicitly (not inferred by comparing values) so identical
     # malformed content in the file and the env var still names the file
     # first, correctly, rather than misattributing based on a value match.
     for raw, label in ((file_raw, f"file {path}"), (env_raw, env_var)):
         if not raw:
+            if strict and label.startswith("file ") and path.is_file():
+                raise ModelPolicyUnavailable("model policy file is empty")
             continue
         try:
             parsed = json.loads(raw)
         except (TypeError, ValueError):
+            if strict:
+                raise ModelPolicyUnavailable("model policy JSON is malformed") from None
             log.warning(
                 f"[apis] model_tiering: malformed JSON in {label}; ignoring"
             )
             continue
-        if isinstance(parsed, dict):
+        if isinstance(parsed, dict) and (parsed or not strict):
             return parsed
+        if strict:
+            raise ModelPolicyUnavailable("model policy mapping is unusable")
+    if strict:
+        raise ModelPolicyUnavailable("model policy source is absent")
     return {}
 
 
-def configured_action_policy() -> dict[str, str]:
+def daemon_model_policy_paths(
+    daemon_environment: Mapping[str, object] | None,
+) -> tuple[Path, Path]:
+    """Bind a guarded dispatch to the daemon's declared model-file locations."""
+    if daemon_environment is None:
+        raise ModelPolicyUnavailable("daemon model policy source is unestablished")
+    paths = []
+    for key, default in (
+        (_ACTION_POLICY_FILE_ENV, _DEFAULT_ACTION_POLICY_PATH),
+        (_VENDOR_BINDING_FILE_ENV, _DEFAULT_VENDOR_BINDING_PATH),
+    ):
+        declared = daemon_environment.get(key)
+        if declared is None:
+            expected = default
+        elif not isinstance(declared, str) or not declared.strip() or declared != declared.strip():
+            raise ModelPolicyUnavailable(f"daemon {key} location is malformed")
+        else:
+            expected = Path(declared).expanduser()
+            if not expected.is_absolute():
+                raise ModelPolicyUnavailable(f"daemon {key} location is not absolute")
+        inherited = os.environ.get(key)
+        if inherited is not None:
+            if not inherited.strip() or inherited != inherited.strip():
+                raise ModelPolicyUnavailable(f"process {key} location is malformed")
+            if not Path(inherited).expanduser().is_absolute():
+                raise ModelPolicyUnavailable(f"process {key} location is not absolute")
+            if Path(inherited).expanduser() != expected:
+                raise ModelPolicyUnavailable(
+                    f"process {key} location conflicts with daemon policy"
+                )
+        paths.append(expected)
+    return paths[0], paths[1]
+
+
+def _json_config_source(env_var: str, file_env_var: str, default_path: Path) -> str:
+    """Name the source the matching config reader will try first."""
+    configured_path = os.environ.get(file_env_var, "").strip()
+    path = Path(configured_path).expanduser() if configured_path else default_path
+    if configured_path or path.is_file():
+        return f"file {path}"
+    if os.environ.get(env_var, "").strip():
+        return env_var
+    return f"missing file {path} and unset {env_var}"
+
+
+def action_policy_source() -> str:
+    return _json_config_source(
+        _ACTION_POLICY_ENV, _ACTION_POLICY_FILE_ENV, _DEFAULT_ACTION_POLICY_PATH
+    )
+
+
+def vendor_binding_source() -> str:
+    return _json_config_source(
+        _VENDOR_BINDING_ENV, _VENDOR_BINDING_FILE_ENV, _DEFAULT_VENDOR_BINDING_PATH
+    )
+
+
+def configured_action_policy(
+    *, strict: bool = False, authoritative_path: Path | None = None
+) -> dict[str, str]:
     """Return the action-class -> min_tier map, normalized to known tiers.
 
     An entry naming an unrecognized tier is dropped (logged), never coerced —
     a typo'd tier name must not silently become the weakest tier.
     """
     raw = _read_json_config(
-        _ACTION_POLICY_ENV, _ACTION_POLICY_FILE_ENV, _DEFAULT_ACTION_POLICY_PATH
+        _ACTION_POLICY_ENV, _ACTION_POLICY_FILE_ENV, _DEFAULT_ACTION_POLICY_PATH,
+        strict=strict, authoritative_path=authoritative_path,
     )
     out: dict[str, str] = {}
     for action_class, tier in raw.items():
@@ -235,10 +317,14 @@ def configured_action_policy() -> dict[str, str]:
                 f"names unrecognized tier {tier!r}; ignoring this entry "
                 f"(unresolved classes fail to {DEFAULT_TIER!r})"
             )
+    if strict and not out:
+        raise ModelPolicyUnavailable("action policy mapping is unusable")
     return out
 
 
-def configured_vendor_binding() -> dict[str, dict[str, str]]:
+def configured_vendor_binding(
+    *, strict: bool = False, authoritative_path: Path | None = None
+) -> dict[str, dict[str, str]]:
     """Return {provider: {tier: model_id}}, lower-cased on both axes.
 
     Shape matches ``local_provider``'s ``vendor_binding``-shaped config
@@ -248,7 +334,8 @@ def configured_vendor_binding() -> dict[str, dict[str, str]]:
     single "enabled" gate: a provider simply has whatever tiers it has.
     """
     raw = _read_json_config(
-        _VENDOR_BINDING_ENV, _VENDOR_BINDING_FILE_ENV, _DEFAULT_VENDOR_BINDING_PATH
+        _VENDOR_BINDING_ENV, _VENDOR_BINDING_FILE_ENV, _DEFAULT_VENDOR_BINDING_PATH,
+        strict=strict, authoritative_path=authoritative_path,
     )
     out: dict[str, dict[str, str]] = {}
     for provider, tiers in raw.items():
@@ -263,6 +350,8 @@ def configured_vendor_binding() -> dict[str, dict[str, str]]:
                 resolved[tier_name] = model_name
         if resolved:
             out[provider_name] = resolved
+    if strict and not out:
+        raise ModelPolicyUnavailable("vendor binding mapping is unusable")
     return out
 
 
@@ -495,6 +584,24 @@ def lens_review_class(lens: str) -> str:
     return f"{LENS_REVIEW_PREFIX}{lens.strip().lower()}"
 
 
+def review_identity_error(agent: str, action_class: str | None) -> str:
+    """Bind a review class to its canonical panel or issue-spec agent."""
+    if not action_class or not action_class.startswith(LENS_REVIEW_PREFIX):
+        return ""
+    # Both registries are the existing owners of their agent/lens assignments.
+    # Import here so ordinary model-tier reads do not load review machinery.
+    from review_panel import lens_by_name
+    from issue_spec import SECTION_BY_LENS
+
+    lens = action_class[len(LENS_REVIEW_PREFIX):]
+    panel = lens_by_name(lens)
+    section = SECTION_BY_LENS.get(lens)
+    expected = {item.agent for item in (panel, section) if item is not None}
+    if not expected or agent not in expected:
+        return "review role does not match the canonical action class"
+    return ""
+
+
 def repair_action_class(blocking_lenses: "set[str] | frozenset[str]") -> str:
     """Action class for a Cicada repair of already-diagnosed blocking findings.
 
@@ -513,6 +620,23 @@ def repair_action_class(blocking_lenses: "set[str] | frozenset[str]") -> str:
 
 class UnboundTierError(ValueError):
     """A resolved tier has no model bound for the target provider."""
+
+
+RESERVED_AUTOMATIC_MODEL_MARKERS: tuple[str, ...] = ("astra", "fable")
+
+
+def automatic_model_refusal(model: str) -> str:
+    """Why *model* is reserved from automatic routing, or an empty string."""
+    normalized = model.strip().lower()
+    marker = next(
+        (name for name in RESERVED_AUTOMATIC_MODEL_MARKERS if name in normalized),
+        "",
+    )
+    return (
+        f"resolved model {model!r} is reserved for explicit operator override ({marker})"
+        if marker
+        else ""
+    )
 
 
 def model_for_tier(
