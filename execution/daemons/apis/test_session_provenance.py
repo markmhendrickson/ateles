@@ -203,7 +203,8 @@ async def test_prelaunch_version_conflict_preserves_intervening_hold(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_prelaunch_cancellation_conflict_preserves_intervening_hold(monkeypatch):
+@pytest.mark.parametrize("boundary", ["cancelled-reason", "cancelled-status"])
+async def test_prelaunch_cancellation_conflict_preserves_intervening_hold(monkeypatch, boundary):
     task = _VersionedTask()
     _install_versioned_task(monkeypatch, task)
     started = threading.Event()
@@ -223,7 +224,7 @@ async def test_prelaunch_cancellation_conflict_preserves_intervening_hold(monkey
         "approved", _Notifier(), gate_override=True,
     ))
     assert await asyncio.to_thread(started.wait, 1)
-    task.before_write = lambda _field, _value, suffix: task.hold() if suffix.endswith("cancelled-reason") else None
+    task.before_write = lambda _field, _value, suffix: task.hold() if suffix.endswith(boundary) else None
     running.cancel()
     release.set()
     with pytest.raises(asyncio.CancelledError):
