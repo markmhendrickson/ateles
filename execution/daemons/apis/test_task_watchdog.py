@@ -288,6 +288,8 @@ def test_retries_after_restart_have_distinct_verified_run_sessions(monkeypatch):
     state = {"status": "failed"}
     payloads = []
     runs = []
+    route_keys = []
+    acknowledged = set()
     monkeypatch.setattr(tw, "_query_tasks", lambda *_a: (
         [("ent_task", {"status": "failed"})], None
     ))
@@ -295,7 +297,12 @@ def test_retries_after_restart_have_distinct_verified_run_sessions(monkeypatch):
         "snapshot": {"status": state["status"]}
     })
 
-    def write(_id, status, **_kwargs):
+    def write(_id, status, **kwargs):
+        key = kwargs["key_suffix"]
+        route_keys.append(key)
+        if key in acknowledged:
+            return True  # /correct acknowledges replay without applying the old write
+        acknowledged.add(key)
         state["status"] = status.value
         return True
 
@@ -352,11 +359,42 @@ def test_retries_after_restart_have_distinct_verified_run_sessions(monkeypatch):
     state["status"] = "failed"
     second = asyncio.run(tw.TaskWatchdog().sweep(object(), dispatch))
     assert first["retried"] == second["retried"] == 1
+    assert len(route_keys) == 2 and route_keys[0] != route_keys[1]
     assert len(payloads) == len(runs) == 2
     assert runs[0].native_session_id != runs[1].native_session_id
     assert all(p["entities"][1]["native_session_id"] == run.native_session_id
                for p, run in zip(payloads, runs))
     assert len({p["idempotency_key"] for p in payloads}) == 2
+
+
+def test_unconfirmed_route_resends_with_same_attempt_key(monkeypatch):
+    state = {"status": "failed"}
+    keys = []
+    dispatched = []
+    monkeypatch.setattr(tw, "_query_tasks", lambda *_a: (
+        [("ent_task", {"status": "failed"})], None
+    ))
+    monkeypatch.setattr(tw, "fetch_task_record", lambda _id: {
+        "snapshot": {"status": state["status"]}
+    })
+
+    def write(_id, status, **kwargs):
+        keys.append(kwargs["key_suffix"])
+        if len(keys) == 1:
+            return False  # no acknowledgement; the same attempt is retried
+        state["status"] = status.value
+        return True
+
+    monkeypatch.setattr(tw, "set_task_status", write)
+
+    async def dispatch(_task_id, _snapshot, _trigger, run_key):
+        dispatched.append(run_key)
+
+    watchdog = tw.TaskWatchdog()
+    first = asyncio.run(watchdog.sweep(object(), dispatch))
+    second = asyncio.run(watchdog.sweep(object(), dispatch))
+    assert first["retried"] == 0 and second["retried"] == 1
+    assert len(keys) == 2 and keys[0] == keys[1] == dispatched[0]
 
 
 def test_failed_task_after_first_page_is_retried(monkeypatch):

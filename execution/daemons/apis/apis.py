@@ -2351,20 +2351,46 @@ async def dispatch_task(
         run_agent_session_id: str | None = None
         run_session = None
         recovery_reason = "Verifying run records (up to 45 seconds); worker not started"
-        prior_reason = snapshot.get("blocked_reason") or ""
+        prior_reason = "" if gate_override else (snapshot.get("blocked_reason") or "")
+        prelaunch_version: str | None = None
+        marker_owned = False
+
+        def _conditional_prelaunch(field: str, value: str, suffix: str) -> bool:
+            nonlocal prelaunch_version
+            write = set_task_field_if_version(
+                entity_id, field, value, expected_version=prelaunch_version,
+                handler=DAEMON_NAME, key_suffix=f"{run_key}-{suffix}",
+            )
+            if write.ok:
+                # A committed write without a new version cannot authorize the
+                # next field. Never obtain a replacement token mid-sequence.
+                prelaunch_version = write.version
+            return bool(write.ok and write.version)
+
+        async def _settle_prelaunch(reason: str, suffix: str) -> None:
+            if not prelaunch_version:
+                return
+            if not await _prelaunch_io(
+                _conditional_prelaunch, "blocked_reason", reason, f"{suffix}-reason"
+            ):
+                return
+            await _prelaunch_io(
+                _conditional_prelaunch, "status", TaskStatus.FAILED.value,
+                f"{suffix}-status",
+            )
 
         async def _settle_cancelled_prelaunch() -> None:
+            if not marker_owned:
+                return
             current = await asyncio.to_thread(fetch_task_snapshot, entity_id)
             if (
                 current
                 and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
                 and current.get("blocked_reason", "") in {prior_reason, recovery_reason, ""}
             ):
-                await asyncio.to_thread(
-                    set_task_status, entity_id, TaskStatus.FAILED,
-                    handler=DAEMON_NAME, from_status=TaskStatus.EXECUTING.value,
-                    reason="Dispatch cancelled during run verification; worker not started",
-                    key_suffix=f"{run_key}-cancelled",
+                await _settle_prelaunch(
+                    "Dispatch cancelled during run verification; worker not started",
+                    "cancelled",
                 )
 
         async def _prelaunch_io(fn, *args, **kwargs):
@@ -2382,17 +2408,26 @@ async def dispatch_task(
                 raise
 
         if RUN_CONVERSATIONS:
-            recovery_visible = await _prelaunch_io(
-                set_task_status, entity_id, TaskStatus.EXECUTING,
-                handler=DAEMON_NAME, from_status=TaskStatus.EXECUTING.value,
-                reason=recovery_reason, key_suffix=f"{run_key}-recovering",
+            current, prelaunch_version = await _prelaunch_io(
+                fetch_task_snapshot_and_version, entity_id
             )
+            recovery_visible = bool(
+                current and prelaunch_version
+                and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
+                and current.get("blocked_reason", "") == prior_reason
+            )
+            if recovery_visible:
+                recovery_visible = await _prelaunch_io(
+                    _conditional_prelaunch, "blocked_reason", recovery_reason,
+                    "recovering",
+                )
             if recovery_visible:
                 current = await _prelaunch_io(fetch_task_snapshot, entity_id)
                 recovery_visible = bool(
                     current and current.get("blocked_reason") == recovery_reason
                     and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
                 )
+            marker_owned = recovery_visible
             if recovery_visible:
                 run_session = await _prelaunch_io(
                     create_run_session,
@@ -2411,9 +2446,7 @@ async def dispatch_task(
                     job.failed(f"task {entity_id} changed during run verification; not started")
                     return
                 cleared = await _prelaunch_io(
-                    set_task_status, entity_id, TaskStatus.EXECUTING,
-                    handler=DAEMON_NAME, from_status=TaskStatus.EXECUTING.value,
-                    reason="", key_suffix=f"{run_key}-verified",
+                    _conditional_prelaunch, "blocked_reason", "", "verified",
                 )
                 if cleared:
                     current = await _prelaunch_io(fetch_task_snapshot, entity_id)
@@ -2440,18 +2473,13 @@ async def dispatch_task(
                     f"[{DAEMON_NAME}] task {entity_id} {reason} — not spawning"
                 )
                 current = await _prelaunch_io(fetch_task_snapshot, entity_id)
-                if (
+                if marker_owned and (
                     current and current.get("blocked_reason", "") in {
                         prior_reason, recovery_reason, ""
                     }
                     and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
                 ):
-                    await _prelaunch_io(
-                        set_task_status, entity_id, TaskStatus.FAILED,
-                        handler=DAEMON_NAME,
-                        from_status=TaskStatus.EXECUTING.value,
-                        reason=reason, key_suffix=run_key,
-                    )
+                    await _settle_prelaunch(reason, "failed")
                 notifier.send(
                     f"{skill} not started on {entity_id}: {reason}",
                     priority=Priority.BLOCKER,

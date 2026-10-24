@@ -118,6 +118,7 @@ _RUN_SESSION_RESULT = re.compile(r"(?:^|;\s*)run_session=([^;\s]+)")
 class _AttemptState:
     attempts: int = 0
     last_retry_ts: float = 0.0
+    pending_run_key: str | None = None
 
 
 class QueryUnavailableError(RuntimeError):
@@ -175,6 +176,7 @@ class TaskWatchdog:
         st = self._state.setdefault(task_id, _AttemptState())
         st.attempts += 1
         st.last_retry_ts = now
+        st.pending_run_key = None
         return st.attempts
 
     def forget(self, task_id: str) -> None:
@@ -278,10 +280,16 @@ class TaskWatchdog:
                 continue
             status = fresh.get("status", "")
             n = self.attempts_for(entity_id) + 1
+            # Allocate the attempt identity before the first durable write.
+            # The in-memory ordinal resets on restart and cannot key /correct.
+            attempt = self._state.setdefault(entity_id, _AttemptState())
+            if attempt.pending_run_key is None:
+                attempt.pending_run_key = f"watchdog_retry-{uuid.uuid4().hex}"
+            run_key = attempt.pending_run_key
             # Re-open to ROUTED so the lifecycle reflects the retry, then dispatch.
             wrote = set_task_status(
                 entity_id, TaskStatus.ROUTED, handler="apis-watchdog",
-                from_status=status, key_suffix=f"watchdog-retry-{n}",
+                from_status=status, key_suffix=run_key,
             )
             routed = _routed_snapshot(entity_id) if wrote else None
             if routed is None:
@@ -296,7 +304,6 @@ class TaskWatchdog:
             try:
                 # The run session persists this key before a worker is launched.
                 # A new retry gets a new key after a watchdog restart too.
-                run_key = f"watchdog_retry-{uuid.uuid4().hex}"
                 await dispatch_fn(entity_id, routed, "watchdog_retry", run_key)
                 counts["retried"] += 1
             except Exception as exc:  # noqa: BLE001

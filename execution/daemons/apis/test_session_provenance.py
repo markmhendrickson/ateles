@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import sys
 import threading
 import time
@@ -20,6 +22,38 @@ for _path in (str(_REPO_ROOT), str(_HERE)):
 import apis  # noqa: E402
 import task_watchdog as tw  # noqa: E402
 from lib.daemon_runtime import session_finalize  # noqa: E402
+from lib.daemon_runtime.task_lifecycle import FieldWrite  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _versioned_prelaunch_fake(monkeypatch):
+    """Adapt existing lifecycle fakes to the server's conditional-write contract."""
+    def read(task_id):
+        snapshot = apis.fetch_task_snapshot(task_id)
+        if snapshot is None:
+            return None, None
+        version = hashlib.sha256(
+            json.dumps(snapshot, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        return snapshot, version
+
+    def write(task_id, field, value, *, expected_version, key_suffix, **_kwargs):
+        current, version = read(task_id)
+        if current is None or not expected_version:
+            return FieldWrite(False)
+        if expected_version != version:
+            return FieldWrite(False, conflict=True)
+        status = apis.TaskStatus.FAILED if field == "status" else apis.TaskStatus.EXECUTING
+        kwargs = {"handler": "apis", "key_suffix": key_suffix}
+        if field == "blocked_reason":
+            kwargs["reason"] = value
+        if not apis.set_task_status(task_id, status, **kwargs):
+            return FieldWrite(False)
+        _, version = read(task_id)
+        return FieldWrite(True, version=version)
+
+    monkeypatch.setattr(apis, "fetch_task_snapshot_and_version", read)
+    monkeypatch.setattr(apis, "set_task_field_if_version", write)
 
 
 class _Notifier:
@@ -59,10 +93,236 @@ def _visible_recovery(monkeypatch):
             if reason == "":
                 visible["active"] = False
             return {"status": "executing", "blocked_reason": reason}
-        return read(entity_id)
+        snapshot = read(entity_id)
+        if not snapshot or not snapshot.get("status"):
+            return {"status": "executing", "blocked_reason": "", **(snapshot or {})}
+        return {"blocked_reason": "", **snapshot}
 
     monkeypatch.setattr(apis, "set_task_status", write_status)
     monkeypatch.setattr(apis, "fetch_task_snapshot", read_status)
+
+
+class _VersionedTask:
+    """A task correction fake with entity-level versions and intervening writes."""
+
+    def __init__(self):
+        self.fields = {"status": "awaiting_approval", "blocked_reason": ""}
+        self.revision = 0
+        self.before_write = None
+        self.response_lost_at = None
+        self.omit_version_at = None
+        self.writes = []
+
+    def version(self):
+        return f"{self.revision:064x}"
+
+    def hold(self):
+        self.fields.update(status="blocked", blocked_reason="held by another gate")
+        self.revision += 1
+
+    def read(self, _task_id):
+        return dict(self.fields)
+
+    def read_with_version(self, _task_id):
+        return self.read(_task_id), self.version()
+
+    def status(self, _task_id, value, **kwargs):
+        suffix = kwargs.get("key_suffix", "")
+        if self.before_write and suffix.endswith(("-recovering", "-verified")):
+            self.before_write("blocked_reason", kwargs.get("reason", ""), suffix)
+        settlement = "cancelled" if suffix.endswith("-cancelled") else "failed"
+        if self.before_write and value is apis.TaskStatus.FAILED:
+            self.before_write("status", value.value, f"{suffix}-{settlement}-status")
+        self.fields["status"] = value.value
+        if kwargs.get("reason") is not None:
+            if self.before_write and value is apis.TaskStatus.FAILED:
+                self.before_write("blocked_reason", kwargs["reason"],
+                                  f"{suffix}-{settlement}-reason")
+            self.fields["blocked_reason"] = kwargs["reason"]
+        self.revision += 1
+        return True
+
+    def conditional(self, _task_id, field, value, *, expected_version, key_suffix, **_kwargs):
+        self.writes.append((field, value, key_suffix, expected_version))
+        if self.before_write:
+            self.before_write(field, value, key_suffix)
+        if not expected_version:
+            return FieldWrite(False)
+        if expected_version != self.version():
+            return FieldWrite(False, conflict=True)
+        self.fields[field] = value
+        self.revision += 1
+        if self.response_lost_at == key_suffix:
+            return FieldWrite(False)
+        if self.omit_version_at == key_suffix:
+            return FieldWrite(True)
+        return FieldWrite(True, version=self.version())
+
+
+def _install_versioned_task(monkeypatch, task):
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", True)
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(apis, "_activity", SimpleNamespace(started=lambda *_a: _Job()))
+    monkeypatch.setattr(apis, "_release_lifecycle_proven", lambda *_a: True)
+    monkeypatch.setattr(apis, "set_task_status", task.status)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", task.read)
+    monkeypatch.setattr(apis, "fetch_task_snapshot_and_version", task.read_with_version)
+    monkeypatch.setattr(apis, "set_task_field_if_version", task.conditional)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["recovering", "verified", "failed-reason", "failed-status"])
+async def test_prelaunch_version_conflict_preserves_intervening_hold(monkeypatch, boundary):
+    task = _VersionedTask()
+    _install_versioned_task(monkeypatch, task)
+    spawned = []
+
+    def interleave(field, _value, suffix):
+        if suffix.endswith(boundary):
+            task.hold()
+            task.before_write = None
+
+    task.before_write = interleave
+    monkeypatch.setattr(apis, "create_run_session", lambda **_kw: (
+        None if boundary.startswith("failed") else SimpleNamespace(
+            conversation_id="ent_conversation", agent_session_id="ent_session"
+        )
+    ))
+
+    async def spawn(*_args, **_kwargs):
+        spawned.append(True)
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", spawn)
+    await apis.dispatch_task(
+        "ent_task", {"title": "Task", "assigned_to": "cicada",
+                     "repo": "markmhendrickson/ateles", "status": "awaiting_approval"},
+        "approved", _Notifier(), gate_override=True,
+    )
+    assert spawned == []
+    assert task.fields == {"status": "blocked", "blocked_reason": "held by another gate"}
+
+
+@pytest.mark.asyncio
+async def test_prelaunch_cancellation_conflict_preserves_intervening_hold(monkeypatch):
+    task = _VersionedTask()
+    _install_versioned_task(monkeypatch, task)
+    started = threading.Event()
+    release = threading.Event()
+    spawned = []
+
+    def session(**_kwargs):
+        started.set()
+        release.wait(1)
+        return None
+
+    monkeypatch.setattr(apis, "create_run_session", session)
+    monkeypatch.setattr(apis, "_spawn_harness_skill", lambda *_a, **_k: spawned.append(True))
+    running = asyncio.create_task(apis.dispatch_task(
+        "ent_task", {"title": "Task", "assigned_to": "cicada",
+                     "repo": "markmhendrickson/ateles", "status": "awaiting_approval"},
+        "approved", _Notifier(), gate_override=True,
+    ))
+    assert await asyncio.to_thread(started.wait, 1)
+    task.before_write = lambda _field, _value, suffix: task.hold() if suffix.endswith("cancelled-reason") else None
+    running.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert spawned == []
+    assert task.fields == {"status": "blocked", "blocked_reason": "held by another gate"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing_version", "invalid_version", "lost_response", "partial_write"])
+async def test_prelaunch_uncertain_version_never_starts_worker(monkeypatch, failure):
+    task = _VersionedTask()
+    _install_versioned_task(monkeypatch, task)
+    spawned = []
+    session_calls = []
+    if failure == "missing_version":
+        monkeypatch.setattr(apis, "fetch_task_snapshot_and_version",
+                            lambda task_id: (task.read(task_id), None))
+    elif failure == "invalid_version":
+        monkeypatch.setattr(apis, "fetch_task_snapshot_and_version",
+                            lambda task_id: (task.read(task_id), "invalid"))
+    elif failure == "lost_response":
+        task.response_lost_at = "approved-0-recovering"
+    else:
+        task.omit_version_at = "approved-0-recovering"
+
+    def session(**_kwargs):
+        session_calls.append(True)
+        return None
+
+    monkeypatch.setattr(apis, "create_run_session", session)
+    monkeypatch.setattr(apis, "_spawn_harness_skill", lambda *_a, **_k: spawned.append(True))
+    await apis.dispatch_task(
+        "ent_task", {"title": "Task", "assigned_to": "cicada",
+                     "repo": "markmhendrickson/ateles", "status": "awaiting_approval"},
+        "approved", _Notifier(), gate_override=True,
+    )
+    assert spawned == session_calls == []
+    assert task.fields["status"] == "executing"
+    assert task.fields["blocked_reason"] in {
+        "", "Verifying run records (up to 45 seconds); worker not started"
+    }
+
+
+@pytest.mark.asyncio
+async def test_prelaunch_replayed_marker_ack_cannot_fail_current_run(monkeypatch):
+    task = _VersionedTask()
+    _install_versioned_task(monkeypatch, task)
+    original = task.conditional
+
+    def replay(_task_id, field, value, **kwargs):
+        if kwargs["key_suffix"].endswith("-recovering"):
+            return FieldWrite(True, version=task.version())  # old ack, no current write
+        return original(_task_id, field, value, **kwargs)
+
+    monkeypatch.setattr(apis, "set_task_field_if_version", replay)
+    monkeypatch.setattr(apis, "create_run_session", lambda **_kw:
+                        (_ for _ in ()).throw(AssertionError("no store")))
+    spawned = []
+    monkeypatch.setattr(apis, "_spawn_harness_skill", lambda *_a, **_k: spawned.append(True))
+    await apis.dispatch_task(
+        "ent_task", {"title": "Task", "assigned_to": "cicada",
+                     "repo": "markmhendrickson/ateles", "status": "awaiting_approval"},
+        "approved", _Notifier(), gate_override=True,
+    )
+    assert spawned == []
+    assert task.fields == {"status": "executing", "blocked_reason": ""}
+
+
+@pytest.mark.asyncio
+async def test_prelaunch_conditional_sequence_starts_verified_worker(monkeypatch):
+    task = _VersionedTask()
+    _install_versioned_task(monkeypatch, task)
+    run = SimpleNamespace(conversation_id="ent_conversation", agent_session_id="ent_session")
+    monkeypatch.setattr(apis, "create_run_session", lambda **_kw: run)
+    monkeypatch.setattr(apis, "append_turn", lambda **_kw: True)
+    monkeypatch.setattr(apis, "update_run_session_status", lambda *_a, **_k: True)
+    spawned = []
+
+    async def spawn(*_args, **kwargs):
+        spawned.append(kwargs)
+        return SimpleNamespace(
+            stdout="[cicada] pull_request_link: BLOCKED — test", stderr="",
+            ok=True, returncode=0,
+        )
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", spawn)
+    await apis.dispatch_task(
+        "ent_task", {"title": "Task", "assigned_to": "cicada",
+                     "repo": "markmhendrickson/ateles", "status": "awaiting_approval"},
+        "approved", _Notifier(), gate_override=True,
+    )
+    assert len(spawned) == 1
+    assert spawned[0]["run_conversation_id"] == run.conversation_id
+    assert spawned[0]["run_agent_session_id"] == run.agent_session_id
+    assert [field for field, _value, _key, _version in task.writes[:2]] == [
+        "blocked_reason", "blocked_reason"
+    ]
+    assert task.writes[1][1] == ""
 
 
 @pytest.mark.asyncio
@@ -184,7 +444,7 @@ async def test_cancelled_recovery_cannot_launch_after_thread_finishes(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_partial_recovery_marker_settles_without_launch(monkeypatch):
+async def test_partial_recovery_marker_stops_without_launch(monkeypatch):
     state = {"status": "awaiting_approval", "blocked_reason": ""}
     spawned = []
     monkeypatch.setattr(apis, "RUN_CONVERSATIONS", True)
@@ -215,12 +475,11 @@ async def test_partial_recovery_marker_settles_without_launch(monkeypatch):
         "approved", _Notifier(), gate_override=True,
     )
     assert spawned == []
-    assert state["status"] == "failed"
-    assert "provenance" in state["blocked_reason"]
+    assert state == {"status": "executing", "blocked_reason": ""}
 
 
 @pytest.mark.asyncio
-async def test_cancellation_during_marker_write_settles_after_write(monkeypatch):
+async def test_cancellation_during_marker_write_leaves_unproven_marker(monkeypatch):
     state = {"status": "awaiting_approval", "blocked_reason": ""}
     started = threading.Event()
     release = threading.Event()
@@ -252,8 +511,10 @@ async def test_cancellation_during_marker_write_settles_after_write(monkeypatch)
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert state["status"] == "failed"
-    assert "cancelled" in state["blocked_reason"]
+    assert state == {
+        "status": "executing",
+        "blocked_reason": "Verifying run records (up to 45 seconds); worker not started",
+    }
 
 
 @pytest.mark.asyncio
@@ -542,7 +803,8 @@ async def test_dispatch_refuses_to_spawn_without_verified_session_provenance(
 
     assert spawned == []
     assert task_statuses[-1][0][1] is apis.TaskStatus.FAILED
-    assert "provenance" in task_statuses[-1][1]["reason"]
+    assert any("provenance" in kwargs.get("reason", "")
+               for _, kwargs in task_statuses)
     assert job.finished_events == []
     assert job.failed_events
 

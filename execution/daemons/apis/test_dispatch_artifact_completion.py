@@ -52,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import apis  # noqa: E402
 from lib.daemon_runtime import task_lifecycle as tl  # noqa: E402
-from lib.daemon_runtime.task_lifecycle import CompletionOutcome, TaskStatus  # noqa: E402
+from lib.daemon_runtime.task_lifecycle import CompletionOutcome, FieldWrite, TaskStatus  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
 
 _REPO = "markmhendrickson/ateles"
@@ -199,7 +199,9 @@ def _dispatch(entity_id, snapshot, notifier=None, trigger="created"):
     """Drive the real entrypoint all the way to the post-spawn path."""
     original_write = apis.set_task_status
     original_read = apis.fetch_task_snapshot
-    visible = {"active": False, "reason": ""}
+    original_versioned_read = apis.fetch_task_snapshot_and_version
+    original_conditional_write = apis.set_task_field_if_version
+    visible = {"active": False, "reason": "", "revision": 0}
 
     def write(*args, **kwargs):
         result = original_write(*args, **kwargs)
@@ -208,16 +210,30 @@ def _dispatch(entity_id, snapshot, notifier=None, trigger="created"):
         return result
 
     def read(task_id):
+        base = original_read(task_id) or {}
         if visible["active"]:
             reason = visible["reason"]
             if reason == "":
                 visible["active"] = False
-            return {"status": "executing", "blocked_reason": reason}
-        return original_read(task_id)
+            return {**base, "status": "executing", "blocked_reason": reason}
+        return {"status": "executing", "blocked_reason": "", **base}
+
+    def read_with_version(task_id):
+        return read(task_id), f"{visible['revision']:064x}"
+
+    def conditional(_task_id, field, value, *, expected_version, **_kwargs):
+        if expected_version != f"{visible['revision']:064x}":
+            return FieldWrite(False, conflict=True)
+        if field == "blocked_reason":
+            visible.update(active=True, reason=value)
+        visible["revision"] += 1
+        return FieldWrite(True, version=f"{visible['revision']:064x}")
 
     if apis.RUN_CONVERSATIONS:
         apis.set_task_status = write
         apis.fetch_task_snapshot = read
+        apis.fetch_task_snapshot_and_version = read_with_version
+        apis.set_task_field_if_version = conditional
     try:
         asyncio.run(
             apis.dispatch_task(
@@ -232,6 +248,8 @@ def _dispatch(entity_id, snapshot, notifier=None, trigger="created"):
     finally:
         apis.set_task_status = original_write
         apis.fetch_task_snapshot = original_read
+        apis.fetch_task_snapshot_and_version = original_versioned_read
+        apis.set_task_field_if_version = original_conditional_write
 
 
 def _cicada_task(**extra) -> dict:
