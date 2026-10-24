@@ -19,7 +19,8 @@ SSE loop (no inline sleep in dispatch):
                         blocked already escalated, pending is the SSE create path).
 
 The decision logic is pure (classify_task / should_retry_now) and unit-tested;
-the I/O (query Neotoma, re-dispatch, escalate) is thin and fail-open. Attempt
+the I/O (query Neotoma, re-dispatch, escalate) is thin. Uncertain reads and
+writes do not launch workers. Attempt
 counts are held in memory keyed by task id until a persistent task-schema
 attempt field lands (the task #1 follow-up); a restart resets them, which is
 safe — it just grants a fresh retry budget.
@@ -32,6 +33,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -58,6 +60,7 @@ from lib.daemon_runtime.session_finalize import (  # noqa: E402
     recover_run_session,
     update_run_session_status,
 )
+from lib.daemon_runtime.gating import fetch_task_record  # noqa: E402
 
 log = logging.getLogger("apis.watchdog")
 
@@ -93,8 +96,9 @@ def stall_seconds(env=None) -> int:
 STALL_SECONDS = stall_seconds()
 # Watchdog sweep cadence.
 SWEEP_INTERVAL_SECONDS = max(60, int(os.environ.get("APIS_WATCHDOG_INTERVAL_SECONDS", "300")))
-# Max tasks pulled per sweep (client-side filtered). Pagination is a follow-up.
+# Rows per page and pages per pass. The opaque cursor resumes the next pass.
 QUERY_LIMIT = max(50, int(os.environ.get("APIS_WATCHDOG_QUERY_LIMIT", "500")))
+PAGES_PER_SWEEP = max(1, int(os.environ.get("APIS_WATCHDOG_PAGES_PER_SWEEP", "5")))
 
 # Statuses the watchdog actively manages.
 _RETRYABLE_INFLIGHT = frozenset({TaskStatus.ROUTED.value, TaskStatus.EXECUTING.value})
@@ -114,6 +118,15 @@ _RUN_SESSION_RESULT = re.compile(r"(?:^|;\s*)run_session=([^;\s]+)")
 class _AttemptState:
     attempts: int = 0
     last_retry_ts: float = 0.0
+    pending_run_key: str | None = None
+
+
+class QueryUnavailableError(RuntimeError):
+    """The task table could not be queried; this is not an empty page."""
+
+
+class CursorExpiredError(QueryUnavailableError):
+    """A continuation token was rejected; restart from the head next pass."""
 
 
 @dataclass
@@ -121,7 +134,9 @@ class TaskWatchdog:
     """Periodic sweeper. Holds per-task attempt state in memory."""
 
     stall_seconds: int = STALL_SECONDS
+    pages_per_sweep: int = PAGES_PER_SWEEP
     _state: dict[str, _AttemptState] = field(default_factory=dict)
+    _cursor: str | None = None
 
     # ── pure decision logic (unit-tested) ──────────────────────────────────
 
@@ -161,33 +176,67 @@ class TaskWatchdog:
         st = self._state.setdefault(task_id, _AttemptState())
         st.attempts += 1
         st.last_retry_ts = now
+        st.pending_run_key = None
         return st.attempts
 
     def forget(self, task_id: str) -> None:
         self._state.pop(task_id, None)
 
-    # ── I/O (fail-open) ────────────────────────────────────────────────────
+    # ── I/O (bounded; uncertain reads and writes never launch workers) ────
 
     async def sweep(self, notifier, dispatch_fn) -> dict:
         """One pass: classify every active task and act. Returns a counts dict.
 
-        `dispatch_fn(task_id, snapshot, trigger)` is an async callable (Apis's
+        `dispatch_fn(task_id, snapshot, trigger, run_key)` is an async callable (Apis's
         dispatch_task closure) used to re-dispatch a retryable task.
         """
         now = time.time()
         counts = {
             "scanned": 0,
+            "pages_read": 0,
+            "scan_complete": False,
+            "query_unavailable": 0,
+            "query_errors": 0,
+            "cursor_expired": 0,
             "retried": 0,
             "reconciled": 0,
             "escalated": 0,
             "skipped_backoff": 0,
+            "retry_unproven": 0,
         }
-        try:
-            tasks = _query_tasks(QUERY_LIMIT)
-        except Exception as exc:  # noqa: BLE001 — never let a query error kill the loop
-            log.warning("[watchdog] task query failed: %s", exc)
-            return counts
+        page_cursor = self._cursor
+        for _ in range(self.pages_per_sweep):
+            try:
+                tasks, next_cursor = _query_tasks(QUERY_LIMIT, page_cursor)
+            except CursorExpiredError as exc:
+                counts["cursor_expired"] += 1
+                self._cursor = None
+                log.warning("[watchdog] cursor expired at %r: %s; restarting next pass", page_cursor, exc)
+                break
+            except QueryUnavailableError as exc:
+                counts["query_unavailable"] += 1
+                log.warning("[watchdog] query unavailable at %r: %s", page_cursor, exc)
+                break
+            except Exception as exc:  # noqa: BLE001 — retry this page next pass
+                counts["query_errors"] += 1
+                log.warning("[watchdog] query failed at %r: %s", page_cursor, exc)
+                break
+            if next_cursor is not None and next_cursor == page_cursor:
+                counts["query_errors"] += 1
+                log.warning("[watchdog] cursor did not advance at %r", page_cursor)
+                self._cursor = None
+                break
+            counts["pages_read"] += 1
+            await self._process_page(tasks, counts, now, notifier, dispatch_fn)
+            page_cursor = next_cursor
+            self._cursor = page_cursor
+            if page_cursor is None:
+                counts["scan_complete"] = True
+                break
+        log.info("[watchdog] sweep: %s cursor=%r", counts, self._cursor)
+        return counts
 
+    async def _process_page(self, tasks, counts, now, notifier, dispatch_fn) -> None:
         for entity_id, snapshot in tasks:
             counts["scanned"] += 1
             status = snapshot.get("status", "")
@@ -204,13 +253,19 @@ class TaskWatchdog:
                 continue
 
             if action == WatchdogAction.ESCALATE:
-                set_task_status(
+                fresh = _fresh_task_snapshot(entity_id)
+                if fresh is None or self.classify(entity_id, fresh.get("status", ""), _age_seconds(fresh, now)) != WatchdogAction.ESCALATE:
+                    continue
+                wrote = set_task_status(
                     entity_id, TaskStatus.BLOCKED, handler="apis-watchdog",
-                    from_status=status,
+                    from_status=fresh.get("status", ""),
                     reason=f"exhausted {MAX_ATTEMPTS} dispatch attempts (watchdog)",
                     key_suffix="watchdog",
                 )
-                _notify(notifier, entity_id, snapshot, MAX_ATTEMPTS)
+                if not wrote:
+                    log.warning("[watchdog] blocked write failed for %s; retrying next pass", entity_id)
+                    continue
+                _notify(notifier, entity_id, fresh, MAX_ATTEMPTS)
                 counts["escalated"] += 1
                 self.forget(entity_id)
                 continue
@@ -219,25 +274,40 @@ class TaskWatchdog:
             if not self.should_retry_now(entity_id, now):
                 counts["skipped_backoff"] += 1
                 continue
-            n = self.record_retry(entity_id, now)
+            fresh = _fresh_task_snapshot(entity_id)
+            if fresh is None or self.classify(entity_id, fresh.get("status", ""), _age_seconds(fresh, now)) != WatchdogAction.RETRY:
+                counts["retry_unproven"] += 1
+                continue
+            status = fresh.get("status", "")
+            n = self.attempts_for(entity_id) + 1
+            # Allocate the attempt identity before the first durable write.
+            # The in-memory ordinal resets on restart and cannot key /correct.
+            attempt = self._state.setdefault(entity_id, _AttemptState())
+            if attempt.pending_run_key is None:
+                attempt.pending_run_key = f"watchdog_retry-{uuid.uuid4().hex}"
+            run_key = attempt.pending_run_key
+            # Re-open to ROUTED so the lifecycle reflects the retry, then dispatch.
+            wrote = set_task_status(
+                entity_id, TaskStatus.ROUTED, handler="apis-watchdog",
+                from_status=status, key_suffix=run_key,
+            )
+            routed = _routed_snapshot(entity_id) if wrote else None
+            if routed is None:
+                counts["retry_unproven"] += 1
+                log.warning("[watchdog] routed write unproven for %s; not dispatching", entity_id)
+                continue
             log.info(
                 "[watchdog] re-dispatching %s (status=%s age=%ss attempt=%d/%d)",
                 entity_id, normalize(status), int(age or 0), n, MAX_ATTEMPTS,
             )
-            # Re-open to ROUTED so the lifecycle reflects the retry, then dispatch.
-            set_task_status(
-                entity_id, TaskStatus.ROUTED, handler="apis-watchdog",
-                from_status=status, key_suffix=f"watchdog-retry-{n}",
-            )
+            self.record_retry(entity_id, now)
             try:
-                await dispatch_fn(entity_id, snapshot, "watchdog_retry")
+                # The run session persists this key before a worker is launched.
+                # A new retry gets a new key after a watchdog restart too.
+                await dispatch_fn(entity_id, routed, "watchdog_retry", run_key)
                 counts["retried"] += 1
             except Exception as exc:  # noqa: BLE001
                 log.warning("[watchdog] re-dispatch of %s failed: %s", entity_id, exc)
-
-        if counts["scanned"]:
-            log.info("[watchdog] sweep: %s", counts)
-        return counts
 
     async def run(self, notifier, dispatch_fn) -> None:
         """Sweep forever on SWEEP_INTERVAL_SECONDS. Fail-open per iteration."""
@@ -251,6 +321,26 @@ class TaskWatchdog:
             except Exception as exc:  # noqa: BLE001 — never crash the daemon
                 log.warning("[watchdog] sweep error (ignored): %s", exc)
             await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+def _fresh_task_snapshot(entity_id: str) -> dict | None:
+    """Read the current typed row, retaining row stamps for stall decisions."""
+    record = fetch_task_record(entity_id)
+    if not isinstance(record, dict):
+        return None
+    snapshot = _unwrap_snapshot(record)
+    if not isinstance(snapshot, dict):
+        return None
+    return {**snapshot, **{
+        key: record[key] for key in ("last_observation_at", "computed_at", "user_id")
+        if key in record and key not in snapshot
+    }}
+
+
+def _routed_snapshot(entity_id: str) -> dict | None:
+    """Return the post-write record only when the route is visible."""
+    fresh = _fresh_task_snapshot(entity_id)
+    if fresh is None or normalize(fresh.get("status")) != TaskStatus.ROUTED.value:
+        return None
+    return fresh
 
 
 def _reconcile_completed_task(entity_id: str, snapshot: dict) -> bool:
@@ -310,41 +400,105 @@ def _notify(notifier, entity_id: str, snapshot: dict, attempts: int) -> None:
         log.warning("[watchdog] notify failed for %s: %s", entity_id, exc)
 
 
-def _query_tasks(limit: int) -> list[tuple[str, dict]]:
-    """Return [(entity_id, snapshot), …] for tasks, via POST /entities/query.
+def _query_tasks(limit: int, cursor: str | None = None) -> tuple[list[tuple[str, dict]], str | None]:
+    """Return one task page and its opaque continuation cursor.
 
-    Raises on transport error (the caller swallows it). Returns [] when no token.
+    Raises when the query is unavailable; absence of credentials is not an empty page.
     """
     if not NEOTOMA_BEARER_TOKEN:
-        log.warning("[watchdog] no bearer token — cannot query tasks")
-        return []
+        raise QueryUnavailableError("no bearer token — cannot query tasks")
+    body = {"entity_type": "task", "limit": limit}
+    if cursor:
+        body["cursor"] = cursor
     resp = httpx.post(
         f"{NEOTOMA_BASE_URL}/entities/query",
         headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-        json={"entity_type": "task", "limit": limit},
+        json=body,
         timeout=20,
     )
+    if cursor and resp.status_code in (400, 410):
+        try:
+            error = resp.json().get("error", {})
+            code = error.get("code", "") if isinstance(error, dict) else ""
+        except (TypeError, ValueError, AttributeError):
+            code = ""
+        if resp.status_code == 410 or "CURSOR" in str(code).upper():
+            raise CursorExpiredError(f"HTTP {resp.status_code}: {code}")
     resp.raise_for_status()
     data = resp.json()
-    rows = data.get("entities") or data.get("results") or []
+    if not isinstance(data, dict):
+        raise QueryUnavailableError("malformed task query response")
+    if "entities" in data:
+        rows = data["entities"]
+    elif "results" in data:
+        rows = data["results"]
+    else:
+        raise QueryUnavailableError("task query has no rows collection")
+    if not isinstance(rows, list):
+        raise QueryUnavailableError("malformed task rows collection")
+    if (
+        "limit" in data and (type(data["limit"]) is not int or data["limit"] != limit)
+        or "offset" in data and (
+            type(data["offset"]) is not int or data["offset"] < 0
+            or (cursor is None and data["offset"] != 0)
+        )
+        or "total" in data and (
+            type(data["total"]) is not int or data["total"] < 0
+        )
+        or any(
+            flag in data and type(data[flag]) is not bool
+            for flag in ("has_more", "truncated")
+        )
+        or "next_offset" in data and data["next_offset"] is not None
+    ):
+        raise QueryUnavailableError("malformed task page metadata")
     out: list[tuple[str, dict]] = []
     for row in rows:
+        if not isinstance(row, dict):
+            raise QueryUnavailableError("malformed task row")
+        if "snapshot" in row and not isinstance(row["snapshot"], dict):
+            raise QueryUnavailableError("malformed task row snapshot")
+        if (isinstance(row.get("snapshot"), dict)
+                and "snapshot" in row["snapshot"]
+                and not isinstance(row["snapshot"]["snapshot"], dict)):
+            raise QueryUnavailableError("malformed task row snapshot")
         eid = row.get("entity_id") or row.get("id")
         snap = _unwrap_snapshot(row)
-        if eid and isinstance(snap, dict):
-            out.append((eid, snap))
-    return out
+        if (not isinstance(eid, str) or not eid or not isinstance(snap, dict)
+                or not isinstance(snap.get("status"), str)
+                or not snap["status"]):
+            raise QueryUnavailableError("malformed task row")
+        out.append((eid, snap))
+    next_cursor = data.get("next_cursor")
+    if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor):
+        raise QueryUnavailableError("malformed task continuation cursor")
+    if data.get("has_more") is False and next_cursor is not None:
+        raise QueryUnavailableError("task query contradicts continuation cursor")
+    if next_cursor is None and (data.get("has_more") is True or data.get("truncated") is True):
+        raise QueryUnavailableError("task query is incomplete without a cursor")
+    if "total" in data:
+        # The REST route echoes offset=0 even for keyset cursor pages, so only
+        # the first page can compare its row count with the global total.
+        if len(rows) > data["total"] or (
+            cursor is None and next_cursor is None and len(rows) != data["total"]
+        ):
+            raise QueryUnavailableError("task query count contradicts returned page")
+    return out, next_cursor
 
 
 def _unwrap_snapshot(row: dict) -> dict:
     """Tolerate the several snapshot nesting shapes Neotoma returns."""
     snap = row.get("snapshot")
-    if isinstance(snap, dict):
-        inner = snap.get("snapshot")
-        if isinstance(inner, dict):
-            return inner
-        return snap
-    return row
+    if not isinstance(snap, dict):
+        return row
+    inner = snap.get("snapshot")
+    base = inner if isinstance(inner, dict) else snap
+    carried = {}
+    for source in (snap, row):
+        for key in ("last_observation_at", "computed_at"):
+            if key not in base and key not in carried and source.get(key) is not None:
+                carried[key] = source[key]
+    return {**base, **carried} if carried else base
 
 
 def _age_seconds(snapshot: dict, now: float) -> float | None:
