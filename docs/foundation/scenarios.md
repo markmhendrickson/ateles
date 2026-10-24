@@ -201,24 +201,30 @@ flowchart TD
 
 ## (f) A parent task with children in independent batches
 
-A parent task is created as the grouping of a piece of work; three child tasks each carry a `PART_OF`
+A parent task is created with immutable `admission_class: aggregate_parent` before any child exists. It is
+visible but incomplete, outside claim, live execution and the dependency-ready frontier, with no intake
+batch. Three child tasks each carry a `PART_OF`
 edge to it. Each child is claimed, executed, and goes through its own batch on its own schedule. The
 **aggregate parent is the explicit workflow-entry exception: it is not claimable, never enters a workflow,
-and has no intake batch or `ADDRESSED_BY` edge.** When a reader asks whether the parent is complete,
-the answer is derived at that moment from every child being terminal and landed, plus effect evidence
+and has no intake batch or `ADDRESSED_BY` edge.** Removing the last child does not change its class or
+make it claimable or complete; it remains visible and incomplete. When a reader asks whether the parent is complete,
+the answer requires at least one current child, every child terminal and landed, plus effect evidence
 for the applicable planning `completion_criteria[]` where the parent is under a planning record.
 Neither terminal status alone nor a stored parent status proves completion.
 
 ```mermaid
 flowchart TD
-    P[aggregate parent: not claimable, no intake batch, never in a workflow]
+    P[aggregate parent: admission_class set at creation, never claimable]
+    P --> Z{at least one current child?}
+    Z -->|no, including last child removed| NC[parent remains incomplete]
     C1[child 1] -->|PART_OF| P
     C2[child 2] -->|PART_OF| P
     C3[child 3] -->|PART_OF| P
     C1 -->|ADDRESSED_BY| R1[batch 1]
     C2 -->|ADDRESSED_BY| R2[batch 2]
     C3 -->|ADDRESSED_BY| R3[batch 3]
-    R1 --> D{all children terminal and landed?}
+    Z -->|yes| D{all children terminal and landed?}
+    R1 --> D
     R2 --> D
     R3 --> D
     D -->|no| NC[parent remains incomplete]
@@ -337,7 +343,9 @@ invariants 2 and 7.
 
 ## (j) A task created, routed by intake, and entering its successor
 
-A complete workflow-entering task is created for ordinary intake; that is its publication. Every
+A complete task with `admission_class: workflow_entering` is created for ordinary intake; that is its
+publication. A missing or ambiguous class is refused, and a childless `aggregate_parent` stays visible
+without an intake batch. Every
 workflow-entering task's intake batch and
 `ADDRESSED_BY` edge become readable with it at creation, and it is unrouted while that batch has no closing
 `route` verdict. (An assembling task is the ruled exception only in adding its persistent `classify` hold to
@@ -391,7 +399,8 @@ lease. A lapsed or returned lease ends only that active hold: the finding and ex
 and only an eligible `pm` owner may reclaim `classify`. When that owner judges assembly complete,
 it writes the `classify` verdict, clearing the exclusion; only then may `link`, `dedupe`,
 `prioritize`, and `route` proceed. An aggregate parent is a separate intentional Empty case:
-it is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge;
+its creator-time `admission_class: aggregate_parent` is readable with zero children or after its last
+child is removed. It is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge;
 its absent batch is not Unknown or a missing atomic unit.
 
 **Invariants:** [`work_model.md#intake-is-every-tasks-first-workflow`](work_model.md#intake-is-every-tasks-first-workflow),

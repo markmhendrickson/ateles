@@ -115,7 +115,9 @@ past without an explicit end; `returned` when the lease holder ended it. Nothing
 
 ### Liveness is derived from activity at read time, never declared
 
-`active` = held lease plus activity (`agent_session` or observations) within the lease window. A stored
+`active` = a `workflow_entering` task with a held lease plus activity (`agent_session` or observations)
+within the lease window. An `aggregate_parent` cannot acquire a lease, and a missing or ambiguous
+`admission_class` cannot be read as active even if a historical lease edge exists. A stored
 liveness flag fails when the process that would clear it died. The two liveness assertions of the archived
 loop document are retired: `executing` / `running` are not states.
 
@@ -157,8 +159,10 @@ the intake batch and writes the `ADDRESSED_BY` edge, then `classify`, `link`, `d
 intake batch has no closing `route` verdict — no separate unrouted state. `link` attaches what the task
 names, a record in the record and an external one alike, and nothing on relevance alone; what a step needs
 beyond that is hydration's, per step (`workflows.md#what-link-attaches-and-what-it-leaves-to-hydration`).
-The aggregate parent described under `#parent-and-child-tasks` is the deliberate exception: it is a
-grouping that is not claimable, never enters a workflow, and therefore has no intake batch. Tasks a batch creates
+The aggregate parent described under `#parent-and-child-tasks` is the deliberate exception: its immutable
+creator-time `admission_class: aggregate_parent` is readable before any child exists, excludes it from claim,
+and admits it without an intake batch. A creator must positively choose one of `aggregate_parent` and
+`workflow_entering`; missing or ambiguous classification refuses admission. Tasks a batch creates
 (children, detached tasks, tasks extracted from a meeting) enter intake themselves; a child may take
 intake's declared fast path and never skips intake. `route` names a declaration that fits the task, holds
 it on one amendment where a declaration nearly fits, or opens the authoring of one for it, and never holds
@@ -313,14 +317,17 @@ this one's parameters.
 
 ### What a claim predicate treats as claimable
 
-Claimable: not terminal, no persistent assembly exclusion, no held lease, and no open checkpoint holding it
-— except that a task under the assembly exclusion exposes its open `classify` step only to a principal that
+Claimable: `admission_class: workflow_entering`, not terminal, no persistent assembly exclusion, no held lease,
+and no open checkpoint holding it — except that a task under the assembly exclusion exposes its open
+`classify` step only to a principal that
 resolves as the declaration's `pm` step owner, so assembly can resume without making the task executable;
 every checkpoint whose subject
 is the task holds it from claim, but one: `unclaimed_step` reorders and never holds, so the step it names
 stays claimable by its role (`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`); a
 checkpoint on an action holds the action, and the task stays with its lease holder or, on a lapse, is
-claimable. A lapsed lease never blocks a claim. Unassigned tasks are a shared pool; an assigned task is
+claimable. An `aggregate_parent` is never claimable, even before any child exists or after its last child
+is removed. A legacy task with missing or ambiguous `admission_class` is excluded from claim and needs
+reconciliation; absence of child `PART_OF` edges never implies workflow entry. A lapsed lease never blocks a claim. Unassigned tasks are a shared pool; an assigned task is
 claimable only by the principal it names. The status vocabulary in the record is what tasks actually carry,
 not what an enum in code declares: a predicate is written against the record (principle 3), because a
 normalizer that fails to map a live value onto a terminal one makes finished work claimable. **The reader is
@@ -333,23 +340,31 @@ record already carries onto `open` or terminal, permanently. Live status distrib
 
 ### A task is live when some principal could claim it now
 
-**The ruling.** A task is **live** when it is [claimable](vocabulary.md#claimable) by some principal: not
+**The ruling.** A task is **live** when it is [claimable](vocabulary.md#claimable) by some principal:
+`admission_class: workflow_entering`, not
 terminal, no lease held on it, no open checkpoint holding it from claim, and no unresolved persistent assembly
 exclusion — except that the exclusion exposes only its open `classify` step, only to the principal that resolves
 as the intake declaration's `pm` step owner. "Live" names no new property. It is the claimable predicate above
 read over the whole backlog rather than from one principal's seat — existentially, over every principal, instead
 of the 1:1 "is this mine" a claim asks.
+An `aggregate_parent` and a task with missing or ambiguous `admission_class` are excluded from the live pool;
+the latter is refused pending reconciliation. Neither is inferred from the current child edges. Both remain
+visible in the backlog and operator reports, including an initially childless parent and a parent whose last
+child was removed.
 
-**What the predicate partitions the backlog into.** A backlog partitions on it into exactly three operational
+**What the predicate partitions the execution backlog into.** Classified workflow-entering tasks partition
+on it into exactly three operational
 parts. It is **live** — claimable now by some principal. A task under an unresolved persistent assembly exclusion
 is live only for the narrow `classify` claim by the intake declaration's resolved `pm` step owner; it never enters
 an ordinary claim pool. Or it is **under a held lease** — nonterminal, claimable by nobody because a principal
 already took it, which is not work nothing is advancing but work being advanced right now. Or it is **finished or
 held** — terminal, held from claim by an open checkpoint that says by what, or excluded from ordinary claim by an
-unresolved persistent assembly exclusion when no eligible PM-only `classify` claim is open. The four refusal
+unresolved persistent assembly exclusion when no eligible PM-only `classify` claim is open. The refusal
 grounds — terminal status, held lease, checkpoint, and assembly exclusion — therefore produce three operational
-parts: terminal, checkpointed, and excluded work share the last part because none is work an ordinary queue may
-hand out. Nothing else is a fourth case, and there is no state a task can occupy that this read cannot classify.
+parts: terminal, checkpointed, and excluded workflow work share the last part because none is work an ordinary queue may
+hand out. `aggregate_parent` tasks and tasks with missing or ambiguous `admission_class` are outside this
+execution partition, not a fourth claim state; operator reporting still displays them with their class or
+reconciliation need. Nothing else is a fourth case among workflow-entering tasks.
 The middle part is why the partition is three parts and not two: a task under a held lease is neither live nor in
 the finished-or-held decision part, and a partition stated as live-and-the-rest without distinguishing execution
 loses every actively executing task in the gap between its two halves.
@@ -1297,7 +1312,16 @@ An **aggregate parent task is not claimable,
 never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a batch
 carries tasks that are executed, which an aggregate parent never is. This is the deliberate exception to
 the workflow-entry creation rule; every child and every other workflow-entering peer task still opens its
-intake batch atomically at creation. Parent completion is derived: every child is terminal and landed, and
+intake batch atomically at creation. The task's immutable creator-time `admission_class: aggregate_parent`
+positively identifies the exception before any child exists and after the last child is removed; child
+`PART_OF` edges express membership, not admission class. Creation refuses a missing or ambiguous class.
+The target of a child task's `PART_OF` edge must already carry `admission_class: aggregate_parent`; an
+ordinary workflow peer cannot become a parent merely by receiving a child edge. Each child has at most
+one parent on its ascent, and moving or ending that edge never changes either task's admission class.
+An aggregate parent stays outside claims, live execution and the dependency-ready frontier at every child
+count. Parent completion requires at least one current child; an initially childless parent or one whose
+last child was removed remains incomplete and visible for planning, never vacuously complete. Once it has
+children, parent completion is derived: every child is terminal and landed, and
 where the parent is under a planning record its effect evidence satisfies the applicable
 `completion_criteria[]`. A terminal child count alone cannot close its parent.
 
@@ -1437,8 +1461,8 @@ model is not a new type but the parent task, since a parent is exactly a task th
 workflow and groups the tasks that do (`#parent-and-child-tasks`). It is not forbidden by principle 11:
 a declaration is not derived state and needs no process to keep it true. It is rejected because it is a
 second thing that supplies nothing the instance does not. Grouping, the parent's purpose, is already the
-`FOLLOWS` history. The parent's derived completion read requires every child terminal and landed and
-applicable planning criterion evidence; it cannot express a series whose end is a decision. And propagation,
+`FOLLOWS` history. The parent's derived completion read requires at least one current child, every child
+terminal and landed, and applicable planning criterion evidence; it cannot express a series whose end is a decision. And propagation,
 the reason one usually wants a template — a
 change to the rule reaching every future occurrence — is what duplication already does: the next
 instance copies the live instance's rule, so correcting the rule on the live instance *is* the change to

@@ -45,7 +45,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [Intake is every task's first workflow](../work_model.md#intake-is-every-tasks-first-workflow)
 
-- **WM-13** — every workflow-entering task atomically gets one intake batch and `ADDRESSED_BY` at creation; an aggregate parent gets neither and is not claimable *[M]*
+- **WM-13** — creator-time immutable `admission_class` positively selects `workflow_entering` or `aggregate_parent`; every workflow-entering task atomically gets one intake batch and `ADDRESSED_BY` at creation; an aggregate parent gets neither and is not claimable, even before children exist or after the last child is removed *[M]*
 - **WM-14** — the same: every workflow-entering child task may take intake's fast path and never skips intake *[M]*
 
 ## [What distinguishes a task being assembled from one intake has not reached](../work_model.md#what-distinguishes-a-task-being-assembled-from-one-intake-has-not-reached)
@@ -115,7 +115,7 @@ Every rule `work_model.md` owns, one entry each: the rule's own statement from `
 
 ## [Parent and child tasks](../work_model.md#parent-and-child-tasks)
 
-- **WM-35** — an aggregate parent is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY`; its children are workflow-entering tasks *[M]*
+- **WM-35** — immutable `admission_class: aggregate_parent` makes a parent nonclaimable, outside live execution and the frontier, without intake batch or `ADDRESSED_BY` before any child exists and after its last child is removed; children are workflow-entering tasks; completion requires at least one child, all children terminal and landed, and applicable criterion evidence *[M]*
 
 ## [A recurring task is one live instance, and its completion creates the next](../work_model.md#a-recurring-task-is-one-live-instance-and-its-completion-creates-the-next)
 

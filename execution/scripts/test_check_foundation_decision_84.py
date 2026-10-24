@@ -18,6 +18,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import check_foundation_decision_84 as decision_84  # noqa: E402
 
 CORPUS = {
+    "planning_model.md": "",
     "conformance.md": "| 84 | question | pointer | dependency | **ruled**: every workflow-entering task gets an intake batch; an aggregate parent is exempt; persistent assembly exclusion survives a lapsed lease; creation grants no lease; only the `pm` step owner claims |\n",
     "vocabulary.md": "### claimable\nClaimable excludes an unresolved persistent assembly exclusion except for its PM-only classify claim.\n### terminal\nTerminal.\n",
     "work_model.md": "### Intake is every task's first workflow\nEvery workflow-entering task's intake batch opens at creation; an aggregate parent task never enters a workflow and has no intake batch.\n### What distinguishes a task being assembled from one intake has not reached\nFor a workflow-entering task: persistent assembly exclusion; lease lapse; creation grants no lease; the declared `pm` step owner; multi-agent assembly. The creating principal receives no `classify` lease by being the creator. Contributors gain no lease or execution privilege.\n### What a claim predicate treats as claimable\nThe assembly exclusion exposes its open `classify` step only to a principal that resolves as the declaration's `pm` step owner.\n### A task is live when some principal could claim it now\n### How a batch is formed, and what chooses its workflow\nEvery workflow-entering task has an intake batch on creation; an assembling task adds a persistent classify hold. The consequence worth naming has two forms, not one. An intake batch opens in the admitted creation unit of the workflow-entering task, without a predecessor verdict. Every successor batch is opened by a closing verdict.\n**A successor batch's tasks are chosen by its verdict.**\n### A batch may hold on a condition discovered mid-flight\nThe assembly exception admits its creator-time finding before a step owner or held lease exists; its persistent assembly exclusion survives the lease lapse.\n### A batch may depend on a task it created\n### Parent and child tasks\nAn **aggregate parent task is not claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a batch carries tasks that are executed, which an aggregate parent never is.\n### A recurring task is one live instance, and its completion creates the next\n### Where tasks come from: every source, indexed\nEvery workflow-entering task source ends at the universal workflow entry: a task with its intake batch at creation; an aggregate parent is the exception.\n### An intake rule turns a described change in the record into a task, and nothing else\n",
@@ -93,6 +94,7 @@ def write_corpus(root: Path) -> None:
             "vocabulary.md",
             "work_model.md",
             "workflows.md",
+            "planning_model.md",
         }:
             text = (REPO_ROOT / "docs" / "foundation" / name).read_text(
                 encoding="utf-8"
@@ -156,8 +158,74 @@ def test_complete_carry_passes(tmp_path: Path) -> None:
     ("name", "current", "contradiction", "diagnostic"),
     [
         (
+            "work_model.md",
+            "positively identifies the exception before any child exists and after the last child is removed",
+            "is inferred from current incoming child edges",
+            "aggregate-parent-model",
+        ),
+        (
+            "work_model.md",
+            "An `aggregate_parent` is never claimable, even before any child exists or after its last child is removed",
+            "An `aggregate_parent` is claimable while childless",
+            "claim-model",
+        ),
+        (
+            "work_model.md",
+            "An `aggregate_parent` and a task with missing or ambiguous `admission_class` are excluded from the live pool",
+            "An `aggregate_parent` and a task with missing or ambiguous `admission_class` enter the live pool",
+            "live-model",
+        ),
+        (
+            "planning_model.md",
+            "`admission_class: workflow_entering` that are otherwise claimable",
+            "`admission_class: aggregate_parent` that are otherwise claimable",
+            "parent-admission-frontier-contract",
+        ),
+        (
+            "data_model.md",
+            "missing or ambiguous values refuse admission and legacy claim",
+            "missing or ambiguous values default to workflow entry",
+            "parent-admission-task-schema",
+        ),
+        (
+            "data_model.md",
+            "the target task already has immutable `admission_class: aggregate_parent`",
+            "an ordinary workflow peer becomes a parent when a child points to it",
+            "parent-admission-part-of",
+        ),
+        (
+            "workflows.md",
+            "`classify` does not change `admission_class`",
+            "`classify` may change `admission_class`",
+            "intake-workflow-atomic-entry",
+        ),
+        (
             "scenarios.md",
-            "every child being terminal and landed, plus effect evidence for the applicable planning `completion_criteria[]`",
+            "Removing the last child does not change its class or make it claimable or complete",
+            "Removing the last child makes the parent claimable and complete",
+            "aggregate-parent-scenario",
+        ),
+        (
+            "conformance_suite.md",
+            "childless parent reads complete",
+            "childless parent reads incomplete",
+            "parent-admission-wm-35-cases",
+        ),
+    ],
+)
+def test_parent_admission_contradictions_fail_in_natural_sources(
+    tmp_path: Path, name: str, current: str, contradiction: str, diagnostic: str
+) -> None:
+    problems = mutate_real_corpus_normalized(tmp_path, name, current, contradiction)
+    assert any(diagnostic in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    ("name", "current", "contradiction", "diagnostic"),
+    [
+        (
+            "scenarios.md",
+            "at least one current child, every child terminal and landed, plus effect evidence for the applicable planning `completion_criteria[]`",
             "the children's terminal states",
             "aggregate-parent-scenario",
         ),
@@ -169,19 +237,19 @@ def test_complete_carry_passes(tmp_path: Path) -> None:
         ),
         (
             "data_model.md",
-            "parent completion (every child terminal and landed, with effect evidence satisfying applicable planning `completion_criteria[]`)",
+            "parent completion (at least one current child, every child terminal and landed, with effect evidence satisfying applicable planning `completion_criteria[]`)",
             "parent completion (all children terminal)",
             "part-of-parent-completion",
         ),
         (
             "vocabulary.md",
-            "derived when every child is terminal and landed and applicable planning `completion_criteria[]` have effect evidence",
+            "derived only with at least one current child, every child terminal and landed, and applicable planning `completion_criteria[]` having effect evidence",
             "derived from its children's terminal states",
             "parent-vocabulary-completion",
         ),
         (
             "conformance_suite.md",
-            "one child terminal but unlanded, then all children terminal and landed with unmet `completion_criteria[]`",
+            "one child terminal but unlanded, then all landed with unmet `completion_criteria[]`",
             "complete two children",
             "aggregate-parent-wm-35-cases",
         ),
@@ -193,7 +261,7 @@ def test_complete_carry_passes(tmp_path: Path) -> None:
         ),
         (
             "work_model.md",
-            "The parent's derived completion read requires every child terminal and landed and applicable planning criterion evidence",
+            "The parent's derived completion read requires at least one current child, every child terminal and landed, and applicable planning criterion evidence",
             "The parent's one derived read, completion when every child is terminal",
             "recurrence-parent-completion",
         ),
@@ -532,7 +600,7 @@ def test_real_intake_appended_contradiction_fails(tmp_path: Path) -> None:
     problems = mutate_real_corpus(
         tmp_path,
         "workflows.md",
-        "creation. Creation is publication",
+        "classification refuses admission rather than defaulting to intake. Creation is publication",
         "creation. Despite that sentence, a workflow-entering task need not receive "
         "its intake batch or `ADDRESSED_BY` atomically at creation. Creation is "
         "publication",
@@ -567,7 +635,7 @@ def test_real_parent_scenario_appended_qualification_fails(tmp_path: Path) -> No
     problems = mutate_real_corpus(
         tmp_path,
         "scenarios.md",
-        "edge.** When a reader asks whether the parent is complete",
+        "edge.** Removing the last child does not change its class or",
         "edge.** This holds only before publication; afterward the parent may enter "
         "a workflow. When a reader asks whether the parent is complete",
     )
@@ -655,8 +723,8 @@ def test_real_parent_scenario_adjacent_paragraph_qualification_fails(
         ),
         (
             "scenarios.md",
-            "```mermaid\nflowchart TD\n    P[aggregate parent: not claimable, no "
-            "intake batch, never in a workflow]",
+            "```mermaid\nflowchart TD\n    P[aggregate parent: admission_class set at creation, never "
+            "claimable]",
             "```mermaid\nflowchart TD\n    P[aggregate parent becomes claimable and "
             "enters intake after publication]\n    P -->|ADDRESSED_BY| PB[aggregate "
             "parent batch]",
@@ -697,9 +765,9 @@ def test_real_contradiction_at_protected_end_boundary_fails(
         ),
         (
             "scenarios.md",
-            "A parent task is created as the grouping",
+            "A parent task is created with immutable `admission_class: aggregate_parent` before any child exists",
             "Despite the following scenario, an aggregate parent may enter a "
-            "workflow.\n\nA parent task is created as the grouping",
+            "workflow.\n\nA parent task is created with immutable `admission_class: aggregate_parent` before any child exists",
             "aggregate-parent-scenario",
         ),
     ),
@@ -784,7 +852,7 @@ def test_real_canonical_decoy_before_contradictory_parent_scenario_fails(
     tmp_path: Path,
 ) -> None:
     def transform(text: str) -> str:
-        marker = "A parent task is created as the grouping"
+        marker = "A parent task is created with immutable `admission_class: aggregate_parent` before any child exists"
         position = text.index(marker)
         decoy = (
             decision_84.AGGREGATE_PARENT_SCENARIO_PARAGRAPH
@@ -890,7 +958,8 @@ def test_real_scenario_corruption_cannot_be_masked_by_later_decoy(
             "## (f) A parent task with children in independent batches"
         )
         prose_start = text.index(
-            "A parent task is created as the grouping", section_start
+            "A parent task is created with immutable `admission_class: aggregate_parent` before any child exists",
+            section_start,
         )
         diagram_start = text.index("```mermaid", prose_start)
         corrupted = (

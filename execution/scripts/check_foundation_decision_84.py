@@ -21,7 +21,7 @@ from pathlib import Path
 FOUNDATION_DIR = Path("docs/foundation")
 
 INTAKE_SECTION_SHA256 = (
-    "c97d72261321231c1bda9163898fc38052e6cbbf1a2be48f5d4dcea81874dc4e"
+    "60ba1875856d26721fa2b8d8938c3c9490ac4c653f813cc7c702966e5a2a86f7"
 )
 BATCH_FORMATION_SECTION_SHA256 = (
     "3c9318488e76d1245b2867e0d868dcff6b558b03c81fa425b1147b71bb8d1b38"
@@ -30,16 +30,31 @@ DIRECT_MODEL_SECTION_SHA256 = (
     "baf247ddc33f69d6db844ec80805f704b6caf8f2c22b917543d6cf3be0c7f37e"
 )
 CLAIM_MODEL_SECTION_SHA256 = (
-    "3d2ff563b78ecab399c0e58448817807686fa95762f4c5790cd358a2bbc2b59c"
+    "6274f48f8f594a8a0e790fe299e2ede86595301a207e92693f9c8aa42a54bdbf"
 )
 VOCABULARY_CLAIMABLE_SECTION_SHA256 = (
-    "aa9167b69df90282181b167fe6b5d237baf93f33ca24eebdbd97b5c2c81e3d1e"
+    "5d521e8e5d208e61d118fae0dcb94db6ca1cb7c47e685d0710fbfe8da8122b28"
 )
 LIVE_MODEL_SECTION_SHA256 = (
-    "9c5bee6f7c856c94426ce3866af4aedbe67284a42a2770b41b1afac8b901fa57"
+    "d1fa230e8d7865a6b76e8387949433f7f0db5100fb24f4170efc749931f64236"
 )
+ACTIVE_MODEL_SECTION_SHA256 = (
+    "20ef9986ce037e19d9241c9944215d887829c427e7a11dd537b731cd868f762d"
+)
+FRONTIER_MODEL_SECTION_SHA256 = (
+    "862789aed2e09b568711c0e6a008cc2daeb2935911b923c599f7fec7cffa6399"
+)
+TASK_SCHEMA_ROW_SHA256 = (
+    "9179a0086e9897d916a1e909720dfe59929787c0e296ed2440faa9fa19ac853a"
+)
+PARENT_VOCABULARY_SECTION_SHA256 = (
+    "7a5f519f82dcd3a340ea12d4f33ea74463be173acd29d23d91b676dc4e64a14d"
+)
+PART_OF_ROW_SHA256 = "396c415f9ec68360b0eebd027250275128be06367e37c2dc4d413e91bf7ec5cb"
+WM13_ROW_SHA256 = "50d5a2d64655f9f8e96c53dc0090bc81799661f38a8414ec5c953bc286d40e06"
+WM35_ROW_SHA256 = "28156649ffaca0801e1e8df29f8a6c696f614a1dc3e91562e452f797d4024645"
 SCENARIO_J_SECTION_SHA256 = (
-    "bb202fcedcb854828d32e675df6aa224b428c3e37ca11cd074ee7a40ea36a001"
+    "7ff3b9b0cd3a0888d2ed6ec2d546648391fa690350e5c6d5313213e627e2098b"
 )
 HOLD_MODEL_SECTION_SHA256 = (
     "f14d9ba6700ea67fedd13ca47cfd680d9da667f852be0adfc48959b33997c1e7"
@@ -49,26 +64,16 @@ FINDING_SCHEMA_ROW_SHA256 = (
 )
 WM14A_ROW_SHA256 = "1b3c03b571c2a44ccab30b99bb06746774b9eada13f86551d30066878914c76e"
 
-WM13_REQUIREMENT = (
-    "`work_model.md#intake-is-every-tasks-first-workflow`: every "
-    "workflow-entering task atomically gets one intake batch and `ADDRESSED_BY` "
-    "at creation; an aggregate parent gets neither and is not claimable"
-)
-INTAKE_ATOMIC_ENTRY_CLAUSE = (
-    "**Entry condition:** every workflow-entering task enters with its intake "
-    "batch and `ADDRESSED_BY` edge admitted atomically at creation."
-)
-INTAKE_ENTRY_PARAGRAPH = (
-    INTAKE_ATOMIC_ENTRY_CLAUSE
-    + " Creation is publication (`work_model.md#the-transition-vocabulary`), so "
-    "this boundary is crossed once and no workflow-entering task enters intake "
-    "twice. The aggregate parent is the explicit exception: it is not claimable, "
-    "never enters a workflow, and has no intake batch. Decision 84's assembly "
-    "exception differs only by adding the persistent `classify` hold finding to "
-    "that same creation unit. A task is unrouted while its intake batch has no "
-    "closing `route` verdict; there is no separate unrouted state "
-    "(`work_model.md#intake-is-every-tasks-first-workflow`)."
-)
+WM13_REQUIREMENT = "`work_model.md#intake-is-every-tasks-first-workflow`: creator-time immutable `admission_class` positively selects `workflow_entering` or `aggregate_parent`; every workflow-entering task atomically gets one intake batch and `ADDRESSED_BY` at creation; an aggregate parent gets neither and is not claimable, even before children exist or after the last child is removed"
+INTAKE_ENTRY_PARAGRAPH = """**Entry condition:** every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at
+creation. Its immutable creator-time `admission_class: workflow_entering` is part of that unit. The only
+other admitted value is `aggregate_parent`, which has no batch or `ADDRESSED_BY`; missing or ambiguous
+classification refuses admission rather than defaulting to intake. Creation is publication (`work_model.md#the-transition-vocabulary`), so this boundary is crossed
+once and no workflow-entering task enters intake twice. The aggregate parent is the explicit exception: it
+is not claimable, never enters a workflow, and has no intake batch. Decision 84's assembly exception differs
+only by adding the persistent
+`classify` hold finding to that same creation unit. A task is unrouted while its intake batch has no closing
+`route` verdict; there is no separate unrouted state (`work_model.md#intake-is-every-tasks-first-workflow`)."""
 INTAKE_PURPOSE_PARAGRAPH = (
     "**Purpose:** turn a created task into a routed one: classified, linked to the "
     "records it concerns, deduplicated, prioritized, and handed to exactly one "
@@ -137,68 +142,60 @@ BATCH_FORMATION_SEMANTIC_BLOCK = (
     + "\n\n"
     + BATCH_SUCCESSOR_TASKS_PARAGRAPH
 )
-AGGREGATE_PARENT_MODEL_CLAUSE = (
-    "An **aggregate parent task is not claimable, never enters a workflow, and "
-    "has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a "
-    "batch carries tasks that are executed, which an aggregate parent never is."
-)
-AGGREGATE_PARENT_MODEL_PARAGRAPH = (
-    "Children `PART_OF` an aggregate parent (at most one parent). Children go "
-    "through workflows independently. "
-    + AGGREGATE_PARENT_MODEL_CLAUSE
-    + " This is the deliberate exception to the workflow-entry creation rule; "
-    "every child and every other workflow-entering peer task still opens its intake "
-    "batch atomically at creation. Parent completion is derived: every child is "
-    "terminal and landed, and where the parent is under a planning record its "
-    "effect evidence satisfies the applicable `completion_criteria[]`. A terminal "
-    "child count alone cannot close its parent."
-)
-AGGREGATE_PARENT_ASCENT_PARAGRAPH = (
-    "**A task's one `PART_OF` edge targets its parent task or a planning record, and "
-    "the records above it are its ascent.** The same edge, with the same one-parent "
-    "rule, relates a task to the plan it is under and a plan to whatever the instance "
-    "holds above it; the walk upward from a task along `PART_OF` is a derived read, "
-    "distinct from the chain, and what a step reads of it is declared and resolved at "
-    "hydration "
-    "(`planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward`, "
-    "`planning_model.md#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration`). "
-    "A task with no planning record above it is unplanned, a derived read and never a "
-    "status, and it is admitted through intake like any task. Completion at every "
-    "level above the task is the parent's rule applied again: derived from "
-    "descendant terminal-and-landed state plus the planning record's criterion "
-    "evidence, never stored "
-    "(`planning_model.md#downward-state-is-derived-upward-content-is-authored-as-entities`, "
-    "`planning_model.md#commissioning-a-planning-record-drives-one-dependency-ready-frontier`)."
-)
+AGGREGATE_PARENT_MODEL_PARAGRAPH = """Children `PART_OF` an aggregate parent (at most one parent). Children go through workflows independently.
+An **aggregate parent task is not claimable,
+never enters a workflow, and has no intake batch or `ADDRESSED_BY` edge** — it is a grouping, and a batch
+carries tasks that are executed, which an aggregate parent never is. This is the deliberate exception to
+the workflow-entry creation rule; every child and every other workflow-entering peer task still opens its
+intake batch atomically at creation. The task's immutable creator-time `admission_class: aggregate_parent`
+positively identifies the exception before any child exists and after the last child is removed; child
+`PART_OF` edges express membership, not admission class. Creation refuses a missing or ambiguous class.
+The target of a child task's `PART_OF` edge must already carry `admission_class: aggregate_parent`; an
+ordinary workflow peer cannot become a parent merely by receiving a child edge. Each child has at most
+one parent on its ascent, and moving or ending that edge never changes either task's admission class.
+An aggregate parent stays outside claims, live execution and the dependency-ready frontier at every child
+count. Parent completion requires at least one current child; an initially childless parent or one whose
+last child was removed remains incomplete and visible for planning, never vacuously complete. Once it has
+children, parent completion is derived: every child is terminal and landed, and
+where the parent is under a planning record its effect evidence satisfies the applicable
+`completion_criteria[]`. A terminal child count alone cannot close its parent."""
+AGGREGATE_PARENT_ASCENT_PARAGRAPH = """**A task's one `PART_OF` edge targets its parent task or a planning record, and the records above it are
+its ascent.** The same edge, with the same one-parent rule, relates a task to the plan it is under and a
+plan to whatever the instance holds above it; the walk upward from a task along `PART_OF` is a derived
+read, distinct from the chain, and what a step reads of it is declared and resolved at hydration
+(`planning_model.md#the-hierarchy-is-edges-and-a-task-has-one-line-upward`,
+`planning_model.md#upward-context-is-a-declared-read-resolved-along-the-ascent-at-hydration`). A task with
+no planning record above it is unplanned, a derived read and never a status, and it is admitted through
+intake like any task. Completion at every level above the task is the parent's rule applied again: derived
+from descendant terminal-and-landed state plus the planning record's criterion evidence, never stored
+(`planning_model.md#downward-state-is-derived-upward-content-is-authored-as-entities`,
+`planning_model.md#commissioning-a-planning-record-drives-one-dependency-ready-frontier`)."""
 AGGREGATE_PARENT_MODEL_SECTION = (
     AGGREGATE_PARENT_MODEL_PARAGRAPH + "\n\n" + AGGREGATE_PARENT_ASCENT_PARAGRAPH
 )
-AGGREGATE_PARENT_SCENARIO_CLAUSE = (
-    "**aggregate parent is the explicit workflow-entry exception: it is not "
-    "claimable, never enters a workflow, and has no intake batch or `ADDRESSED_BY` "
-    "edge.**"
-)
-AGGREGATE_PARENT_SCENARIO_PARAGRAPH = (
-    "A parent task is created as the grouping of a piece of work; three child tasks "
-    "each carry a `PART_OF` edge to it. Each child is claimed, executed, and goes "
-    "through its own batch on its own schedule. The "
-    + AGGREGATE_PARENT_SCENARIO_CLAUSE
-    + " When a reader asks whether the parent is complete, the answer is derived "
-    "at that moment from every child being terminal and landed, plus effect evidence "
-    "for the applicable planning `completion_criteria[]` where the parent is under "
-    "a planning record. Neither terminal status alone nor a stored parent status "
-    "proves completion."
-)
+AGGREGATE_PARENT_SCENARIO_PARAGRAPH = """A parent task is created with immutable `admission_class: aggregate_parent` before any child exists. It is
+visible but incomplete, outside claim, live execution and the dependency-ready frontier, with no intake
+batch. Three child tasks each carry a `PART_OF`
+edge to it. Each child is claimed, executed, and goes through its own batch on its own schedule. The
+**aggregate parent is the explicit workflow-entry exception: it is not claimable, never enters a workflow,
+and has no intake batch or `ADDRESSED_BY` edge.** Removing the last child does not change its class or
+make it claimable or complete; it remains visible and incomplete. When a reader asks whether the parent is complete,
+the answer requires at least one current child, every child terminal and landed, plus effect evidence
+for the applicable planning `completion_criteria[]` where the parent is under a planning record.
+Neither terminal status alone nor a stored parent status proves completion."""
 AGGREGATE_PARENT_SCENARIO_DIAGRAM = """```mermaid
 flowchart TD
-    P[aggregate parent: not claimable, no intake batch, never in a workflow]
+    P[aggregate parent: admission_class set at creation, never claimable]
+    P --> Z{at least one current child?}
+    Z -->|no, including last child removed| NC[parent remains incomplete]
     C1[child 1] -->|PART_OF| P
     C2[child 2] -->|PART_OF| P
     C3[child 3] -->|PART_OF| P
     C1 -->|ADDRESSED_BY| R1[batch 1]
     C2 -->|ADDRESSED_BY| R2[batch 2]
     C3 -->|ADDRESSED_BY| R3[batch 3]
-    R1 --> D{all children terminal and landed?}
+    Z -->|yes| D{all children terminal and landed?}
+    R1 --> D
     R2 --> D
     R3 --> D
     D -->|no| NC[parent remains incomplete]
@@ -206,10 +203,8 @@ flowchart TD
     E -->|no| NC
     E -->|yes, derived at read| PC[parent reads complete]
 ```"""
-AGGREGATE_PARENT_SCENARIO_INVARIANTS = (
-    "**Invariants:** [`work_model.md#parent-and-child-tasks`]"
-    "(work_model.md#parent-and-child-tasks); `principles.md` invariant 11."
-)
+AGGREGATE_PARENT_SCENARIO_INVARIANTS = """**Invariants:** [`work_model.md#parent-and-child-tasks`](work_model.md#parent-and-child-tasks);
+`principles.md` invariant 11."""
 AGGREGATE_PARENT_SCENARIO_SECTION = (
     AGGREGATE_PARENT_SCENARIO_PARAGRAPH
     + "\n\n"
@@ -217,11 +212,7 @@ AGGREGATE_PARENT_SCENARIO_SECTION = (
     + "\n\n"
     + AGGREGATE_PARENT_SCENARIO_INVARIANTS
 )
-WM35_REQUIREMENT = (
-    "`work_model.md#parent-and-child-tasks`: an aggregate parent is not claimable, "
-    "never enters a workflow, and has no intake batch or `ADDRESSED_BY`; its "
-    "children are workflow-entering tasks"
-)
+WM35_REQUIREMENT = "`work_model.md#parent-and-child-tasks`: immutable `admission_class: aggregate_parent` makes a parent nonclaimable, outside live execution and the frontier, without intake batch or `ADDRESSED_BY` before any child exists and after its last child is removed; children are workflow-entering tasks; completion requires at least one child, all children terminal and landed, and applicable criterion evidence"
 
 
 class CorpusProblem(Exception):
@@ -602,6 +593,7 @@ def check(root: Path) -> list[str]:
         "workflows.md",
         "scenarios.md",
         "conformance_suite.md",
+        "planning_model.md",
     )
     texts: dict[str, str] = {}
     for name in names:
@@ -714,8 +706,74 @@ def check(root: Path) -> list[str]:
     parent_vocabulary = _heading_section(
         texts["vocabulary.md"], "### parent task", "### child task"
     )
+    active_model = _owning_heading_section(
+        texts["work_model.md"],
+        "Liveness is derived from activity at read time, never declared",
+        "No assignment log; history is the task's own observations",
+    )
+    frontier_model = _heading_section(
+        texts["planning_model.md"],
+        "### Commissioning a planning record drives one dependency-ready frontier",
+        "### The swarm may not author a missing ancestor",
+    )
+    admission_surfaces = {
+        "task-schema": task_schema,
+        "parent-model": parent_model,
+        "claim-model": claim_model_owner,
+        "live-model": live_model_owner,
+        "parent-vocabulary": parent_vocabulary,
+        "wm-13": creation_row_map["WM-13"],
+        "wm-35": wm35,
+        "parent-scenario": scenario_f,
+        "intake-workflow": intake_workflow,
+        "frontier": frontier_model,
+    }
 
     problems: list[str] = []
+    for surface, source in admission_surfaces.items():
+        problems += _require(
+            f"parent-admission-{surface}",
+            source,
+            (("admission_class",),),
+        )
+    problems += _require(
+        "parent-admission-schema-values",
+        task_schema,
+        (("`workflow_entering`",), ("`aggregate_parent`",), ("immutable",)),
+    )
+    problems += _require(
+        "parent-admission-childless",
+        parent_model,
+        (("before any child",), ("last child",), ("incomplete",)),
+    )
+    problems += _require(
+        "parent-admission-fail-closed",
+        claim_model_owner + " " + live_model_owner,
+        (("missing",), ("ambiguous",), ("refused", "excluded")),
+    )
+    problems += _require(
+        "parent-admission-frontier",
+        frontier_model,
+        (("admission_class: workflow_entering",), ("claimable",)),
+    )
+    for label, source, digest in (
+        ("parent-admission-active", active_model, ACTIVE_MODEL_SECTION_SHA256),
+        (
+            "parent-admission-frontier-contract",
+            frontier_model,
+            FRONTIER_MODEL_SECTION_SHA256,
+        ),
+        ("parent-admission-task-schema", task_schema, TASK_SCHEMA_ROW_SHA256),
+        (
+            "parent-admission-parent-vocabulary",
+            parent_vocabulary,
+            PARENT_VOCABULARY_SECTION_SHA256,
+        ),
+        ("parent-admission-part-of", part_of, PART_OF_ROW_SHA256),
+        ("parent-admission-wm-13-cases", creation_row_map["WM-13"], WM13_ROW_SHA256),
+        ("parent-admission-wm-35-cases", wm35, WM35_ROW_SHA256),
+    ):
+        problems += _require_exact_section_digest(label, source, digest)
     problems += _require(
         "register",
         register,
@@ -726,7 +784,7 @@ def check(root: Path) -> list[str]:
             ("creation grants no lease",),
             ("`pm` step owner",),
             ("workflow-entering",),
-            ("aggregate parent",),
+            ("aggregate parent", "aggregate-parent"),
         ),
     )
     problems += _require(
@@ -846,7 +904,7 @@ def check(root: Path) -> list[str]:
         "parent-vocabulary-completion",
         parent_vocabulary,
         (
-            ("every child is terminal and landed",),
+            ("every child is terminal and landed", "every child terminal and landed"),
             ("`completion_criteria[]`",),
             ("effect evidence",),
         ),
@@ -1018,6 +1076,28 @@ for _row in ("WM-13", "WM-14", "WM-21", "WM-32b", "WM-35a", "WM-39"):
     _PROBLEM_LOCATIONS[f"universal-entry-{_row.lower()}"] = (
         f"docs/foundation/conformance_suite.md — row {_row}"
     )
+_PROBLEM_LOCATIONS.update(
+    {
+        "parent-admission-task-schema": "docs/foundation/data_model.md — task row",
+        "parent-admission-parent-model": "docs/foundation/work_model.md — Parent and child tasks",
+        "parent-admission-claim-model": "docs/foundation/work_model.md — What a claim predicate treats as claimable",
+        "parent-admission-live-model": "docs/foundation/work_model.md — A task is live",
+        "parent-admission-parent-vocabulary": "docs/foundation/vocabulary.md — parent task",
+        "parent-admission-wm-13": "docs/foundation/conformance_suite.md — WM-13",
+        "parent-admission-wm-35": "docs/foundation/conformance_suite.md — WM-35",
+        "parent-admission-parent-scenario": "docs/foundation/scenarios.md — scenario (f)",
+        "parent-admission-intake-workflow": "docs/foundation/workflows.md — intake",
+        "parent-admission-frontier": "docs/foundation/planning_model.md — Commissioning a planning record",
+        "parent-admission-schema-values": "docs/foundation/data_model.md — task row",
+        "parent-admission-childless": "docs/foundation/work_model.md — Parent and child tasks",
+        "parent-admission-fail-closed": "docs/foundation/work_model.md — claim and live reads",
+        "parent-admission-active": "docs/foundation/work_model.md — Liveness is derived",
+        "parent-admission-frontier-contract": "docs/foundation/planning_model.md — Commissioning a planning record",
+        "parent-admission-part-of": "docs/foundation/data_model.md — PART_OF row",
+        "parent-admission-wm-13-cases": "docs/foundation/conformance_suite.md — WM-13",
+        "parent-admission-wm-35-cases": "docs/foundation/conformance_suite.md — WM-35",
+    }
+)
 
 
 def _actionable_problem(problem: str) -> str:
