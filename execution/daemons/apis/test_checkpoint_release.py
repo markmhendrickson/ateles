@@ -622,6 +622,7 @@ async def test_approve_releases_task_and_marks_brief_consumed(
     )
     assert dispatches[0]["kwargs"]["trigger"] == "approved"
     assert dispatches[0]["kwargs"]["gate_override"] is True
+    assert dispatches[0]["kwargs"]["run_key_override"] == f"approved-{brief_id}"
     assert records[task_id]["snapshot"]["status"] == "routed"
     assert records[task_id]["snapshot"]["blocked_reason"] == ""
     assert records[brief_id]["snapshot"]["resolved_dispatched"] is True

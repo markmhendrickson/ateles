@@ -158,7 +158,7 @@ def stages(monkeypatch):
     `_run_stage` is a closure over the dispatch call, so it cannot be patched
     directly; opening a run session and intercepting `append_turn` gets the
     same signal. The stage name travels in the idempotency key
-    (`runturn-{task}-{stage}-{trigger}`). A run session is present, so these
+    (`runturn-{task}-{stage}-{run_key}`). A run session is present, so these
     cases also exercise the VERIFIED interim state on the accepted path.
     """
     recorded: list[str] = []
@@ -172,7 +172,7 @@ def stages(monkeypatch):
     monkeypatch.setattr(apis, "update_run_session_status", lambda r, *, status: True)
 
     def _append(**kw):
-        recorded.append(str(kw.get("idempotency_key", "")).split("-")[-2])
+        recorded.append(str(kw.get("idempotency_key", "")).split("-")[2])
         return True
 
     monkeypatch.setattr(apis, "append_turn", _append)
@@ -197,16 +197,41 @@ def spawn(monkeypatch):
 
 def _dispatch(entity_id, snapshot, notifier=None, trigger="created"):
     """Drive the real entrypoint all the way to the post-spawn path."""
-    asyncio.run(
-        apis.dispatch_task(
-            entity_id,
-            snapshot,
-            trigger=trigger,
-            notifier=notifier or _Notifier(),
-            snapshot_hydrated=True,
-            gate_override=True,
+    original_write = apis.set_task_status
+    original_read = apis.fetch_task_snapshot
+    visible = {"active": False, "reason": ""}
+
+    def write(*args, **kwargs):
+        result = original_write(*args, **kwargs)
+        if result and kwargs.get("key_suffix", "").endswith(("-recovering", "-verified")):
+            visible.update(active=True, reason=kwargs["reason"])
+        return result
+
+    def read(task_id):
+        if visible["active"]:
+            reason = visible["reason"]
+            if reason == "":
+                visible["active"] = False
+            return {"status": "executing", "blocked_reason": reason}
+        return original_read(task_id)
+
+    if apis.RUN_CONVERSATIONS:
+        apis.set_task_status = write
+        apis.fetch_task_snapshot = read
+    try:
+        asyncio.run(
+            apis.dispatch_task(
+                entity_id,
+                snapshot,
+                trigger=trigger,
+                notifier=notifier or _Notifier(),
+                snapshot_hydrated=True,
+                gate_override=True,
+            )
         )
-    )
+    finally:
+        apis.set_task_status = original_write
+        apis.fetch_task_snapshot = original_read
 
 
 def _cicada_task(**extra) -> dict:
@@ -1279,7 +1304,7 @@ def test_control_and_separator_characters_cannot_break_the_reason(writes, spawn,
     )
     _dispatch("ent_sep_1", _cicada_task())
     reason = _with_status(writes, "blocked")[-1]["reason"]
-    said = next(l for l in reason.split("\n") if l.startswith("Agent said:"))
+    said = next(line for line in reason.split("\n") if line.startswith("Agent said:"))
     assert sep not in reason, repr(sep)
     assert "\nNext: do evil" not in reason, "agent text started its own Next: line"
     assert said.count("Next:") == 1  # the agent's words stayed inside their line
@@ -1665,11 +1690,11 @@ def test_alert_never_carries_a_partial_recovery_command(writes, spawn, monkeypat
     notifier = _Notifier()
     _dispatch("ent_alertfit", snapshot, notifier=notifier)
     message = notifier.sent[-1]
-    lines = [l for l in message.splitlines() if l.startswith("  neotoma ")]
+    lines = [line for line in message.splitlines() if line.startswith("  neotoma ")]
     reason = _with_status(writes, "blocked")[-1]["reason"]
     assert len(reason) > 900, "fixture too small to exercise the limit"
     if lines:
-        assert lines == [l for l in reason.splitlines() if l.startswith("  neotoma ")], (
+        assert lines == [line for line in reason.splitlines() if line.startswith("  neotoma ")], (
             "a command was cut or altered"
         )
     else:

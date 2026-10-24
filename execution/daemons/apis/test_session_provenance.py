@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +40,180 @@ class _Job:
 
     def failed(self, *_args, **_kwargs):
         self.failed_events.append(_args)
+
+
+def _visible_recovery(monkeypatch):
+    """Keep existing test fakes faithful to the task reason readback contract."""
+    write = apis.set_task_status
+    read = apis.fetch_task_snapshot
+    visible = {"active": False, "reason": ""}
+
+    def write_status(*args, **kwargs):
+        if kwargs.get("key_suffix", "").endswith(("-recovering", "-verified")):
+            visible.update(active=True, reason=kwargs["reason"])
+        return write(*args, **kwargs)
+
+    def read_status(entity_id):
+        if visible["active"]:
+            reason = visible["reason"]
+            if reason == "":
+                visible["active"] = False
+            return {"status": "executing", "blocked_reason": reason}
+        return read(entity_id)
+
+    monkeypatch.setattr(apis, "set_task_status", write_status)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", read_status)
+
+
+@pytest.mark.asyncio
+async def test_delayed_run_recovery_keeps_other_dispatch_responsive(monkeypatch):
+    seen = []
+    task_state = {}
+    spawned = []
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", True)
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(apis, "_activity", SimpleNamespace(started=lambda *_a: _Job()))
+    monkeypatch.setattr(apis, "_release_lifecycle_proven", lambda *_a: True)
+
+    def status(task_id, value, **kwargs):
+        current = task_state.setdefault(task_id, {})
+        current["status"] = value.value
+        if kwargs.get("reason") is not None:
+            current["blocked_reason"] = kwargs["reason"]
+        if task_id == "ent_second" and value is apis.TaskStatus.EXECUTING:
+            seen.append("second_status")
+        return True
+
+    def session(*, task_id, **_kwargs):
+        if task_id == "ent_first":
+            seen.append("first_waiting")
+            time.sleep(0.2)  # real delay on the critical recovery path
+            seen.append("first_resolved")
+        return None
+
+    monkeypatch.setattr(apis, "set_task_status", status)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda task_id: dict(task_state[task_id]))
+    monkeypatch.setattr(apis, "create_run_session", session)
+
+    async def spawn(*_args, **_kwargs):
+        spawned.append(True)
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", spawn)
+    notifier = _Notifier()
+
+    async def dispatch(task_id):
+        await apis.dispatch_task(
+            task_id,
+            {"title": "Independent task", "assigned_to": "cicada",
+             "repo": "markmhendrickson/ateles", "status": "awaiting_approval"},
+            "approved", notifier, gate_override=True,
+        )
+
+    first = asyncio.create_task(dispatch("ent_first"))
+    second = asyncio.create_task(dispatch("ent_second"))
+
+    async def sentinel():
+        await asyncio.sleep(0.05)
+        assert task_state["ent_first"]["status"] == "executing"
+        assert task_state["ent_first"]["blocked_reason"] == (
+            "Verifying run records (up to 45 seconds); worker not started"
+        )
+        seen.append("sentinel")
+
+    await asyncio.gather(first, second, sentinel())
+    assert seen.index("second_status") < seen.index("first_resolved")
+    assert seen.index("sentinel") < seen.index("first_resolved")
+    assert spawned == []
+    assert "provenance" in task_state["ent_first"]["blocked_reason"]
+    assert "provenance" in task_state["ent_second"]["blocked_reason"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_recovery_cannot_launch_after_thread_finishes(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    state = {}
+    spawned = []
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", True)
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(apis, "_activity", SimpleNamespace(started=lambda *_a: _Job()))
+    monkeypatch.setattr(apis, "_release_lifecycle_proven", lambda *_a: True)
+
+    def status(_id, value, **kwargs):
+        state["status"] = value.value
+        if kwargs.get("reason") is not None:
+            state["blocked_reason"] = kwargs["reason"]
+        return True
+
+    def session(**_kwargs):
+        started.set()
+        release.wait(1)
+        return SimpleNamespace(
+            conversation_id="ent_conversation", agent_session_id="ent_session",
+            native_session_id="ent_task:approved-0",
+        )
+
+    monkeypatch.setattr(apis, "set_task_status", status)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: dict(state))
+    monkeypatch.setattr(apis, "create_run_session", session)
+
+    async def spawn(*_args, **_kwargs):
+        spawned.append(True)
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", spawn)
+    task = asyncio.create_task(apis.dispatch_task(
+        "ent_task", {"title": "Task", "assigned_to": "cicada",
+                     "repo": "markmhendrickson/ateles", "status": "awaiting_approval"},
+        "approved", _Notifier(), gate_override=True,
+    ))
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    await asyncio.sleep(0.03)
+    assert spawned == []
+    assert state["status"] == "failed"
+    assert "cancelled" in state["blocked_reason"]
+
+
+@pytest.mark.asyncio
+async def test_task_held_during_run_verification_cannot_launch(monkeypatch):
+    state = {}
+    spawned = []
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", True)
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(apis, "_activity", SimpleNamespace(started=lambda *_a: _Job()))
+    monkeypatch.setattr(apis, "_release_lifecycle_proven", lambda *_a: True)
+
+    def status(_id, value, **kwargs):
+        state["status"] = value.value
+        if kwargs.get("reason") is not None:
+            state["blocked_reason"] = kwargs["reason"]
+        return True
+
+    def session(**_kwargs):
+        state.update(status="blocked", blocked_reason="held by another gate")
+        return SimpleNamespace(
+            conversation_id="ent_conversation", agent_session_id="ent_session",
+            native_session_id="ent_task:approved-0",
+        )
+
+    monkeypatch.setattr(apis, "set_task_status", status)
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda _id: dict(state))
+    monkeypatch.setattr(apis, "create_run_session", session)
+
+    async def spawn(*_args, **_kwargs):
+        spawned.append(True)
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", spawn)
+    await apis.dispatch_task(
+        "ent_task", {"title": "Task", "assigned_to": "cicada",
+                     "repo": "markmhendrickson/ateles", "status": "awaiting_approval"},
+        "approved", _Notifier(), gate_override=True,
+    )
+    assert spawned == []
+    assert state == {"status": "blocked", "blocked_reason": "held by another gate"}
 
 
 _PR_HEADER = (
@@ -149,6 +326,7 @@ async def test_dispatch_persists_one_session_across_spawn_turns_and_completion(
 
     monkeypatch.setattr(apis, "_spawn_harness_skill", fake_spawn)
 
+    _visible_recovery(monkeypatch)
     await apis.dispatch_task(
         "ent_task",
         {
@@ -268,6 +446,7 @@ async def test_dispatch_refuses_to_spawn_without_verified_session_provenance(
 
     monkeypatch.setattr(apis, "_spawn_harness_skill", fake_spawn)
 
+    _visible_recovery(monkeypatch)
     await apis.dispatch_task(
         "ent_task",
         {
@@ -356,6 +535,7 @@ async def test_timed_out_prelaunch_store_recovers_late_exact_run_once(monkeypatc
         )
 
     monkeypatch.setattr(apis, "_spawn_harness_skill", spawn)
+    _visible_recovery(monkeypatch)
     await apis.dispatch_task(
         "ent_task", {"title": "Implement it", "assigned_to": "cicada",
                      "repo": "markmhendrickson/ateles", "status": "awaiting_approval",
@@ -410,6 +590,7 @@ async def test_dispatch_holds_verified_when_terminal_state_is_unverified(
     )
     monkeypatch.setattr(apis, "resolve_artifact_ref", lambda *a, **k: True)
 
+    _visible_recovery(monkeypatch)
     await apis.dispatch_task(
         "ent_task",
         {
@@ -500,6 +681,7 @@ async def test_watchdog_reconciles_terminal_provenance_without_repeating_effect(
             gate_override=True,
         )
 
+    _visible_recovery(monkeypatch)
     await apis.dispatch_task(
         "ent_task",
         snapshot,

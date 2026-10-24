@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -184,7 +185,7 @@ class TaskWatchdog:
     async def sweep(self, notifier, dispatch_fn) -> dict:
         """One pass: classify every active task and act. Returns a counts dict.
 
-        `dispatch_fn(task_id, snapshot, trigger)` is an async callable (Apis's
+        `dispatch_fn(task_id, snapshot, trigger, run_key)` is an async callable (Apis's
         dispatch_task closure) used to re-dispatch a retryable task.
         """
         now = time.time()
@@ -293,7 +294,10 @@ class TaskWatchdog:
             )
             self.record_retry(entity_id, now)
             try:
-                await dispatch_fn(entity_id, routed, "watchdog_retry")
+                # The run session persists this key before a worker is launched.
+                # A new retry gets a new key after a watchdog restart too.
+                run_key = f"watchdog_retry-{uuid.uuid4().hex}"
+                await dispatch_fn(entity_id, routed, "watchdog_retry", run_key)
                 counts["retried"] += 1
             except Exception as exc:  # noqa: BLE001
                 log.warning("[watchdog] re-dispatch of %s failed: %s", entity_id, exc)
@@ -478,12 +482,16 @@ def _query_tasks(limit: int, cursor: str | None = None) -> tuple[list[tuple[str,
 def _unwrap_snapshot(row: dict) -> dict:
     """Tolerate the several snapshot nesting shapes Neotoma returns."""
     snap = row.get("snapshot")
-    if isinstance(snap, dict):
-        inner = snap.get("snapshot")
-        if isinstance(inner, dict):
-            return inner
-        return snap
-    return row
+    if not isinstance(snap, dict):
+        return row
+    inner = snap.get("snapshot")
+    base = inner if isinstance(inner, dict) else snap
+    carried = {}
+    for source in (snap, row):
+        for key in ("last_observation_at", "computed_at"):
+            if key not in base and key not in carried and source.get(key) is not None:
+                carried[key] = source[key]
+    return {**base, **carried} if carried else base
 
 
 def _age_seconds(snapshot: dict, now: float) -> float | None:

@@ -19,6 +19,7 @@ for _p in (_HERE, _REPO_ROOT):
         sys.path.insert(0, _p)
 
 import task_watchdog as tw  # noqa: E402
+from lib.daemon_runtime import session_finalize  # noqa: E402
 
 
 # ── pure classification ──────────────────────────────────────────────────────
@@ -127,7 +128,7 @@ def test_sweep_retries_fresh_failure_and_escalates_exhausted(monkeypatch):
 
     dispatched: list[tuple] = []
 
-    async def dispatch_fn(task_id, snapshot, trigger):
+    async def dispatch_fn(task_id, snapshot, trigger, run_key):
         dispatched.append((task_id, trigger))
 
     notifier = object()
@@ -152,7 +153,7 @@ def test_sweep_skips_during_backoff(monkeypatch):
 
     dispatched: list = []
 
-    async def dispatch_fn(task_id, snapshot, trigger):
+    async def dispatch_fn(task_id, snapshot, trigger, run_key):
         dispatched.append(task_id)
 
     counts = asyncio.run(wd.sweep(object(), dispatch_fn))
@@ -174,7 +175,7 @@ def test_sweep_leaves_unresolved_verified_effect_without_dispatch(monkeypatch):
 
     dispatched: list[str] = []
 
-    async def dispatch_fn(task_id, _snapshot, _trigger):
+    async def dispatch_fn(task_id, _snapshot, _trigger, _run_key):
         dispatched.append(task_id)
 
     counts = asyncio.run(wd.sweep(object(), dispatch_fn))
@@ -216,6 +217,148 @@ def test_query_tasks_unwraps_shapes():
     assert tw._unwrap_snapshot({"status": "z"}) == {"status": "z"}
 
 
+@pytest.mark.parametrize("status,stamp_key,nested", [
+    ("routed", "last_observation_at", False),
+    ("executing", "computed_at", False),
+    ("routed", "last_observation_at", True),
+    ("executing", "computed_at", True),
+])
+def test_row_stamped_stalled_task_reaches_retry_from_second_page(
+    monkeypatch, status, stamp_key, nested,
+):
+    old = tw._iso(tw.time.time() - 7200)
+    task = {"status": status}
+    wrapped = {"snapshot": task} if nested else task
+    row = {"entity_id": "ent_stalled", "snapshot": wrapped}
+    (wrapped if nested else row)[stamp_key] = old
+    pages = [
+        {"entities": [{"entity_id": "ent_done", "snapshot": {"status": "done"}}],
+         "limit": tw.QUERY_LIMIT, "offset": 0, "total": 2, "next_cursor": "second"},
+        {"entities": [row], "limit": tw.QUERY_LIMIT, "offset": 0,
+         "total": 2, "next_cursor": None},
+    ]
+    requests = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, body):
+            self.body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.body
+
+    def post(_url, **kwargs):
+        requests.append(kwargs["json"])
+        return Response(pages[len(requests) - 1])
+
+    monkeypatch.setattr(tw, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(tw.httpx, "post", post)
+    state = {"status": status}
+    fresh_reads = []
+
+    def fresh(_id):
+        fresh_reads.append(state["status"])
+        return {"snapshot": {"status": state["status"]}, stamp_key: old}
+
+    def write(_id, new_status, **_kwargs):
+        state["status"] = new_status.value
+        return True
+
+    monkeypatch.setattr(tw, "fetch_task_record", fresh)
+    monkeypatch.setattr(tw, "set_task_status", write)
+    dispatched = []
+
+    async def dispatch(task_id, snapshot, trigger, run_key):
+        dispatched.append((task_id, snapshot["status"], trigger, run_key))
+
+    counts = asyncio.run(tw.TaskWatchdog(stall_seconds=3600).sweep(object(), dispatch))
+    assert [r.get("cursor") for r in requests] == [None, "second"]
+    assert counts["scan_complete"] is True
+    assert counts["scanned"] == 2
+    assert counts["retried"] == 1
+    assert fresh_reads == [status, "routed"]
+    assert dispatched[0][:3] == ("ent_stalled", "routed", "watchdog_retry")
+
+
+def test_retries_after_restart_have_distinct_verified_run_sessions(monkeypatch):
+    state = {"status": "failed"}
+    payloads = []
+    runs = []
+    monkeypatch.setattr(tw, "_query_tasks", lambda *_a: (
+        [("ent_task", {"status": "failed"})], None
+    ))
+    monkeypatch.setattr(tw, "fetch_task_record", lambda _id: {
+        "snapshot": {"status": state["status"]}
+    })
+
+    def write(_id, status, **_kwargs):
+        state["status"] = status.value
+        return True
+
+    monkeypatch.setattr(tw, "set_task_status", write)
+    monkeypatch.setattr(session_finalize, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(session_finalize, "_post_store", lambda body:
+                        payloads.append(body) or None)  # response lost after write
+
+    def rows(entity_type, *, identity_value, **_kwargs):
+        payload = next((body for body in payloads
+                        if body["entities"][1]["native_session_id"] == identity_value), None)
+        if payload is None:
+            return []
+        if entity_type == "agent_session":
+            return [{"entity_id": f"session-{identity_value}",
+                     "snapshot": payload["entities"][1]}]
+        return [{"entity_id": f"conversation-{identity_value}",
+                 "snapshot": payload["entities"][0]}]
+
+    def entity_readback(entity_id, *, entity_type, required_fields, **_kwargs):
+        identity = entity_id.split("-", 1)[1]
+        payload = next(body for body in payloads
+                       if body["entities"][1]["native_session_id"] == identity)
+        entity = payload["entities"][0 if entity_type == "conversation" else 1]
+        return all(entity.get(key) == value for key, value in required_fields.items())
+
+    def relationship_readback(source_id, *, target_entity_id, relationship_type, **_kwargs):
+        identity = source_id.split("-", 1)[1]
+        payload = next(body for body in payloads
+                       if body["entities"][1]["native_session_id"] == identity)
+        source_index = 0 if source_id.startswith("conversation-") else 1
+        return relationship_type == "REFERS_TO" and any(
+            rel.get("source_index") == source_index and (
+                rel.get("target_entity_id") == target_entity_id
+                or rel.get("target_index") == 1
+                and target_entity_id == f"session-{identity}"
+            ) for rel in payload["relationships"]
+        )
+
+    monkeypatch.setattr(session_finalize, "_query_entity_rows", rows)
+    monkeypatch.setattr(session_finalize, "_entity_readback_matches", entity_readback)
+    monkeypatch.setattr(session_finalize, "_relationship_readback_matches", relationship_readback)
+
+    async def dispatch(_task_id, routed, trigger, run_key):
+        assert routed["status"] == "routed"
+        assert trigger == "watchdog_retry"
+        run = session_finalize.create_run_session(
+            task_id="ent_task", agent="cicada", run_key=run_key,
+        )
+        assert run is not None
+        runs.append(run)
+
+    first = asyncio.run(tw.TaskWatchdog().sweep(object(), dispatch))
+    state["status"] = "failed"
+    second = asyncio.run(tw.TaskWatchdog().sweep(object(), dispatch))
+    assert first["retried"] == second["retried"] == 1
+    assert len(payloads) == len(runs) == 2
+    assert runs[0].native_session_id != runs[1].native_session_id
+    assert all(p["entities"][1]["native_session_id"] == run.native_session_id
+               for p, run in zip(payloads, runs))
+    assert len({p["idempotency_key"] for p in payloads}) == 2
+
+
 def test_failed_task_after_first_page_is_retried(monkeypatch):
     pages = [
         ([(f"ent_{n}", {"status": "done"}) for n in range(500)], "next"),
@@ -233,16 +376,18 @@ def test_failed_task_after_first_page_is_retried(monkeypatch):
     monkeypatch.setattr(tw, "_routed_snapshot", lambda _id: {"status": "routed", "source": "readback"})
     dispatched = []
 
-    async def dispatch(task_id, snapshot, trigger):
-        dispatched.append((task_id, snapshot, trigger))
+    async def dispatch(task_id, snapshot, trigger, run_key):
+        dispatched.append((task_id, snapshot, trigger, run_key))
 
     counts = asyncio.run(tw.TaskWatchdog().sweep(object(), dispatch))
     assert cursors == [None, "next"]
     assert counts["scanned"] == 501
     assert counts["scan_complete"] is True
-    assert dispatched == [(
+    assert len(dispatched) == 1
+    assert dispatched[0][:3] == (
         "ent_target", {"status": "routed", "source": "readback"}, "watchdog_retry"
-    )]
+    )
+    assert dispatched[0][3].startswith("watchdog_retry-")
 
 
 def test_failed_route_write_never_launches(monkeypatch):
