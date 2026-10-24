@@ -126,6 +126,7 @@ UNDEFINED_WORD_THRESHOLD = 150
 ALLOWLIST_WORDS = frozenset(
     """
     that what with never from which this every rather than would nothing already because written
+    those else
     where does through before against above other into without both after below over must they
     itself there says once here about when stated section naming
     binding channel effect recorded delivery rules level source
@@ -150,6 +151,7 @@ ALLOWLIST_WORDS = frozenset(
     request answer defect confirmed release
     absent accepted added applied classes data entities foundation like place target draft next mark part
     acts admitted shared writer
+    changed fails
     """.split()
 )
 # `fields` tipped the advisory bound on ateles#899 (decision-93 ruling prose merged with main);
@@ -164,6 +166,8 @@ ALLOWLIST_WORDS = frozenset(
 # contract's bound terms remain registration, principal, and record-owned write qualification.
 # `draft` and `next` crossed it with the review fixes to that pass, on the same ground.
 # `mark` and `part` crossed it with the instance-owner section, on the same ground.
+# `those` and `else` are function words; `changed` and `fails` are ordinary inflected verbs.
+# Their base nouns (`change`, `failure`) remain candidates for a human to assess.
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z']*")
 _TESTID_ABBREVIATIONS = frozenset(
