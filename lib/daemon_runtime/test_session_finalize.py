@@ -276,7 +276,10 @@ def test_update_run_session_status_reads_back_terminal_state(monkeypatch):
     assert posted[0]["entities"][0]["status"] == "completed"
 
 
-def test_recover_run_session_finds_exact_existing_run_and_verifies_links(monkeypatch):
+@pytest.mark.parametrize("reported_total, expected", [(1, True), (2, False)])
+def test_recover_run_session_finds_exact_existing_run_and_verifies_links(
+    monkeypatch, reported_total, expected,
+):
     native_session_id = "ent_task:approved-2"
 
     class _Response:
@@ -305,7 +308,7 @@ def test_recover_run_session_finds_exact_existing_run_and_verifies_links(monkeyp
                     "trigger_ref": "ent_task",
                     "status": "active",
                 },
-            }]})
+            }], "total": reported_total, "limit": 25, "offset": 0})
         assert filters == {
             "conversation_id": {"op": "eq", "value": native_session_id}
         }
@@ -315,7 +318,7 @@ def test_recover_run_session_finds_exact_existing_run_and_verifies_links(monkeyp
                 "conversation_id": native_session_id,
                 "session_id": native_session_id,
             },
-        }]})
+        }], "total": reported_total, "limit": 25, "offset": 0})
 
     def fake_get(url, **_kwargs):
         if url.endswith("/entities/ent_conv99"):
@@ -355,10 +358,13 @@ def test_recover_run_session_finds_exact_existing_run_and_verifies_links(monkeyp
     monkeypatch.setattr(sf.httpx, "post", fake_post)
     monkeypatch.setattr(sf.httpx, "get", fake_get)
 
-    assert sf.recover_run_session(
+    recovered = sf.recover_run_session(
         task_id="ent_task",
         native_session_id=native_session_id,
-    ) == sf.RunSession("ent_conv99", "ent_session99", native_session_id)
+    )
+    assert (recovered is not None) is expected
+    if expected:
+        assert recovered == sf.RunSession("ent_conv99", "ent_session99", native_session_id)
 
 
 def test_recover_run_session_rejects_identity_from_another_task(monkeypatch):
@@ -404,6 +410,13 @@ def test_recover_run_session_rejects_unavailable_foreign_or_ambiguous_rows(
 
 @pytest.mark.parametrize("payload", [
     {}, {"entities": {}}, {"entities": [{}], "next_cursor": "next"},
+    {"entities": [], "total": 1}, {"entities": [], "total": -1},
+    {"entities": [], "total": True}, {"entities": [], "total": "0"},
+    {"entities": [], "truncated": "false"},
+    {"entities": [], "has_more": 0},
+    {"entities": [], "next_cursor": 4},
+    {"entities": [], "next_offset": 1},
+    {"entities": [], "limit": 0}, {"entities": [], "offset": 1},
 ])
 def test_recovery_query_rejects_malformed_or_incomplete_envelope(monkeypatch, payload):
     class Response:
@@ -419,6 +432,22 @@ def test_recovery_query_rejects_malformed_or_incomplete_envelope(monkeypatch, pa
         "agent_session", identity_field="native_session_id",
         identity_value="ent_task:approved-2",
     ) is None
+
+
+def test_recovery_query_accepts_complete_empty_result(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"entities": [], "total": 0, "limit": 25, "offset": 0}
+
+    monkeypatch.setattr(sf, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(sf.httpx, "post", lambda *_a, **_kw: Response())
+    assert sf._query_entity_rows(
+        "agent_session", identity_field="native_session_id",
+        identity_value="ent_task:approved-2",
+    ) == []
 
 
 def test_create_run_conversation_fail_open(monkeypatch):

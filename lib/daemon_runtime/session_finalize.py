@@ -425,10 +425,22 @@ def _query_entity_rows(
         if (
             not isinstance(rows, list)
             or len(rows) >= 25
-            or data.get("next_cursor") is not None
-            or data.get("has_more") is True
-            or data.get("truncated") is True
             or not all(isinstance(row, dict) for row in rows)
+            or ("total" in data and (
+                type(data["total"]) is not int or data["total"] != len(rows)
+            ))
+            or ("limit" in data and (
+                type(data["limit"]) is not int or data["limit"] != 25
+            ))
+            or ("offset" in data and (
+                type(data["offset"]) is not int or data["offset"] != 0
+            ))
+            or ("next_cursor" in data and data["next_cursor"] is not None)
+            or ("next_offset" in data and data["next_offset"] is not None)
+            or any(
+                flag in data and (type(data[flag]) is not bool or data[flag])
+                for flag in ("has_more", "truncated")
+            )
         ):
             log.warning("[finalize] malformed or incomplete %s query", entity_type)
             return None

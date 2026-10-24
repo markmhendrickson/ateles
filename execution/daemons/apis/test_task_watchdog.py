@@ -430,6 +430,86 @@ def test_query_refuses_incomplete_page_without_cursor(monkeypatch):
         raise AssertionError("partial page without continuation must not look complete")
 
 
+@pytest.mark.parametrize("metadata", [
+    {"total": 2}, {"total": 0}, {"total": -1}, {"total": True},
+    {"total": "1"}, {"truncated": "false"}, {"has_more": 0},
+    {"next_cursor": 4}, {"limit": 0}, {"offset": 1},
+    {"next_cursor": "later", "has_more": False},
+    {"next_offset": 1},
+])
+def test_query_refuses_inconsistent_page_metadata(monkeypatch, metadata):
+    monkeypatch.setattr(tw, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"entities": [{"entity_id": "ent_x", "snapshot": {
+                "status": "failed",
+            }}], "limit": 500, "offset": 0, **metadata}
+
+    monkeypatch.setattr(tw.httpx, "post", lambda *_a, **_kw: Response())
+    with pytest.raises(tw.QueryUnavailableError):
+        tw._query_tasks(500)
+
+
+def test_incomplete_query_does_not_dispatch_or_complete_scan(monkeypatch):
+    monkeypatch.setattr(tw, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"entities": [{"entity_id": "ent_x", "snapshot": {
+                "status": "failed",
+            }}], "total": 2, "limit": 500, "offset": 0}
+
+    monkeypatch.setattr(tw.httpx, "post", lambda *_a, **_kw: Response())
+
+    async def dispatch(*_args):
+        raise AssertionError("incomplete query must not dispatch")
+
+    counts = asyncio.run(tw.TaskWatchdog().sweep(object(), dispatch))
+    assert counts["query_unavailable"] == 1
+    assert counts["scanned"] == 0
+    assert counts["scan_complete"] is False
+
+
+def test_query_accepts_counted_continuation_and_final_page(monkeypatch):
+    monkeypatch.setattr(tw, "NEOTOMA_BEARER_TOKEN", "test-token")
+    payloads = iter([
+        {"entities": [{"entity_id": "ent_a", "snapshot": {"status": "done"}}],
+         "total": 2, "limit": 1, "offset": 0, "next_cursor": "later",
+         "has_more": True},
+        {"entities": [{"entity_id": "ent_b", "snapshot": {"status": "done"}}],
+         "total": 2, "limit": 1, "offset": 0, "next_cursor": "last-page"},
+        {"entities": [], "total": 2, "limit": 1, "offset": 0},
+    ])
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    monkeypatch.setattr(tw.httpx, "post", lambda *_a, **_kw: Response(next(payloads)))
+    assert tw._query_tasks(1) == ([("ent_a", {"status": "done"})], "later")
+    assert tw._query_tasks(1, "later") == ([("ent_b", {"status": "done"})], "last-page")
+    assert tw._query_tasks(1, "last-page") == ([], None)
+
+
 @pytest.mark.parametrize("payload", [
     {}, {"entities": None}, {"entities": {}}, {"entities": "bad"},
     {"entities": [None]}, {"entities": [{"entity_id": "ent_x", "snapshot": None}]},

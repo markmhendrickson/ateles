@@ -425,6 +425,22 @@ def _query_tasks(limit: int, cursor: str | None = None) -> tuple[list[tuple[str,
         raise QueryUnavailableError("task query has no rows collection")
     if not isinstance(rows, list):
         raise QueryUnavailableError("malformed task rows collection")
+    if (
+        "limit" in data and (type(data["limit"]) is not int or data["limit"] != limit)
+        or "offset" in data and (
+            type(data["offset"]) is not int or data["offset"] < 0
+            or (cursor is None and data["offset"] != 0)
+        )
+        or "total" in data and (
+            type(data["total"]) is not int or data["total"] < 0
+        )
+        or any(
+            flag in data and type(data[flag]) is not bool
+            for flag in ("has_more", "truncated")
+        )
+        or "next_offset" in data and data["next_offset"] is not None
+    ):
+        raise QueryUnavailableError("malformed task page metadata")
     out: list[tuple[str, dict]] = []
     for row in rows:
         if not isinstance(row, dict):
@@ -445,8 +461,17 @@ def _query_tasks(limit: int, cursor: str | None = None) -> tuple[list[tuple[str,
     next_cursor = data.get("next_cursor")
     if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor):
         raise QueryUnavailableError("malformed task continuation cursor")
+    if data.get("has_more") is False and next_cursor is not None:
+        raise QueryUnavailableError("task query contradicts continuation cursor")
     if next_cursor is None and (data.get("has_more") is True or data.get("truncated") is True):
         raise QueryUnavailableError("task query is incomplete without a cursor")
+    if "total" in data:
+        # The REST route echoes offset=0 even for keyset cursor pages, so only
+        # the first page can compare its row count with the global total.
+        if len(rows) > data["total"] or (
+            cursor is None and next_cursor is None and len(rows) != data["total"]
+        ):
+            raise QueryUnavailableError("task query count contradicts returned page")
     return out, next_cursor
 
 
