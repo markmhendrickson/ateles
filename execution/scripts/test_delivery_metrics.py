@@ -739,6 +739,19 @@ def test_cli_rejects_bad_repo_and_bad_interventions_file(capsys, tmp_path):
     capsys.readouterr()
 
 
+def test_by_workflow_breakdown_separates_fast_and_slow_workflows():
+    gh = standard_repo()
+    gh.runs = [
+        run(1, "c1a", ts(13, 8, 0), ts(13, 8, 5), name="fast"),
+        run(2, "c1a", ts(13, 8, 0), ts(13, 9, 0), name="slow"),
+        run(3, "c2a", ts(14, 8, 0), ts(14, 8, 7), name="fast"),
+    ]
+    ci = compute(gh)["metrics"]["ci_minutes_per_pr"]
+    by_wf = {w["workflow"]: w for w in ci["by_workflow"]}
+    assert by_wf["fast"]["n"] == 2 and by_wf["fast"]["median"] == 6.0
+    assert by_wf["slow"]["n"] == 1 and by_wf["slow"]["median"] == 60.0
+
+
 def test_percentile():
     assert dm.percentile([5], 0.9) == 5
     assert dm.percentile([1, 2, 3, 4], 0.5) == 2.5

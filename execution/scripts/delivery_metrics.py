@@ -77,6 +77,7 @@ DEFAULT_MAX_DEPLOYMENTS = 150
 DEFAULT_CI_LOOKBACK_DAYS = 30
 DEPLOY_HORIZON_DAYS = 14
 
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 CI_EVENTS = {"pull_request", "push"}
 FAILED_CONCLUSIONS = {"failure", "timed_out", "startup_failure"}
 SUCCESS_CONCLUSIONS = {"success"}
@@ -823,6 +824,28 @@ def metric_ci(
             "identified_by": how,
         }
 
+    # per-workflow wall-clock (latest run of each workflow per PR), so the slow
+    # workflow is visible even when no single summary run can be identified
+    per_workflow: dict[str, list[float]] = {}
+    for pr in prs:
+        latest_by_name: dict[str, dict[str, Any]] = {}
+        for r in by_pr.get(pr["number"], []):
+            if run_seconds(r) is None or not r.get("name"):
+                continue
+            prev = latest_by_name.get(r["name"])
+            if prev is None or (parse_ts(r.get("updated_at")) or _EPOCH) > (
+                parse_ts(prev.get("updated_at")) or _EPOCH
+            ):
+                latest_by_name[r["name"]] = r
+        for name, r in latest_by_name.items():
+            per_workflow.setdefault(name, []).append((run_seconds(r) or 0.0) / 60.0)
+    ci["by_workflow"] = [
+        {"workflow": name, **distribution(vals, "minutes", "")}
+        for name, vals in sorted(
+            per_workflow.items(), key=lambda kv: (-len(kv[1]), kv[0])
+        )
+    ]
+
     # failure rate over attributed runs
     all_attributed = [r for runs_ in by_pr.values() for r in runs_]
     ok = sum(
@@ -1271,6 +1294,8 @@ def render_summary(report: dict[str, Any]) -> str:
         lines.append(
             _dist_line("required/summary run wall-clock", ci["required_run_wall_clock"])
         )
+        for w in ci.get("by_workflow", []):
+            lines.append(_dist_line(f"workflow '{w['workflow']}' wall-clock", w))
     cf = m["ci_failure_rate"]
     if cf["status"] == "ok":
         lines.append(
