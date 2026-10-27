@@ -645,7 +645,7 @@ class TestAuthorityState:
         monkeypatch.setattr(
             apis,
             "_task_gate_context",
-            lambda _snapshot: ("cicada", action_type, policy, decision),
+            lambda _snapshot, **_kw: ("cicada", action_type, policy, decision),
         )
         return apis._checkpoint_authority_state("ent_cp", self.TASK)
 
