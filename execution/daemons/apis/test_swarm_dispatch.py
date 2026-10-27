@@ -4878,31 +4878,38 @@ def test_pavo_prompt_still_allows_blocking_on_failure():
 # ── Part C — Lanius PR blocked-comment guidance ────────────────────────────
 
 
-def test_lanius_pr_prompt_blocked_comment_names_gates():
+def test_gate_block_comment_names_gates():
     """Blocked comment must name which pre-impl gates are unsigned."""
-    prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
-    # The prompt must mention the specific gates so Lanius lists them.
+    comment = swarm_dispatch.compose_gate_block_comment(
+        80, set(PRE_IMPL_GATES), _OPERATOR_LOGIN
+    )
     for gate in PRE_IMPL_GATES:
-        assert gate in prompt, f"Lanius PR prompt must mention gate '{gate}'"
+        assert f"`{gate}`" in comment
 
 
-def test_lanius_pr_prompt_blocked_comment_names_gate_owners():
+def test_gate_block_comment_names_gate_owners():
     """Blocked comment must indicate who owns each gate (Pavo, Waxwing)."""
-    prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
-    assert "Pavo" in prompt or "pavo" in prompt
-    assert "Waxwing" in prompt or "waxwing" in prompt
+    comment = swarm_dispatch.compose_gate_block_comment(
+        80, set(PRE_IMPL_GATES), _OPERATOR_LOGIN
+    )
+    assert "pavo" in comment.lower()
+    assert "waxwing" in comment.lower()
 
 
-def test_lanius_pr_prompt_blocked_comment_includes_confirm_command():
+def test_gate_block_comment_includes_confirm_command():
     """Blocked comment must include the /confirm-gates-clear command."""
-    prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
-    assert _CONFIRM_GATES_CLEAR_CMD in prompt
+    comment = swarm_dispatch.compose_gate_block_comment(
+        80, {"arch"}, _OPERATOR_LOGIN
+    )
+    assert _CONFIRM_GATES_CLEAR_CMD in comment
 
 
-def test_lanius_pr_prompt_blocked_comment_specifies_operator_only():
+def test_gate_block_comment_specifies_operator_only():
     """Blocked comment must specify that only the operator can issue the command."""
-    prompt = SwarmDispatcher._lanius_pr_prompt(_trigger(), parent=80)
-    assert _OPERATOR_LOGIN in prompt
+    comment = swarm_dispatch.compose_gate_block_comment(
+        80, {"arch"}, _OPERATOR_LOGIN
+    )
+    assert f"Only @{_OPERATOR_LOGIN} may issue it" in comment
 
 
 def test_pre_impl_gates_constant_includes_expected_gates():
