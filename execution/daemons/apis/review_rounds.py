@@ -71,19 +71,27 @@ class RoundStatus:
         """Plain-words status line for the tool's output."""
         seen = ", ".join(h[:7] for h in self.prior_heads) or "none"
         if not self.capped:
-            return (
+            line = (
                 f"review rounds: this head is round {self.round_number} of {self.cap} "
                 f"(earlier reviewed heads: {seen})."
             )
-        head = (
-            f"{CAP_REACHED}. {len(self.prior_heads)} earlier heads already received "
-            f"lens verdicts ({seen}); this head would be round {self.round_number}, "
-            f"past the cap of {self.cap}."
+            if self.override_reason:
+                line += (
+                    " --allow-round-overrun was given but is not needed here; it is not "
+                    "recorded on the approval."
+                )
+            return line
+        facts = (
+            f"{len(self.prior_heads)} earlier heads already received lens verdicts "
+            f"({seen}); this head would be round {self.round_number}, past the cap of {self.cap}."
         )
         if self.override_reason:
-            return f"{head} Overrun allowed by --allow-round-overrun: {self.override_reason}"
+            return (
+                f"round cap overrun allowed by --allow-round-overrun: {self.override_reason} "
+                f"({facts} Without the override this would read: {CAP_REACHED}.)"
+            )
         return (
-            f"{head} Refusing to treat this verdict set as approvable. Split the unit or "
+            f"{CAP_REACHED}. {facts} Refusing to approve this verdict set. Split the unit or "
             "cut its scope and open a fresh PR; if the operator has granted an overrun "
             "for this PR, re-run with --allow-round-overrun '<reason>'."
         )
@@ -107,10 +115,12 @@ def clean_reason(raw: str) -> str:
 
     Whitespace is collapsed and angle brackets are dropped so the text cannot
     open an HTML comment (a swarm marker) in the approval body; the length is
-    capped. A reason that is empty, or too short to say anything, is refused: an
+    capped. `@` and square brackets are dropped too, so the logged reason cannot
+    mention an account or build a link. A reason that is empty, or too short to say anything, is refused: an
     override with no stated reason is not a logged override.
     """
-    text = re.sub(r"\s+", " ", (raw or "").replace("<", " ").replace(">", " ")).strip()
+    text = re.sub(r"[<>@\[\]`]", " ", raw or "")
+    text = re.sub(r"\s+", " ", text).strip()
     if len(text) < MIN_REASON_CHARS:
         raise OverrunReasonError(
             f"--allow-round-overrun needs a stated reason of at least {MIN_REASON_CHARS} "

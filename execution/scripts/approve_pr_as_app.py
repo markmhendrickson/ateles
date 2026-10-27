@@ -2524,10 +2524,15 @@ async def run(
         # The three-round cap (operator ruling 2026-10-27). Counted from the same
         # author-scoped lens records the gate reads, so an outside account's marker
         # is never a round.
+        try:
+            overrun_reason = review_rounds.clean_reason(allow_round_overrun) if allow_round_overrun else ""
+        except review_rounds.OverrunReasonError as exc:
+            print(f"refusing: {exc}")
+            return 1
         rounds = review_rounds.round_status(
             lens_records(lens_authors.scope_lens_comments(comments, authors)),
             head_sha,
-            override_reason=allow_round_overrun,
+            override_reason=overrun_reason,
         )
         print(rounds.describe())
         print()
@@ -2786,9 +2791,10 @@ def main() -> int:
         help=(
             "allow an approval past the three-round cap (a PR whose head is the fourth "
             "or later to receive lens verdicts is otherwise refused with 'round cap "
-            "reached: split or cut scope'; operator ruling 2026-10-27). The operator "
-            "may grant one; the reason is required and is recorded in the approval "
-            "review body. There is deliberately no environment setting for this."
+            "reached: split or cut scope'; operator ruling 2026-10-27). Use it only "
+            "once the operator has granted an overrun for this PR. REASON is required "
+            "(10 to 300 characters) and is recorded in the approval review body. "
+            "There is deliberately no environment setting for this."
         ),
     )
     args = parser.parse_args()

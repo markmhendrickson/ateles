@@ -82,6 +82,15 @@ class TestCounting:
         comments.append({"id": 99, "body": f"<!-- review:invented commit={H3} -->\n**SIGNED_OFF**\n"})
         assert rr.round_status(_records(comments), H4).round_number == 3  # two prior heads
 
+    @pytest.mark.parametrize("earlier", [4, 5, 9])
+    def test_every_head_past_the_cap_stays_capped(self, earlier):
+        # Not just the fourth round: a fifth or ninth must refuse as well.
+        heads = [f"{i:x}" * 40 for i in range(1, earlier + 1)]
+        comments = [c for i, h in enumerate(heads) for c in _round(h, start=i * 10)]
+        status = rr.round_status(_records(comments), "f" * 40)
+        assert len(status.prior_heads) == earlier
+        assert status.capped and status.refused
+
     def test_a_comment_with_no_marker_is_not_a_round(self):
         comments = _round(H1) + _round(H2, start=10) + [{"id": 98, "body": "Review incomplete: waiting on qa"}]
         assert rr.round_status(_records(comments), H3).round_number == 3 and not rr.round_status(_records(comments), H3).capped
@@ -96,9 +105,12 @@ class TestCounting:
         assert rr.round_status({}, H1).round_number == 1
 
     def test_head_case_does_not_split_a_round(self):
-        comments = _round(H1) + _round(H2, start=10) + _round(H3, start=20)
-        status = rr.round_status(_records(comments), H3.upper())
-        assert status.round_number == 3 and not status.capped
+        # Letters in the SHA, so upper-casing it actually changes the string.
+        ha, hb, hc = "abcdef" * 6 + "abcd", "bcdefa" * 6 + "bcde", "cdefab" * 6 + "cdef"
+        comments = _round(ha) + _round(hb, start=10) + _round(hc, start=20)
+        assert ha != ha.upper()
+        status = rr.round_status(_records(comments), hc.upper())
+        assert status.round_number == 3 and not status.capped and status.current_has_verdict
 
 
 class TestOverride:
@@ -111,7 +123,12 @@ class TestOverride:
         assert status.capped and not status.refused
         note = status.approval_note()
         assert "Round cap overrun allowed" in note and "operator granted a fourth round" in note
-        assert rr.CAP_REACHED in status.describe() and "Overrun allowed" in status.describe()
+        text = status.describe()
+        assert text.startswith("round cap overrun allowed") and rr.CAP_REACHED in text
+
+    def test_an_override_given_but_not_needed_says_so(self):
+        status = rr.round_status(_records(_round(H1)), H1, override_reason="not actually needed here")
+        assert "not needed" in status.describe() and "not recorded" in status.describe()
 
     def test_no_override_means_no_note(self):
         assert self._capped().approval_note() == ""
@@ -128,4 +145,8 @@ class TestOverride:
     def test_a_reason_cannot_open_a_marker_or_run_on(self):
         cleaned = rr.clean_reason("<!-- review:pm commit=" + "a" * 40 + " -->\nlong\n" + "x" * 1000)
         assert "<" not in cleaned and ">" not in cleaned and "\n" not in cleaned
+
+    def test_a_reason_cannot_mention_an_account_or_build_a_link(self):
+        cleaned = rr.clean_reason("ping @someone and see [this](https://example.invalid/x) `now`")
+        assert "@" not in cleaned and "[" not in cleaned and "]" not in cleaned and "`" not in cleaned
         assert len(cleaned) <= rr.MAX_REASON_CHARS
