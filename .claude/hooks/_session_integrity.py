@@ -6,14 +6,17 @@ hooks). These hooks are MECHANICAL and FAIL-OPEN: any unexpected error, a
 missing bearer token, or an unreachable Neotoma must never crash a session
 or block a clean exit on a false negative. Enforcement (the Stop finalizer)
 blocks ONLY when it can positively determine the session is write-bearing
-and unlinked/turn-less.
+and unlinked or without any conversation capture.
 
 Design contract (see docs/session_integrity.md):
   - A session is "write-bearing" if it issued any non-bookkeeping Neotoma
     write. We approximate this from the transcript by detecting any Neotoma
     store/correct/create_relationship/submit_* tool use whose entity_type is
     not purely conversation/conversation_message bookkeeping.
-  - An integral session has (a) >=1 bound plan and (b) >=1 stored turn pair.
+  - An integral session has (a) >=1 bound plan or task and (b) conversation capture: at least one
+    conversation / conversation_message / agent_message store alongside its
+    domain writes. Written per state change, not per turn (operator ruling
+    2026-10-27); no row is required for a turn that changed nothing.
   - Genuine no-op sessions (no writes) are exempt — never blocked (grace path).
 
 State is kept in a per-session JSON file under the project .claude/.session_state/

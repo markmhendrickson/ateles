@@ -128,20 +128,29 @@ def main() -> int:
         return 0
 
     reasons = []
+    fixes = []
     if not bound:
         reasons.append("no plan OR task link (conversation not PART_OF any plan or task)")
+        fixes.append(
+            "link the work to the plan for this workstream or to a task (a Neotoma "
+            "store or correct call that names the plan, or a PART_OF relationship "
+            "alongside a task entity)"
+        )
     if not captured_conversation:
         reasons.append(
             "no conversation capture (no conversation/conversation_message/"
-            "agent_message store alongside the state-changing writes)"
+            "agent_message store anywhere in the session)"
+        )
+        fixes.append(
+            "make one Neotoma store call (MCP tool, not Bash) that stores the "
+            "conversation and a conversation_message for the turn that changed state"
         )
     detail = (
         "Session integrity violation: this session made domain writes but has "
         + " and ".join(reasons)
-        + ". Per docs/session_integrity.md, bind the conversation to the plan "
-        "for this workstream OR a task, record the conversation capture for the "
-        "turns that changed state (per state change, not per turn), and run "
-        "/end to finalize before stopping."
+        + ". Per docs/session_integrity.md (write per state change, not per turn), to "
+        "clear this: " + "; and ".join(fixes) + ". No row is needed for turns that "
+        "changed nothing."
     )
 
     if not ENFORCE:

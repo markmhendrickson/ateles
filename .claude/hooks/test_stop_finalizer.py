@@ -63,6 +63,9 @@ TASK = {"entity_type": "task", "title": "ship the fix"}
 CONVERSATION = {"entity_type": "conversation", "conversation_id": "c1"}
 USER_MSG = {"entity_type": "conversation_message", "role": "user", "content": "do the thing"}
 PLAN_LINK = {"relationship_type": "PART_OF", "source": "task", "target_plan_id": "p1"}
+AGENT_MSG = {"entity_type": "agent_message", "role": "assistant", "content": "done"}
+PLAN = {"entity_type": "plan", "title": "the workstream plan"}
+TASK_BINDING = {"relationship_type": "PART_OF", "source": "n1", "target": "t1"}
 
 
 def _run(monkeypatch, tmp_path, events, enforce):
@@ -113,8 +116,10 @@ def test_domain_writes_with_plan_but_no_capture_is_violated_and_blocks(
     assert (rc, status) == (2, "violated")
     out = json.loads(capsys.readouterr().out)
     assert out["decision"] == "block"
-    assert "conversation capture" in out["reason"]
-    assert "plan OR task link" not in out["reason"]
+    assert "no conversation capture (" in out["reason"]
+    assert "no plan OR task link" not in out["reason"]
+    assert "one Neotoma store call" in out["reason"]
+    assert "link the work to the plan" not in out["reason"]
 
 
 def test_domain_writes_with_capture_but_no_plan_or_task_link_is_still_violated(
@@ -123,7 +128,11 @@ def test_domain_writes_with_capture_but_no_plan_or_task_link_is_still_violated(
     events = [_user(), _store([{"entity_type": "note", "title": "x"}, CONVERSATION, USER_MSG])]
     rc, status = _run(monkeypatch, tmp_path, events, enforce=True)
     assert (rc, status) == (2, "violated")
-    assert "plan OR task link" in json.loads(capsys.readouterr().out)["reason"]
+    reason = json.loads(capsys.readouterr().out)["reason"]
+    assert "no plan OR task link" in reason
+    assert "no conversation capture (" not in reason
+    assert "link the work to the plan" in reason
+    assert "/end" not in reason  # /end requires per-turn rows; the ruling does not
 
 
 def test_warn_mode_records_violation_but_does_not_block(monkeypatch, tmp_path):
@@ -156,3 +165,30 @@ def test_capture_in_a_separate_store_call_counts(monkeypatch, tmp_path):
     ]
     rc, status = _run(monkeypatch, tmp_path, events, enforce=True)
     assert (rc, status) == (0, "integral")
+
+
+def test_agent_message_alone_counts_as_conversation_capture(monkeypatch, tmp_path):
+    """agent_message is the canonical capture row in docs/session_integrity.md."""
+    events = [_user(), _store([TASK, AGENT_MSG], [PLAN_LINK])]
+    rc, status = _run(monkeypatch, tmp_path, events, enforce=True)
+    assert (rc, status) == (0, "integral")
+
+
+def test_plan_entity_alone_binds_the_session(monkeypatch, tmp_path):
+    """A plan touch binds without any task: the plan leg works on its own."""
+    events = [_user(), _store([PLAN, {"entity_type": "note", "title": "n"}, CONVERSATION])]
+    rc, status = _run(monkeypatch, tmp_path, events, enforce=True)
+    assert (rc, status) == (0, "integral")
+
+
+def test_task_link_alone_binds_the_session(monkeypatch, tmp_path):
+    """A PART_OF relationship alongside a task entity binds without any plan."""
+    events = [_user(), _store([TASK, CONVERSATION, USER_MSG], [TASK_BINDING])]
+    rc, status = _run(monkeypatch, tmp_path, events, enforce=True)
+    assert (rc, status) == (0, "integral")
+
+
+def test_task_link_without_capture_is_violated(monkeypatch, tmp_path):
+    events = [_user(), _store([TASK], [TASK_BINDING])]
+    rc, status = _run(monkeypatch, tmp_path, events, enforce=True)
+    assert (rc, status) == (2, "violated")

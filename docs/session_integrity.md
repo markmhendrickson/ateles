@@ -129,7 +129,7 @@ Hooks are the obvious primitive, but **only Claude Code exposes lifecycle hooks*
 Add an in-repo `.claude/settings.json` with:
 
 - **`SessionStart`** — record session start; if the session declares intent to write, prompt for / resolve a `plan_id` and stamp it on the `conversation`.
-- **`UserPromptSubmit`** / **`PostToolUse`** — lightweight turn accounting (warns if a domain write occurred with no conversation capture; does not require a row for a turn that changed nothing).
+- **`UserPromptSubmit`** / **`PostToolUse`** — lightweight turn counter only (liveness signal; no warning is implemented here). The conversation-capture check runs at `Stop`; no row is required for a turn that changed nothing.
 - **`SessionEnd` / `Stop`** — run the **integrity check** (§3) and **block exit** if a write-bearing session is non-integral, mirroring the existing git stop-hook pattern. Emit one `harness_event` per Stop as the audit record (consuming the dormant `harness_event` schema `689230f4`).
 
 Covers: Claude Code (the primary HITL harness and all autonomous ateles agents that run under it).
@@ -155,7 +155,7 @@ Covers: **all** harnesses (Claude Code, Cursor, Codex, autonomous daemons), beca
 | Concern | Claude Code hook | MCP/proxy invariant |
 |---|---|---|
 | Plan binding at start | ✅ proactive prompt | ✅ lazy, enforced at first write |
-| Turn storage | ✅ accounting + warn | ✅ `harness_event` audit |
+| Conversation capture | ✅ `Stop` checks capture exists | ❌ not checked (plan link only); `harness_event` audit |
 | Artifact linkage | ✅ end-of-session check | ✅ per-write check |
 | Block on violation | ✅ `Stop` hook | ⚠️ see §6 (warn→block ramp) |
 | Cursor / Codex coverage | ❌ | ✅ |

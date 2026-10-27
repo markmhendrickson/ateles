@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """UserPromptSubmit hook — lightweight turn accounting (layer 1, §5.1).
 
-Increments the per-session turn counter so the Stop finalizer has a cheap
-signal even if the transcript is unavailable. Does not block or inject
-context (exit 0, no stdout) — turn capture itself is performed by the agent
-via the MCP [TURN LIFECYCLE] contract; this hook only counts.
+Increments the per-session turn counter in the session state file. The Stop
+finalizer no longer reads it: since the operator ruling of 2026-10-27 (write
+per state change, not per turn) integrity is judged on conversation capture
+seen in the transcript, not on a turn count. The counter is kept only as a
+cheap liveness signal. Does not block or inject context (exit 0, no stdout) —
+conversation capture itself is performed by the agent.
 """
 import sys
 from pathlib import Path
