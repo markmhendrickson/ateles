@@ -23,6 +23,7 @@ import base64
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -152,7 +153,21 @@ class _FakeClient:
         reported_changed_files: "int | None | str" = "auto",
         base_ref_after_first_get: str | None = None,
         file_rows: "list[dict] | None" = None,
+        workflow_runs: "list[dict] | None" = None,
+        actions_status: int = 200,
+        default_branch: "str | None" = BASE_REF,
+        checks_total: "int | None" = None,
+        checks_page_status: "dict[int, int] | None" = None,
     ):
+        # Actions workflow runs on the head (check_suite_id -> workflow_id), the
+        # repo's default branch (None: unreadable), and the check-runs listing's
+        # reported total / per-page failures.
+        self.workflow_runs = workflow_runs or []
+        self.actions_status = actions_status
+        self.default_branch = default_branch
+        self.checks_total = checks_total
+        self.checks_page_status = checks_page_status or {}
+        self.check_pages: list[int] = []
         # What the PR itself says about how many files it changes ("auto" = the
         # real count; None = the field is absent), and a base branch that moves
         # after the first read of the PR.
@@ -235,6 +250,15 @@ class _FakeClient:
     async def get(self, url, headers=None, params=None):
         self.get_urls.append(url)
         page = (params or {}).get("page", 1)
+        if url == f"{target.GITHUB_API}/repos/{REPO}":
+            if self.default_branch is None:
+                return _FakeResponse({"message": "Not Found"}, status_code=404)
+            return _FakeResponse({"default_branch": self.default_branch})
+        if url.endswith("/actions/runs"):
+            if self.actions_status >= 400:
+                return _FakeResponse({"message": "error"}, status_code=self.actions_status)
+            rows = self.workflow_runs[(page - 1) * 100 : page * 100]
+            return _FakeResponse({"total_count": len(self.workflow_runs), "workflow_runs": rows})
         if "/contents/" in url:
             assert url.endswith("/contents/.github/review_scope.json"), url
             ref = (params or {}).get("ref", "")
@@ -295,7 +319,13 @@ class _FakeClient:
                 {"state": self.combined_state, "total_count": self.legacy_status_total_count}
             )
         if url.endswith("/check-runs"):
-            return _FakeResponse({"check_runs": self.check_runs})
+            self.check_pages.append(page)
+            if self.checks_page_status.get(page, 200) >= 400:
+                return _FakeResponse({"message": "error"}, status_code=self.checks_page_status[page])
+            total = self.checks_total if self.checks_total is not None else len(self.check_runs)
+            return _FakeResponse(
+                {"total_count": total, "check_runs": self.check_runs[(page - 1) * 100 : page * 100]}
+            )
         if "/reviews/" in url:
             # read-back of a just-posted review
             if self.review_readback is not None:
@@ -4381,10 +4411,16 @@ class TestUnclearClassificationThroughTheTool:
 # ── Re-run check-runs on one head (closed and reopened, CI re-triggered) ────
 
 
-def _cr(id_, conclusion="success", *, status="completed", started="2026-10-27T10:00:00Z",
-        completed="2026-10-27T10:05:00Z", name="pytest", app_id=15368):
+def _cr(id_, conclusion="success", *, status="completed", started="2026-10-01T10:00:00Z",
+        completed="2026-10-01T10:05:00Z", name="pytest", app_id=15368, wf=1, suite=None):
+    """`wf` is the Actions workflow the run belongs to (None: a run with no
+    workflow, e.g. a non-Actions App); `suite` its check suite (default: one per run)."""
+    suite = suite if suite is not None else wf * 1000 + id_ if wf is not None else None
     row = {"id": id_, "name": name, "status": status, "conclusion": conclusion,
-           "started_at": started, "completed_at": completed, "app": {"id": app_id}}
+           "started_at": started, "completed_at": completed, "app": {"id": app_id},
+           "_wf": wf}
+    if suite is not None:
+        row["check_suite"] = {"id": suite}
     if started is None:
         row.pop("started_at")
     if completed is None or status != "completed":
@@ -4394,36 +4430,51 @@ def _cr(id_, conclusion="success", *, status="completed", started="2026-10-27T10
     return row
 
 
-async def _evaluate(runs):
-    client = _FakeClient(comments=[], check_runs=runs)
-    return await target.evaluate_checks(client, repo=REPO, head_sha=HEAD)
+def _workflow_rows(runs):
+    """The Actions run for each (suite, workflow) pair the runs belong to."""
+    seen, rows = set(), []
+    for r in runs:
+        suite, wf = (r.get("check_suite") or {}).get("id"), r.get("_wf")
+        if suite is not None and wf is not None and suite not in seen:
+            seen.add(suite)
+            rows.append({"check_suite_id": suite, "workflow_id": wf, "name": f"workflow-{wf}"})
+    return rows
+
+
+async def _evaluate(runs, *, now=None, **client_kw):
+    client_kw.setdefault("workflow_runs", _workflow_rows(runs))
+    client = _FakeClient(comments=[], check_runs=runs, **client_kw)
+    outcomes, green = await target.evaluate_checks(client, repo=REPO, head_sha=HEAD, now=now)
+    _evaluate.client = client
+    return outcomes, green
 
 
 @pytest.mark.asyncio
 class TestReRunCheckRunsAreJudgedByTheNewest:
     async def test_two_stale_failures_and_a_newer_success_are_green(self):
         runs = [
-            _cr(10, "failure", started="2026-10-27T09:00:00Z", completed="2026-10-27T09:05:00Z"),
-            _cr(20, "failure", started="2026-10-27T09:30:00Z", completed="2026-10-27T09:35:00Z"),
-            _cr(30, "success", started="2026-10-27T10:00:00Z"),
+            _cr(10, "failure", started="2026-10-01T09:00:00Z", completed="2026-10-01T09:05:00Z"),
+            _cr(20, "failure", started="2026-10-01T09:30:00Z", completed="2026-10-01T09:35:00Z"),
+            _cr(30, "success", started="2026-10-01T10:00:00Z"),
         ]
         outcomes, green = await _evaluate(runs)
         assert green is True
         states = {o.state for o in outcomes}
-        assert states == {"superseded by run 30", "success"}
+        assert states == {"superseded by run 30 (workflow workflow-1)", "success"}
         assert sum(o.superseded for o in outcomes) == 2  # listed, never dropped
 
     async def test_an_older_success_never_overrides_a_newer_failure(self):
-        runs = [_cr(10, "success", started="2026-10-27T09:00:00Z"),
-                _cr(20, "failure", started="2026-10-27T10:00:00Z")]
+        runs = [_cr(10, "success", started="2026-10-01T09:00:00Z"),
+                _cr(20, "failure", started="2026-10-01T10:00:00Z")]
         outcomes, green = await _evaluate(runs)
         assert green is False
-        assert [o.state for o in outcomes] == ["superseded by run 20", "failing (failure)"]
+        assert [o.state for o in outcomes] == [
+            "superseded by run 20 (workflow workflow-1)", "failing (failure)"]
 
     @pytest.mark.parametrize("status", ["queued", "in_progress"])
     async def test_an_older_success_never_overrides_a_newer_pending_run(self, status):
-        runs = [_cr(10, "success", started="2026-10-27T09:00:00Z"),
-                _cr(20, status=status, started="2026-10-27T10:00:00Z")]
+        runs = [_cr(10, "success", started="2026-10-01T09:00:00Z"),
+                _cr(20, status=status, started="2026-10-01T10:00:00Z")]
         _, green = await _evaluate(runs)
         assert green is False
 
@@ -4434,31 +4485,31 @@ class TestReRunCheckRunsAreJudgedByTheNewest:
         assert outcomes[0].superseded
 
     async def test_an_older_failure_does_not_beat_a_newer_pending_run_to_green(self):
-        runs = [_cr(10, "failure", started="2026-10-27T09:00:00Z"),
-                _cr(20, status="in_progress", started="2026-10-27T10:00:00Z")]
+        runs = [_cr(10, "failure", started="2026-10-01T09:00:00Z"),
+                _cr(20, status="in_progress", started="2026-10-01T10:00:00Z")]
         outcomes, green = await _evaluate(runs)
         assert green is False
         assert outcomes[1].state == "pending (in_progress)"
 
     async def test_order_is_by_start_time_not_by_id(self):
-        runs = [_cr(99, "failure", started="2026-10-27T08:00:00Z"),
-                _cr(5, "success", started="2026-10-27T10:00:00Z")]
+        runs = [_cr(99, "failure", started="2026-10-01T08:00:00Z"),
+                _cr(5, "success", started="2026-10-01T10:00:00Z")]
         _, green = await _evaluate(runs)
         assert green is True
 
     async def test_equal_start_times_fall_back_to_completed_then_id(self):
-        runs = [_cr(1, "failure", completed="2026-10-27T10:05:00Z"),
-                _cr(2, "success", completed="2026-10-27T10:09:00Z")]
+        runs = [_cr(1, "failure", completed="2026-10-01T10:05:00Z"),
+                _cr(2, "success", completed="2026-10-01T10:09:00Z")]
         assert (await _evaluate(runs))[1] is True
-        runs = [_cr(1, "success", completed="2026-10-27T10:05:00Z"),
-                _cr(2, "failure", completed="2026-10-27T10:09:00Z")]
+        runs = [_cr(1, "success", completed="2026-10-01T10:05:00Z"),
+                _cr(2, "failure", completed="2026-10-01T10:09:00Z")]
         assert (await _evaluate(runs))[1] is False
         # completed_at outranks id: the lower id completed later
-        runs = [_cr(9, "success", completed="2026-10-27T10:09:00Z"),
-                _cr(2, "failure", completed="2026-10-27T10:05:00Z")]
+        runs = [_cr(9, "success", completed="2026-10-01T10:09:00Z"),
+                _cr(2, "failure", completed="2026-10-01T10:05:00Z")]
         assert (await _evaluate(runs))[1] is True
-        runs = [_cr(1, "success", completed="2026-10-27T10:05:00Z"),
-                _cr(2, "failure", completed="2026-10-27T10:09:00Z")]
+        runs = [_cr(1, "success", completed="2026-10-01T10:05:00Z"),
+                _cr(2, "failure", completed="2026-10-01T10:09:00Z")]
         assert (await _evaluate(runs))[1] is False
         runs = [_cr(1, "failure"), _cr(2, "success")]
         assert (await _evaluate(runs))[1] is True
@@ -4486,24 +4537,204 @@ class TestReRunCheckRunsAreJudgedByTheNewest:
         assert green is False
 
     async def test_the_table_names_superseded_runs(self, monkeypatch, capsys):
-        runs = [_cr(10, "failure", started="2026-10-27T09:00:00Z"), _cr(30, "success")]
+        runs = [_cr(10, "failure", started="2026-10-01T09:00:00Z"), _cr(30, "success")]
         client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
         client.check_runs = runs
+        client.workflow_runs = _workflow_rows(runs)
         assert await _run_path(monkeypatch, client, apply=False) == 0
         out = capsys.readouterr().out
-        assert "superseded by run 30" in out and "SUPERSEDED" in out
+        assert "superseded by run 30 (workflow workflow-1)" in out and "SUPERSEDED" in out
 
     async def test_a_stale_red_run_no_longer_blocks_an_approval(self, monkeypatch):
-        runs = [_cr(10, "failure", started="2026-10-27T09:00:00Z"),
-                _cr(20, "failure", started="2026-10-27T09:30:00Z"),
+        runs = [_cr(10, "failure", started="2026-10-01T09:00:00Z"),
+                _cr(20, "failure", started="2026-10-01T09:30:00Z"),
                 _cr(30, "success")]
         client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
         client.check_runs = runs
+        client.workflow_runs = _workflow_rows(runs)
         assert await _run_path(monkeypatch, client) == 0
 
     async def test_a_newer_red_run_still_blocks_an_approval(self, monkeypatch):
-        runs = [_cr(10, "success", started="2026-10-27T09:00:00Z"), _cr(30, "failure")]
+        runs = [_cr(10, "success", started="2026-10-01T09:00:00Z"), _cr(30, "failure")]
         client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
         client.check_runs = runs
+        client.workflow_runs = _workflow_rows(runs)
         assert await _run_path(monkeypatch, client) == 1
         assert client.posted == []
+
+
+# ── Round 3: workflow identity, future start times, pagination ──────────────
+
+
+NOW = datetime(2026, 10, 1, 10, 30, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+class TestSameNamedJobsInDifferentWorkflows:
+    """`pytest` runs in two workflows (daemon-tests.yml and ateles-tests.yml)."""
+
+    async def test_a_failure_in_one_workflow_is_not_superseded_by_a_pass_in_another(self):
+        runs = [
+            _cr(1, "failure", wf=111, started="2026-10-01T10:00:00Z"),
+            _cr(2, "success", wf=222, started="2026-10-01T10:01:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs)
+        assert green is False
+        assert not any(o.superseded for o in outcomes)
+        assert [o.passed for o in outcomes] == [False, True]
+
+    async def test_a_reopened_run_supersedes_within_its_workflow_only(self):
+        """Both cases in one head: workflow 111 was re-run (new suite, same
+        workflow) so its stale failure is superseded; workflow 222's own failure
+        has no newer run and still blocks."""
+        runs = [
+            _cr(1, "failure", wf=111, started="2026-10-01T09:00:00Z"),
+            _cr(2, "success", wf=111, started="2026-10-01T10:00:00Z"),   # reopen: new suite
+            _cr(3, "failure", wf=222, started="2026-10-01T09:30:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs)
+        assert outcomes[0].superseded and "workflow-111" in outcomes[0].state
+        assert not outcomes[2].superseded and not outcomes[2].passed
+        assert green is False
+        # ... and with workflow 222 green the head is green.
+        runs[2] = _cr(3, "success", wf=222, started="2026-10-01T09:30:00Z")
+        assert (await _evaluate(runs))[1] is True
+
+    async def test_a_rerun_inside_one_suite_is_still_the_same_workflow(self):
+        runs = [
+            _cr(1, "failure", wf=111, suite=5000, started="2026-10-01T09:00:00Z"),
+            _cr(2, "success", wf=111, suite=5000, started="2026-10-01T10:00:00Z"),
+        ]
+        assert (await _evaluate(runs))[1] is True
+
+    async def test_a_run_with_no_workflow_never_supersedes_or_is_superseded(self):
+        runs = [
+            _cr(1, "failure", wf=None, started="2026-10-01T09:00:00Z"),
+            _cr(2, "success", wf=None, started="2026-10-01T10:00:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs)
+        assert green is False and not any(o.superseded for o in outcomes)
+
+    async def test_an_unmapped_newer_pass_does_not_supersede_a_mapped_failure(self):
+        runs = [
+            _cr(1, "failure", wf=111, started="2026-10-01T09:00:00Z"),
+            _cr(2, "success", wf=None, started="2026-10-01T10:00:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs)
+        assert green is False and not any(o.superseded for o in outcomes)
+
+    async def test_a_mapped_newer_pass_does_not_supersede_an_unmapped_failure(self):
+        runs = [
+            _cr(1, "failure", wf=None, started="2026-10-01T09:00:00Z"),
+            _cr(2, "success", wf=111, started="2026-10-01T10:00:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs)
+        assert green is False and not any(o.superseded for o in outcomes)
+
+    async def test_a_failed_workflow_lookup_supersedes_nothing(self):
+        runs = [_cr(1, "failure", started="2026-10-01T09:00:00Z"),
+                _cr(2, "success", started="2026-10-01T10:00:00Z")]
+        outcomes, green = await _evaluate(runs, actions_status=500, workflow_runs=[])
+        assert green is False and not any(o.superseded for o in outcomes)
+
+    async def test_a_head_with_no_repeated_check_makes_no_workflow_lookup(self):
+        await _evaluate([_cr(1, "success", name="a"), _cr(2, "success", name="b")])
+        assert not [u for u in _evaluate.client.get_urls if "/actions/" in u]
+
+
+@pytest.mark.asyncio
+class TestFutureStartTimes:
+    async def test_a_run_dated_far_in_the_future_supersedes_nothing(self):
+        runs = [
+            _cr(1, "failure", started="2026-10-01T10:00:00Z"),
+            _cr(2, "success", started="2026-10-01T14:00:00Z"),   # four hours ahead
+        ]
+        outcomes, green = await _evaluate(runs, now=NOW)
+        assert green is False and not any(o.superseded for o in outcomes)
+
+    async def test_a_future_dated_failure_does_not_hide_behind_it_either(self):
+        runs = [
+            _cr(1, "success", started="2026-10-01T10:00:00Z"),
+            _cr(2, "failure", started="2026-10-01T14:00:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs, now=NOW)
+        assert green is False and not any(o.superseded for o in outcomes)
+
+    async def test_a_small_clock_skew_is_tolerated(self):
+        runs = [
+            _cr(1, "failure", started="2026-10-01T10:00:00Z"),
+            _cr(2, "success", started="2026-10-01T10:33:00Z"),   # three minutes ahead
+        ]
+        assert (await _evaluate(runs, now=NOW))[1] is True
+
+    async def test_an_unreadable_start_time_supersedes_nothing(self):
+        runs = [
+            _cr(1, "failure", started="2026-10-01T10:00:00Z"),
+            _cr(2, "success", started="not-a-time"),
+        ]
+        outcomes, green = await _evaluate(runs, now=NOW)
+        assert green is False and not any(o.superseded for o in outcomes)
+
+
+@pytest.mark.asyncio
+class TestCheckRunListIsReadInFull:
+    def _many(self, n, **kw):
+        return [_cr(i, "success", name=f"job-{i}", **kw) for i in range(1, n + 1)]
+
+    async def test_a_long_list_is_paginated_and_green_when_all_pass(self):
+        outcomes, green = await _evaluate(self._many(250))
+        assert green is True and len(outcomes) == 250
+        assert _evaluate.client.check_pages == [1, 2, 3]
+
+    async def test_a_failure_on_a_later_page_is_seen(self):
+        runs = self._many(250)
+        runs[220] = _cr(221, "failure", name="job-221")
+        assert (await _evaluate(runs))[1] is False
+
+    async def test_a_list_shorter_than_its_total_is_not_green(self):
+        outcomes, green = await _evaluate(self._many(250), checks_total=300)
+        assert green is False
+        assert any("read 250 of 300" in o.state for o in outcomes)
+
+    async def test_an_unreadable_page_is_not_green_and_says_why(self):
+        outcomes, green = await _evaluate(self._many(250), checks_page_status={2: 502})
+        assert green is False
+        assert any("page 2" in o.state and "502" in o.state for o in outcomes)
+
+    async def test_an_unreadable_first_page_is_not_green(self):
+        outcomes, green = await _evaluate(self._many(5), checks_page_status={1: 500})
+        assert green is False
+
+
+@pytest.mark.asyncio
+class TestPathPanelNeedsTheDefaultBranch:
+    async def test_a_non_default_base_takes_the_full_panel(self, monkeypatch, capsys):
+        client = _path_client(
+            [SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope(), default_branch="develop"
+        )
+        assert await _run_path(monkeypatch, client, apply=False) == 1
+        out = capsys.readouterr().out
+        assert "Panel: full five-lens panel" in out and "not the repository's default branch" in out
+
+    async def test_an_unreadable_default_branch_takes_the_full_panel(self, monkeypatch, capsys):
+        client = _path_client(
+            [SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope(), default_branch=None
+        )
+        assert await _run_path(monkeypatch, client, apply=False) == 1
+        assert "unreadable" in capsys.readouterr().out
+
+    async def test_the_default_base_still_selects_one_lens(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+
+
+@pytest.mark.asyncio
+class TestOneLensWording:
+    async def test_the_reason_glosses_the_scope_lists_and_points_at_a_review_comment(
+        self, monkeypatch
+    ):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        body = client.posted[0]["json"]["body"]
+        assert "the paths this repo marks as safe for one lens" in body
+        assert "post an objection as a review comment on the current head" in body

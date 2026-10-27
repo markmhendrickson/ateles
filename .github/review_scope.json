@@ -122,7 +122,8 @@
     "**/Gemfile*",
     "**/go.mod",
     "**/go.sum",
-    "**/Cargo.toml"
+    "**/Cargo.toml",
+    "apps/task-dashboard/vite.config.ts"
   ],
   "reduced_paths": [
     "docs/**",
@@ -134,12 +135,12 @@
     "apps/task-dashboard/tailwind.config.ts",
     "apps/task-dashboard/postcss.config.js",
     "apps/task-dashboard/tsconfig.json",
-    "apps/task-dashboard/vite.config.ts",
-    "execution/scripts/**",
     "**/test_*.py",
     "**/*_test.py",
     "**/*.test.ts",
-    "**/*.test.tsx"
+    "**/*.test.tsx",
+    "execution/scripts/hallucination_filter.py",
+    "execution/scripts/local_whisper.py"
   ],
   "ux_paths": [
     "README.md",

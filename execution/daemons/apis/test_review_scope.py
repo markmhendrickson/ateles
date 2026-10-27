@@ -374,6 +374,7 @@ class TestThisRepoCoversEveryRiskCategory:
             "apps/task-dashboard/src/Console.test.tsx",
             "execution/scripts/local_whisper.py",
             "execution/scripts/hallucination_filter.py",
+            "execution/scripts/test_hallucination_filter.py",
         ],
     )
     def test_ordinary_application_code_docs_and_ui_stay_on_the_reduced_route(self, path):
@@ -385,3 +386,52 @@ class TestThisRepoCoversEveryRiskCategory:
         scope = self._scope()
         assert scope.full_panel_trigger(["LICENSE"]) is None
         assert scope.unclassified(["LICENSE"]) == ["LICENSE"]
+
+
+class TestReducedPathsAreAnExplicitList:
+    """Round 3: `execution/scripts/**` was too wide a reduced route (it held
+    data-writing scripts). A script not named is unclear, so it takes the full panel."""
+
+    def _scope(self):
+        return rs.parse_scope((REPO_ROOT / rs.SCOPE_PATH).read_text())
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "execution/scripts/import_audio_from_desktop.py",
+            "execution/scripts/link_vocabulary_terms.py",
+            "execution/scripts/workout_import/importer.py",
+            "execution/scripts/stream_transcript.py",
+            "execution/scripts/package_rule_inventory_inputs.py",
+            "execution/scripts/brand_new_tool.py",
+        ],
+    )
+    def test_a_script_that_is_not_listed_is_unclear_and_takes_the_full_panel(self, path):
+        scope = self._scope()
+        assert scope.unclassified([path]) == [path]
+        d = rs.select_path_panel([path], rs.ScopeLoad(scope, "s"))
+        assert d.full
+
+    def test_a_brand_new_script_beside_a_safe_one_still_takes_the_full_panel(self):
+        d = rs.select_path_panel(
+            ["execution/scripts/hallucination_filter.py", "execution/scripts/brand_new_tool.py"],
+            rs.ScopeLoad(self._scope(), "s"),
+        )
+        assert d.full and "brand_new_tool.py" in d.reason
+
+    def test_the_dashboard_build_config_is_full_panel(self):
+        assert self._scope().full_panel_trigger(["apps/task-dashboard/vite.config.ts"]) is not None
+        assert self._scope().unclassified(["apps/task-dashboard/vite.config.ts"]) != []
+
+    def test_the_one_lens_reasons_gloss_the_scope_lists(self):
+        scope = rs.parse_scope(json.dumps(GOOD))
+        arch = rs.select_path_panel(["lib/a.py"], rs.ScopeLoad(scope, "s"))
+        assert "the paths this repo marks as safe for one lens" in arch.reason
+        ux = rs.select_path_panel(["site/a.html"], rs.ScopeLoad(scope, "s"))
+        assert "the user-facing paths this repo marks as safe for one lens" in ux.reason
+        unclear = rs.select_path_panel(["odd/x.bin"], rs.ScopeLoad(scope, "s"))
+        assert "the paths this repo marks as safe for one lens" in unclear.reason
+
+    def test_the_one_lens_note_says_review_comment(self):
+        text = rs.select_path_panel(["lib/a.py"], _load(GOOD)).describe()
+        assert "post an objection as a review comment on the current head" in text

@@ -205,6 +205,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -589,6 +590,17 @@ def _file_list_problem(rows_seen: int, expected: object) -> str:
             f"the file list has {rows_seen} entries but the PR reports {expected} changed files"
         )
     return ""
+
+
+async def _default_branch(client: httpx.AsyncClient, repo: str) -> str:
+    """The repository's default branch, or "" when it cannot be read."""
+    try:
+        resp = await client.get(f"{GITHUB_API}/repos/{repo}", headers=_github_headers(repo))
+        if resp.status_code >= 400:
+            return ""
+        return str((resp.json() or {}).get("default_branch") or "")
+    except Exception:  # noqa: BLE001 — unreadable: not the default
+        return ""
 
 
 async def fetch_review_scope(
@@ -1475,11 +1487,111 @@ async def _unscheduled_non_required_reason(
     return f"{not_required}; no online runner has all of its labels [{label_text}]"
 
 
-def _check_group(run: dict) -> tuple[str, str]:
-    """Which check a run belongs to: its name and the App that posted it, so a
-    re-run of the same check on the same head is the same group."""
+# A re-run's start time may not be later than "now" by more than this: a clock
+# error or a forged timestamp must not let a run outrank real ones.
+CHECK_RUN_FUTURE_SKEW = timedelta(minutes=5)
+_CHECK_RUNS_PAGE_CAP = 50
+_ACTIONS_RUNS_PAGE_CAP = 20
+
+
+def _parse_time(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _suite_id(run: dict) -> object:
+    suite = run.get("check_suite")
+    return suite.get("id") if isinstance(suite, dict) else None
+
+
+def _app_key(run: dict) -> str:
     app = run.get("app") if isinstance(run.get("app"), dict) else {}
-    return (str(run.get("name") or "").strip(), str(app.get("id") or app.get("slug") or ""))
+    return str(app.get("id") or app.get("slug") or "")
+
+
+def _orderable(run: dict, workflows: dict, now: datetime) -> bool:
+    """May this run supersede, or be superseded by, another run of its check?
+
+    Only when its check suite maps to a known Actions workflow (so a job of the
+    same name in a DIFFERENT workflow is never the same check) and its start time
+    is readable and not in the future. Anything else counts as it stands.
+    """
+    if _suite_id(run) not in workflows:
+        return False
+    started = str(run.get("started_at") or "")
+    if not started:
+        return True  # an unstarted run: ordered newest by `_check_order`
+    when = _parse_time(started)
+    return when is not None and when <= now + CHECK_RUN_FUTURE_SKEW
+
+
+async def _read_check_runs(
+    client: httpx.AsyncClient, repo: str, head_sha: str
+) -> tuple[list[dict], str]:
+    """(every check-run on the head, "") or (what was read, why it is incomplete).
+
+    Paginated at 100 per page. A page that cannot be read, a list shorter than
+    the API's own `total_count`, or a list too long to read is incomplete, and an
+    incomplete list is never green.
+    """
+    runs: list[dict] = []
+    total: object = None
+    for page in range(1, _CHECK_RUNS_PAGE_CAP + 1):
+        resp = await client.get(
+            f"{GITHUB_API}/repos/{repo}/commits/{head_sha}/check-runs",
+            headers={**_github_headers(repo), "Accept": "application/vnd.github+json"},
+            params={"per_page": 100, "page": page},
+        )
+        if resp.status_code >= 400:
+            return runs, f"check-runs page {page} could not be read (HTTP {resp.status_code})"
+        payload = resp.json() or {}
+        rows = payload.get("check_runs", []) or []
+        runs.extend(rows)
+        total = payload.get("total_count", total)
+        if isinstance(total, int) and not isinstance(total, bool):
+            if len(runs) >= total:
+                return runs, ""
+            if not rows:
+                return runs, f"read {len(runs)} of {total} check-runs"
+        elif len(rows) < 100:
+            return runs, ""
+    return runs, f"more than {_CHECK_RUNS_PAGE_CAP * 100} check-runs; the list cannot be fully read"
+
+
+async def _workflow_runs_by_suite(
+    client: httpx.AsyncClient, repo: str, head_sha: str
+) -> dict:
+    """check_suite id -> (workflow_id, label) for the Actions runs on the head.
+
+    Empty on any failure: a check-run whose suite is not in the map is never
+    superseded and never supersedes, so a failed or partial lookup can only make
+    the gate stricter.
+    """
+    out: dict = {}
+    try:
+        for page in range(1, _ACTIONS_RUNS_PAGE_CAP + 1):
+            resp = await client.get(
+                f"{GITHUB_API}/repos/{repo}/actions/runs",
+                headers=_github_headers(repo),
+                params={"head_sha": head_sha, "per_page": 100, "page": page},
+            )
+            if resp.status_code >= 400:
+                return {}
+            payload = resp.json() or {}
+            rows = payload.get("workflow_runs", []) or []
+            for row in rows:
+                suite, workflow = row.get("check_suite_id"), row.get("workflow_id")
+                if suite is not None and workflow is not None:
+                    out[suite] = (workflow, str(row.get("name") or workflow))
+            total = payload.get("total_count")
+            if len(rows) < 100 or (isinstance(total, int) and page * 100 >= total):
+                break
+    except Exception:  # noqa: BLE001 — an unreadable lookup supersedes nothing
+        return {}
+    return out
 
 
 def _check_order(run: dict) -> tuple[str, str, int]:
@@ -1497,7 +1609,12 @@ def _check_order(run: dict) -> tuple[str, str, int]:
 
 
 async def evaluate_checks(
-    client: httpx.AsyncClient, *, repo: str, head_sha: str, base_ref: str = ""
+    client: httpx.AsyncClient,
+    *,
+    repo: str,
+    head_sha: str,
+    base_ref: str = "",
+    now: datetime | None = None,
 ) -> tuple[list[CheckOutcome], bool]:
     """Every required-looking check-run on *head_sha*; True iff ALL are green.
 
@@ -1524,9 +1641,14 @@ async def evaluate_checks(
     An empty *base_ref* disables this, so every pending check blocks. If every
     check-run on the head is "not run", that is still no signal: not green.
 
-    Re-runs: several check-runs of the same name (and App) on one head are one
-    check, judged by its newest run (`_check_order`); the older ones are listed as
-    "superseded by run <id>" and decide nothing, in either direction.
+    Re-runs: several check-runs of the same name, App AND Actions workflow on one
+    head are one check, judged by its newest run (`_check_order`); the older ones
+    are listed as "superseded by run <id>" and decide nothing, in either
+    direction. A job of the same name in another workflow is a different check
+    (this repo has `pytest` in two workflows). A run whose check suite cannot be
+    mapped to a workflow, or that started later than now plus a small skew, is
+    never superseded and never supersedes. The check-run list is read in full
+    (100 per page); one that cannot be fully read is not green.
     """
     status_resp = await client.get(
         f"{GITHUB_API}/repos/{repo}/commits/{head_sha}/status",
@@ -1537,12 +1659,16 @@ async def evaluate_checks(
     combined_state = status_payload.get("state", "")
     legacy_status_count = status_payload.get("total_count", 0) or 0
 
-    checks_resp = await client.get(
-        f"{GITHUB_API}/repos/{repo}/commits/{head_sha}/check-runs",
-        headers={**_github_headers(repo), "Accept": "application/vnd.github+json"},
+    runs, list_problem = await _read_check_runs(client, repo, head_sha)
+    # Only a repeated (name, App) pair can need a workflow lookup; a head with no
+    # repeats is read as it stands, with no extra call.
+    pairs = [((r.get("name") or "").strip(), _app_key(r)) for r in runs]
+    workflows = (
+        await _workflow_runs_by_suite(client, repo, head_sha)
+        if len(set(pairs)) != len(pairs)
+        else {}
     )
-    checks_resp.raise_for_status()
-    runs = (checks_resp.json() or {}).get("check_runs", [])
+    clock = now or datetime.now(timezone.utc)
 
     outcomes: list[CheckOutcome] = []
     legacy_statuses_green = legacy_status_count == 0 or combined_state in ("success", "")
@@ -1551,20 +1677,29 @@ async def evaluate_checks(
 
     # A head can carry several runs of the same check (closed and reopened, or CI
     # re-triggered on the same head). Each group is judged by its NEWEST run only;
-    # an older run, failed or green, never decides it. Ties are not superseded, so
-    # two runs that cannot be ordered both count (fail closed).
-    newest: dict[tuple[str, str], dict] = {}
-    for run in runs:
-        key = _check_group(run)
+    # an older run, failed or green, never decides it. A group is the check's name,
+    # its App and its Actions workflow. A run that cannot be placed in a workflow,
+    # or whose start time is unreadable or in the future, is its own group: it
+    # counts as it stands. Ties are not superseded, so two runs that cannot be
+    # ordered both count (fail closed).
+    def group_of(index: int, run: dict) -> tuple:
+        if _orderable(run, workflows, clock):
+            return (str(run.get("name") or "").strip(), _app_key(run), workflows[_suite_id(run)][0])
+        return ("unplaced", index)
+
+    keys = [group_of(i, run) for i, run in enumerate(runs)]
+    newest: dict[tuple, dict] = {}
+    for key, run in zip(keys, runs):
         if key not in newest or _check_order(run) > _check_order(newest[key]):
             newest[key] = run
-    for run in runs:
-        winner = newest[_check_group(run)]
+    for key, run in zip(keys, runs):
+        winner = newest[key]
         if run is not winner and _check_order(run) < _check_order(winner):
+            label = workflows[_suite_id(winner)][1]
             outcomes.append(
                 CheckOutcome(
                     (run.get("name") or "").strip(),
-                    f"superseded by run {winner.get('id')}",
+                    f"superseded by run {winner.get('id')} (workflow {label})",
                     True,
                     superseded=True,
                 )
@@ -1597,6 +1732,11 @@ async def evaluate_checks(
             passed = False
         outcomes.append(CheckOutcome(name, state, passed))
         all_green = all_green and passed
+
+    if list_problem:
+        # An incomplete list can hide a failing run: never green.
+        outcomes.append(CheckOutcome("check-runs", f"unreadable ({list_problem})", False))
+        all_green = False
 
     ran = [o for o in outcomes if not o.not_run and not o.superseded]
     if not ran and legacy_status_count == 0:
@@ -2287,7 +2427,18 @@ async def run(
                     list_problem = _file_list_problem(rows_seen, pr_data.get("changed_files"))
                 except Exception:  # noqa: BLE001 — unreadable list: full panel
                     changed = []
-                if list_problem:
+                default_branch = await _default_branch(client, repo)
+                if not default_branch or default_branch != base_ref:
+                    # The scope file is read from the base branch; a PR aimed at any
+                    # other branch (or a repo whose default cannot be read) could be
+                    # retargeted after review, so it takes the full panel.
+                    decision = review_scope.PanelDecision(
+                        True, "",
+                        f"The PR's base branch ({base_ref or 'unknown'}) is not the repository's "
+                        f"default branch ({default_branch or 'unreadable'}), so the full panel applies.",
+                        scope_load.source,
+                    )
+                elif list_problem:
                     # An incomplete list reads as a smaller change: the full panel.
                     decision = review_scope.PanelDecision(
                         True, "", f"The changed-file list cannot be trusted ({list_problem}), so the full panel applies.",

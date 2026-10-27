@@ -315,8 +315,8 @@ class PanelDecision:
         if not self.full:
             text += (
                 " The other lenses were not required for this change; to require one, pass "
-                "`--lenses <lens>` to the approval tool, or have it post an objection on the "
-                "current head."
+                "`--lenses <lens>` to the approval tool, or post an objection as a "
+                "review comment on the current head."
             )
         return text
 
@@ -349,15 +349,17 @@ def select_path_panel(changed_files: Sequence[str], load: ScopeLoad) -> PanelDec
         more = f" (and {len(unclear) - 1} more)" if len(unclear) > 1 else ""
         return PanelDecision(
             True, "",
-            f"`{unclear[0]}`{more} is on neither reduced_paths nor ux_paths, so its classification "
-            "is unclear and the full panel applies.",
+            f"`{unclear[0]}`{more} is on neither reduced_paths nor ux_paths (the paths this repo "
+            "marks as safe for one lens), so its classification is unclear and the full panel applies.",
             source,
         )
     ux = load.scope.all_on_ux_paths(files)
     if ux is not None:
         return PanelDecision(
-            False, "ux", f"Every changed file is on ux_paths (for example `{ux[0]}` matches `{ux[1]}`) and none is on a full-panel path.", source
+            False, "ux", f"Every changed file is on ux_paths (the user-facing paths this repo marks as safe for one lens; "
+            f"for example `{ux[0]}` matches `{ux[1]}`) and none is on a full-panel path.", source
         )
     return PanelDecision(
-        False, "arch", "Every changed file is on reduced_paths and none is on a full-panel path; not every one is on ux_paths, so architecture is the one lens.", source
+        False, "arch", "Every changed file is on reduced_paths (the paths this repo marks as safe for one lens) and none "
+        "is on a full-panel path; not every one is user-facing, so architecture is the one lens.", source
     )
