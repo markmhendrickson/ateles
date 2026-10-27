@@ -711,7 +711,7 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         seed_entries_left=[k for k in seed_keys
                            if ledger_view and k in ledger_view["in_flight"]],
         login_state=str(fake.machines.get("m-codex-login", {}).get("state", "")),
-        login_lock_held=fly_runner._login_lock("codex").locked(),
+        login_lock_held=fly_runner._login_lock("codex", executor.config.ledger_path.parent).locked(),
         login_config_run_id=str(((fake.machines.get("m-codex-login", {}).get("config") or {})
                                  .get("metadata") or {}).get("ateles_run_id") or ""),
         login_stop_requests=sum(1 for r in fake.requests if r.method == "POST"
