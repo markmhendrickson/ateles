@@ -266,13 +266,15 @@ def _assert_delivery_scope(invocation: dict, *, enabled: bool) -> None:
 
 
 def _assert_github_identity(invocation: dict, *, token: str | None) -> None:
-    """``token=None`` asserts the AMBIENT value survived unchanged — not
-    merely that it differs from the scoped-delivery sentinel, which a bug
-    that wiped ambient identity entirely would also satisfy."""
+    """``token=None`` asserts the child holds NO GitHub identity: the daemon's
+    ambient token is neither passed on nor replaced by the scoped one (the
+    child environment is an allowlist that carries no GitHub credential)."""
     env = invocation["kwargs"]["env"]
     if token is None:
-        assert env.get("GITHUB_TOKEN") == "ambient-github-token"
-        assert env.get("GH_TOKEN") == "ambient-gh-token"
+        assert "GITHUB_TOKEN" not in env
+        assert "GH_TOKEN" not in env
+        assert "ambient-github-token" not in env.values()
+        assert "ambient-gh-token" not in env.values()
     else:
         assert env["GITHUB_TOKEN"] == token
         assert env["GH_TOKEN"] == token

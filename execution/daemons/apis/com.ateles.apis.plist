@@ -11,6 +11,13 @@
         <string>/Users/markmhendrickson/repos/ateles/execution/daemons/apis/apis.py</string>
     </array>
 
+    <!-- A dedicated, empty working directory. Without this launchd starts the
+         daemon in "/", and any child it launches without a directory of its own
+         inherited that. The directory must exist before the job is loaded
+         (mkdir -p), or launchd cannot start the job. -->
+    <key>WorkingDirectory</key>
+    <string>/Users/markmhendrickson/.ateles-work/apis</string>
+
     <!-- Run at login -->
     <key>RunAtLoad</key>
     <true/>
