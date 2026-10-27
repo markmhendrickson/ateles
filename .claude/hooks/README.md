@@ -169,3 +169,38 @@ text-bearing-leader exemptions, override scoping (including that an exported
 value does not approve), and fail-open on malformed input. The suite pipes
 synthetic JSON to the hook's stdin and never runs `git` — writing it does not
 stash anything.
+
+## `codex_turn_guard.py` (Codex only: SessionStart/compact, UserPromptSubmit, PreToolUse, Stop)
+
+Stops three kinds of wasted Codex turns, measured on local rollouts 2026-10-22..27 (Neotoma tasks
+`ent_cb8972677f5fe58c5934e6ed`, `ent_d61c8d051200f3805f61a688`). Installed at user scope by
+`execution/scripts/install_codex_turn_guard.py`; not wired for Claude Code, which has no goals or heartbeats.
+
+| Defect | Mechanism | Binds? |
+|---|---|---|
+| Re-answering the operator's last question after a compaction | `UserPromptSubmit` records the message, `Stop` marks it answered, `SessionStart` (`source=compact`) tells the model it was answered | Context only, on by default. Codex has no hook that can veto a reply, and `PostCompact` cannot inject context. The vendor-side fix is the real one. |
+| Status-only goal-continuation turns | At a goal turn's first tool call, one watermark (operator message, local repository state, optional watch commands). A quiet previous turn plus an unchanged watermark inside a back-off window (5 min doubling to 1 h) means every tool call is denied, with the instruction on stderr | When enforced, for tool calls. Not for the first model sampling of the turn (Codex does not run `UserPromptSubmit` on goal turns: 0 of 349 observed) and not for how soon the next goal turn starts. **Ships in shadow.** |
+| Idle scheduled heartbeats | `UserPromptSubmit` on a `<heartbeat>` prompt blocks it before the model runs, by the same watermark and back-off (10 min doubling to 1 h), keyed per automation id, only for an automation with a watch file | When enforced, if Codex honours `decision: block` on this event (schema-verified in 0.157.1, not run-verified end to end). **Ships in shadow.** |
+
+**Modes**, per path (`answered`, `goal`, `heartbeat`): the `ATELES_CODEX_TURN_GUARD` environment variable
+(`enforce`, `shadow`, `off`) wins, then `~/.codex/ateles/turn_guard/mode.json`, then the defaults (answered
+enforce, goal shadow, heartbeat shadow). Shadow decides and logs but never denies or blocks. Every decision is
+one line in `~/.codex/ateles/turn_guard/decisions.log` (time, thread, path, mode, decision, reason, next check);
+read it before running `install_codex_turn_guard.py --enforce goal heartbeat`.
+
+**Watermark inputs:** the hash of the last operator prompt, the repository `HEAD` and status of the turn's working
+directory (read with `core.fsmonitor` off, no optional locks), and the output of read-only commands listed in
+`~/.codex/ateles/turn_guard/goal_watch.json` (goal) or `.../heartbeats/<automation id>.json` (heartbeat). Examples:
+`templates/codex/goal_watch.example.json`, `templates/codex/heartbeat_watch.example.json`. Without watch commands an
+outside change is seen only when the back-off window lapses.
+
+**Quiet turn:** it wrote nothing (a heuristic over tool names and command text; an unrecognised write counts as
+quiet, which costs at most one back-off window), the watermark did not change during it, and its final message was
+short (160 characters for a heartbeat, 2000 for a goal turn). On 639 local goal turns the classifier counted 38
+(5%) as quiet-eligible; most local goal turns do real work. The shadow log gives the live rate.
+
+**Fail-open.** Any error inside the script exits 0. A missing script is handled by the installed command
+(`test -f <script> || exit 0; exec python3 <script>`), because Python itself exits 2 for a missing file and Codex
+reads exit 2 as a block. A Stop gate that demands a report (#1374) must not be applied to a turn this guard ended:
+`turn_ended_by_guard(session_id, turn_id)` in this module reports it. Subagent events are ignored. State is one
+0600 JSON file per thread in `.claude/.session_state/`.

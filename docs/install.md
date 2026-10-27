@@ -115,6 +115,37 @@ config presence alone is not treated as proof. The user-scope path is the measur
 0.153.4. A generated `AGENTS.md` remains a fallback for installations that have not trusted the hook, not a
 second policy source.
 
+**Optional: the turn guard (goal and heartbeat turns).** Codex goal continuation and scheduled heartbeats can
+spend whole turns re-answering a question or confirming nothing changed. The turn guard is a separate,
+reversible install. Run it from a long-lived checkout, not a linked worktree or a temporary path (the installer
+refuses those unless given `--allow-worktree`):
+
+```sh
+python3 <ateles-checkout>/execution/scripts/install_codex_turn_guard.py --dry-run --heartbeats   # preview
+python3 <ateles-checkout>/execution/scripts/install_codex_turn_guard.py                           # hooks only
+python3 <ateles-checkout>/execution/scripts/install_codex_turn_guard.py --heartbeats              # also shorten heartbeat prompts
+python3 <ateles-checkout>/execution/scripts/install_codex_turn_guard.py --check --heartbeats
+python3 <ateles-checkout>/execution/scripts/install_codex_turn_guard.py --enforce goal heartbeat # after reading the log
+python3 <ateles-checkout>/execution/scripts/install_codex_turn_guard.py --uninstall               # revert (--dry-run previews)
+```
+
+What it changes: `hooks.json` (four `codex_turn_guard.py` entries, guarded so a removed checkout makes them do
+nothing rather than block), `~/.codex/ateles/turn_guard/` (its own files and backups) and, with `--heartbeats`,
+the `prompt` and `updated_at` lines of heartbeat `automation.toml` files; the original prompt is kept as a brief
+file. `config.toml` is never touched. Open `/hooks` afterwards and trust the new entries.
+
+What binds, and when. The goal and heartbeat paths start in **shadow**: the hook only logs what it would do to
+`~/.codex/ateles/turn_guard/decisions.log`, so nothing is skipped until you run `--enforce`. The compaction
+notice ("this message was already answered") is on from the start; it is context the model may ignore, not a
+gate. Enforced goal guarding denies tool calls in a turn that has nothing new, but cannot stop Codex starting the
+turn. Enforced heartbeat guarding blocks an idle heartbeat before the model runs, only for an automation that has
+a watch file (`--heartbeats` creates an empty one), and was verified against the hook schemas, not in a live run.
+Idle runs back off from 10 minutes doubling to 1 hour; goal turns from 5 minutes doubling to 1 hour. Anything
+outside the repository (a pull request, CI, Neotoma) is seen only on that schedule unless you list read-only
+commands in the watch file: see `templates/codex/heartbeat_watch.example.json` and
+`templates/codex/goal_watch.example.json`. `ATELES_CODEX_TURN_GUARD=off|shadow|enforce` overrides every path.
+Design and limits: `.claude/hooks/README.md`, `codex_turn_guard.py`.
+
 ### Cursor — target rung: protocol, beside a generated rules file
 
 **What gets installed:** the Ateles MCP server. Add an `ateles` entry to `mcpServers` in `~/.cursor/mcp.json`
