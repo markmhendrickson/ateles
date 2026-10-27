@@ -36,7 +36,7 @@ Use this skill when:
    - Voice Memos files are **copied** (system-managed; do not move).
 3. **Transcribe** using OpenAI Whisper via `execution/scripts/transcribe_audio.py`, or run the full pipeline with `execution/scripts/import_audio_from_desktop.py`.
 4. **Store** transcriptions: Neotoma MCP first per migration rules; if transcriptions still in Parquet, use `$DATA_DIR/transcriptions/transcriptions.parquet` via Parquet MCP.
-5. **Auto-invoke [`/analyze-meeting`](../analyze-meeting/SKILL.md)** on each successfully transcribed file. The analyze-meeting skill's own "skip silently" rule (≥2 speakers OR ≥200 words AND a commitment verb) handles non-meeting audio (voice memos, lectures, ambient recordings) so unrelated audio does not produce spurious tasks/emails/issues. Disable per-run with `--no-analyze`.
+5. **Auto-invoke [`/process-meeting`](../process-meeting/SKILL.md)** on each successfully transcribed file. The process-meeting skill's own "skip silently" rule (≥2 speakers OR ≥200 words AND a commitment verb) handles non-meeting audio (voice memos, lectures, ambient recordings) so unrelated audio does not produce spurious tasks or issues. Note that process-meeting drafts no emails or messages — it recommends follow-ups as tasks — so a misfire cannot produce a stray draft. Disable per-run with `--no-analyze`.
 6. **Link continuations**: After all transcriptions are stored, review the batch for recordings that are continuations of each other (same topic, recorded within minutes, or explicitly referencing a previous memo). Create a `continues` relationship between them in Neotoma (earlier → later).
 7. **Extract and relate entities**: For each transcription, identify mentioned entities — people, places, organizations, topics, tasks, decisions, feedback items, etc. — and create or update corresponding Neotoma entities. Then relate each transcription to every entity it produced or updated using a `mentions` relationship (transcription → entity).
 
@@ -65,7 +65,7 @@ Use this skill when:
 - Prefer `import_audio_from_desktop.py` when running the full workflow from repo root (scans both Desktop and Voice Memos by default).
 - To scan a specific source only: `import_audio_from_desktop.py --source ~/Desktop`
 - Always perform entity extraction and continuation linking after the transcription step — do not skip even if the transcript is short.
-- Analysis is LLM-driven via `/analyze-meeting`; the old `--analyze` keyword-count flag has been removed.
+- Analysis is LLM-driven via `/process-meeting`; the old `--analyze` keyword-count flag has been removed.
 
 ## Related Rules
 
