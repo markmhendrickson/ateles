@@ -105,6 +105,34 @@ WHAT IS ALLOWED (mirrors the task spec — none of these print a value):
   - `pgrep -x <name>`, `pgrep -l <name>`, and
     `ps -p <pid> -o pid=,comm=` — process presence/identity without argv or
     environment values.
+  - A plain `grep` or `rg` whose literal PATTERN merely names a credential
+    path or a tripwire command (searching source for the dotenv path, a token
+    variable, `env -u NAME`, `printenv`): the pattern is data handed to the
+    search program, not something it reads. Only the pattern is released;
+    every file operand, redirection and recursive root is still judged.
+    Masking is a POSITIVE precondition on the whole command
+    (`_masking_is_safe_for`), so anything not built for is judged exactly as
+    before. It applies only when: the command is plain commands joined by
+    `;`, `&&`, `||`, newline and `|` (no grouping, subshell, compound keyword,
+    function, alias, `&`, heredoc, process substitution, `coproc`, and no
+    command word such as `export`, `eval`, `source` or `hash` that could
+    redefine a tool); output is redirected only to /dev/null or duplicated
+    onto fd 1 or 2; NO environment assignment precedes any command (a search
+    tool reads options and config from the environment, e.g. `GREP_OPTIONS`
+    or `RIPGREP_CONFIG_PATH`, which can turn the pattern word into a file it
+    reads); the tool is the bare name `grep` or `rg` (or in a standard system
+    directory) behind nothing but option-free wrappers (`env`, `command`,
+    `nohup`, `sudo`, `xargs`); the search carries only the options in
+    `_SEARCH_FLAGS` (grep `-nirRHhwFEIs`, rg `-niwFHIs` and their plain long
+    spellings), every one of which takes no value, so the first positional
+    word is the pattern, and any other option (`-e`, `-f`, `-A`, `-C`, `-m`,
+    `-g`, `-o`, `--color`, ...) leaves the command judged as written; the
+    pattern word is provably literal; and every later stage of its pipeline is
+    a plain line filter that cannot name a file (`head`, `tail`, `wc`, `sort`,
+    `uniq`, `nl`, or a one-pattern `grep`/`rg`, each with only the listed
+    options, none behind a prefix such as `xargs`). `egrep`, `fgrep` and `git
+    grep` are not masked. See `_mask_search_patterns` (Neotoma task
+    ent_66d9c92e8343408876e3542b).
 
 Compound commands are split the way gmail_send_gate.py splits them — on
 `&&`, `;`, `|`, and newlines, with backslash-newline line continuations
@@ -129,6 +157,22 @@ not possible by parsing shell text. The guard does not handle these CLASSES:
     outside Bash, Read, Grep, and Glob.
   - A credential reaching context from a source that is not a listed path
     (an environment, a process listing, a log).
+  - Remaining false positives, kept on purpose: a file whose NAME matches a
+    dotenv glob (`my.env.py`, `.env.md`) is refused whatever its extension,
+    because `.env.local` and `.env.production` are real credential files and
+    no extension list can tell them apart safely. Searches the masking is not
+    built for are judged as written, so a pattern that looks like a credential
+    path is still read as a path: `egrep`, `fgrep`, `git grep`, `ag`, `ack`,
+    `git log --grep`, awk or sed program text (which is code, not data), any
+    search with an option outside the short list above (`-e`, `-f`, `-A`,
+    `-C`, `-m`, `-o`, `-g`, `--color`, `--include`, ...), one prefixed by an
+    environment assignment or an option-bearing wrapper, one behind `time` or
+    other wrappers, one inside `$(...)`, backticks, `sh -c` or `find -exec`,
+    loops, groups, heredocs, output to a real file, and a pipe into anything
+    but a plain line filter. Two shapes are not caught by this guard at all,
+    with or without a pattern naming a credential: a computed recursive root
+    (`grep -r x "$PWD"`) and `git grep --no-index` run from a directory above
+    a credential directory.
 Treat a pass from this hook as "nothing obviously wrong", never as proof that
 no credential was read. Hardening belongs to the sandbox and broker
 (ateles#1340); additions here should be limited to accidents that actually
@@ -334,7 +378,16 @@ def _safe_alternative(path_desc: str, tool: str = "Bash") -> str:
             "  - To check whether a variable EXISTS, count it rather than reading it:\n"
             "      grep -c '^VAR_NAME=' <file>\n"
             "  - To list which variable NAMES a file defines (no values):\n"
-            "      grep -o '^[A-Z_]*=' <file>\n\n"
+            "      grep -o '^[A-Z_]*=' <file>\n"
+            "  - To search SOURCE CODE for the text of a credential path or variable,\n"
+            "    keep the text in a plain quoted pattern and point the search at source\n"
+            "    files: grep -n 'text' <file>  or  rg -n 'text' <dir>. Only plain grep and\n"
+            "    rg with -n -i -r -R -H -h -w -F -E -I -s are recognised; any other option\n"
+            "    (-e -f -A -C -m -o -g ...), egrep/fgrep/git grep, a VAR=value prefix,\n"
+            "    output redirected anywhere but /dev/null, a pipe into anything but\n"
+            "    head/tail/wc/sort/uniq/nl/grep, loops and groups, heredocs and a wrapper\n"
+            "    with options are judged as written. Drop them, or search in two steps.\n"
+            "    (-o is fine on a credential FILE for names only, as above.)\n\n"
         )
     return header + body + _PROVENANCE_NOTE
 
@@ -1527,27 +1580,36 @@ def _decode_ansi_c_escape(text: str, index: int) -> tuple[str, int]:
     return "\\" + char, index + 1
 
 
-def _lex(command: str):
+def _lex(command: str, spans: list | None = None):
     """Split *command* into ``(kind, text)`` tokens, kind ``"word"`` or ``"op"``.
 
     Quotes and backslash escapes are decoded; a command or variable
     substitution is kept verbatim inside its word. Raises ``ValueError`` on an
     unterminated quote, so callers can fall back to their coarser checks.
+
+    When *spans* is a list, one ``(start, end)`` pair is appended per token,
+    in step with the returned list: the half-open range of the token's RAW
+    text in *command*, quotes and escapes included.
     """
     tokens: list[tuple[str, str]] = []
     i, n = 0, len(command)
     word: list[str] = []
     in_word = False
+    start = 0
 
     def flush():
         nonlocal in_word
         if in_word:
             tokens.append(("word", "".join(word)))
+            if spans is not None:
+                spans.append((start, i))
             word.clear()
             in_word = False
 
     while i < n:
         ch = command[i]
+        if not in_word:
+            start = i
         if ch in " \t\r":
             flush()
             i += 1
@@ -1634,6 +1696,8 @@ def _lex(command: str):
             if op:
                 flush()
                 tokens.append(("op", op))
+                if spans is not None:
+                    spans.append((i, i + len(op)))
                 i += len(op)
             else:
                 word.append(ch)
@@ -2101,9 +2165,366 @@ def _redirected_stdin_loop_hit(command: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Search patterns are data, not operands.
+#
+# The checks below match path-shaped and command-shaped TEXT anywhere in a
+# command. A search for the text of a credential path or of a tripwire command
+# in source code (a `rg` or `grep` whose pattern names the dotenv path or an
+# `env -u NAME` form) therefore read as the credential read itself and was
+# refused, which blocked diagnosing a credential defect in this very guard
+# (Neotoma task ent_66d9c92e8343408876e3542b). The pattern of a
+# `grep`/`rg` is data handed to the search program; what the
+# program READS is its file operands, which stay fully judged.
+#
+# `_mask_search_patterns` replaces only the literal pattern word of a plain
+# `grep` or `rg` with an inert placeholder before any check runs, and fails
+# closed everywhere it is unsure (`_masking_is_safe_for` for the command,
+# `_SEARCH_FLAGS` for the options). Scope was cut after three review rounds to
+# what the task's false positives need: `grep -n 'text' file`, `rg -n 'text'
+# dir`, with the options listed in `_SEARCH_FLAGS`, none of which takes a value.
+# Everything else, including `egrep`, `fgrep`, `git grep`, valued options and
+# any environment assignment, is judged as written.
+# Redirection targets, file operands and everything outside the pattern word
+# are untouched, so every read of a credential file stays refused.
+# ---------------------------------------------------------------------------
+_MASKED_PATTERN = "MASKEDSEARCHPATTERN"
+
+# The ONLY options a masked search may carry, per tool: (short flags, long
+# flags). Deliberately minimal, what a pattern-only source search needs
+# (`grep -n 'text' file`, `rg -n 'text' dir`). Every option listed takes NO
+# value, so the first positional word is always the pattern. Any other option,
+# valued or not (`-e`, `-f`, `-A`, `-C`, `-m`, `-g`, `-o`, `--color`, ...),
+# leaves the whole command judged as written: nothing here has to know a
+# value-taking option's arity, which differs between grep implementations.
+_SEARCH_FLAGS = {
+    "grep": (
+        frozenset("nirRHhwFEIs"),
+        frozenset(
+            {"--line-number", "--ignore-case", "--recursive", "--fixed-strings",
+             "--extended-regexp", "--word-regexp", "--with-filename", "--no-filename"}
+        ),
+    ),
+    "rg": (
+        frozenset("niwFHIs"),
+        frozenset(
+            {"--line-number", "--ignore-case", "--fixed-strings", "--word-regexp",
+             "--with-filename", "--no-filename"}
+        ),
+    ),
+}  # fmt: skip
+
+
+def _raw_word_is_literal(raw: str) -> bool:
+    """True when the shell passes *raw* on as exactly its decoded text: no
+    unquoted glob, brace or tilde expansion, and no parameter, command or
+    arithmetic expansion anywhere (inside double quotes too). Anything this
+    cannot prove literal is treated as code, never as data."""
+    i, n = 0, len(raw)
+    while i < n:
+        ch = raw[i]
+        if ch == "\\":
+            i += 2
+        elif ch == "'":
+            end = raw.find("'", i + 1)
+            if end < 0:
+                return False
+            i = end + 1
+        elif ch == '"':
+            i += 1
+            while i < n and raw[i] != '"':
+                if raw[i] == "\\":
+                    i += 2
+                    continue
+                if raw[i] in "$`":
+                    return False
+                i += 1
+            if i >= n:
+                return False
+            i += 1
+        elif ch in "*?[]{}$`~!^#":
+            return False
+        else:
+            i += 1
+    return True
+
+
+# Masking is a POSITIVE precondition on the whole command, not a list of flows to
+# refuse. Every rule below is "mask only if", so a shape nobody thought of is
+# left judged as written. See `_masking_is_safe_for`.
+#
+# Words that open or close a compound command, define a function, or otherwise
+# change what a later `grep` word runs or where its output goes.
+_COMPOUND_WORDS = frozenset(
+    {"{", "}", "!", "if", "then", "else", "elif", "fi", "for", "while", "until",
+     "do", "done", "case", "esac", "select", "function", "coproc", "[[", "]]"}
+)  # fmt: skip
+_SHADOWING_COMMANDS = frozenset(
+    {"alias", "unalias", "hash", "enable", "export", "declare", "typeset",
+     "readonly", "local", "eval", "source", ".", "builtin", "unset", "set",
+     "shopt", "trap"}
+)  # fmt: skip
+_SHADOWING_ASSIGNMENT_RE = re.compile(r"(?:PATH|BASH_ENV|ENV|SHELLOPTS|IFS|PS4)=")
+# ANY environment assignment in command-prefix position declines masking. The
+# search tools read their own options and config from the environment
+# (`GREP_OPTIONS`, `RIPGREP_CONFIG_PATH`), which can turn the word the lexer
+# calls the pattern into a file the program reads, so no list of "harmless"
+# names is kept: the fall-through is the judgement the unmasked command gets.
+_ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# Operators a masked command may contain. `>` forms are judged one by one
+# (only `/dev/null` and `1`/`2` fd duplication are harmless); every other
+# operator (grouping, `&`, `|&`, heredocs, process substitution) declines.
+_MASKING_PLAIN_OPERATORS = frozenset({";", "&&", "||", "|", "\n", "<"})
+_SEARCH_DIRECTORIES = ("/usr/bin/", "/bin/", "/usr/local/bin/", "/opt/homebrew/bin/")
+# Pipe stages that only filter or count their input, with the EXACT options
+# they may carry: (flags, flags taking a number, long flags, positionals).
+# Anything outside this table, a file operand, a prefix word or an unlisted
+# option makes the stage "not plain" and the search is left unmasked.
+_PLAIN_FILTERS = {
+    "head": (set(), set("nc"), set(), 0),
+    "tail": (set(), set("nc"), set(), 0),
+    "wc": (set("lwcmL"), set(), set(), 0),
+    "sort": (set("nrufbdhVis"), set(), set(), 0),
+    "uniq": (set("cdui"), set(), set(), 0),
+    "nl": (set(), set(), set(), 0),
+    "grep": (set("vicnwxFEhH"), set(), set(), 1),
+    "rg": (set("vicnwxFhH"), set(), set(), 1),
+}  # fmt: skip
+
+
+def _is_plain_filter_stage(words: list[str]) -> bool:
+    """True for a pipe stage that only filters or counts its input: a bare
+    command name (no prefix word, no path), options from `_PLAIN_FILTERS`
+    only, and exactly the positional operands the table allows (none, or one
+    pattern for the grep family). It cannot name a file, so the text it is
+    handed cannot be read back as a path."""
+    if not words or words[0] not in _PLAIN_FILTERS:
+        return False
+    flags, numeric, longs, positionals_allowed = _PLAIN_FILTERS[words[0]]
+    positionals = 0
+    index = 1
+    while index < len(words):
+        word = words[index]
+        if word == "--":
+            positionals += len(words) - index - 1
+            break
+        if word.startswith("--"):
+            if word not in longs:
+                return False
+        elif word.startswith("-") and word != "-":
+            if re.fullmatch(r"-\d+", word) and words[0] in ("head", "tail"):
+                index += 1
+                continue
+            cluster = word[1:]
+            for position, flag in enumerate(cluster):
+                if flag in numeric:
+                    attached = cluster[position + 1 :]
+                    if attached:
+                        if not re.fullmatch(r"[0-9]+", attached):
+                            return False
+                    else:
+                        index += 1
+                        if index >= len(words) or not re.fullmatch(r"[0-9]+", words[index]):
+                            return False
+                    break
+                if flag not in flags:
+                    return False
+        else:
+            if any(ch in word for ch in "*?[]{}$`~!^#"):
+                return False  # an unquoted-looking glob could expand to file names
+            positionals += 1
+        index += 1
+    return positionals == positionals_allowed
+
+
+def _bare_prefixes_only(words: list[str], index: int) -> bool:
+    """True when every word before the command word is a shell keyword or a
+    bare wrapper (`env`, `command`, `nohup`, `exec`, `sudo`, `xargs`) with NO
+    option and NO environment assignment. `_command_index` skips option words
+    without knowing which take a value, so a wrapper option whose value is
+    spelled like a search tool would put the real program in the pattern
+    slot; an assignment can change how the tool reads its own arguments."""
+    for word in words[:index]:
+        if word in _LEADING_KEYWORDS:
+            continue
+        if _basename(word) in _COMMAND_PREFIXES:
+            continue
+        return False
+    return True
+
+
+def _search_command_kind(words: list[str]) -> tuple[str | None, int]:
+    """(kind, index of the first word after the command name) for a simple
+    command that is plain `grep` or `rg`, else (None, 0). The command word
+    must be the bare tool name or sit in a standard system directory (a
+    `./grep` or `/tmp/grep` is some other program); `egrep`, `fgrep` and
+    `git grep` are not handled and are judged as written."""
+    index = _command_index(words)
+    if index is None or not _bare_prefixes_only(words, index):
+        return None, 0
+    word = words[index]
+    name = _basename(word)
+    if word != name and not any(word == d + name for d in _SEARCH_DIRECTORIES):
+        return None, 0
+    if name in ("grep", "rg"):
+        return name, index + 1
+    return None, 0
+
+
+def _search_pattern_word_indexes(words: list[str], kind: str, start: int) -> list[int]:
+    """Indexes into *words* of the search PATTERN (the first positional word).
+    Empty whenever an option outside `_SEARCH_FLAGS` appears anywhere on the
+    line (options may follow positionals), so nothing here has to know the
+    arity of any option."""
+    short_flags, long_flags = _SEARCH_FLAGS[kind]
+    positionals: list[int] = []
+    index, n = start, len(words)
+    while index < n:
+        word = words[index]
+        if word == "--":
+            positionals.extend(range(index + 1, n))
+            break
+        if word.startswith("--"):
+            if word not in long_flags:
+                return []
+        elif word.startswith("-") and word != "-":
+            if not all(flag in short_flags for flag in word[1:]):
+                return []
+        else:
+            positionals.append(index)
+        index += 1
+    return positionals[:1]
+
+
+def _mask_search_patterns(command: str) -> str:
+    """*command* with the literal pattern words of every recognised search
+    command replaced by an inert placeholder. Returns *command* unchanged when
+    it cannot be lexed, when anything could change what the word `grep` runs or
+    what the lexer sees as a command (heredocs, functions, aliases, PATH), or
+    when nothing qualifies. Never raises: a failure here must leave the
+    command judged as it was written."""
+    try:
+        return _mask_search_patterns_unchecked(command)
+    except Exception:  # noqa: BLE001 — fall back to the unmasked command
+        return command
+
+
+def _masking_is_safe_for(command: str, tokens: list) -> bool:
+    """The positive precondition for masking ANY pattern in *command*.
+
+    The pattern of a search can reach a reader (as `-o` output, or as a
+    matching line) and the lexer reads some constructs differently from the
+    shell, so masking is allowed only for a command made of plain commands
+    joined by `;`, `&&`, `||`, newlines and `|`: no grouping, subshell,
+    compound keyword, function, alias, `&`, heredoc, process substitution,
+    coprocess or `exec`-style redirect; output redirected only to /dev/null
+    or duplicated onto fd 1/2; no assignment that changes command lookup; and
+    no command word that could redefine the search tool. Anything else keeps
+    the command judged as written."""
+    if re.search(r"(?<!<)<<(?!<)", command.replace("\\\n", "")):
+        return False  # a heredoc, however it is spelled
+    previous_op = None
+    for index, (kind, text) in enumerate(tokens):
+        if kind == "op":
+            if text in _MASKING_PLAIN_OPERATORS:
+                if text == "<" and previous_op == "<":
+                    return False  # `<` `<` split by a line continuation
+            elif text in (">", ">>", ">&"):
+                operand = tokens[index + 1][1] if index + 1 < len(tokens) else ""
+                harmless = (text in (">", ">>") and operand == "/dev/null") or (
+                    text == ">&" and operand in ("1", "2")
+                )
+                if not harmless:
+                    return False
+            else:
+                return False
+            previous_op = text
+            continue
+        previous_op = None
+        if _SHADOWING_ASSIGNMENT_RE.match(text):
+            return False
+    for words, _redirects in _simple_commands(command):
+        if words and words[0] in _COMPOUND_WORDS:
+            return False  # a keyword is only one in command position
+        position = _command_index(words)
+        prefix = words if position is None else words[:position]
+        if any(_ASSIGNMENT_WORD_RE.match(word) for word in prefix):
+            return False  # any assignment before a command, searches included
+        if position is None:
+            continue
+        head = words[position]
+        if _basename(head) in _SHADOWING_COMMANDS or _SHELL_EXPANSION_RE.search(head):
+            return False
+    return True
+
+
+def _mask_search_patterns_unchecked(command: str) -> str:
+    spans: list[tuple[int, int]] = []
+    try:
+        tokens = _lex(command, spans)
+    except ValueError:
+        return command
+    if not _masking_is_safe_for(command, tokens):
+        return command
+    # Group word tokens into simple commands, as _simple_commands does (a
+    # redirection's operand is not a command word), remembering the operator
+    # that ended each group.
+    groups: list[dict] = []
+    current: dict = {"idx": [], "closer": ""}
+    index = 0
+    while index < len(tokens):
+        kind, text = tokens[index]
+        if kind == "word":
+            current["idx"].append(index)
+        elif text in _CONTROL_OPERATORS:
+            if current["idx"]:
+                current["closer"] = text
+                groups.append(current)
+            current = {"idx": [], "closer": ""}
+        elif index + 1 < len(tokens) and tokens[index + 1][0] == "word":
+            index += 1  # skip the redirection operand
+        index += 1
+    if current["idx"]:
+        groups.append(current)
+
+    replacements: list[tuple[int, int]] = []
+    for position, group in enumerate(groups):
+        words = [tokens[t][1] for t in group["idx"]]
+        kind, start = _search_command_kind(words)
+        if kind is None:
+            continue
+        # The pattern can be this command's OUTPUT, so it is released only
+        # when every later stage of its pipeline is a plain line filter.
+        if not _pipeline_ends_in_filters(groups, tokens, position):
+            continue
+        for word_index in _search_pattern_word_indexes(words, kind, start):
+            begin, end = spans[group["idx"][word_index]]
+            if _raw_word_is_literal(command[begin:end]):
+                replacements.append((begin, end))
+    if not replacements:
+        return command
+    masked = command
+    for begin, end in sorted(set(replacements), reverse=True):
+        masked = masked[:begin] + _MASKED_PATTERN + masked[end:]
+    return masked
+
+
+def _pipeline_ends_in_filters(groups: list[dict], tokens: list, position: int) -> bool:
+    """True when the group at *position* is the last stage of its pipeline, or
+    every later stage is a plain line filter (`_is_plain_filter_stage`)."""
+    while groups[position]["closer"] == "|":
+        position += 1
+        if position >= len(groups):
+            return False
+        if not _is_plain_filter_stage([tokens[t][1] for t in groups[position]["idx"]]):
+            return False
+    return True
+
+
 def check_bash(command: str, cwd: str | None = None):
     if not command or not isinstance(command, str):
         return None
+    command = _mask_search_patterns(command)
     # Every operand check below resolves a relative path against the payload
     # directory, the hook's own, and each literal `cd` target in the command,
     # so a reader cannot reach a credential by naming it relative to a
