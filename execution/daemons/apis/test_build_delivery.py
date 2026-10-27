@@ -141,6 +141,10 @@ def _task_snapshot(**over) -> dict:
         "confidence": 0.95,
         "status": "pending",
     }
+    if over.get("action_type") == "local_edit":
+        # A genuinely local task must not name an outward action in its text:
+        # the gate reads the text of a declared-low task too.
+        snap["description"] = f"Tidy the local notes index for {REPO}#1448."
     snap.update(over)
     return snap
 

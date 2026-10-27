@@ -914,6 +914,11 @@ def test_pending_task_beyond_the_first_query_page_reaches_dispatch(monkeypatch):
         low_blast_action_types = frozenset({"local_edit"})
         high_blast_action_types = frozenset()
 
+        def blast_radius_for(self, action_type):
+            # The gate's action-type resolver compares a declared type under
+            # the policy, as the real ExecutionPolicy supports.
+            return BlastRadius()
+
     writes = []
 
     def record_status(entity_id, status, **kwargs):

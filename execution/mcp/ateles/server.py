@@ -963,8 +963,12 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
     )
     if resolved.value:
         # A declared value is echoed exactly as the caller wrote it, as before.
-        result["action_type"] = action_type if action_type else resolved.value
+        result["action_type"] = (
+            action_type if action_type and resolved.source == "declared" else resolved.value
+        )
         result["action_type_source"] = resolved.source
+        if resolved.note:
+            result["action_type_note"] = resolved.note
         if policy:
             result["action_blast_radius"] = effective_policy.blast_radius_for(
                 resolved.value
