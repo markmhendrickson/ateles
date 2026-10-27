@@ -45,7 +45,7 @@ FORBIDDEN_403 = (
 
 # Captured at import, before the autouse fixture below replaces the attribute,
 # so these tests exercise the real credential scoping.
-_REAL_REPO_SCOPED_ENV = hlr.repo_scoped_env
+_REAL_REPO_SCOPED_ENV = getattr(hlr, "repo_scoped_env", None)
 
 
 @pytest.fixture(autouse=True)
@@ -55,7 +55,7 @@ def _ambient_credential(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", AMBIENT)
     monkeypatch.setenv("GIT_ASKPASS", "/ambient/askpass")
     monkeypatch.setenv("ATELES_REVIEWER_APP_PRIVATE_KEY", "not-a-real-key")
-    monkeypatch.setattr(hlr, "repo_scoped_env", _REAL_REPO_SCOPED_ENV)
+    monkeypatch.setattr(hlr, "repo_scoped_env", _REAL_REPO_SCOPED_ENV, raising=False)
 
 
 def _mint(monkeypatch, *, token: str = SCOPED, error: str | None = None):
@@ -110,6 +110,10 @@ class FakeGit:
             presented = (env or {}).get("GH_TOKEN")
             if helper_reset and presented == SCOPED:
                 return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            if kwargs.get("check"):
+                raise subprocess.CalledProcessError(
+                    128, command, stderr=FORBIDDEN_403
+                )
             return subprocess.CompletedProcess(
                 command, 128, stdout="", stderr=FORBIDDEN_403
             )

@@ -503,3 +503,63 @@ def test_status_refuses_a_flag_it_would_silently_ignore(flag, capsys):
     with pytest.raises(SystemExit):
         gat.main(["status", *flag])
     assert "status lists every App" in capsys.readouterr().err
+
+
+# ── repo_scoped_token: a token proven to reach the repository ─────────────────
+
+
+class _Covering(FakeGitHub):
+    """FakeGitHub that also answers GET /repos/<repo> (visible or 404)."""
+
+    def __init__(self, visible: bool):
+        super().__init__()
+        self.visible = visible
+
+    def __call__(self, method, path, bearer):
+        if method == "GET" and path.startswith("/repos/") and path.count("/") == 3:
+            self.calls.append((method, path))
+            if not self.visible:
+                raise gat.AppTokenError(f"{method} {path} -> HTTP 404 Not Found")
+            return {"full_name": path[len("/repos/"):]}
+        return super().__call__(method, path, bearer)
+
+
+def test_repo_scoped_token_returns_a_token_that_can_see_the_repo(configured, monkeypatch):
+    fake = _Covering(visible=True)
+    monkeypatch.setattr(gat, "_request", fake)
+    info = gat.repo_scoped_token("o/r")
+    assert info.token.startswith("ghs_fake_")
+    assert ("GET", "/repos/o/r") in fake.calls
+
+
+def test_repo_scoped_token_names_the_repo_when_no_installation_covers_it(
+    configured, monkeypatch
+):
+    """A pinned installation id mints for the wrong installation; say so."""
+    monkeypatch.setenv(f"{PREFIX}_INSTALLATION_ID", "999")
+    fake = _Covering(visible=False)
+    monkeypatch.setattr(gat, "_request", fake)
+    with pytest.raises(gat.AppTokenError) as caught:
+        gat.repo_scoped_token("o/private")
+    message = str(caught.value)
+    assert "o/private" in message and "999" in message
+    assert "ghs_fake_" not in message  # never the token
+
+
+def test_repo_scoped_token_forgets_a_rejected_token(configured, monkeypatch):
+    monkeypatch.setenv(f"{PREFIX}_INSTALLATION_ID", "999")
+    fake = _Covering(visible=False)
+    monkeypatch.setattr(gat, "_request", fake)
+    with pytest.raises(gat.AppTokenError):
+        gat.repo_scoped_token("o/private")
+    assert fake.minted == 1
+    with pytest.raises(gat.AppTokenError):
+        gat.repo_scoped_token("o/private")
+    assert fake.minted == 2  # re-minted, not served from cache
+
+
+@pytest.mark.parametrize("repo", ["", "no-slash"])
+def test_repo_scoped_token_requires_owner_and_name(configured, repo):
+    with pytest.raises(gat.AppTokenError, match="owner/name"):
+        gat.repo_scoped_token(repo)
+    assert configured.calls == []
