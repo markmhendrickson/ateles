@@ -1017,3 +1017,14 @@ def test_a_successful_cleanup_still_allows_the_local_builder(monkeypatch, entry)
             )
     assert local == [True]
     assert KEY not in delivery._delivery_ledger().delivery_receipts()
+
+
+def test_fly_instructions_say_the_run_ends_when_the_agent_stops_replying():
+    # A Fly delivery is one non-interactive run: an agent that backgrounds the
+    # suite and ends its turn "until it reports" commits nothing.
+    plan = delivery.FlyDeliveryPlan(REPO, BRANCH, "main", REPO + "#123", 123)
+    text = delivery.fly_delivery_instructions(plan)
+    assert "RUN MODE:" in text
+    assert "never start a background command" in text
+    assert "Commit before your final message" in text
+    assert text.index("RUN MODE:") < text.index("DELIVERY:")
