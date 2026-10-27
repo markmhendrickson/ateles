@@ -51,8 +51,10 @@ Cases:
       name rather than re-implemented (Falco, PR #1320 round 2 non-blocking
       finding, now closed).
 """
+
 from __future__ import annotations
 
+import hashlib
 import http.server
 import json
 import socket
@@ -77,8 +79,16 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _row(entity_id, rule="Do the thing.", applies_when="always", scope="global",
-         status="active", domain="test", rule_kind="mandatory", title="T"):
+def _row(
+    entity_id,
+    rule="Do the thing.",
+    applies_when="always",
+    scope="global",
+    status="active",
+    domain="test",
+    rule_kind="mandatory",
+    title="T",
+):
     return {
         "entity_id": entity_id,
         "last_observation_at": "2026-01-01T00:00:00.000Z",
@@ -96,10 +106,22 @@ def _row(entity_id, rule="Do the thing.", applies_when="always", scope="global",
 
 class _FakeNeotomaHandler(http.server.BaseHTTPRequestHandler):
     rows: list[dict] = []
+    stored_requests: list[dict] = []
+    stored_entity_ids: list[str] = []
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
+        raw = self.rfile.read(length)
+        request = json.loads(raw.decode()) if raw else {}
+        if self.path.endswith("/store"):
+            self.stored_requests.append(request)
+            entity = request["entities"][0]
+            canonical = entity.get("title") or entity.get(
+                "governed_call_correlation", ""
+            )
+            self.stored_entity_ids.append(
+                "ent_" + hashlib.sha256(canonical.encode()).hexdigest()[:24]
+            )
         body = json.dumps({"entities": self.rows}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -113,7 +135,11 @@ class _FakeNeotomaHandler(http.server.BaseHTTPRequestHandler):
 
 @pytest.fixture
 def fake_neotoma():
-    handler = type("Handler", (_FakeNeotomaHandler,), {"rows": []})
+    handler = type(
+        "Handler",
+        (_FakeNeotomaHandler,),
+        {"rows": [], "stored_requests": [], "stored_entity_ids": []},
+    )
     port = _free_port()
     server = http.server.HTTPServer(("127.0.0.1", port), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -197,6 +223,7 @@ def _run(event: dict, base_url: str | None = None):
     env = {"PATH": "/usr/bin:/bin:/usr/local/bin"}
     if base_url:
         env["NEOTOMA_BASE_URL"] = base_url
+        env["NEOTOMA_BEARER_TOKEN"] = "fixture-bearer"  # gitleaks:allow
     return subprocess.run(
         [sys.executable, HOOK],
         input=json.dumps(event),
@@ -215,7 +242,11 @@ class TestMatchedCategories:
     def test_correct_targeting_agent_grant_matches_grant_write(self):
         cats = gate.matched_categories(
             "mcp__mcpsrv_neotoma__correct",
-            {"entity_id": "ent_x", "entity_type": "agent_grant", "field": "entity_types"},
+            {
+                "entity_id": "ent_x",
+                "entity_type": "agent_grant",
+                "field": "entity_types",
+            },
         )
         assert cats == ["grant_write"]
 
@@ -229,14 +260,24 @@ class TestMatchedCategories:
     def test_store_with_entities_list_reads_each_entity_type(self):
         cats = gate.matched_categories(
             "mcp__mcpsrv_neotoma__store",
-            {"entities": [{"entity_type": "task"}, {"entity_type": "relationship_type"}]},
+            {
+                "entities": [
+                    {"entity_type": "task"},
+                    {"entity_type": "relationship_type"},
+                ]
+            },
         )
         assert cats == ["policy_write"]
 
     def test_store_with_both_grant_and_policy_entities_matches_both(self):
         cats = gate.matched_categories(
             "mcp__mcpsrv_neotoma__store",
-            {"entities": [{"entity_type": "agent_grant"}, {"entity_type": "agent_policy"}]},
+            {
+                "entities": [
+                    {"entity_type": "agent_grant"},
+                    {"entity_type": "agent_policy"},
+                ]
+            },
         )
         assert set(cats) == {"grant_write", "policy_write"}
 
@@ -335,7 +376,7 @@ class TestMatchedCategories:
             {
                 "command": (
                     "gh api graphql -f query="
-                    "'query { repository(owner:\"o\",name:\"r\") "
+                    '\'query { repository(owner:"o",name:"r") '
                     "{ securityAdvisories(first:10) { nodes { id } } } }'"
                 )
             },
@@ -422,7 +463,7 @@ class TestBashReadOnlyMentionsDoNotInject:
                 {
                     "command": (
                         "gh pr comment 1320 --body "
-                        "\"see .claude/settings.json for the wiring\""
+                        '"see .claude/settings.json for the wiring"'
                     )
                 },
             )
@@ -488,7 +529,7 @@ class TestBashReadOnlyMentionsDoNotInject:
                 {
                     "command": (
                         "gh pr comment 1320 --body "
-                        "\"the fix uses sed -i to patch .claude/settings.json\""
+                        '"the fix uses sed -i to patch .claude/settings.json"'
                     )
                 },
             )
@@ -503,8 +544,7 @@ class TestBashReadOnlyMentionsDoNotInject:
                 "Bash",
                 {
                     "command": (
-                        "git commit -m "
-                        "'cp fallback for .claude/settings.json restore'"
+                        "git commit -m 'cp fallback for .claude/settings.json restore'"
                     )
                 },
             )
@@ -528,7 +568,7 @@ class TestBashReadOnlyMentionsDoNotInject:
                 "Bash",
                 {
                     "command": (
-                        "python3 -c \"import json; "
+                        'python3 -c "import json; '
                         "d=json.load(open('.claude/settings.json')); "
                         "json.dump(d, open('.claude/settings.json','w'))\""
                     )
@@ -555,11 +595,7 @@ class TestBashAdvisoryProseMentionsDoNotInject:
         assert (
             gate.matched_categories(
                 "Bash",
-                {
-                    "command": (
-                        "gh issue create --title 'security-advisory follow-up'"
-                    )
-                },
+                {"command": ("gh issue create --title 'security-advisory follow-up'")},
             )
             == []
         )
@@ -586,8 +622,7 @@ class TestBashAdvisoryProseMentionsDoNotInject:
                 "Bash",
                 {
                     "command": (
-                        "gh pr view 1320 --json body "
-                        "| grep /security-advisories"
+                        "gh pr view 1320 --json body | grep /security-advisories"
                     )
                 },
             )
@@ -689,7 +724,9 @@ class TestBashMutationShapesStillInject:
 class TestGrantWriteInjectsRuleAndProbeReminder:
     def test_effect(self, fake_neotoma):
         base_url, handler = fake_neotoma
-        handler.rows = [_row("ent_1c0cbb99d2c8011358ff1dc3", rule="STOP_BEFORE_HIGH_RISK_CANARY")]
+        handler.rows = [
+            _row("ent_1c0cbb99d2c8011358ff1dc3", rule="STOP_BEFORE_HIGH_RISK_CANARY")
+        ]
         result = _run(
             {
                 "tool_name": "mcp__mcpsrv_neotoma__correct",
@@ -712,6 +749,188 @@ class TestGrantWriteInjectsRuleAndProbeReminder:
         assert "BOTH before and after" in ctx
 
 
+class TestRuleInjectionAuditEvent:
+    """Effect coverage: removing `_emit_injection_audit` makes these fail red.
+
+    The fake server captures the exact persisted `/store` request, proving
+    that the action-linked record exists and contains no raw tool material.
+    """
+
+    def test_correlates_injection_to_governed_tool_call(self, fake_neotoma):
+        base_url, handler = fake_neotoma
+        rule_id = "ent_c4d33237ff2d12b4aaec71af"
+        handler.rows = [_row(rule_id, rule="FULL_RULE_CANARY")]
+        result = _run(
+            {
+                "session_id": "session-safe-1",
+                "turn_id": "turn-safe-1",
+                "tool_use_id": "call-safe-1",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "/tmp/.cursor/mcp.json"},
+            },
+            base_url=base_url,
+        )
+
+        assert result.returncode == 0, result.stderr
+        events = [
+            req["entities"][0]
+            for req in handler.stored_requests
+            if req.get("entities", [{}])[0].get("event_type") == "rule_injection"
+        ]
+        assert len(events) == 1
+        event = events[0]
+        assert event["trigger_action_classes"] == ["harness_config"]
+        assert event["rule_entity_ids"] == [rule_id]
+        assert event["expected_rule_entity_ids"] == [
+            "ent_663888501a290e9aaf60270c",
+            rule_id,
+        ]
+        assert event["missing_rule_entity_ids"] == ["ent_663888501a290e9aaf60270c"]
+        assert event["delivery_status"] == "partial"
+        assert event["delivery_policy"] == "fail_open"
+        assert event["correlation_basis"] == "tool_use_id"
+        assert event["governed_call_correlation"].startswith("sha256:")
+        assert "call-safe-1" not in json.dumps(event)
+        assert event["injected_at"].endswith("+00:00")
+
+    def test_never_persists_secret_pii_path_or_raw_prompt(self, fake_neotoma):
+        base_url, handler = fake_neotoma
+        rule_id = "ent_c4d33237ff2d12b4aaec71af"
+        secret = "fixture-sensitive-value"
+        private_path = f"/Users/{secret}/.cursor/mcp.json"
+        handler.rows = [_row(rule_id, rule=f"RULE_BODY_{secret}")]
+        result = _run(
+            {
+                "session_id": f"session {secret}",
+                "turn_id": f"turn {secret}",
+                "tool_use_id": f"call {secret}",
+                "tool_name": "Edit",
+                "tool_input": {
+                    "file_path": private_path,
+                    "prompt": f"raw prompt {secret}",
+                    "token": secret,
+                },
+            },
+            base_url=base_url,
+        )
+
+        assert result.returncode == 0, result.stderr
+        request = next(
+            req
+            for req in handler.stored_requests
+            if req.get("entities", [{}])[0].get("event_type") == "rule_injection"
+        )
+        persisted = json.dumps(request, sort_keys=True)
+        assert secret not in persisted
+        assert private_path not in persisted
+        assert "raw prompt" not in persisted
+        assert "RULE_BODY" not in persisted
+        event = request["entities"][0]
+        assert event["correlation_basis"] == "tool_use_id"
+        assert event["governed_call_correlation"].startswith("sha256:")
+        assert event["session_id"].startswith("sha256:")
+
+    def test_missing_tool_call_id_uses_turn_and_names_limitation(self, fake_neotoma):
+        base_url, handler = fake_neotoma
+        handler.rows = [_row("ent_c4d33237ff2d12b4aaec71af", rule="FULL_RULE_CANARY")]
+        result = _run(
+            {
+                "session_id": "session-safe-2",
+                "turn_id": "turn-safe-2",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "/tmp/.cursor/mcp.json"},
+            },
+            base_url=base_url,
+        )
+        assert result.returncode == 0, result.stderr
+        event = next(
+            req["entities"][0]
+            for req in handler.stored_requests
+            if req.get("entities", [{}])[0].get("event_type") == "rule_injection"
+        )
+        assert event["correlation_basis"] == "turn_id"
+        assert event["governed_call_correlation"].startswith("sha256:")
+        assert "turn-safe-2" not in json.dumps(event)
+
+    @pytest.mark.parametrize(
+        ("shared_identifiers", "expected_basis", "expected_correlation_prefix"),
+        [
+            (
+                {"session_id": "same-session", "turn_id": "same-turn"},
+                "turn_id",
+                "sha256:",
+            ),
+            ({}, "unavailable", "unavailable"),
+        ],
+    )
+    def test_each_governed_action_persists_a_distinct_audit_entity(
+        self,
+        fake_neotoma,
+        shared_identifiers,
+        expected_basis,
+        expected_correlation_prefix,
+    ):
+        """One turn/session fallback may join actions, never identify them.
+
+        The fake store derives the persisted entity id from the same public
+        identity material Neotoma sees. Two governed actions with identical
+        fallback correlation — including no available correlation at all —
+        must still persist as two distinct audit entities.
+        """
+        base_url, handler = fake_neotoma
+        handler.rows = [_row("ent_c4d33237ff2d12b4aaec71af", rule="FULL_RULE_CANARY")]
+        event = {
+            **shared_identifiers,
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/tmp/.cursor/mcp.json"},
+        }
+
+        first = _run(event, base_url=base_url)
+        second = _run(event, base_url=base_url)
+
+        assert first.returncode == 0, first.stderr
+        assert second.returncode == 0, second.stderr
+        events = [
+            request["entities"][0]
+            for request in handler.stored_requests
+            if request.get("entities", [{}])[0].get("event_type") == "rule_injection"
+        ]
+        assert len(events) == 2
+        assert {item["correlation_basis"] for item in events} == {expected_basis}
+        correlations = {item["governed_call_correlation"] for item in events}
+        assert len(correlations) == 1
+        assert next(iter(correlations)).startswith(expected_correlation_prefix)
+        assert len(set(handler.stored_entity_ids)) == 2
+        delivery_ids = {item["delivery_id"] for item in events}
+        assert len(delivery_ids) == 2
+        assert all(item.startswith("rule-injection-") for item in delivery_ids)
+        assert {item["title"] for item in events} == delivery_ids
+
+    def test_retrieval_failure_is_observable_and_stays_fail_open(self, fake_neotoma):
+        base_url, handler = fake_neotoma
+        handler.rows = []
+        result = _run(
+            {
+                "session_id": "session-safe-3",
+                "tool_use_id": "call-safe-3",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "/tmp/.cursor/mcp.json"},
+            },
+            base_url=base_url,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == ""
+        event = next(
+            req["entities"][0]
+            for req in handler.stored_requests
+            if req.get("entities", [{}])[0].get("event_type") == "rule_injection"
+        )
+        assert event["delivery_status"] == "retrieval_failed_or_unavailable"
+        assert event["delivery_policy"] == "fail_open"
+        assert event["rule_entity_ids"] == []
+        assert event["missing_rule_entity_ids"] == event["expected_rule_entity_ids"]
+
+
 class TestPolicyWriteInjectsMappedRules:
     def test_effect(self, fake_neotoma):
         base_url, handler = fake_neotoma
@@ -722,7 +941,9 @@ class TestPolicyWriteInjectsMappedRules:
         result = _run(
             {
                 "tool_name": "mcp__mcpsrv_neotoma__store",
-                "tool_input": {"entities": [{"entity_type": "agent_policy", "rule": "x"}]},
+                "tool_input": {
+                    "entities": [{"entity_type": "agent_policy", "rule": "x"}]
+                },
             },
             base_url=base_url,
         )
@@ -737,9 +958,14 @@ class TestPolicyWriteInjectsMappedRules:
 class TestHarnessConfigInjectsMappedRule:
     def test_effect(self, fake_neotoma):
         base_url, handler = fake_neotoma
-        handler.rows = [_row("ent_c4d33237ff2d12b4aaec71af", rule="CURSOR_HTTP_MCP_CANARY")]
+        handler.rows = [
+            _row("ent_c4d33237ff2d12b4aaec71af", rule="CURSOR_HTTP_MCP_CANARY")
+        ]
         result = _run(
-            {"tool_name": "Edit", "tool_input": {"file_path": "/Users/op/.cursor/mcp.json"}},
+            {
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "/Users/op/.cursor/mcp.json"},
+            },
             base_url=base_url,
         )
         assert result.returncode == 0, result.stderr
@@ -753,9 +979,14 @@ class TestHarnessConfigInjectsMappedRule:
         — proves the real mutation shape still injects through the actual
         hook process, not just the pure matcher."""
         base_url, handler = fake_neotoma
-        handler.rows = [_row("ent_c4d33237ff2d12b4aaec71af", rule="CURSOR_HTTP_MCP_CANARY")]
+        handler.rows = [
+            _row("ent_c4d33237ff2d12b4aaec71af", rule="CURSOR_HTTP_MCP_CANARY")
+        ]
         result = _run(
-            {"tool_name": "Bash", "tool_input": {"command": "echo '{}' > .claude/settings.json"}},
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo '{}' > .claude/settings.json"},
+            },
             base_url=base_url,
         )
         assert result.returncode == 0, result.stderr
@@ -773,7 +1004,9 @@ class TestBashReadOnlyMentionDoesNotInjectEndToEnd:
 
     def test_git_diff_mentioning_path_prints_nothing(self, fake_neotoma):
         base_url, handler = fake_neotoma
-        handler.rows = [_row("ent_c4d33237ff2d12b4aaec71af", rule="CURSOR_HTTP_MCP_CANARY")]
+        handler.rows = [
+            _row("ent_c4d33237ff2d12b4aaec71af", rule="CURSOR_HTTP_MCP_CANARY")
+        ]
         result = _run(
             {
                 "tool_name": "Bash",
@@ -788,9 +1021,14 @@ class TestBashReadOnlyMentionDoesNotInjectEndToEnd:
 
     def test_cat_of_path_prints_nothing(self, fake_neotoma):
         base_url, handler = fake_neotoma
-        handler.rows = [_row("ent_c4d33237ff2d12b4aaec71af", rule="CURSOR_HTTP_MCP_CANARY")]
+        handler.rows = [
+            _row("ent_c4d33237ff2d12b4aaec71af", rule="CURSOR_HTTP_MCP_CANARY")
+        ]
         result = _run(
-            {"tool_name": "Bash", "tool_input": {"command": "cat .claude/settings.json"}},
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "cat .claude/settings.json"},
+            },
             base_url=base_url,
         )
         assert result.returncode == 0, result.stderr
@@ -982,7 +1220,11 @@ class TestFailOpenOnUnreachableNeotoma:
         result = _run(
             {
                 "tool_name": "mcp__mcpsrv_neotoma__correct",
-                "tool_input": {"entity_id": "ent_x", "entity_type": "agent_policy", "field": "rule"},
+                "tool_input": {
+                    "entity_id": "ent_x",
+                    "entity_type": "agent_policy",
+                    "field": "rule",
+                },
             },
             base_url="http://127.0.0.1:1",  # nothing listens here
         )
@@ -996,7 +1238,11 @@ class TestFailOpenOnUnreachableNeotoma:
         result = _run(
             {
                 "tool_name": "mcp__mcpsrv_neotoma__correct",
-                "tool_input": {"entity_id": "ent_x", "entity_type": "agent_grant", "field": "entity_types"},
+                "tool_input": {
+                    "entity_id": "ent_x",
+                    "entity_type": "agent_grant",
+                    "field": "entity_types",
+                },
             },
             base_url="http://127.0.0.1:1",
         )
@@ -1013,7 +1259,9 @@ class TestMalformedInputFailsOpen:
         assert result.stdout.strip() == ""
 
     def test_non_dict_tool_input_prints_nothing(self):
-        result = _run({"tool_name": "mcp__mcpsrv_neotoma__correct", "tool_input": "oops"})
+        result = _run(
+            {"tool_name": "mcp__mcpsrv_neotoma__correct", "tool_input": "oops"}
+        )
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
