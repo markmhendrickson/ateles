@@ -137,9 +137,19 @@ it blocking unless its exact label set is on
 `KNOWN_UNPROVISIONED_RUNNER_LABEL_SETS`; a completed check with a failing
 conclusion always blocks. See `_unscheduled_non_required_reason`.
 
+Three-round cap (operator ruling 2026-10-27, `review_rounds`): a repair unit
+not merged after three build, review and correct rounds is split or cut in scope
+before another round runs. A round is a distinct head that received a lens
+verdict (the swarm's own verdict comments and their `commit=` markers). When the
+head being approved would be a fourth round or later, the tool prints "round cap
+reached: split or cut scope" and refuses, whatever the lenses said. The explicit,
+logged escape hatch is `--allow-round-overrun <reason>`: the reason is required
+and is written into the approval review. It lifts only this refusal.
+
 Usage:
     python3 execution/scripts/approve_pr_as_app.py --repo <owner/name> --pr <n> \\
-        [--lenses pm,security] [--panel {path,required,all}] [--no-carry] [--apply]
+        [--lenses pm,security] [--panel {path,required,all}] [--no-carry] \\
+        [--allow-round-overrun REASON] [--apply]
 
 `--lenses` ADDS to the derived floor; it can never remove a lens the panel
 logic would itself require for this diff/issue. `--panel all` (formerly the
@@ -219,6 +229,7 @@ import httpx  # noqa: E402
 from lib import github_app_token as _github_app_token  # noqa: E402
 
 import review_carry  # noqa: E402
+import review_rounds  # noqa: E402
 import review_scope  # noqa: E402
 import lens_authors  # noqa: E402
 from review_panel import LENSES, Lens, select_panel  # noqa: E402
@@ -2403,6 +2414,7 @@ async def run(
     panel_all: bool = False,
     carry: bool = True,
     panel_mode: str = "",
+    allow_round_overrun: str = "",
 ) -> int:
     async with httpx.AsyncClient(timeout=30) as client:
         pr_data = await _fetch_pr(client, repo, pr)
@@ -2509,6 +2521,19 @@ async def run(
             authors = frozenset()
         _print_ignored(lens_authors.ignored_lens_comments(comments, authors), authors)
 
+        # The three-round cap (operator ruling 2026-10-27). Counted from the same
+        # author-scoped lens records the gate reads, so an outside account's marker
+        # is never a round.
+        rounds = review_rounds.round_status(
+            lens_records(lens_authors.scope_lens_comments(comments, authors)),
+            head_sha,
+            override_reason=allow_round_overrun,
+        )
+        print(rounds.describe())
+        print()
+        if rounds.approval_note():
+            panel_note = "\n".join(x for x in (panel_note, rounds.approval_note()) if x)
+
         lens_outcomes: list[LensOutcome] = []
         for lens in lenses:
             outcome = await evaluate_lens(
@@ -2593,6 +2618,7 @@ async def run(
             and no_non_required_blocks
             and not unadmitted
             and checks_green
+            and not rounds.refused
         )
 
         print(f"head_sha={head_sha}")
@@ -2603,6 +2629,10 @@ async def run(
         )
         print(f"non-swarm objections: {'HELD' if unadmitted else 'NONE'}")
         print(f"checks: {'GREEN' if checks_green else 'NOT GREEN'}")
+        print(
+            "round cap: "
+            + ("REACHED (split or cut scope)" if rounds.refused else "OVERRUN ALLOWED" if rounds.capped else "OK")
+        )
         print(f"overall: {'PASS' if overall_pass else 'FAIL'}")
 
         # Who would approve, worked out BEFORE the apply branch so that the real
@@ -2749,7 +2779,26 @@ def main() -> int:
             "as each lens's own App where it has one, else as the swarm App"
         ),
     )
+    parser.add_argument(
+        "--allow-round-overrun",
+        metavar="REASON",
+        default=None,
+        help=(
+            "allow an approval past the three-round cap (a PR whose head is the fourth "
+            "or later to receive lens verdicts is otherwise refused with 'round cap "
+            "reached: split or cut scope'; operator ruling 2026-10-27). The operator "
+            "may grant one; the reason is required and is recorded in the approval "
+            "review body. There is deliberately no environment setting for this."
+        ),
+    )
     args = parser.parse_args()
+
+    overrun = ""
+    if args.allow_round_overrun is not None:
+        try:
+            overrun = review_rounds.clean_reason(args.allow_round_overrun)
+        except review_rounds.OverrunReasonError as exc:
+            parser.error(str(exc))
 
     extra_lenses = [x.strip() for x in args.lenses.split(",") if x.strip()]
 
@@ -2765,6 +2814,8 @@ def main() -> int:
             # Only named for the path-selected panel, so callers and tests of the
             # older modes see the call they always saw.
             **({"panel_mode": "path"} if args.panel == "path" else {}),
+            # Only named when an overrun was granted, for the same reason.
+            **({"allow_round_overrun": overrun} if overrun else {}),
         )
     )
 

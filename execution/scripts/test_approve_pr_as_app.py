@@ -4738,3 +4738,136 @@ class TestOneLensWording:
         body = client.posted[0]["json"]["body"]
         assert "the paths this repo marks as safe for one lens" in body
         assert "post an objection as a review comment on the current head" in body
+
+
+# ── Operator ruling 2026-10-27: three build/review/correct rounds, then split ──
+#
+# A round is a distinct head that received a lens verdict. Each test below was
+# run red against the tool without the cap (the PR body records what each looked
+# like red). The synthetic threads below carry the swarm's own marker comments.
+
+ROUND_HEADS = ["1" * 40, "2" * 40, "3" * 40]
+
+
+def _cap_round_comments(heads: list[str], *, author: str = SWARM_LOGIN, start: int = 100) -> list[dict]:
+    """Every lens in ALL_FOUR posting a SIGNED_OFF verdict at each of *heads*."""
+    out: list[dict] = []
+    for h, head in enumerate(heads):
+        for i, lens in enumerate(ALL_FOUR):
+            body = _lens_comment_body(lens, target.LENS_AGENTS[lens], head=head)
+            out.append(_comment(start + h * 10 + i, body, author=author))
+    return out
+
+
+@pytest.mark.asyncio
+class TestRoundCap:
+    async def _run(self, monkeypatch, comments, *, apply=True, **kw):
+        client = _FakeClient(comments=comments, check_runs=_green_checks())
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        code = await target.run(REPO, PR, ALL_FOUR, apply=apply, **kw)
+        return code, client
+
+    async def test_round_three_is_approvable(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS[:2]) + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 0 and len(client.posted) == 1
+        assert "round 3 of 3" in capsys.readouterr().out
+        assert "Round cap" not in client.posted[0]["json"]["body"]
+
+    async def test_round_four_is_refused_even_when_every_lens_cleared(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments)
+        out = capsys.readouterr().out
+        assert code == 1 and client.posted == []
+        assert "round cap reached: split or cut scope" in out
+        assert "round cap: REACHED" in out and "overall: FAIL" in out
+
+    async def test_a_dry_run_reports_the_cap_too(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments, apply=False)
+        assert code == 1 and client.posted == []
+        assert "round cap reached: split or cut scope" in capsys.readouterr().out
+
+    async def test_a_fourth_head_with_no_verdict_yet_already_says_so(self, monkeypatch, capsys):
+        code, client = await self._run(monkeypatch, _cap_round_comments(ROUND_HEADS), apply=False)
+        assert code == 1
+        assert "round cap reached: split or cut scope" in capsys.readouterr().out
+
+    async def test_a_logged_overrun_lets_the_approval_through_and_records_why(self, monkeypatch, capsys):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(
+            monkeypatch, comments, allow_round_overrun="operator granted a fourth round for the migration"
+        )
+        assert code == 0 and len(client.posted) == 1
+        body = client.posted[0]["json"]["body"]
+        assert "Round cap overrun allowed" in body and "operator granted a fourth round" in body
+        out = capsys.readouterr().out
+        assert "round cap: OVERRUN ALLOWED" in out
+
+    async def test_an_overrun_does_not_lift_a_lens_objection(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS) + _all_clear_comments(["pm", "arch", "qa"]) + [
+            _comment(
+                900,
+                _lens_comment_body(
+                    "security", target.LENS_AGENTS["security"], verdict="REQUEST_CHANGES", extra="[BLOCKING] real"
+                ),
+            )
+        ]
+        code, client = await self._run(
+            monkeypatch, comments, allow_round_overrun="operator granted a fourth round for the migration"
+        )
+        assert code == 1 and client.posted == []
+
+    async def test_markers_from_an_outside_account_are_not_rounds(self, monkeypatch):
+        comments = _cap_round_comments(ROUND_HEADS, author=OTHER_LOGIN) + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 0 and len(client.posted) == 1
+
+    async def test_the_cap_is_per_head_not_per_comment(self, monkeypatch):
+        # Many comments on the same two earlier heads are still two rounds.
+        comments = _cap_round_comments(ROUND_HEADS[:1]) * 1 + _cap_round_comments(ROUND_HEADS[:1], start=500)
+        comments += _cap_round_comments(ROUND_HEADS[1:2], start=600) + _all_clear_comments(ALL_FOUR)
+        code, client = await self._run(monkeypatch, comments)
+        assert code == 0
+
+
+class TestRoundOverrunFlag:
+    def _argv(self, monkeypatch, *extra):
+        monkeypatch.setattr(sys, "argv", ["approve_pr_as_app.py", "--repo", REPO, "--pr", str(PR), *extra])
+
+    def test_an_empty_reason_is_refused_before_anything_runs(self, monkeypatch, capsys):
+        self._argv(monkeypatch, "--allow-round-overrun", "")
+
+        async def _boom(*a, **k):  # pragma: no cover - must not be reached
+            raise AssertionError("run() must not start with a bad override")
+
+        monkeypatch.setattr(target, "run", _boom)
+        with pytest.raises(SystemExit) as exc:
+            target.main()
+        assert exc.value.code == 2
+        assert "needs a stated reason" in capsys.readouterr().err
+
+    def test_the_flag_reaches_run_with_the_cleaned_reason(self, monkeypatch):
+        self._argv(monkeypatch, "--allow-round-overrun", "operator   granted\na fourth round")
+        seen = {}
+
+        async def _fake_run(repo, pr, extra, **kw):
+            seen.update(kw)
+            return 0
+
+        monkeypatch.setattr(target, "run", _fake_run)
+        assert target.main() == 0
+        assert seen["allow_round_overrun"] == "operator granted a fourth round"
+
+    def test_without_the_flag_run_is_called_as_before(self, monkeypatch):
+        self._argv(monkeypatch)
+        seen = {}
+
+        async def _fake_run(repo, pr, extra, **kw):
+            seen.update(kw)
+            return 0
+
+        monkeypatch.setattr(target, "run", _fake_run)
+        assert target.main() == 0
+        assert "allow_round_overrun" not in seen
