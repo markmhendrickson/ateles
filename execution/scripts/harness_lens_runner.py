@@ -1884,6 +1884,46 @@ def refuse_if_credential_files_in_worktree(worktree: Path) -> str | None:
     return None
 
 
+def authentication_setup_failure(provider: str) -> str:
+    """Report a provider that has no login inside its isolated harness home.
+
+    This is an AUTHENTICATION-SETUP failure, not a guard failure and not
+    exhaustion: it names the provider and exactly what is missing, so the
+    operator is not left reading a generic refusal. It never reads, copies or
+    prints a credential, and the runner never places one in the home: giving a
+    provider its login is the operator's.
+    """
+    head = (
+        f"authentication setup incomplete for provider {provider!r}: it has no "
+        "authentication available inside its isolated harness home — refusing "
+        "before a model call. Missing: "
+    )
+    if provider == "cursor":
+        missing = (
+            "a named Cursor subscription capability. Cursor's login state lives "
+            "outside the isolated home and the runner has no narrowly exposable "
+            "capability for it (unlike Codex's auth.json or Claude's "
+            "CLAUDE_CODE_OAUTH_TOKEN), so no Cursor review can start until the "
+            "operator wires one; the runner does not copy Cursor credentials "
+            "into the home"
+        )
+    elif provider == "codex":
+        missing = (
+            f"Codex's login file ({_codex_auth_source()}) is not present, so "
+            "there is nothing to link into the isolated CODEX_HOME; the "
+            "operator logs Codex in again"
+        )
+    elif provider == "claude":
+        missing = (
+            "CLAUDE_CODE_OAUTH_TOKEN is unset or empty in this process's "
+            "environment; the operator supplies a Claude subscription token to "
+            "this process (the runner does not read the interactive login)"
+        )
+    else:
+        missing = "an authentication capability for this provider"
+    return head + missing + "."
+
+
 def refuse_if_guard_required(sandbox: "HarnessSandbox") -> str | None:
     """Return a refusal reason when *sandbox*'s OWN probed state shows a
     required guard is unbound, or None to proceed.
@@ -1897,13 +1937,7 @@ def refuse_if_guard_required(sandbox: "HarnessSandbox") -> str | None:
     There is no lighter-weight lens run that can accept a partial bind.
     """
     if not sandbox.authentication_ready:
-        return (
-            f"provider {sandbox.provider!r} has no authentication available "
-            "inside its isolated harness home — refusing before a model call. "
-            "Codex requires its isolated auth.json capability; Claude requires "
-            "CLAUDE_CODE_OAUTH_TOKEN; Cursor requires a named subscription "
-            "capability that is not yet wired."
-        )
+        return authentication_setup_failure(sandbox.provider)
     if not sandbox.fully_guarded:
         missing = "; ".join(sandbox.unavailable_guards) or "unspecified"
         return (

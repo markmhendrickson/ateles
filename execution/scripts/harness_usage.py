@@ -142,6 +142,45 @@ def _gate_view(provider: str, headroom: float) -> dict[str, object]:
     return view
 
 
+def _provider_view(
+    provider: str, resolved: tuple[float, str], values: dict[str, float]
+) -> dict[str, object]:
+    """One provider's row for ``show``.
+
+    A usage reading older than ``APIS_HARNESS_USAGE_MAX_AGE_SECONDS`` is shown
+    as UNKNOWN: its windows are withheld (not printed as if they were current)
+    and headroom is ``null`` with the router's neutral selection value named
+    separately. The reading's last-observed time and age are reported so an
+    operator can see how stale it is, but its last values are not.
+    """
+    headroom, source = resolved
+    reading = harness_router.usage_reading(provider)
+    windows = harness_router.usage_windows(provider)
+    unknown = reading.is_unknown
+    row: dict[str, object] = {
+        "headroom": None if source == harness_router.HEADROOM_SOURCE_UNKNOWN else headroom,
+        "headroom_source": source,
+        "live": harness_router.live_headroom(provider),
+        "reading": {
+            "state": reading.state,
+            "last_observed_at": (
+                None if reading.observed_at is None
+                else harness_router.render_wall(reading.observed_at)
+            ),
+            "age_seconds": None if reading.age_seconds is None else int(reading.age_seconds),
+            "max_age_seconds": int(reading.max_age_seconds),
+            "detail": reading.reason,
+        },
+        "cooling": _cooling_view(provider),
+        "windows": [] if unknown else windows,
+        "usage_gate": _gate_view(provider, values[provider]),
+    }
+    if unknown:
+        row["headroom_used_for_selection"] = headroom
+        row["windows_withheld"] = len(windows)
+    return row
+
+
 def _refresh_providers() -> int:
     """Refresh every configured provider from its native subscription CLI."""
     app_codex = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
@@ -282,17 +321,12 @@ def main(argv: list[str] | None = None) -> int:
         if until is None:
             parser.error(f"unparseable --until: {args.until!r}")
         harness_router.record_exhausted(args.provider, until)
-    values = harness_router.configured_headroom()
+    resolution = harness_router.headroom_resolution()
+    values = {provider: value for provider, (value, _source) in resolution.items()}
     print(
         json.dumps(
             {
-                provider: {
-                    "headroom": values[provider],
-                    "live": harness_router.live_headroom(provider),
-                    "cooling": _cooling_view(provider),
-                    "windows": harness_router.usage_windows(provider),
-                    "usage_gate": _gate_view(provider, values[provider]),
-                }
+                provider: _provider_view(provider, resolution[provider], values)
                 for provider in harness_router.configured_providers()
             },
             indent=2,
