@@ -3028,8 +3028,20 @@ def detect_auth_failure(*texts: str) -> bool:
     return any(sig in blob for sig in _AUTH_FAILURE_SIGNATURES)
 
 
+class RemoteLensOutcomeUnknown(RuntimeError):
+    """A re-dispatched lens ran remotely and its outcome is unknown.
+
+    Final for the missing-lens sweep: the run may already have posted, so it
+    escalates once instead of counting as a retryable attempt."""
+
+
 def review_failure_class(result: SkillResult) -> str:
     """Return a public-safe reason for one incomplete review invocation."""
+    # A remote run whose outcome is unknown may already have posted: checked
+    # first, so a usage-limit match in its error never auto-resumes (replays)
+    # the lens. This class is not auto-resumed; the panel reports incomplete.
+    if getattr(result, "remote_outcome_unknown", False):
+        return "remote outcome unknown"
     if getattr(result, "cooled_until", "") or detect_session_limit(
         result.stdout, result.stderr, result.error
     ):
@@ -5539,6 +5551,11 @@ class SwarmDispatcher:
         finally:
             await cleanup_pr_worktree(worktree)
 
+        if getattr(result, "remote_outcome_unknown", False):
+            raise RemoteLensOutcomeUnknown(
+                f"lens '{lens_name}' ran remotely and its outcome is unknown; "
+                "not re-dispatched"
+            )
         if not result.ok:
             raise RuntimeError(
                 f"lens '{lens_name}' run failed: "
@@ -5658,6 +5675,22 @@ class SwarmDispatcher:
                     try:
                         await self._redispatch_missing_lens(repository, pr, lens)
                         summary["resumed"] += 1
+                    except RemoteLensOutcomeUnknown as exc:
+                        # Final, not a retryable failure: the remote run may
+                        # already have posted, so a re-dispatch could duplicate.
+                        log.error(
+                            f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
+                            f"'{lens}' outcome unknown ({exc}) — not retrying."
+                        )
+                        self.notifier.send(
+                            f"🔴 {ref}: the '{lens}' lens ran on a remote runner "
+                            "and its outcome is unknown. It will not be "
+                            "re-dispatched automatically (that could duplicate "
+                            "its review), so merge is held on this lens.",
+                            priority=Priority.BLOCKER,
+                        )
+                        escalated.add(lens)
+                        summary["escalated"] += 1
                     except Exception as exc:
                         summary["failed"] += 1
                         log.error(
@@ -13454,6 +13487,11 @@ class SwarmDispatcher:
                 action_class=model_tiering.lens_review_class(first.lens),
                 escalation_signals=signals,
             )
+            # An unknown remote outcome is final for this round: hand each
+            # lens the failed result so the panel loop does not run it again
+            # alone (the remote run may already have posted).
+            if getattr(result, "remote_outcome_unknown", False):
+                return {item.lens: result for item in combinable}
             if not result.ok:
                 return {}
             blocks = review_carry.split_combined_reply(

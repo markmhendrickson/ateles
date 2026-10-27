@@ -421,3 +421,75 @@ async def test_zero_headroom_lens_preference_uses_remaining_provider(
     monkeypatch.setattr(d, "_post_missing_panel_comments", noop)
 
     await d._redispatch_missing_lens("o/r", _pr(), "security")
+
+
+# ---------------------------------------------------------------------------
+# A remote run with an unknown outcome is final, never replayed
+# ---------------------------------------------------------------------------
+
+
+def _unknown(error: str = "fly runner: wait lost") -> skill_runner.SkillResult:
+    return skill_runner.SkillResult(
+        "falco", False, None, "", "", error=error, remote_outcome_unknown=True
+    )
+
+
+def test_unknown_remote_outcome_is_its_own_failure_class():
+    assert sd.review_failure_class(_unknown()) == "remote outcome unknown"
+
+
+def test_unknown_remote_outcome_beats_a_usage_limit_match():
+    """A usage-limit match would auto-resume, i.e. replay the lens."""
+    limit = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    assert sd.detect_session_limit(limit) is True
+    assert sd.review_failure_class(_unknown(limit)) == "remote outcome unknown"
+
+
+@pytest.mark.asyncio
+async def test_redispatch_raises_on_unknown_remote_outcome(monkeypatch):
+    d = _dispatcher()
+
+    async def fake_run_skill(agent, *a, **k):  # noqa: ANN001
+        return _unknown()
+
+    async def must_not_run(*a, **k):  # noqa: ANN002, ANN003
+        raise AssertionError("an unknown outcome must not be persisted or posted")
+
+    async def no_changed_files(*a, **k):  # noqa: ANN002, ANN003
+        return []
+
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+    monkeypatch.setattr(sd, "_token_for_agent_on_repo", lambda *a: "test-token")
+    monkeypatch.setattr(d, "_changed_files", no_changed_files)
+    monkeypatch.setattr(d, "_persist_panel_reviews", must_not_run)
+    monkeypatch.setattr(d, "_post_missing_panel_comments", must_not_run)
+
+    with pytest.raises(sd.RemoteLensOutcomeUnknown):
+        await d._redispatch_missing_lens("o/r", _pr(), "security")
+
+
+@pytest.mark.asyncio
+async def test_unknown_remote_outcome_escalates_once_without_retry(monkeypatch):
+    d = _dispatcher()
+    calls: list[str] = []
+
+    async def fake_candidates(repo):  # noqa: ANN001
+        return [(_pr(), ["security"])]
+
+    async def allow(*a, **k):  # noqa: ANN002, ANN003
+        return True
+
+    async def fake_redispatch(repository, pr, lens):  # noqa: ANN001
+        calls.append(lens)
+        raise sd.RemoteLensOutcomeUnknown("outcome unknown")
+
+    monkeypatch.setattr(d, "_prs_with_missing_lens", fake_candidates)
+    monkeypatch.setattr(d, "_label_gate_allows", allow)
+    monkeypatch.setattr(d, "_redispatch_missing_lens", fake_redispatch)
+
+    first = await d.resume_missing_lens_reviews(["o/r"])
+    await d.resume_missing_lens_reviews(["o/r"])
+
+    assert len(calls) == 1, "an unknown remote outcome must not be re-dispatched"
+    assert first["escalated"] == 1
+    assert len(d.notifier.sent) == 1

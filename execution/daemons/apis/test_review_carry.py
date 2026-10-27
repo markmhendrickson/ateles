@@ -27,7 +27,7 @@ import review_carry  # noqa: E402
 import review_delta  # noqa: E402
 import review_scope  # noqa: E402
 import swarm_dispatch as sd  # noqa: E402
-from review_panel import lens_by_name  # noqa: E402
+from review_panel import LENSES, lens_by_name  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
 
 REPO_ROOT = _HERE.parents[2]
@@ -513,6 +513,42 @@ class TestDispatcherCombinedPass:
         assert await d._run_combined_pass(
             _trigger(), panel, {}, 80, NEW, pending_gates=set(), live_gates={}, signals=None
         ) == {}
+
+
+    async def test_unknown_remote_outcome_is_final_for_every_combined_lens(
+        self, monkeypatch
+    ):
+        """Each lens gets the failed result, so the panel loop never re-runs
+        it alone in the same round (the remote run may already have posted)."""
+        unknown = SkillResult(
+            "pavo", False, None, "", "", error="fly runner: wait lost",
+            remote_outcome_unknown=True,
+        )
+
+        async def fake_run_skill(*a, **k):
+            return unknown
+
+        async def no_providers():
+            return []
+
+        async def must_not_post(*a, **k):
+            pytest.fail("an unknown outcome must not be posted")
+
+        d = _dispatcher()
+        monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+        monkeypatch.setattr(sd, "usable_providers_async", no_providers)
+        monkeypatch.setattr(d, "_lens_agent_prompt", lambda a: "x")
+        monkeypatch.setattr(d, "_combined_prompt", lambda *a, **k: "p")
+        monkeypatch.setattr(d, "_post_combined_comments", must_not_post)
+        from test_gate_sign_off_dispatch import _trigger
+
+        panel = [lens for lens in LENSES if lens.lens in ("pm", "qa", "ux")]
+        assert len(panel) == 3
+        results = await d._run_combined_pass(
+            _trigger(head_sha=NEW), panel, {}, 80, NEW,
+            pending_gates=set(), live_gates={}, signals=None,
+        )
+        assert results == {"pm": unknown, "qa": unknown, "ux": unknown}
 
 
 class TestAggregationNamesCarriedLenses:
