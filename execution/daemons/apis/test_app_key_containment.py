@@ -55,9 +55,10 @@ def test_control_the_keys_are_in_the_host_environment(host_env):
 def test_no_app_key_reaches_an_agent_child(host_env):
     child = skill_runner._subscription_only_env()
     _no_keys(child)
-    # ids are not secrets and an agent may need to see which App it acts as
-    for name, value in NOT_KEYS.items():
-        assert child[name] == value
+    # ids are not secrets, but the child environment is an allowlist and a child
+    # is handed the token it needs, not the identity of the App behind it
+    for name in NOT_KEYS:
+        assert name not in child
 
 
 def test_no_app_key_reaches_a_local_review_child(host_env, tmp_path):

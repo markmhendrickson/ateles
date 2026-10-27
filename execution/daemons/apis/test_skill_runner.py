@@ -1641,8 +1641,8 @@ class TestGithubTokenInjection:
     def test_github_token_not_injected_when_none(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
-        """NO-OP: when github_token is not passed (None), GITHUB_TOKEN and GH_TOKEN
-        in subprocess_env must match the ambient daemon env — no override."""
+        """When github_token is not passed (None), the child holds neither
+        GITHUB_TOKEN nor GH_TOKEN: it does not inherit the daemon's."""
         fake_def = _make_def(prompt_markdown="Role: Gryllus.", tool_allowlist="*")
         instance = _loader_with_no_policies()
         instance.load.return_value = fake_def
@@ -1676,13 +1676,15 @@ class TestGithubTokenInjection:
         assert result.ok
         assert len(captured_envs) == 1
         env = captured_envs[0]
-        # Ambient tokens must be preserved unchanged.
-        assert env.get("GITHUB_TOKEN") == "ghp_ambient_daemon_token", (
-            "GITHUB_TOKEN must not be modified when github_token is not passed"
+        # The daemon's own GitHub identity must NOT reach the child.
+        assert "GITHUB_TOKEN" not in env, (
+            "a dispatch with no github_token must not inherit the daemon's GITHUB_TOKEN"
         )
-        assert env.get("GH_TOKEN") == "ghp_ambient_gh_token", (
-            "GH_TOKEN must not be modified when github_token is not passed"
+        assert "GH_TOKEN" not in env, (
+            "a dispatch with no github_token must not inherit the daemon's GH_TOKEN"
         )
+        assert "ghp_ambient_daemon_token" not in env.values()
+        assert "ghp_ambient_gh_token" not in env.values()
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -2162,7 +2164,7 @@ class TestGithubDeliveryCredentialBoundary:
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
-    def test_non_network_default_dispatch_keeps_ambient_identity_unchanged(
+    def test_non_network_default_dispatch_holds_no_github_identity(
         self, MockLoader, mock_write_harness, monkeypatch
     ) -> None:
         """A dispatch that never requests the GitHub contract (the ordinary
@@ -2194,8 +2196,10 @@ class TestGithubDeliveryCredentialBoundary:
             )
 
         assert result.ok
-        assert captured_env["GITHUB_TOKEN"] == "ambient-operator-token"
-        assert captured_env["GH_TOKEN"] == "ambient-operator-token"
+        # The daemon's own GitHub identity is not handed to a non-delivery child.
+        assert "GITHUB_TOKEN" not in captured_env
+        assert "GH_TOKEN" not in captured_env
+        assert "ambient-operator-token" not in captured_env.values()
 
     @patch("skill_runner._write_harness_event")
     @patch("skill_runner.AgentLoader")
@@ -2247,9 +2251,10 @@ class TestGithubDeliveryCredentialBoundary:
                     task_entity_id="ent_def",
                 )
             )
-        assert second_env["GITHUB_TOKEN"] == "ambient-operator-token"
-        assert second_env["GITHUB_TOKEN"] != "scoped-delivery-token"
-        assert second_env["GH_TOKEN"] != "scoped-delivery-token"
+        # Neither the scoped token nor the daemon's own identity reaches it.
+        assert "GITHUB_TOKEN" not in second_env
+        assert "GH_TOKEN" not in second_env
+        assert "scoped-delivery-token" not in second_env.values()
 
 
 # ── Phase 1 / Layer A: tightened attribution spec (neotoma#1686 follow-up) ───
@@ -2975,7 +2980,6 @@ class TestDispatchFailureDiagnostics:
         descendant_pid_file = tmp_path / "descendant.pid"
         launcher.write_text(
             f"#!{sys.executable}\n"
-            "import os\n"
             "import subprocess\n"
             "import sys\n"
             "import time\n"
@@ -2986,7 +2990,7 @@ class TestDispatchFailureDiagnostics:
             "    stdout=subprocess.DEVNULL,\n"
             "    stderr=subprocess.DEVNULL,\n"
             ")\n"
-            "Path(os.environ['DESCENDANT_PID_FILE']).write_text(str(child.pid))\n"
+            f"Path({str(descendant_pid_file)!r}).write_text(str(child.pid))\n"
             "time.sleep(60)\n",
             encoding="utf-8",
         )
@@ -3002,11 +3006,6 @@ class TestDispatchFailureDiagnostics:
             patch("skill_runner.CLAUDE_BIN", str(launcher)),
             patch.object(Path, "exists", return_value=True),
             patch.object(Path, "read_text", return_value="skill body"),
-            patch.dict(
-                os.environ,
-                {"DESCENDANT_PID_FILE": str(descendant_pid_file)},
-                clear=False,
-            ),
         ):
             result = asyncio.run(
                 skill_runner.run_skill(
@@ -3014,7 +3013,9 @@ class TestDispatchFailureDiagnostics:
                     "p",
                     role="gryllus",
                     task_entity_id="ent_timeout_group",
-                    timeout=1,
+                    # Long enough that a loaded host still gets the launcher to
+                    # record its descendant before the timeout fires.
+                    timeout=3,
                 )
             )
 
@@ -3301,9 +3302,11 @@ class TestCrossHarnessRouting:
         assert "GEMINI_API_KEY" not in child
         assert "RECRAFT_API_KEY" not in child
 
-    def test_unrelated_google_keys_are_not_collateral(self, monkeypatch) -> None:
+    def test_unrelated_google_keys_are_dropped_too(self, monkeypatch) -> None:
+        # The child environment is an allowlist: a key nobody listed is dropped,
+        # whatever it is for.
         monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "maps-key")
-        assert skill_runner._subscription_only_env()["GOOGLE_MAPS_API_KEY"] == "maps-key"
+        assert "GOOGLE_MAPS_API_KEY" not in skill_runner._subscription_only_env()
 
     def test_dispatched_child_is_marked_so_the_capability_client_refuses(
         self, monkeypatch
@@ -3313,16 +3316,6 @@ class TestCrossHarnessRouting:
         monkeypatch.delenv(AGENT_CHILD_MARKER_ENV, raising=False)
         assert skill_runner._subscription_only_env()[AGENT_CHILD_MARKER_ENV] == "1"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "STAGED: _subscription_only_env is still a denylist, so a metered "
-            "key nobody has named passes through. The standing control is an "
-            "allowlist child environment (follow-up issue). strict=True: when "
-            "the allowlist lands this XPASSes and must be un-marked, never "
-            "deleted."
-        ),
-    )
     def test_unnamed_future_metered_key_is_scrubbed(self, monkeypatch) -> None:
         monkeypatch.setenv("SOME_FUTURE_VENDOR_API_KEY", "future-metered")
         assert "SOME_FUTURE_VENDOR_API_KEY" not in skill_runner._subscription_only_env()

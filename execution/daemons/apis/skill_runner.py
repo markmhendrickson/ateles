@@ -52,6 +52,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 # ── Path bootstrap (mirrors apis.py so this module is importable standalone) ──
 _DAEMON_DIR = Path(__file__).resolve().parent
@@ -1903,6 +1904,21 @@ def _neotoma_identity_for_child(env: dict[str, str], role: str, *, granted: bool
         env["NEOTOMA_BEARER_TOKEN"] = own
 
 
+def _neotoma_token_for_claude_child(env: dict[str, str], role: str) -> None:
+    """A Claude child's Neotoma credential, in place: exactly the token its
+    ``--mcp-config`` is built with (``neotoma_token_for_agent``: the role's own
+    token, else the shared daemon bearer) as ``NEOTOMA_BEARER_TOKEN``, so a
+    script in the child acts as the same principal its MCP session does. Every
+    other ``*_NEOTOMA_TOKEN`` and the production twin are absent."""
+    for name in [k for k in env if k.endswith("_NEOTOMA_TOKEN")]:
+        env.pop(name, None)
+    for name in _SHARED_NEOTOMA_BEARER_NAMES:
+        env.pop(name, None)
+    token, _ = neotoma_token_for_agent(role)
+    if token:
+        env["NEOTOMA_BEARER_TOKEN"] = token
+
+
 def _isolation_refusal_result(skill: str, provider: str, exc: "IsolationRefusal") -> SkillResult:
     """A launch refused before any child for a configuration the operator must
     repair (value-free, no cooldown; the provider loop fails over)."""
@@ -1980,6 +1996,135 @@ _METERED_CREDENTIALS = (
     "OPENAI_API_KEY",
     "CURSOR_API_KEY",
 )
+
+
+# ── Child environment allowlist ───────────────────────────────────────────────
+# A dispatched agent process is steered by untrusted content (issue and pull
+# request text), and Apis loads the operator's whole dotenv into its own
+# environment. A child therefore starts from NOTHING and receives only the names
+# below, each with the reason it is here. An unknown name is dropped (fail
+# closed): a new credential in the dotenv reaches no child until someone adds it
+# to this table in a reviewed change. Adding a name that carries authority is a
+# security decision, so each entry says what it is for.
+#
+# Not here, on purpose: GITHUB_TOKEN / GH_TOKEN (a delivery child gets exactly
+# the per-task token it is handed, set after this filter), every ``*_PAT``,
+# payment-provider tokens, GitHub App keys, the shared Neotoma bearer, other
+# roles' Neotoma tokens, agent sockets (SSH_AUTH_SOCK), ``GIT_*``, and
+# ``XDG_CONFIG_HOME`` (tools read configuration, credentials included, from it).
+CHILD_ENV_ALLOWLIST: dict[str, str] = {
+    # What any process needs to run.
+    "PATH": "locate the harness CLI, git and the interpreter",
+    "HOME": "harness login and git identity are read from here (isolated providers get a generated one)",
+    "USER": "some tools and the macOS keychain lookup read the account name",
+    "LOGNAME": "same as USER",
+    "SHELL": "the harness's shell tool starts the user's shell",
+    "TMPDIR": "temporary files (the harness and git write here)",
+    "TMP": "temporary files for tools that read TMP",
+    "TEMP": "temporary files for tools that read TEMP",
+    "LANG": "locale, so output is decoded as UTF-8",
+    "LANGUAGE": "locale message language",
+    "LC_ALL": "locale override",
+    "LC_CTYPE": "character classification (UTF-8 handling)",
+    "TZ": "time zone, so timestamps in output agree with the host",
+    "TERM": "terminal type; the CLIs query it even when output is piped",
+    "NO_COLOR": "keeps escape sequences out of captured output",
+    "__CF_USER_TEXT_ENCODING": "macOS text encoding hint some system tools read",
+    "DEVELOPER_DIR": "macOS developer tool selection, so /usr/bin/git resolves",
+    "SDKROOT": "macOS developer tool selection used with DEVELOPER_DIR",
+    # Interpreter settings (non-secret) for repo scripts a child runs.
+    "PYTHONPATH": "site-packages of the daemon's interpreter, so repo scripts import",
+    "VIRTUAL_ENV": "the interpreter environment named in the daemon's launch plist",
+    "PYTHONUNBUFFERED": "line-by-line output from scripts the child runs",
+    "PYTHONIOENCODING": "UTF-8 output from scripts the child runs",
+    "PYTHONUTF8": "UTF-8 mode for scripts the child runs",
+    "PYTHONDONTWRITEBYTECODE": "no bytecode written into a worktree",
+    # Network trust for the harness CLIs (proxy values are screened, see below).
+    "SSL_CERT_FILE": "custom CA bundle path (non-secret)",
+    "SSL_CERT_DIR": "custom CA directory path (non-secret)",
+    "NODE_EXTRA_CA_CERTS": "extra CA bundle for the Node-based Claude and Cursor CLIs (non-secret path)",
+    "HTTPS_PROXY": "outbound proxy, passed only when its value holds no credentials",
+    "HTTP_PROXY": "outbound proxy, passed only when its value holds no credentials",
+    "NO_PROXY": "hosts that bypass the proxy",
+    "https_proxy": "lower-case spelling of HTTPS_PROXY (curl and Node read it)",
+    "http_proxy": "lower-case spelling of HTTP_PROXY",
+    "no_proxy": "lower-case spelling of NO_PROXY",
+    # The provider CLIs' own subscription login.
+    "CLAUDE_CODE_OAUTH_TOKEN": "Claude subscription login for the claude CLI (the only Claude credential)",
+    "CLAUDE_CONFIG_DIR": "where the claude CLI keeps its login and settings, when not under HOME",
+    "CODEX_HOME": "where the codex CLI keeps its login; an isolated dispatch replaces it with a generated home",
+    # Swarm configuration a child's scripts need that holds no secret.
+    "NEOTOMA_BASE_URL": "the Neotoma endpoint the child's scripts and signer address",
+}
+# Locale names beyond the two listed (LC_MESSAGES, LC_TIME, ...): all non-secret.
+CHILD_ENV_ALLOWED_PREFIXES: tuple[str, ...] = ("LC_",)
+# Proxy variables can carry ``user:password@`` credentials; their value is
+# checked and a credential-bearing one is dropped.
+_CHILD_ENV_PROXY_NAMES = frozenset({"HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"})
+
+
+def _child_env_name_allowed(name: str, extra: frozenset[str] = frozenset()) -> bool:
+    return (
+        name in CHILD_ENV_ALLOWLIST
+        or name in extra
+        or name.startswith(CHILD_ENV_ALLOWED_PREFIXES)
+    )
+
+
+def _proxy_value_has_credentials(value: str) -> bool:
+    """True when a proxy URL carries userinfo (``scheme://user:pass@host``)."""
+    authority = value.split("://", 1)[-1].split("/", 1)[0]
+    return "@" in authority
+
+
+def _make_dispatch_scratch_dir(tmp_parent: str | None = None) -> str:
+    """A fresh, empty, owner-only directory for a dispatch that names no
+    working directory, as a resolved absolute path. The caller removes it."""
+    try:
+        parent = Path(tmp_parent) if tmp_parent and tmp_parent.strip() else None
+        if parent is not None:
+            parent.mkdir(parents=True, exist_ok=True)
+        made = tempfile.mkdtemp(prefix="apis_work_", dir=str(parent) if parent else None)
+        os.chmod(made, 0o700)
+    except OSError as exc:
+        # The class only: an OSError's text can carry local paths.
+        raise _LocalSpawnError(
+            f"no scratch working directory could be created ({type(exc).__name__})"
+        ) from None
+    return resolve_dispatch_workspace(made)
+
+
+def _same_directory(a: str, b: str) -> bool:
+    """True when *a* and *b* are the same directory on disk. Compares the
+    filesystem identity (device and inode), not the spelling, so a case-variant
+    path on a case-insensitive volume (macOS) or a link to it is the same."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _unsafe_child_cwd(path: str | None) -> str:
+    """Why a child may not run in *path*, or ``""`` when it may.
+
+    A child never runs in the filesystem root or the user's home directory: the
+    first is where a daemon with no working directory ends up, the second holds
+    every dotfile the operator has. ``None`` means "the daemon's own directory"
+    and is judged as that. Identity is judged by what the path IS on disk
+    (``os.path.samefile``), with the resolved spelling as a second check.
+    """
+    try:
+        target = str(path if path else os.getcwd())
+        resolved = Path(target).resolve()
+        homes = {str(Path.home()), os.path.expanduser("~"), os.environ.get("HOME", "")}
+    except (OSError, RuntimeError):
+        return "the child's working directory could not be resolved"
+    if resolved == Path(resolved.anchor) or _same_directory(target, os.sep):
+        return "the child's working directory is the filesystem root"
+    for home in homes - {""}:
+        if resolved == Path(home).resolve() or _same_directory(target, home):
+            return "the child's working directory is the user's home directory"
+    return ""
 
 
 def _provider_binaries() -> dict[str, str | None]:
@@ -2595,19 +2740,30 @@ def _subscription_only_env(
     local_review: bool = False,
     local_review_home: str | None = None,
     inference_only: bool = False,
+    extra_allowed: Iterable[str] = (),
 ) -> dict[str, str]:
     """Build the child environment for a governed harness invocation.
 
-    Local review inference gets an allowlisted environment rather than the
-    daemon's ambient credentials.  Its isolated HOME/GH_CONFIG_DIR plus Git's
-    explicit no-helper settings close credential-file, keychain, SSH-agent,
-    and inherited-token publication paths while retaining only subscription
-    authentication needed to run the selected model.
+    The child starts from nothing and receives only the names in
+    ``CHILD_ENV_ALLOWLIST`` (plus ``LC_*`` locale names and the caller's
+    ``extra_allowed``), taken from the daemon's environment merged with
+    ``env_extra``. Everything else is dropped, so a credential that the daemon
+    loaded from its dotenv, or that someone adds tomorrow, never reaches a
+    child unless it is deliberately added to the table. The delivery token is
+    not inherited: the caller sets it after this returns, on the delivery path
+    only.
 
-    Two independent controls on metered API billing:
+    Local review inference gets a narrower allowlist.  Its isolated
+    HOME/GH_CONFIG_DIR plus Git's explicit no-helper settings close
+    credential-file, keychain, SSH-agent, and inherited-token publication paths
+    while retaining only subscription authentication needed to run the selected
+    model.
 
-    * The harness metered keys (``_METERED_CREDENTIALS``) are stripped unless
-      ``APIS_ALLOW_METERED_HARNESS=1`` explicitly allows them.
+    Independent controls, applied on top of the allowlist as defence in depth:
+
+    * The harness metered keys (``_METERED_CREDENTIALS``) are not on the
+      allowlist and pass only when ``APIS_ALLOW_METERED_HARNESS=1`` explicitly
+      allows them.
     * GitHub App private keys (`github_app_token.is_app_key_variable`) are
       ALWAYS stripped, by pattern, in both branches.
     * Media-generation vendor credentials are ALWAYS stripped, by name and by
@@ -2615,13 +2771,9 @@ def _subscription_only_env(
       never releases them. They belong to the host-side capability client only
       (ateles#1189); a dispatched agent must never hold one. The child is also
       marked so the capability client refuses to run inside it.
-
-    STAGED CONTROL: this is still a denylist. A metered key nobody has named
-    passes through. The standing fix is an allowlist child environment
-    (tracked as a follow-up); until then ``test_unnamed_future_metered_key_is_scrubbed``
-    is an ``xfail(strict=True)`` documenting the gap.
     """
     merged = {**os.environ, **(env_extra or {})}
+    metered_override = not local_review and merged.get("APIS_ALLOW_METERED_HARNESS", "0") == "1"
     if local_review:
         if not local_review_home:
             raise ValueError("local_review requires an isolated local_review_home")
@@ -2666,8 +2818,16 @@ def _subscription_only_env(
             }
         )
     else:
-        child = merged
-    if child.get("APIS_ALLOW_METERED_HARNESS", "0") != "1":
+        extra = frozenset(extra_allowed) | (
+            frozenset(_METERED_CREDENTIALS) if metered_override else frozenset()
+        )
+        child = {
+            key: value
+            for key, value in merged.items()
+            if _child_env_name_allowed(key, extra)
+            and not (key in _CHILD_ENV_PROXY_NAMES and _proxy_value_has_credentials(value))
+        }
+    if not metered_override:
         for key in _METERED_CREDENTIALS:
             child.pop(key, None)
     elif child.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
@@ -3329,6 +3489,8 @@ async def _run_skill_once(
     _mcp_tmp_path: str | None = None
     _codex_gate_config: CodexGateOwnerConfig | None = None
     _isolated_home: IsolatedHarnessHome | None = None
+    # A per-dispatch working directory, made only when the caller named none.
+    _scratch_dir: str | None = None
     _codex_gate_token = ""
     if provider == "claude" and local_review:
         # Claude otherwise merges project/user MCP configuration. A local
@@ -3568,17 +3730,32 @@ async def _run_skill_once(
     # Hard boundary from the approved plan: all three adapters use bundled
     # subscription auth by default. API-key credentials are removed so a capped
     # plan queues/fails over instead of silently spending metered tokens.
+    #
+    # The child's environment is an ALLOWLIST (``CHILD_ENV_ALLOWLIST``): the
+    # daemon's dotenv credentials never reach it. The one Neotoma name carried
+    # in is the role's own token, and only for the providers whose identity
+    # step below turns it into the child's single Neotoma credential.
     subprocess_env = _subscription_only_env(
         env_extra,
         local_review=local_review,
         local_review_home=local_review_home or None,
         inference_only=inference_only,
+        extra_allowed=(
+            (neotoma_token_env_name(_role),)
+            if provider in ISOLATED_PROVIDERS and not local_review
+            else ()
+        ),
     )
     if provider in ISOLATED_PROVIDERS:
-        # Codex and Cursor only; Claude's environment is unchanged here.
+        # Codex and Cursor: the role's own token or none.
         _neotoma_identity_for_child(
             subprocess_env, _role,
             granted=bool(allowed_mcp_servers(agent_def.tools)) or owns_pending_gate)
+    elif provider == "claude" and not local_review:
+        # Claude keeps the one Neotoma credential its --mcp-config already
+        # carries (the role's own token, else the shared daemon bearer), as
+        # NEOTOMA_BEARER_TOKEN. No other role's token and no other bearer.
+        _neotoma_token_for_claude_child(subprocess_env, _role)
     if local_cfg is not None:
         # Local inference: point the CLI at the loopback proxy and strip any
         # frontier OAuth credential so it cannot be sent there.
@@ -3615,11 +3792,10 @@ async def _run_skill_once(
     # identity, if any. The fail-closed refusals for a network-enabled
     # dispatch with no token, and for an explicitly-empty token on any
     # dispatch, already returned a SkillResult in the preflight block above —
-    # by this point github_token is either None (not requested; ambient env
-    # passes through unchanged, exact pre-#109 behaviour) or a non-empty
-    # scoped string to inject. When include_github_contract is True, the
-    # ambient GITHUB_TOKEN/GH_TOKEN are stripped first so no path leaves the
-    # daemon's own identity in a network-enabled child's env.
+    # by this point github_token is either None (not requested) or a non-empty
+    # scoped string to inject. The child environment is an allowlist that holds
+    # no GitHub credential, so when none is requested the child has none (it no
+    # longer inherits the daemon's); the pops below remain as a second layer.
     if include_github_contract:
         subprocess_env.pop("GITHUB_TOKEN", None)
         subprocess_env.pop("GH_TOKEN", None)
@@ -3666,6 +3842,8 @@ async def _run_skill_once(
             shutil.rmtree(_codex_gate_config.home, ignore_errors=True)
         if _isolated_home is not None:
             shutil.rmtree(_isolated_home.home, ignore_errors=True)
+        if _scratch_dir is not None:
+            shutil.rmtree(_scratch_dir, ignore_errors=True)
 
     # ── Executor choice (ateles#1456) ──────────────────────────────────────────
     # Local is today's code, unchanged. The fly executor takes the SAME argv,
@@ -3757,17 +3935,33 @@ async def _run_skill_once(
     proc = None
 
     async def _run_local() -> tuple[int | None, bytes, bytes]:
-        nonlocal proc, _isolated_home
+        nonlocal proc, _isolated_home, _scratch_dir
         spawn_cwd = cwd
         if _home_override_refusal is not None:
             exc = _home_override_refusal
             raise _LocalIsolationRefused(f"{exc} (repair: {exc.setting})")
+        if not spawn_cwd:
+            # No worktree and no directory was named: the child gets a fresh,
+            # empty directory of its own, never the daemon's (which is "/"
+            # under launchd). It is also the Codex/Cursor workspace, so the
+            # CLI's write root is that directory and nothing wider.
+            if _scratch_dir is None:
+                _scratch_dir = _make_dispatch_scratch_dir((env_extra or {}).get("TMPDIR"))
+            spawn_cwd = _scratch_dir
+            if provider == "codex" and "--cd" not in cmd and cmd and cmd[-1] == "-":
+                cmd[-1:] = ["--cd", spawn_cwd, "-"]
+            elif provider == "cursor" and "--workspace" not in cmd:
+                cmd.extend(["--workspace", spawn_cwd])
+        # Refuse before anything is prepared or started: a child never runs in
+        # the filesystem root or the user's home directory.
+        _cwd_refusal = _unsafe_child_cwd(spawn_cwd)
+        if _cwd_refusal:
+            raise _LocalIsolationRefused(f"{_cwd_refusal} (repair: dispatch working directory)")
         if _isolation_wanted and _isolated_home is None:
-            # ONE absolute workspace (resolved above, or the daemon's own
-            # directory) is what the guard checks, the child's cwd and the
-            # CLI's workspace flag; nothing is resolved twice.
-            workspace = cwd or resolve_dispatch_workspace(os.getcwd())
-            spawn_cwd = workspace
+            # ONE absolute workspace (resolved above, or the per-dispatch
+            # scratch directory) is what the guard checks, the child's cwd and
+            # the CLI's workspace flag; nothing is resolved twice.
+            workspace = spawn_cwd
             try:
                 overrides = codex_config_overrides(cmd) if provider == "codex" else []
                 if overrides:
@@ -4296,6 +4490,8 @@ async def _run_skill_once(
             shutil.rmtree(_codex_gate_config.home, ignore_errors=True)
         if _isolated_home is not None:
             shutil.rmtree(_isolated_home.home, ignore_errors=True)
+        if _scratch_dir is not None:
+            shutil.rmtree(_scratch_dir, ignore_errors=True)
 
 
 def usable_providers() -> set[str]:
