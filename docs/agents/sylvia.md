@@ -28,6 +28,22 @@ operational_entity_types:
   - daemon_report
 canonical_context_entities:
   - vendor_binding
+observation_ids:
+  name: 0a2c090c-0e38-da81-122c-2852b578ff52
+  description: fa78e3d2-513d-960c-16fa-a53519ced3c1
+  tier: 5e460e13-be62-8b0c-9bf3-0f7a07d9ed39
+  genus: 0bc04ecc-a63a-280a-93cf-3f3c1a61af7a
+  status: 5ffbb634-829c-f02e-9f8f-0f37f8c5dc82
+  aauth_sub: 83ebdd00-560e-73f1-2645-1edd4718fd76
+  agent_grant: 5e460e13-be62-8b0c-9bf3-0f7a07d9ed39
+  observation_source_default: e0de470a-ad07-3e64-88b4-5cf2aaae063d
+  harness_preferences: e0de470a-ad07-3e64-88b4-5cf2aaae063d
+  triggers: unknown
+  tool_allowlist: 4715d74c-3dc0-a3e3-847b-b22c8780f9dc
+  context_entity_types: a549460d-8da1-82c0-71ab-49e7a3ad917a
+  operational_entity_types: 7d20c478-c304-4746-bcaf-840d256bc669
+  user_invocable: unknown
+  prompt_markdown: 6f50c539-eed2-f864-e37e-c49e409e7a94
 ---
 
 # sylvia

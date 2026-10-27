@@ -64,6 +64,22 @@ operational_entity_types:
   - strategy_drift_signal
 canonical_context_entities:
   - operator_profile
+observation_ids:
+  name: c677f65b-0f4e-dde7-a25f-510ee87f0799
+  description: ed132759-56ae-bfcc-1354-7df02b99fafc
+  tier: a00d16b0-efb5-6080-6223-63ebbeea2090
+  genus: 04e9380a-fcb2-3ad0-3043-f52b76f64206
+  status: a00d16b0-efb5-6080-6223-63ebbeea2090
+  aauth_sub: 641315f2-268f-65f4-6663-57d133e5e7aa
+  agent_grant: 542befca-37a6-3442-c428-38b1c5c074d9
+  observation_source_default: a428a0af-cd61-9297-77ea-491ddc2885b0
+  harness_preferences: unknown
+  triggers: 2a833506-820d-a4f8-0217-aad6952dc712
+  tool_allowlist: a428a0af-cd61-9297-77ea-491ddc2885b0
+  context_entity_types: f0ad4ea6-281b-4353-86a1-e96596d2eba5
+  operational_entity_types: c16a6e05-805b-390b-7aff-d07b69e3fc08
+  user_invocable: unknown
+  prompt_markdown: dbdc5c44-e228-c331-2ad0-65a40221a291
 ---
 
 # manucode

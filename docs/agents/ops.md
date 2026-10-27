@@ -10,6 +10,22 @@ status: planned
 canonical_context_entities:
   - operator_profile
   - product_profile
+observation_ids:
+  name: 7926ac86-828e-505a-a3c0-1ee72255ca92
+  description: 7926ac86-828e-505a-a3c0-1ee72255ca92
+  tier: 7926ac86-828e-505a-a3c0-1ee72255ca92
+  genus: unknown
+  status: 7926ac86-828e-505a-a3c0-1ee72255ca92
+  aauth_sub: unknown
+  agent_grant: unknown
+  observation_source_default: unknown
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: unknown
+  context_entity_types: unknown
+  operational_entity_types: unknown
+  user_invocable: unknown
+  prompt_markdown: 7926ac86-828e-505a-a3c0-1ee72255ca92
 ---
 
 # ops
