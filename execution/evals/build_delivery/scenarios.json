@@ -151,7 +151,8 @@
       },
       "expect": {
         "launches": 1,
-        "child_in_daemon_cwd": true,
+        "child_in_daemon_cwd": false,
+        "child_in_scratch_dir": true,
         "network": false,
         "add_dirs": 0,
         "sandbox": "workspace-write",

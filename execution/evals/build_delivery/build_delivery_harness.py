@@ -1274,6 +1274,19 @@ def check(scenario: dict, obs: dict) -> list[str]:
     if "child_in_daemon_cwd" in exp:
         in_cwd = bool(child) and Path(child["cwd"]).resolve() == world.daemon_cwd.resolve()
         want("child ran in the daemon's cwd", in_cwd, exp["child_in_daemon_cwd"])
+    if "child_in_scratch_dir" in exp:
+        # A dispatch that names no directory runs in a fresh, empty scratch
+        # directory: not the daemon's own cwd, not a worktree of the clone, and
+        # not a git checkout (no ``.git`` entry), so it widens nothing.
+        cwd = Path(child["cwd"]).resolve() if child else None
+        in_scratch = (
+            cwd is not None
+            and cwd.name.startswith("apis_work_")
+            and cwd != world.daemon_cwd.resolve()
+            and cwd.parent != world.worktrees.resolve()
+            and not os.path.lexists(cwd / ".git")
+        )
+        want("child ran in a fresh scratch directory", in_scratch, exp["child_in_scratch_dir"])
     if "network" in exp:
         want("network granted", child.get("network"), exp["network"])
     if "add_dirs" in exp:

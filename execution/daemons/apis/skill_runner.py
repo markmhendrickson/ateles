@@ -2094,23 +2094,36 @@ def _make_dispatch_scratch_dir(tmp_parent: str | None = None) -> str:
     return resolve_dispatch_workspace(made)
 
 
+def _same_directory(a: str, b: str) -> bool:
+    """True when *a* and *b* are the same directory on disk. Compares the
+    filesystem identity (device and inode), not the spelling, so a case-variant
+    path on a case-insensitive volume (macOS) or a link to it is the same."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 def _unsafe_child_cwd(path: str | None) -> str:
     """Why a child may not run in *path*, or ``""`` when it may.
 
     A child never runs in the filesystem root or the user's home directory: the
     first is where a daemon with no working directory ends up, the second holds
     every dotfile the operator has. ``None`` means "the daemon's own directory"
-    and is judged as that.
+    and is judged as that. Identity is judged by what the path IS on disk
+    (``os.path.samefile``), with the resolved spelling as a second check.
     """
     try:
-        resolved = Path(path if path else os.getcwd()).resolve()
-        home = Path.home().resolve()
+        target = str(path if path else os.getcwd())
+        resolved = Path(target).resolve()
+        homes = {str(Path.home()), os.path.expanduser("~"), os.environ.get("HOME", "")}
     except (OSError, RuntimeError):
         return "the child's working directory could not be resolved"
-    if resolved == Path(resolved.anchor):
+    if resolved == Path(resolved.anchor) or _same_directory(target, os.sep):
         return "the child's working directory is the filesystem root"
-    if resolved == home:
-        return "the child's working directory is the user's home directory"
+    for home in homes - {""}:
+        if resolved == Path(home).resolve() or _same_directory(target, home):
+            return "the child's working directory is the user's home directory"
     return ""
 
 

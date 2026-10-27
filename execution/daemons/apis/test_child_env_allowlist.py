@@ -330,6 +330,9 @@ def test_the_cwd_guard_judges_root_home_and_the_daemons_own_directory(
     assert skill_runner._unsafe_child_cwd(str(tmp_path / "h"))
     assert skill_runner._unsafe_child_cwd(str(tmp_path / "h" / ".." / "h"))
     assert not skill_runner._unsafe_child_cwd(str(tmp_path / "ws"))
+    # A link to home is home.
+    (tmp_path / "link-to-home").symlink_to(tmp_path / "h")
+    assert skill_runner._unsafe_child_cwd(str(tmp_path / "link-to-home"))
     monkeypatch.chdir("/")
     assert skill_runner._unsafe_child_cwd(None)  # None means the daemon's own: "/"
     monkeypatch.chdir(tmp_path / "ws")
@@ -344,3 +347,29 @@ def test_the_apis_launch_definition_names_a_working_directory_that_is_not_root_o
     work = plist.get("WorkingDirectory")
     assert work, "the Apis plist must set WorkingDirectory (launchd defaults to /)"
     assert work != "/" and Path(work) != Path(plist["EnvironmentVariables"]["HOME"])
+
+
+def _volume_ignores_case(directory: Path) -> bool:
+    probe = directory / "CaseProbe"
+    probe.mkdir()
+    try:
+        return (directory / "caseprobe").exists()
+    finally:
+        probe.rmdir()
+
+
+def test_a_case_variant_spelling_of_home_is_still_home(monkeypatch, tmp_path):
+    """On a case-insensitive volume (the macOS default) ``/Users/Name`` and
+    ``/Users/name`` are one directory: the guard compares what the path is on
+    disk, not how it is spelled."""
+    if not _volume_ignores_case(tmp_path):
+        pytest.skip("this volume is case-sensitive, so a case variant is another path")
+    home = tmp_path / "OperatorHome"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    variant = tmp_path / "operatorhome"
+    assert str(variant) != str(home) and variant.exists()
+    assert "home directory" in skill_runner._unsafe_child_cwd(str(variant))
+    assert "home directory" in skill_runner._unsafe_child_cwd(
+        str(tmp_path / "OPERATORHOME")
+    )
