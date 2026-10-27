@@ -285,8 +285,8 @@ async def test_a_notice_marker_written_by_the_bot_suppresses_a_repeat(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_the_marker_sweeps_do_not_filter_by_author(monkeypatch):
-    """A bot-authored in-flight marker is cleared exactly like a PAT-authored one."""
+async def test_the_clear_deletes_the_dispatchers_own_bot_authored_marker(monkeypatch):
+    """The App bot's own marker-only comment is cleared, as a PAT-authored one is."""
     _configure_app(monkeypatch)
     deleted: list[str] = []
     marker = "<!-- apis-pipeline-inflight:2026-10-14T10:00:00+00:00:inflight -->"
@@ -315,12 +315,11 @@ def test_the_bot_login_is_a_swarm_identity(monkeypatch):
     monkeypatch.setattr(lens_authors._github_app_token, "app_configured", lambda prefix=None: True)
     monkeypatch.setattr(lens_authors._github_app_token, "bot_login", lambda prefix=None: BOT)
     monkeypatch.setattr(lens_authors, "_login_for_token", lambda token: PAT_LOGIN)
-    # conftest stubs the App lookup out for every test; this one needs the real one
-    monkeypatch.setattr(
-        lens_authors,
-        "_app_bot_logins",
-        lambda: ({BOT.casefold()}, False),
-    )
+    # conftest stubs the whole App lookup out for every test; restore the real
+    # `_app_bot_logins` so the assertion below exercises it. Only the network
+    # boundary stays stubbed (`app_configured` / `bot_login` above and
+    # `_login_for_token`).
+    monkeypatch.setattr(lens_authors, "_app_bot_logins", lens_authors._REAL_APP_BOT_LOGINS)
     resolution = lens_authors.resolve()
     assert BOT.casefold() in resolution.authors
     assert PAT_LOGIN in resolution.authors

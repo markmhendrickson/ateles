@@ -160,6 +160,24 @@ def clear_cache() -> None:
         _app_meta_cache.clear()
 
 
+def forget_token(token: str) -> bool:
+    """Drop the cached installation token equal to *token* (server-side revoked).
+
+    GitHub can invalidate an installation token before its ``expires_at`` (a
+    permission change, an uninstall, a key rotation). The cache cannot know, so
+    a caller that has just been answered 401 with this token forgets it here and
+    the next ``installation_token_info`` mints a fresh one. Installation lookups
+    are kept. Returns True when an entry was dropped.
+    """
+    if not token:
+        return False
+    with _lock:
+        stale = [k for k, v in _token_cache.items() if v.token == token]
+        for k in stale:
+            del _token_cache[k]
+    return bool(stale)
+
+
 # ── configuration ────────────────────────────────────────────────────────────
 
 
