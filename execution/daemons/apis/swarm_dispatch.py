@@ -301,6 +301,33 @@ PRE_IMPL_GATES = ("pm", "ux", "arch")
 # command.  Defaults to the repo owner; override with APIS_OPERATOR_LOGIN.
 _OPERATOR_LOGIN = os.environ.get("APIS_OPERATOR_LOGIN", "markmhendrickson")
 
+
+def compose_gate_block_comment(
+    parent: int | None, pending: set[str], operator_login: str
+) -> str:
+    """Describe an unsigned parent gate without echoing untrusted gate names."""
+    gates = sorted(pending.intersection(PRE_IMPL_GATES))
+    rows = []
+    for gate in gates:
+        lens = lens_by_name(gate)
+        rows.append(f"| `{gate}` | {lens.agent if lens else 'unknown'} |")
+    gate_rows = "\n".join(rows)
+    parent_text = (
+        f"on parent issue #{parent}" if parent is not None else "— no parent issue found"
+    )
+    return (
+        f"{attribution_header('lanius', 'PR gate inheritance')}\n\n"
+        f"**BLOCKED**: pre-implementation gates are not signed off {parent_text}\n\n"
+        "| gate | owner agent |\n|---|---|\n"
+        f"{gate_rows}\n\n"
+        "If no gates are listed, the check reported blocked without naming them.\n\n"
+        f"`{_CONFIRM_GATES_CLEAR_CMD}`: Only @{operator_login} may issue it; "
+        "it waives all unsigned pre-impl gates and re-triggers the PR pipeline.\n\n"
+        "Normally, the gate owner signs off `gate_status.<gate>` in Neotoma, "
+        "or the operator waives it.\n\n"
+        "_Posted by the Apis dispatcher on behalf of lanius._"
+    )
+
 # Bot/machine-account identities whose comments must NEVER trigger swarm
 # commands, regardless of comment content.  This is the structural guard
 # against self-trigger feedback loops (neotoma#1686): a swarm confirmation
@@ -7358,6 +7385,8 @@ class SwarmDispatcher:
             self._lanius_pr_prompt(trigger, parent),
             github_token=_lanius_token,
             include_github_contract=True,
+            # Read-only on Fly: the check reads gates and never delivers.
+            github_read_only=True,
             notifier=self.notifier,
             action_class=model_tiering.ACTION_CARRY_FORWARD_CHECK,
             escalation_signals=lanius_signals,
@@ -7393,6 +7422,7 @@ class SwarmDispatcher:
                 ),
                 github_token=_lanius_token,
                 include_github_contract=True,
+                github_read_only=True,
                 notifier=self.notifier,
                 action_class=model_tiering.ACTION_CARRY_FORWARD_CHECK,
                 repository=trigger.repository,
@@ -7441,6 +7471,10 @@ class SwarmDispatcher:
         # a seat under the cap — otherwise a carried-over gate can never clear
         # because its owning lens is never re-invoked (ateles#230 panel gap).
         pending_gates = parse_pending_gates(lanius.stdout)
+        if verdict == "blocked":
+            await self._post_gate_block(
+                trigger, parent, parse_pending_gates(lanius.stdout)
+            )
         # Lanius reads the record's VALUE. A `signed_off` left behind by a
         # sign-off that failed after landing, or was cancelled mid-write,
         # reads as cleared to it, so its owner would never be seated to
@@ -12453,7 +12487,6 @@ class SwarmDispatcher:
             else "No parent issue reference found in the PR body — find it "
             "yourself or treat gate inheritance as blocked."
         )
-        operator_login = _OPERATOR_LOGIN
         return (
             "Invoke the lanius agent per your appended system prompt.\n\n"
             f"A pull request event ({t.action}) fired for "
@@ -12461,9 +12494,10 @@ class SwarmDispatcher:
             f"head={t.head_ref} base={t.base_ref}\n\n{t.body}\n\n"
             f"{parent_line}\n\n"
             "Run your PR-opened protocol: enforce PR gate inheritance from "
-            "the parent issue (block with a comment listing pending gates if "
-            "any pre-impl gate is not signed_off/waived); if clear, assign "
-            "Vanellus as reviewer.\n\n"
+            "the parent issue. Do NOT post GitHub comments or assign reviewers "
+            "or make any other GitHub write. Report only through the final "
+            "GATE_INHERITANCE and GATE_PENDING lines; the dispatcher posts the "
+            "blocking comment and routes Vanellus into review when clear.\n\n"
             "GATE-STATUS SOURCE OF TRUTH: the parent issue's `gate_status` "
             "lives on its NEOTOMA issue entity, NOT in the GitHub issue body "
             "(the GitHub body never carries gate metadata). ALWAYS retrieve it "
@@ -12488,19 +12522,13 @@ class SwarmDispatcher:
             "fail-open-for-review guardrail. To run the full issue pipeline on "
             "a legacy issue (gate init + expectations + Pavo), the operator can "
             "backfill via `trigger_swarm_pr.py issue <n>`.\n\n"
-            "BLOCKED COMMENT REQUIREMENTS (ateles#112): when you post a "
-            "blocking comment, it MUST include:\n"
-            "  1. A list of WHICH pre-impl gates are unsigned and who owns "
-            "each (e.g. `pm` owned by Pavo, `ux` owned by Accipiter, `arch` "
-            "owned by Waxwing).\n"
-            "  2. The exact operator-override command: "
-            f"`/confirm-gates-clear` — only @{operator_login} may issue this "
-            "command; it waives all unsigned pre-impl gates and re-triggers "
-            "the PR pipeline. No other commenter can clear gates.\n"
-            "  3. The normal resolution path: the gate owner can sign off the "
-            "gate via Neotoma (set gate_status.<gate> → signed_off) or the "
-            "operator can waive it.\n\n"
             f"{_agent_prompt_instruction('lanius', 'PR gate inheritance')}\n\n"
+            "AUTHORITATIVE FOR THIS RUN: this instruction overrides the "
+            "publication steps in your role prompt. Do NOT post a blocking "
+            "comment, do NOT assign or request a reviewer, and make no other "
+            "GitHub write. The dispatcher posts the gate-block comment and "
+            "routes Vanellus from your GATE_INHERITANCE and GATE_PENDING "
+            "lines.\n\n"
             "End your reply with exactly one line: `GATE_INHERITANCE: clear` "
             "or `GATE_INHERITANCE: blocked` so the dispatcher can route. When "
             "you emit `blocked`, add a SECOND line naming the unsigned pre-impl "
@@ -14473,6 +14501,35 @@ class SwarmDispatcher:
         except Exception as exc:
             log.error(
                 f"[{DAEMON_NAME}] fallback review comments failed for "
+                f"{t.repository}#{t.number}: {exc}"
+            )
+
+    async def _post_gate_block(
+        self, t: SwarmTrigger, parent: int | None, pending: set[str]
+    ) -> None:
+        """Surface Lanius's blocked verdict with the dispatcher's write access."""
+        try:
+            if not await self._require_github_write_credential(
+                t.repository,
+                "gate-block comment",
+                detail=f"{t.repository}#{t.number}",
+            ):
+                return
+            url = (
+                f"https://api.github.com/repos/{t.repository}/issues/"
+                f"{t.number}/comments"
+            )
+            body = compose_gate_block_comment(parent, pending, _OPERATOR_LOGIN)
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    url,
+                    json={"body": body},
+                    headers=self._github_headers(t.repository),
+                )
+                response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001 — reporting must not stop review
+            log.error(
+                f"[{DAEMON_NAME}] gate-block comment failed for "
                 f"{t.repository}#{t.number}: {exc}"
             )
 
