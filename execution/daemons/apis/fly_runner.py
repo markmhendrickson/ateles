@@ -1428,13 +1428,33 @@ def _github_request(method: str, path: str, bearer: str, body: dict | None = Non
     return json.loads(raw or b"{}")
 
 
-def mint_job_github_token(repository: str, prefix: str) -> str:
-    """A FRESH installation token for this one job, scoped to *repository*.
+# The read-class job token: contents and pull requests, read only. A job that
+# only reads (reviews, carry-forward checks) gets nothing to write with, so a
+# token minted from the swarm's reviewing App cannot approve, comment, push or
+# open a pull request. GitHub adds ``metadata: read`` to every token. The token
+# is requested with exactly this block and the answer is checked against it
+# (``check_read_token_response``); a token that comes back broader is revoked.
+READ_TOKEN_PERMISSIONS: dict[str, str] = {"contents": "read", "pull_requests": "read"}
+READ_TOKEN_IMPLICIT_PERMISSIONS: dict[str, str] = {"metadata": "read"}
+
+
+def mint_job_github_token(
+    repository: str,
+    prefix: str,
+    *,
+    clock: Callable[[], float] = time.time,
+    revoke: Callable[[str], None] | None = None,
+) -> str:
+    """A FRESH read-only installation token for this one job, scoped to
+    *repository*.
 
     Deliberately not ``github_app_token.installation_token``: that one is
     cached and shared by the whole process, and this token is revoked when
-    the job ends. Raises ``FlyIneligible`` when the App is unconfigured or the
-    mint fails; never falls back to a PAT.
+    the job ends. It is requested with ``READ_TOKEN_PERMISSIONS`` only (never
+    the App's full grant) and the response is checked against that request; a
+    token GitHub granted more broadly is revoked and refused. Raises
+    ``FlyIneligible`` when the App is unconfigured, the mint fails or the grant
+    does not match; never falls back to a PAT.
     """
     from lib import github_app_token as gat
 
@@ -1452,13 +1472,19 @@ def mint_job_github_token(repository: str, prefix: str) -> str:
             "POST",
             f"/app/installations/{installation}/access_tokens",
             jwt,
-            {"repositories": [repository.split("/", 1)[1]]},
-        )
+            {"repositories": [repository.split("/", 1)[1]],
+             "permissions": dict(READ_TOKEN_PERMISSIONS)},
+        )  # fmt: skip
     except Exception as exc:  # noqa: BLE001 — the message carries no credential
         raise FlyIneligible(f"GitHub App token mint failed: {exc}") from None
-    token = str(payload.get("token") or "")
-    if not token:
-        raise FlyIneligible("GitHub App token mint returned no token")
+    revoke = revoke or revoke_job_github_token
+    try:
+        token, _ = check_read_token_response(payload, repository, clock())
+    except FlyIneligible:
+        minted = payload.get("token") if isinstance(payload, dict) else None
+        if isinstance(minted, str) and minted.strip():
+            _revoke_refused_delivery_token(revoke, minted, None)
+        raise
     return token
 
 
@@ -1513,35 +1539,44 @@ def _delivery_repository(repository: str) -> str:
     return repository
 
 
-def check_delivery_token_response(payload: Any, repository: str, now: float) -> tuple[str, float]:
-    """``(token, expires_at)`` when GitHub granted exactly what a delivery asked
-    for; ``FlyIneligible`` naming the mismatch (never a value) otherwise."""
+def _check_token_response(
+    payload: Any,
+    repository: str,
+    now: float,
+    *,
+    requested: dict[str, str],
+    implicit: dict[str, str],
+    label: str,
+) -> tuple[str, float]:
+    """``(token, expires_at)`` when GitHub granted exactly *requested* (plus the
+    *implicit* permissions GitHub adds) for exactly one repository;
+    ``FlyIneligible`` naming the mismatch (never a value) otherwise."""
     if not isinstance(payload, dict):
-        raise FlyIneligible("the delivery token response is not an object")
+        raise FlyIneligible(f"the {label} response is not an object")
     token = payload.get("token")
     if not isinstance(token, str) or not token.strip():
-        raise FlyIneligible("the delivery token response carries no token")
+        raise FlyIneligible(f"the {label} response carries no token")
     granted = payload.get("permissions")
     if not isinstance(granted, dict):
-        raise FlyIneligible("the delivery token response does not list its permissions")
-    expected = dict(DELIVERY_TOKEN_PERMISSIONS)
-    for name, level in DELIVERY_TOKEN_IMPLICIT_PERMISSIONS.items():
+        raise FlyIneligible(f"the {label} response does not list its permissions")
+    expected = dict(requested)
+    for name, level in implicit.items():
         if name in granted:
             expected[name] = level
     if granted != expected:
         extra = sorted(set(granted) - set(expected))
         wrong = sorted(n for n in expected if granted.get(n) != expected[n])
         raise FlyIneligible(
-            "the delivery token's permissions differ from the request"
+            f"the {label}'s permissions differ from the request"
             + (f"; not requested: {extra}" if extra else "")
             + (f"; missing or different: {wrong}" if wrong else ""))
     if payload.get("repository_selection") != "selected":
-        raise FlyIneligible("the delivery token is not limited to selected repositories")
+        raise FlyIneligible(f"the {label} is not limited to selected repositories")
     repos = payload.get("repositories")
     names = [r.get("full_name") for r in repos if isinstance(r, dict)] if isinstance(repos, list) else []
     if not isinstance(repos, list) or len(repos) != 1 or len(names) != 1 \
             or not isinstance(names[0], str) or names[0].lower() != repository.lower():  # fmt: skip
-        raise FlyIneligible("the delivery token does not cover exactly the one repository")
+        raise FlyIneligible(f"the {label} does not cover exactly the one repository")
     raw = payload.get("expires_at")
     try:
         expires = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
@@ -1549,13 +1584,31 @@ def check_delivery_token_response(payload: Any, repository: str, now: float) -> 
             raise ValueError
         expires_at = expires.timestamp()
     except (TypeError, ValueError):
-        raise FlyIneligible("the delivery token has no readable expiry") from None
+        raise FlyIneligible(f"the {label} has no readable expiry") from None
     if not math.isfinite(expires_at) or expires_at <= now:
-        raise FlyIneligible("the delivery token is already expired")
+        raise FlyIneligible(f"the {label} is already expired")
     if expires_at - now > GITHUB_TOKEN_LIFETIME_SECONDS + TOKEN_EXPIRY_MARGIN_SECONDS:
-        raise FlyIneligible("the delivery token's expiry is later than an installation "
+        raise FlyIneligible(f"the {label}'s expiry is later than an installation "
                             "token can live")  # fmt: skip
     return token, expires_at
+
+
+def check_delivery_token_response(payload: Any, repository: str, now: float) -> tuple[str, float]:
+    """``(token, expires_at)`` when GitHub granted exactly what a delivery asked
+    for; ``FlyIneligible`` naming the mismatch (never a value) otherwise."""
+    return _check_token_response(payload, repository, now,
+                                 requested=DELIVERY_TOKEN_PERMISSIONS,
+                                 implicit=DELIVERY_TOKEN_IMPLICIT_PERMISSIONS,
+                                 label="delivery token")  # fmt: skip
+
+
+def check_read_token_response(payload: Any, repository: str, now: float) -> tuple[str, float]:
+    """The same check for a read-class job token: exactly ``READ_TOKEN_PERMISSIONS``
+    (plus GitHub's implicit metadata read), one repository, a sane expiry."""
+    return _check_token_response(payload, repository, now,
+                                 requested=READ_TOKEN_PERMISSIONS,
+                                 implicit=READ_TOKEN_IMPLICIT_PERMISSIONS,
+                                 label="job token")  # fmt: skip
 
 
 def _revoke_refused_delivery_token(revoke: Callable[[str], None], token: str,
@@ -1723,6 +1776,10 @@ class FlyJob:
     stdin: bytes
     timeout: int
     needs_github: bool
+    # True when the dispatch carries the GitHub DELIVERY contract (commit, push,
+    # open a pull request). Such a job is only ever launched with a delivery plan
+    # and the PR-opener token; it never gets the read-class token below.
+    github_delivery_contract: bool = False
     # name -> value. Never logged; only written into machine config files.
     secrets: dict[str, str] = field(repr=False, default_factory=dict)
     child_credential_names: list[str] = field(default_factory=list)
@@ -1844,6 +1901,7 @@ def build_job(
     config: FlyConfig | None = None,
     delivery: dict | None = None,
     neotoma_tools_granted: bool = False,
+    github_delivery_contract: bool = False,
 ) -> FlyJob:
     """Check eligibility and assemble the job, minus the GitHub token (which
     is minted at launch). Raises ``FlyIneligible`` with the reason.
@@ -1941,6 +1999,13 @@ def build_job(
         *config.extra_probe_env_names,
     ]))  # fmt: skip
 
+    if github_delivery_contract and delivery is None:
+        # Fail closed: a job told to commit, push or open a pull request, with no
+        # delivery plan, would otherwise be handed a read-class token it cannot
+        # use for that and must never be handed a stronger one.
+        raise FlyIneligible(
+            "a job that delivers to GitHub needs a delivery plan and the PR-opener "
+            "token; it cannot run on Fly without one")
     argv = runner_argv(provider, cmd, mcp_config_path)
     argv, system_prompt = externalize_system_prompt(provider, argv)
     if delivery is not None:
@@ -1960,6 +2025,7 @@ def build_job(
         stdin=stdin,
         timeout=int(timeout),
         needs_github=github_requested,
+        github_delivery_contract=github_delivery_contract,
         secrets=secrets,
         child_credential_names=child_names,
         neotoma_token_name=token_name if own_token else "",
@@ -2374,6 +2440,11 @@ class FlyExecutor:
             # A refused or mismatched mint raises FlyIneligible here, before
             # any reservation or machine: the builder runs locally instead.
             job.secrets[DELIVERY_TOKEN_NAME] = await self._mint_delivery_owned(job, tokens)
+        elif job.github_delivery_contract:
+            # Defence in depth behind build_job: a delivering job never takes the
+            # read-class path, whatever built it.
+            raise FlyIneligible("a job that delivers to GitHub is launched with a delivery "
+                                "plan or not at all")
         elif job.needs_github:
             token = await self._mint_owned(job, tokens)
             job.secrets["GITHUB_TOKEN"] = token

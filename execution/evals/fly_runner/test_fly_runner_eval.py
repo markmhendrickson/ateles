@@ -31,6 +31,8 @@ def test_scenario_set_covers_the_required_behaviours():
     ids = {s["id"] for s in SCENARIOS}
     assert {
         "opted_out_class_stays_local",
+        "delivery_contract_without_a_plan_never_mints_a_job_token",
+        "forced_fly_delivery_is_refused_before_any_mint",
         "forced_fly_ineligible_role_refused",
         "forced_fly_without_app_refused_not_pat",
         "opted_in_class_runs_on_fly",

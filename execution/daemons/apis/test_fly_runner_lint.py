@@ -139,8 +139,6 @@ ALLOWLIST: dict[str, str] = {
         'unset role token: the role then needs its own key, or is refused',
     "execution/daemons/apis/fly_runner.py:job_files:job.stdin or b''":
         'a job with no stdin sends an empty stdin file',
-    "execution/daemons/apis/fly_runner.py:mint_job_github_token:payload.get('token') or ''":
-        'an empty token is refused on the next line',
     "execution/daemons/apis/fly_runner.py:process_start_token:return ''":
         "'' is 'alive, start unknown', the direction that never proves death",
     'execution/daemons/apis/fly_runner.py:process_start_token:return None':

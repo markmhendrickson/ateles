@@ -241,15 +241,22 @@ def test_the_run_a_token_must_cover_includes_the_delivery_steps():
 # ── Nothing else changes ─────────────────────────────────────────────────────
 
 
-def test_the_read_class_job_token_is_unchanged(monkeypatch):
+def test_the_read_class_job_token_is_read_only(monkeypatch):
     calls = []
     monkeypatch.setattr(gat, "app_configured", lambda prefix: True)
     monkeypatch.setattr(gat, "mint_app_jwt", lambda prefix: "app-jwt")
     monkeypatch.setattr(gat, "_resolve_installation_id", lambda prefix, repo, f: "42")
     monkeypatch.setattr(fly_runner, "_github_request",
-                        lambda m, p, b, body=None: calls.append(body) or {"token": "t"})
-    fly_runner.mint_job_github_token(REPO, "ATELES_REVIEWER_APP")
-    assert calls == [{"repositories": ["repo"]}]  # no permissions narrowing added there
+                        lambda m, p, b, body=None: calls.append(body) or _granted_read())
+    fly_runner.mint_job_github_token(REPO, "ATELES_REVIEWER_APP", clock=lambda: NOW)
+    # Read only: it can no longer write what a delivery token writes.
+    assert calls == [{"repositories": ["repo"],
+                      "permissions": {"contents": "read", "pull_requests": "read"}}]
+
+
+def _granted_read():
+    return _granted(permissions={"contents": "read", "pull_requests": "read",
+                                 "metadata": "read"})
 
 
 def test_the_executor_still_mints_with_the_read_class_function():

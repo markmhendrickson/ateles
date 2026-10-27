@@ -3706,6 +3706,7 @@ async def _run_skill_once(
                 codex_outer_sandboxed=codex_outer_sandboxed,
                 delivery=fly_delivery,
                 neotoma_tools_granted=bool(allowed_mcp_servers(agent_def.tools)),
+                github_delivery_contract=include_github_contract,
             )
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
