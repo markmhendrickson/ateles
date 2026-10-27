@@ -85,6 +85,12 @@ python3 scripts/linters/check_neotoma_rest_paths.py || ERRORS=$((ERRORS + 1))
 echo "  - Checking agent roster (no retired agent names)..."
 python3 scripts/linters/check_agent_roster.py || ERRORS=$((ERRORS + 1))
 
+# agent_policy rule_kind vocabulary (ateles#1245 — an out-of-vocabulary or
+# absent rule_kind must be refused, never silently defaulted to mandatory).
+# Checks the committed snapshot; CI holds no NEOTOMA_BEARER_TOKEN to check live.
+echo "  - Checking agent_policy rule_kind vocabulary (no out-of-vocabulary rows)..."
+python3 scripts/linters/check_policy_rule_kind_vocab.py || ERRORS=$((ERRORS + 1))
+
 # CLAUDE.md rule parity (ateles#973). A standing rule that vanishes from this
 # file stops binding, and a small diff can hide the loss — the six deletions in
 # the merge that motivated this were all same-rule replacements. Every side
