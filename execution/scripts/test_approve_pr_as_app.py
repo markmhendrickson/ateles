@@ -4060,6 +4060,72 @@ async def _run_path(monkeypatch, client, *, apply=True, extra=()):
     return await target.run(REPO, PR, list(extra), apply=apply, panel_mode="path")
 
 
+def _repo_scope() -> str:
+    """This repository's own committed scope file: the single list of full-panel
+    paths, read by the approval tool in production and by these tests."""
+    return (_REPO_ROOT / ".github" / "review_scope.json").read_text()
+
+
+@pytest.mark.asyncio
+class TestThisRepoScopeThroughTheApprovalTool:
+    """The operator's rule text is full-panel. `docs/foundation/**` states the
+    design the swarm is built against, so a change to it is rule text, not
+    ordinary docs: `--panel path` must not approve it on arch alone."""
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "docs/foundation/work_model.md",
+            "docs/foundation/conformance.md",
+            "docs/foundation/decision_state.md",
+        ],
+    )
+    async def test_foundation_text_needs_all_five(self, monkeypatch, path):
+        client = _path_client([path], _all_clear_comments(["arch"]), scope=_repo_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+        client = _path_client([path], _all_clear_comments(FIVE), scope=_repo_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        body = client.posted[0]["json"]["body"]
+        assert "Panel: full five-lens panel, chosen by changed path." in body
+        assert "docs/foundation/**" in body
+        assert "**security**" in body
+
+    async def test_a_docs_only_change_needs_one_lens(self, monkeypatch):
+        client = _path_client(["docs/guide/how_to.md"], _all_clear_comments(["ux"]), scope=_repo_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        assert "Panel: one lens (ux)" in client.posted[0]["json"]["body"]
+
+    async def test_a_tests_only_change_needs_one_lens(self, monkeypatch):
+        client = _path_client(
+            ["execution/scripts/test_hallucination_filter.py"],
+            _all_clear_comments(["arch"]),
+            scope=_repo_scope(),
+        )
+        assert await _run_path(monkeypatch, client) == 0
+        assert "Panel: one lens (arch)" in client.posted[0]["json"]["body"]
+
+    async def test_an_unclassified_file_takes_all_five(self, monkeypatch):
+        client = _path_client(["misc/unlisted_thing.txt"], _all_clear_comments(["arch"]), scope=_repo_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        client = _path_client(["misc/unlisted_thing.txt"], _all_clear_comments(FIVE), scope=_repo_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        assert "Panel: full five-lens panel" in client.posted[0]["json"]["body"]
+
+    async def test_an_objection_from_a_non_required_lens_still_refuses(self, monkeypatch):
+        objection = _comment(
+            9,
+            _lens_comment_body(
+                "security", target.LENS_AGENTS["security"], verdict="REQUEST_CHANGES", extra="[BLOCKING] a real problem"
+            ),
+            author=SWARM_LOGIN,
+        )
+        comments = _all_clear_comments(["arch"]) + [objection]
+        client = _path_client(["docs/guide/how_to.md"], comments, scope=_repo_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+
+
 @pytest.mark.asyncio
 class TestPathSelectedPanel:
     async def test_a_plain_change_needs_only_arch(self, monkeypatch):
