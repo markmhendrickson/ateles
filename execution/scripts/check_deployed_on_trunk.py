@@ -7,6 +7,13 @@ is the head that is live. A deploy from an unmerged integration branch breaks
 that silently. `.github/actions/deployed-on-trunk` stops it at deploy time;
 this script audits it after the fact, from outside the deploy workflow.
 
+CAVEAT: this is a weaker, later check. Ancestry only grows, so it is judged as
+of NOW and cannot tell deployed-then-merged from merged-then-deployed: a commit
+deployed from an unmerged branch and merged later reads as on trunk. It is not
+proof that what was deployed had been reviewed on trunk; the deploy-time guard
+is the check that binds. (A Deployment record's `ref` is the commit sha and is
+provenance only.)
+
 Where the deployed sha comes from (exactly one):
     --sha SHA                       a commit you already know
     --from-url URL --json-field F   a version/health endpoint, e.g. /version

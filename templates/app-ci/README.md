@@ -30,6 +30,12 @@ audit (`trunk-audit.yml`): it runs from the default branch, reads the GitHub Dep
 trusting the deploy job, and fails the run when the latest production deployment is off trunk or cannot be
 checked. Treat a failing audit as an incident, not as flakiness.
 
+**The audit is a weaker, later check, not proof of review.** Ancestry only grows, so the audit reads ancestry **as of
+now** and cannot tell *deployed-then-merged* from *merged-then-deployed*: a commit deployed from an unmerged branch
+and merged afterwards reads as on trunk. A pass therefore does not show that what was deployed had been reviewed on
+trunk at the time. The **deploy-time guard is the check that binds**; the audit only catches what the guard missed
+while it is still off trunk.
+
 ## The 15-minute budget
 
 Per-PR CI targets **under 15 minutes end to end**. Every job carries a `timeout-minutes` (5 for `fast`, 12 for each
@@ -117,6 +123,16 @@ token cannot be forwarded to another host.
 checks the commit the *running service reports about itself*: it verifies a self-reported commit, **not the image
 or the code**, so a service that reports a stale or wrong value passes. Use both when you can; the deployment
 record is the independent one.
+
+**The audit judges ancestry as of now.** Both sources are checked against the trunk tip at the moment the audit runs
+(`check_deployed_on_trunk.py --from-deployments`, `--from-url`, `--sha`, and the scheduled `trunk-audit.yml`). It
+cannot tell *deployed-then-merged* from *merged-then-deployed*, so it is a weaker, later check than the deploy-time
+guard and is not proof that what was deployed had been reviewed on trunk. Do not cite a passing audit as evidence
+that a past deploy was on trunk when it happened; the guard's run for that deploy is that evidence.
+
+The GitHub Deployment record's `ref` is written as the commit sha (`DEPLOY_SHA`), so the record is pinned to the
+commit rather than to a branch name that can move. It is **provenance only**: it says what the workflow claims it
+deployed, not that the commit was on trunk then.
 
 ## Adopt it in an existing repo
 

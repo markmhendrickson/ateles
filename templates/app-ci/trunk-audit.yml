@@ -10,6 +10,10 @@
 # (could not check, which is never a pass). Failed scheduled runs notify the
 # workflow's owners; also point a notification at this workflow.
 #
+# Limit: the audit judges ancestry as of now, so it cannot tell deployed-then-
+# merged from merged-then-deployed. It is a weaker, later check than the
+# deploy-time guard, which is the one that binds.
+#
 # GitHub disables scheduled workflows in a repo with no activity for 60 days;
 # re-enable it (or push a commit) if the audit stops appearing in the run list.
 name: trunk-audit

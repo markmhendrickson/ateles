@@ -399,5 +399,17 @@ class HardeningTests(unittest.TestCase):
         self.assertIsNone(seen["target_auth"])
 
 
+class CaveatTests(unittest.TestCase):
+    def test_help_states_the_as_of_now_limit(self):
+        out = io.StringIO()
+        with mock.patch.object(sys, "stdout", out):
+            with self.assertRaises(SystemExit):
+                ctd.main(["--help"])
+        text = " ".join(out.getvalue().split())
+        self.assertIn("as of NOW", text)
+        self.assertIn("deployed-then-merged from merged-then-deployed", text)
+        self.assertIn("deploy-time guard is the check that binds", text)
+
+
 if __name__ == "__main__":
     unittest.main()
