@@ -4413,3 +4413,40 @@ Read on 2026-09-26 against `origin/main` at `bb38fb9b`, Codex CLI 0.153.4, Atele
   still review and trust the definition in Codex before it affects ordinary sessions. The larger compaction,
   scenario, daemon, Cursor, and cross-harness evaluation remains task `ent_8ef6743f00b589400259f6b5`; this
   pass does not duplicate it.
+
+## Revision 150 (2026-10-27): decision 148's conformance check — an instance's delivery path makes no call on swarm coordination
+
+Read on 2026-10-27 against `origin/main` at `b7394da1`. This is a conformance row, not a decision: decision 148 is
+ruled (`conformance.md#the-register-of-open-design-decisions`), and the section that rules it
+(`adapters.md#a-client-instance-runs-a-minimal-runtime-of-its-own-and-its-delivery-never-depends-on-swarm-coordination`)
+states what delivery depends on and says the planted refusal for it is "added to `conformance_suite.md` in a later
+change". This row names the check that change must build, and records that nothing runs it. It is bounded by what
+decision 148 rules: delivery, the path from an inbound event to a taken action. It asserts nothing about how an
+application repository's changes are reviewed or merged.
+
+- **The check, in two parts.** (1) *Static:* the runtime an instance runs for delivery, meaning its adapters, its
+  action gate, the step runners for its declared workflows, and its operator-facing agent, as named by the
+  instance's `deployment_configuration`, contains no call on the swarm's coordination: not on the component that
+  assigns work to agents, not on a review-lens runner, not on the planning machinery. The reference to look for is a
+  call, an import, or an environment the runtime reads from one of those. (2) *Dynamic:* with the dispatcher, the
+  assigning component, and the gate-status surface stopped while the instance's own runtime is up, an inbound event
+  is read, a step runs, the gate judges, and the action is taken through an adapter. Part 2 is the planted refusal in
+  the rule's own words: a delivery that stalls when the swarm's coordination is stopped while the instance's own
+  runtime is up.
+- **Where it stands: no check found.** A name and content search of `execution/scripts`, `scripts/linters`, and
+  `.github/workflows` on this date found no script or step that reads an instance's delivery runtime for either part;
+  the nearest, `prepare_instance_auth_deployment.py`, prepares an instance's authentication argv and was not read as
+  such a check. The ruling is therefore a statement the design makes about a runtime whose compliance nothing
+  measures. This is the non-binding-control shape `CLAUDE.md` names: the rule is written, and nothing fails when it
+  is violated.
+- **What is not measured here, and what this row does not claim.** Whether any instance's delivery path currently
+  depends on swarm coordination was not read in this pass, so this row claims neither a dependency nor its absence.
+  The first run of part 1 against each instance's runtime is the measurement, and its result belongs in this
+  document as a dated entry, not in the register. Decision 148 itself says that with the swarm's coordination absent,
+  development and review of the declarations and the runtime stop, so a repository whose merges are gated by swarm
+  review conforms to it; whether an application repository's merge and deploy path should be free of swarm review
+  is a separate property that decision 148 does not rule, and it is not checked here. If the operator wants it, it
+  is a new decision with its own cost, which is that merges of application code could not be swarm-gated.
+- **What closes the row.** Part 1 as a checker with fail-then-pass coverage, part 2 as a `conformance_suite.md` row
+  with the planted refusal above, and both wired into a lane that binds, which is to say one whose failure blocks
+  a merge in the repository it reads.

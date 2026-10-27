@@ -354,8 +354,12 @@ def test_a_launch_failure_without_an_exit_code_records_nothing() -> None:
 
 
 def test_an_overlong_session_reset_is_clamped(caplog) -> None:
+    # A reset two days out: plausible as an instant, too long for a session
+    # window. A fixed calendar date here went stale once it passed and was
+    # then rejected as implausible instead of clamped.
+    when = datetime.fromtimestamp(time.time() + 2 * 86400, ZoneInfo("Europe/Madrid"))
     attempt, _ = _spawning_attempt(
-        "You've hit your session limit · resets 2026-10-25 09:00 (Europe/Madrid)"
+        f"You've hit your session limit · resets {when:%Y-%m-%d %H:%M} (Europe/Madrid)"
     )
     now = time.time()
     with caplog.at_level("WARNING"):
