@@ -1,0 +1,8 @@
+{
+  "_comment": "Optional watch file for goal-continuation turns, saved as ~/.codex/ateles/turn_guard/goal_watch.json. The Ateles codex_turn_guard hashes each command's output together with the last operator message and the repository state; a goal turn is treated as having nothing new only while all of them are unchanged. Without this file, a state kept outside the repository (CI, a pull request, a daemon, a Neotoma record) is seen only when the back-off window lapses (5 min doubling to base_s*2^n, at most cap_s). argv is run without a shell, read-only, 6 s each and 12 s in total.",
+  "watch": [
+    {"name": "pull_request", "argv": ["gh", "pr", "view", "123", "--repo", "OWNER/REPO", "--json", "state,headRefOid,reviewDecision,statusCheckRollup"]}
+  ],
+  "base_s": 300,
+  "cap_s": 3600
+}

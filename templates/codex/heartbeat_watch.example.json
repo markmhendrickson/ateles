@@ -1,8 +1,8 @@
 {
-  "_comment": "Optional per-heartbeat watch commands for the Ateles codex_turn_guard. The guard hashes each command's output; an idle heartbeat is blocked only while every hash is unchanged. argv is run without a shell, read-only, 6 s each, 12 s in total. base_s and cap_s set the back-off window after a quiet run (doubles per consecutive quiet run, up to cap_s).",
+  "_comment": "Watch file for one heartbeat automation, saved as ~/.codex/ateles/turn_guard/heartbeats/<automation id>.json. The Ateles codex_turn_guard hashes each command's output; once the heartbeat path is enforced, an idle run is skipped only while every hash and the repository are unchanged. argv is run without a shell, read-only, 6 s each and 12 s in total. base_s and cap_s set the back-off window after a quiet run (it doubles per consecutive quiet run, up to cap_s). An automation without this file is never skipped.",
   "watch": [
     {"name": "pull_request", "argv": ["gh", "pr", "view", "123", "--repo", "OWNER/REPO", "--json", "state,headRefOid,reviewDecision,statusCheckRollup"]}
   ],
   "base_s": 600,
-  "cap_s": 21600
+  "cap_s": 3600
 }

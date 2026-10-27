@@ -45,6 +45,10 @@ on:
       - "lib/github_app_token.py"
       - "lib/test_github_app_token.py"
       - "execution/scripts/**"
+      # The Codex turn guard's installer tests read these two inputs, so an
+      # edit to either alone must re-run them.
+      - ".codex/turn_guard_hooks.json"
+      - "templates/codex/**"
       # The scripts fixture imports the complete-profile preparation core.
       - "execution/lib/instance_profile_guard.py"
       - "execution/lib/instance_auth_profile_guard.py"
