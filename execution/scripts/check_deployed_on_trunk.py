@@ -241,9 +241,11 @@ def run(args: argparse.Namespace) -> tuple[int, str]:
     if status in ON_TRUNK_STATUSES:
         return EXIT_ON_TRUNK, f"ON TRUNK: {short} from {source} is an ancestor of {branch} in {args.repo}"
     if status in OFF_TRUNK_STATUSES:
+        relation = f"ahead of {branch}" if status == "ahead" else f"diverged from {branch}"
         return (
             EXIT_NOT_ON_TRUNK,
-            f"NOT ON TRUNK: {short} from {source} is {status} of {branch} in {args.repo}",
+            f"NOT ON TRUNK: {short} from {source} is {relation} in {args.repo}; "
+            f"merge it to {branch} first, or deploy a commit that is already on {branch}",
         )
     return EXIT_COULD_NOT_RUN, f"UNKNOWN: could not check (unrecognised compare status {status!r})"
 

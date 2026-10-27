@@ -26,11 +26,18 @@ SHA = "a" * 40
 REPO = "owner/app"
 
 
+class UnexpectedCall(BaseException):
+    """Raised by the default mocks. It is a BaseException on purpose: main()
+    turns every Exception into `UNKNOWN ... exit 2`, so an Exception-based
+    mock would satisfy a bad-input test's exit-2 expectation by itself and let
+    broken validation pass. This one escapes the catch-all and fails the test."""
+
+
 def _run(argv, api=None, fetch=None):
     """Run main() with the API and endpoint fetchers mocked; return (code, stdout)."""
     out = io.StringIO()
-    with mock.patch.object(ctd, "api_get", api or mock.Mock(side_effect=AssertionError("unexpected api call"))):
-        with mock.patch.object(ctd, "fetch_json_url", fetch or mock.Mock(side_effect=AssertionError("unexpected fetch"))):
+    with mock.patch.object(ctd, "api_get", api or mock.Mock(side_effect=UnexpectedCall("unexpected api call"))):
+        with mock.patch.object(ctd, "fetch_json_url", fetch or mock.Mock(side_effect=UnexpectedCall("unexpected fetch"))):
             with mock.patch.object(sys, "stdout", out):
                 code = ctd.main(argv)
     return code, out.getvalue()
@@ -114,12 +121,14 @@ class ErrorTests(unittest.TestCase):
         self.assertEqual(code, 2)
 
     def test_malformed_sha_is_unknown(self):
-        code, _ = _run(["--repo", REPO, "--sha", "not-a-sha"])
+        code, out = _run(["--repo", REPO, "--sha", "not-a-sha"])
         self.assertEqual(code, 2)
+        self.assertIn("is not a commit sha", out)
 
     def test_malformed_repo_is_unknown(self):
-        code, _ = _run(["--repo", "nonsense", "--sha", SHA])
+        code, out = _run(["--repo", "nonsense", "--sha", SHA])
         self.assertEqual(code, 2)
+        self.assertIn("--repo must be owner/name", out)
 
     def test_no_sha_source_is_unknown(self):
         with self.assertRaises(SystemExit) as ctx:
@@ -154,22 +163,25 @@ class FromUrlTests(unittest.TestCase):
         self.assertEqual(code, 1)
 
     def test_missing_field_is_unknown(self):
-        code, _ = _run(
+        code, out = _run(
             ["--repo", REPO, "--from-url", "https://app.example/version", "--json-field", "commit"],
             fetch=lambda url: {"status": "ok"},
         )
         self.assertEqual(code, 2)
+        self.assertIn("not found in the version endpoint response", out)
 
     def test_health_ok_string_is_not_a_sha(self):
-        code, _ = _run(
+        code, out = _run(
             ["--repo", REPO, "--from-url", "https://app.example/health", "--json-field", "commit"],
             fetch=lambda url: {"commit": "ok"},
         )
         self.assertEqual(code, 2)
+        self.assertIn("does not hold a commit sha", out)
 
     def test_requires_json_field(self):
-        code, _ = _run(["--repo", REPO, "--from-url", "https://app.example/version"], fetch=lambda url: {})
+        code, out = _run(["--repo", REPO, "--from-url", "https://app.example/version"], fetch=lambda url: {})
         self.assertEqual(code, 2)
+        self.assertIn("--from-url requires --json-field", out)
 
     def test_endpoint_unreachable_is_unknown(self):
         def fetch(url):
@@ -182,8 +194,9 @@ class FromUrlTests(unittest.TestCase):
         self.assertEqual(code, 2)
 
     def test_non_http_url_rejected(self):
-        with self.assertRaises(ctd.CheckError):
+        with self.assertRaises(ctd.CheckError) as ctx:
             ctd.fetch_json_url("file:///etc/passwd")
+        self.assertIn("must be an http(s) URL", str(ctx.exception))
 
 
 def _deployments_api(deployments, statuses, compare="behind"):
@@ -348,15 +361,17 @@ class HardeningTests(unittest.TestCase):
     def test_short_sha_is_rejected(self):
         for bad in ("abcdef1", "a" * 39, "a" * 41, SHA + "\n" + SHA):
             with self.subTest(bad=bad):
-                code, _ = _run(["--repo", REPO, "--sha", bad])
+                code, out = _run(["--repo", REPO, "--sha", bad])
                 self.assertEqual(code, 2)
+                self.assertIn("is not a commit sha", out)
 
     def test_short_sha_from_endpoint_is_rejected(self):
-        code, _ = _run(
+        code, out = _run(
             ["--repo", REPO, "--from-url", "https://app.example/version", "--json-field", "commit"],
             fetch=lambda url: {"commit": "abcdef1"},
         )
         self.assertEqual(code, 2)
+        self.assertIn("does not hold a commit sha", out)
 
     def test_api_calls_do_not_follow_redirects_so_the_token_stays_on_github(self):
         seen = {"target_auth": None, "target_hit": False}

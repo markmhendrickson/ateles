@@ -89,6 +89,10 @@ to deploy unless it is green within a timeout (default 25 minutes), failing clos
 pending check. It is polling rather than a `workflow_run` trigger because that works identically for a push and
 a manual deploy of a specific sha, and it only needs `checks: read` on the guard job.
 
+**Two costs to know about.** The wait can delay a deploy by up to its timeout (default 25 minutes) while CI runs
+or is pending. And the deploy concurrency group is per commit, so **two different commits can deploy at the same
+time**; if your target cannot tolerate that, take a lock inside the deploy command itself.
+
 ## Know which commit is live
 
 Three pieces make the deployed commit visible, so the audit has something to read:
@@ -148,7 +152,7 @@ deployed, not that the commit was on trunk then.
    (performance audits, native or integration suites, evals). Remove it from `ci.yml`. Trigger it once by hand
    (`workflow_dispatch`) to prove it runs.
 6. **Wire the deploy.** Vendor the guard action (see below), add the `guard` job from `deploy-guard.yml` to the
-   deploy workflow and make the deploy job `needs: guard`, or copy the file whole. Add the `GIT_SHA` build arg, the `/version` endpoint, and the Deployment
+   deploy workflow and make the deploy job `needs: guard`, or copy the file whole. Set `WAIT_FOR_CI=true` if you have no branch protection. Add the `GIT_SHA` build arg, the `/version` endpoint, and the Deployment
    record steps. Deploy only from the default branch (or a commit that is on it).
 7. **Require only the summary job.** In branch protection, replace the individual required checks with the single
    summary job. On a free-plan private repo (no protection), skip this step: the guard in step 6 is what binds.

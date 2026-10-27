@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       sha:
-        description: Commit to deploy (defaults to the commit the workflow runs on)
+        description: Full 40-character commit sha to deploy (defaults to the commit the workflow runs on)
         required: false
   push:
     branches: [main]
@@ -158,7 +158,9 @@ jobs:
       # and serve GET /version (no auth) returning {"commit": "<GIT_SHA>"}.
       #
       # FILL THIS SLOT. It fails on purpose so an unfilled copy of this template
-      # cannot record a successful deploy. Replace the whole step.
+      # cannot record a successful deploy. Replace the whole step. Two different
+      # commits can run this step at once (the concurrency group is per commit),
+      # so if your target cannot tolerate that, take a lock inside this command.
       - name: Build and deploy (fails until replaced)
         run: |
           echo "::error::deploy.yml has no deploy command yet: replace this step (docker build --build-arg GIT_SHA=$DEPLOY_SHA ..., then push and release)."
