@@ -203,7 +203,15 @@ def minutes_between(a: datetime, b: datetime) -> float:
 
 def gh_transport(path: str, params: dict[str, Any]) -> Any:
     """GET ``path`` through ``gh api`` and return parsed JSON."""
-    cmd = ["gh", "api", "--method", "GET", "-H", "Accept: application/vnd.github+json", path.lstrip("/")]
+    cmd = [
+        "gh",
+        "api",
+        "--method",
+        "GET",
+        "-H",
+        "Accept: application/vnd.github+json",
+        path.lstrip("/"),
+    ]
     for key, value in params.items():
         cmd += ["-f", f"{key}={value}"]
     try:
@@ -263,10 +271,15 @@ class Api:
         page = 1
         while True:
             if page > limit:
-                meta.update(truncated=True, truncated_reason=f"page limit {limit} reached for {path}")
+                meta.update(
+                    truncated=True,
+                    truncated_reason=f"page limit {limit} reached for {path}",
+                )
                 break
             try:
-                data = self.get(path, {**(params or {}), "per_page": self.per_page, "page": page})
+                data = self.get(
+                    path, {**(params or {}), "per_page": self.per_page, "page": page}
+                )
             except BudgetExceeded as exc:
                 meta.update(truncated=True, truncated_reason=str(exc))
                 break
@@ -295,7 +308,9 @@ class Notes:
 
     def from_meta(self, label: str, meta: dict[str, Any]) -> None:
         if meta.get("truncated"):
-            self.truncation.append(f"{label}: {meta.get('truncated_reason', 'truncated')}")
+            self.truncation.append(
+                f"{label}: {meta.get('truncated_reason', 'truncated')}"
+            )
 
 
 # --------------------------------------------------------------------------
@@ -323,7 +338,9 @@ def collect_merged_prs(
     return _in_window_merged(raw, since, until)
 
 
-def _in_window_merged(raw: list[dict[str, Any]], since: datetime, until: datetime) -> list[dict[str, Any]]:
+def _in_window_merged(
+    raw: list[dict[str, Any]], since: datetime, until: datetime
+) -> list[dict[str, Any]]:
     prs: dict[int, dict[str, Any]] = {}
     for item in raw:
         merged_at = parse_ts(item.get("merged_at"))
@@ -334,7 +351,9 @@ def _in_window_merged(raw: list[dict[str, Any]], since: datetime, until: datetim
             "number": number,
             "title": item.get("title") or "",
             "body": item.get("body") or "",
-            "labels": [str(lbl.get("name", "")).lower() for lbl in item.get("labels") or []],
+            "labels": [
+                str(lbl.get("name", "")).lower() for lbl in item.get("labels") or []
+            ],
             "created_at": parse_ts(item.get("created_at")),
             "merged_at": merged_at,
             "merge_commit_sha": item.get("merge_commit_sha"),
@@ -345,7 +364,9 @@ def _in_window_merged(raw: list[dict[str, Any]], since: datetime, until: datetim
     return sorted(prs.values(), key=lambda p: (p["merged_at"], p["number"]))
 
 
-def attach_commits(api: Api, repo: str, prs: list[dict[str, Any]], notes: Notes) -> None:
+def attach_commits(
+    api: Api, repo: str, prs: list[dict[str, Any]], notes: Notes
+) -> None:
     for pr in prs:
         items, meta = api.paginate(f"/repos/{repo}/pulls/{pr['number']}/commits")
         if meta.get("truncated"):
@@ -355,7 +376,9 @@ def attach_commits(api: Api, repo: str, prs: list[dict[str, Any]], notes: Notes)
                 continue
         commits = []
         for c in items:
-            authored = parse_ts(((c.get("commit") or {}).get("author") or {}).get("date"))
+            authored = parse_ts(
+                ((c.get("commit") or {}).get("author") or {}).get("date")
+            )
             commits.append({"sha": c.get("sha"), "authored_at": authored})
         pr["commits"] = commits
 
@@ -386,7 +409,12 @@ def merged_elsewhere(
 
 
 def fetch_runs(
-    api: Api, path: str, start: datetime, end: datetime, notes: Notes, params: dict[str, Any] | None = None
+    api: Api,
+    path: str,
+    start: datetime,
+    end: datetime,
+    notes: Notes,
+    params: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """All Actions runs created in [start, end], bisecting past the search cap."""
     found: dict[Any, dict[str, Any]] = {}
@@ -394,20 +422,27 @@ def fetch_runs(
     def walk(a: datetime, b: datetime) -> None:
         query = {**(params or {}), "created": f"{iso(a)}..{iso(b)}"}
         items, meta = api.paginate(
-            path, query, item_key="workflow_runs", max_pages=math.ceil(SEARCH_CAP / api.per_page) + 1
+            path,
+            query,
+            item_key="workflow_runs",
+            max_pages=math.ceil(SEARCH_CAP / api.per_page) + 1,
         )
         total = meta.get("total_count")
         if meta.get("truncated"):
             notes.from_meta(f"workflow runs ({path})", meta)
         else:
-            capped = (total is not None and total > len(items)) or len(items) >= SEARCH_CAP
+            capped = (total is not None and total > len(items)) or len(
+                items
+            ) >= SEARCH_CAP
             if capped and (b - a) > timedelta(seconds=2):
                 mid = (a + (b - a) / 2).replace(microsecond=0)
                 walk(a, mid)
                 walk(mid + timedelta(seconds=1), b)
                 return
             if capped:
-                notes.truncation.append(f"workflow runs ({path}): more than {SEARCH_CAP} runs in one second")
+                notes.truncation.append(
+                    f"workflow runs ({path}): more than {SEARCH_CAP} runs in one second"
+                )
         for run in items:
             found[run.get("id")] = run
 
@@ -444,7 +479,10 @@ def collect_deploy_records(
             for d in deployments
             if (c := parse_ts(d.get("created_at"))) is not None
             and since <= c < horizon
-            and (environment_re is None or environment_re.search(str(d.get("environment", ""))))
+            and (
+                environment_re is None
+                or environment_re.search(str(d.get("environment", "")))
+            )
         ]
         if deployments:
             sources.append("github_deployments")
@@ -454,7 +492,9 @@ def collect_deploy_records(
             )
             relevant = relevant[:max_deployments]
         for d in relevant:
-            statuses, smeta = api.paginate(f"/repos/{repo}/deployments/{d['id']}/statuses")
+            statuses, smeta = api.paginate(
+                f"/repos/{repo}/deployments/{d['id']}/statuses"
+            )
             notes.from_meta("deployment statuses", smeta)
             good = [
                 parse_ts(s.get("created_at"))
@@ -463,27 +503,52 @@ def collect_deploy_records(
             ]
             if good:
                 records.append(
-                    {"sha": d.get("sha"), "success_at": min(good), "source": "deployment", "environment": d.get("environment")}
+                    {
+                        "sha": d.get("sha"),
+                        "success_at": min(good),
+                        "source": "deployment",
+                        "environment": d.get("environment"),
+                    }
                 )
     except ApiError as exc:
         problems.append(f"deployments API: {exc.message[:120]}")
 
     # Deploy workflows
     try:
-        workflows, wmeta = api.paginate(f"/repos/{repo}/actions/workflows", item_key="workflows")
+        workflows, wmeta = api.paginate(
+            f"/repos/{repo}/actions/workflows", item_key="workflows"
+        )
         notes.from_meta("workflow listing", wmeta)
-        deploy_workflows = [w for w in workflows if DEPLOY_NAME_RE.search(str(w.get("name", "")))][:5]
+        deploy_workflows = [
+            w for w in workflows if DEPLOY_NAME_RE.search(str(w.get("name", "")))
+        ][:5]
         if deploy_workflows:
             sources.append("deploy_workflows")
         for w in deploy_workflows:
-            runs = fetch_runs(api, f"/repos/{repo}/actions/workflows/{w['id']}/runs", since, horizon, notes)
+            runs = fetch_runs(
+                api,
+                f"/repos/{repo}/actions/workflows/{w['id']}/runs",
+                since,
+                horizon,
+                notes,
+            )
             for run in runs:
-                if run.get("event") == "pull_request" or run.get("conclusion") != "success":
+                if (
+                    run.get("event") == "pull_request"
+                    or run.get("conclusion") != "success"
+                ):
                     continue
                 done = parse_ts(run.get("updated_at"))
                 if done is None:
                     continue
-                records.append({"sha": run.get("head_sha"), "success_at": done, "source": "workflow", "environment": None})
+                records.append(
+                    {
+                        "sha": run.get("head_sha"),
+                        "success_at": done,
+                        "source": "workflow",
+                        "environment": None,
+                    }
+                )
     except ApiError as exc:
         problems.append(f"workflows API: {exc.message[:120]}")
 
@@ -506,7 +571,10 @@ def window_days(since: datetime, until: datetime) -> list[str]:
 
 
 def metric_merges_per_day(
-    prs: list[dict[str, Any]], since: datetime, until: datetime, other_bases: dict[str, int] | None
+    prs: list[dict[str, Any]],
+    since: datetime,
+    until: datetime,
+    other_bases: dict[str, int] | None,
 ) -> dict[str, Any]:
     days = window_days(since, until)
     counts = {d: 0 for d in days}
@@ -527,7 +595,10 @@ def metric_merges_per_day(
         result["suspicious_zero"] = True
         hint = "zero merges into this branch in the window"
         if other_bases:
-            top = ", ".join(f"{b} ({c})" for b, c in sorted(other_bases.items(), key=lambda kv: -kv[1])[:5])
+            top = ", ".join(
+                f"{b} ({c})"
+                for b, c in sorted(other_bases.items(), key=lambda kv: -kv[1])[:5]
+            )
             hint += f"; but PRs were merged into other branches in the window: {top}. Check --branch"
         else:
             hint += "; no merged PRs found on other branches either, so the window may genuinely be quiet or the repo/branch wrong"
@@ -538,7 +609,9 @@ def metric_merges_per_day(
 def metric_pr_lead_time(prs: list[dict[str, Any]]) -> dict[str, Any]:
     if not prs:
         return unavailable("no merged PRs in window")
-    opened = [minutes_between(p["created_at"], p["merged_at"]) for p in prs if p["created_at"]]
+    opened = [
+        minutes_between(p["created_at"], p["merged_at"]) for p in prs if p["created_at"]
+    ]
     first_commit = []
     for p in prs:
         times = [c["authored_at"] for c in (p["commits"] or []) if c.get("authored_at")]
@@ -546,12 +619,17 @@ def metric_pr_lead_time(prs: list[dict[str, Any]]) -> dict[str, Any]:
             first_commit.append(minutes_between(min(times), p["merged_at"]))
     return {
         "status": "ok",
+        "n": len(prs),
         "created_to_merged": distribution(opened, "minutes", "no PR with a created_at"),
-        "first_commit_to_merged": distribution(first_commit, "minutes", "commits not retrievable for any merged PR"),
+        "first_commit_to_merged": distribution(
+            first_commit, "minutes", "commits not retrievable for any merged PR"
+        ),
     }
 
 
-def attribute_runs(prs: list[dict[str, Any]], runs: list[dict[str, Any]]) -> dict[str, Any]:
+def attribute_runs(
+    prs: list[dict[str, Any]], runs: list[dict[str, Any]]
+) -> dict[str, Any]:
     """Assign each run to the PR that owns its head_sha.
 
     A sha can appear in more than one PR (stacked PRs share commits). Ownership
@@ -579,14 +657,23 @@ def attribute_runs(prs: list[dict[str, Any]], runs: list[dict[str, Any]]) -> dic
             continue
         if len(candidates) > 1:
             ambiguous += 1
-            direct = [p for p in candidates if sha in (p.get("merge_commit_sha"), p.get("head_sha"))]
+            direct = [
+                p
+                for p in candidates
+                if sha in (p.get("merge_commit_sha"), p.get("head_sha"))
+            ]
             pool = direct or candidates
             owner = sorted(pool, key=lambda p: (p["merged_at"], p["number"]))[0]
         else:
             owner = candidates[0]
         by_pr.setdefault(owner["number"], []).append(run)
         matched += 1
-    return {"by_pr": by_pr, "matched": matched, "unmatched": unmatched, "ambiguous": ambiguous}
+    return {
+        "by_pr": by_pr,
+        "matched": matched,
+        "unmatched": unmatched,
+        "ambiguous": ambiguous,
+    }
 
 
 def run_seconds(run: dict[str, Any]) -> float | None:
@@ -605,7 +692,11 @@ def identify_summary_workflow(
     coverage: dict[str, int] = {}
     prs_with_pr_runs = 0
     for runs in by_pr.values():
-        names = {r.get("name") for r in runs if r.get("event") == "pull_request" and r.get("name")}
+        names = {
+            r.get("name")
+            for r in runs
+            if r.get("event") == "pull_request" and r.get("name")
+        }
         if names:
             prs_with_pr_runs += 1
         for n in names:
@@ -617,10 +708,17 @@ def identify_summary_workflow(
     if required:
         pick = sorted(required, key=lambda n: (-coverage[n], n))[0]
         return pick, "required_status_check"
-    guesses = [n for n in coverage if SUMMARY_NAME_RE.search(n) and coverage[n] * 2 >= prs_with_pr_runs]
+    guesses = [
+        n
+        for n in coverage
+        if SUMMARY_NAME_RE.search(n) and coverage[n] * 2 >= prs_with_pr_runs
+    ]
     if guesses:
         pick = sorted(guesses, key=lambda n: (-coverage[n], n))[0]
-        return pick, "name heuristic (ci/required/summary/gate/checks/status, present on at least half of PRs)"
+        return (
+            pick,
+            "name heuristic (ci/required/summary/gate/checks/status, present on at least half of PRs)",
+        )
     return None, (
         "no workflow name matches a required status check or the ci/required/summary/gate/checks/status "
         "heuristic on at least half of PRs"
@@ -658,7 +756,9 @@ def metric_ci(
     per_pr_minutes: list[float] = []
     zero_total_prs = 0
     for pr in prs:
-        durations = [d for r in by_pr.get(pr["number"], []) if (d := run_seconds(r)) is not None]
+        durations = [
+            d for r in by_pr.get(pr["number"], []) if (d := run_seconds(r)) is not None
+        ]
         if not durations:
             continue
         total = sum(durations)
@@ -675,7 +775,10 @@ def metric_ci(
         "prs_without_matched_runs": prs_without_runs,
     }
     if not per_pr_minutes:
-        ci = unavailable("runs matched PRs but none was a completed run with usable timestamps", **base)
+        ci = unavailable(
+            "runs matched PRs but none was a completed run with usable timestamps",
+            **base,
+        )
     elif max(per_pr_minutes) <= 0:
         ci = unavailable(
             "every matched run has zero duration (run_started_at == updated_at): timestamp problem, not a fact",
@@ -684,7 +787,9 @@ def metric_ci(
     else:
         ci = {**distribution(per_pr_minutes, "minutes", ""), **base}
         if zero_total_prs:
-            notes.warnings.append(f"{zero_total_prs} PR(s) had matched runs with zero total duration; check timestamps")
+            notes.warnings.append(
+                f"{zero_total_prs} PR(s) had matched runs with zero total duration; check timestamps"
+            )
 
     # required / summary workflow wall-clock
     workflow, how = identify_summary_workflow(by_pr, required_contexts)
@@ -696,21 +801,45 @@ def metric_ci(
             matching = [
                 r
                 for r in by_pr.get(pr["number"], [])
-                if r.get("name") == workflow and r.get("event") == "pull_request" and run_seconds(r) is not None
+                if r.get("name") == workflow
+                and r.get("event") == "pull_request"
+                and run_seconds(r) is not None
             ]
             if matching:
-                latest = max(matching, key=lambda r: parse_ts(r.get("updated_at")) or datetime.min.replace(tzinfo=timezone.utc))
+                latest = max(
+                    matching,
+                    key=lambda r: (
+                        parse_ts(r.get("updated_at"))
+                        or datetime.min.replace(tzinfo=timezone.utc)
+                    ),
+                )
                 wall.append((run_seconds(latest) or 0.0) / 60.0)
-        dist = distribution(wall, "minutes", "no PR with a completed run of the summary workflow")
-        ci["required_run_wall_clock"] = {**dist, "workflow": workflow, "identified_by": how}
+        dist = distribution(
+            wall, "minutes", "no PR with a completed run of the summary workflow"
+        )
+        ci["required_run_wall_clock"] = {
+            **dist,
+            "workflow": workflow,
+            "identified_by": how,
+        }
 
     # failure rate over attributed runs
     all_attributed = [r for runs_ in by_pr.values() for r in runs_]
-    ok = sum(1 for r in all_attributed if r.get("status") == "completed" and r.get("conclusion") in SUCCESS_CONCLUSIONS)
-    failed = sum(1 for r in all_attributed if r.get("status") == "completed" and r.get("conclusion") in FAILED_CONCLUSIONS)
+    ok = sum(
+        1
+        for r in all_attributed
+        if r.get("status") == "completed" and r.get("conclusion") in SUCCESS_CONCLUSIONS
+    )
+    failed = sum(
+        1
+        for r in all_attributed
+        if r.get("status") == "completed" and r.get("conclusion") in FAILED_CONCLUSIONS
+    )
     denom = ok + failed
     if denom == 0:
-        failure = unavailable("no attributed run finished with a success or failure conclusion")
+        failure = unavailable(
+            "no attributed run finished with a success or failure conclusion"
+        )
     else:
         failure = {
             "status": "ok",
@@ -752,7 +881,9 @@ def metric_interventions(
     entries: list[dict[str, Any]] | None, since: datetime, until: datetime
 ) -> dict[str, Any]:
     if entries is None:
-        return unavailable("no --interventions-file supplied; interventions are not recorded on GitHub")
+        return unavailable(
+            "no --interventions-file supplied; interventions are not recorded on GitHub"
+        )
     days = window_days(since, until)
     per_day = {d: 0 for d in days}
     outside = 0
@@ -773,7 +904,9 @@ def metric_interventions(
     }
     if total == 0:
         result["suspicious_zero"] = True
-        result["note"] = "file supplied but holds no interventions in the window; confirm it covers this period"
+        result["note"] = (
+            "file supplied but holds no interventions in the window; confirm it covers this period"
+        )
     return result
 
 
@@ -799,7 +932,9 @@ def normalise_interventions(raw: Any) -> list[dict[str, Any]]:
         if "count" in entry or "date" in entry:
             count = entry.get("count")
             if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-                raise ValueError(f"interventions[{i}]: count must be a non-negative integer")
+                raise ValueError(
+                    f"interventions[{i}]: count must be a non-negative integer"
+                )
             date_raw = entry.get("date")
             try:
                 day = datetime.fromisoformat(str(date_raw)).date().isoformat()
@@ -809,10 +944,14 @@ def normalise_interventions(raw: Any) -> list[dict[str, Any]]:
         elif "at" in entry:
             at = parse_ts(entry.get("at"))
             if at is None:
-                raise ValueError(f"interventions[{i}]: bad timestamp {entry.get('at')!r}")
+                raise ValueError(
+                    f"interventions[{i}]: bad timestamp {entry.get('at')!r}"
+                )
             out.append({"date": at.date().isoformat(), "count": 1})
         else:
-            raise ValueError(f"interventions[{i}]: needs {{date, count}} or {{at, note}}")
+            raise ValueError(
+                f"interventions[{i}]: needs {{date, count}} or {{at, note}}"
+            )
     return out
 
 
@@ -836,7 +975,9 @@ def metric_deploys(
         return unavailable(reason)
     if not records:
         return unavailable(
-            "deploy sources exist (" + ", ".join(deploy["sources"]) + ") but no successful deploy was found in the period"
+            "deploy sources exist ("
+            + ", ".join(deploy["sources"])
+            + ") but no successful deploy was found in the period"
         )
 
     compare_calls = 0
@@ -879,14 +1020,25 @@ def metric_deploys(
         else:
             deltas.append(minutes_between(pr["merged_at"], hit["success_at"]))
     if budget_hit:
-        notes.truncation.append(f"deploy lead time: compare budget of {max_compare} spent; later PRs unmatched")
+        notes.truncation.append(
+            f"deploy lead time: compare budget of {max_compare} spent; later PRs unmatched"
+        )
 
-    lead = distribution(deltas, "minutes", "no merged PR was followed by a successful deploy of its commit in the data")
+    lead = distribution(
+        deltas,
+        "minutes",
+        "no merged PR was followed by a successful deploy of its commit in the data",
+    )
     lead["merged_prs"] = len(prs)
     lead["prs_without_matching_deploy"] = unmatched
 
     # share of deploys whose SHA is on the branch
-    window_records = [r for r in records if r["sha"] and since <= r["success_at"] < until + timedelta(days=DEPLOY_HORIZON_DAYS)]
+    window_records = [
+        r
+        for r in records
+        if r["sha"]
+        and since <= r["success_at"] < until + timedelta(days=DEPLOY_HORIZON_DAYS)
+    ]
     shas = sorted({r["sha"] for r in window_records})
     on_branch = off_branch = unresolved = 0
     checked = 0
@@ -894,7 +1046,9 @@ def metric_deploys(
         try:
             status = cmp(branch, sha)
         except BudgetExceeded:
-            notes.truncation.append(f"deploy-on-branch share: compare budget of {max_compare} spent after {checked} SHAs")
+            notes.truncation.append(
+                f"deploy-on-branch share: compare budget of {max_compare} spent after {checked} SHAs"
+            )
             break
         checked += 1
         if status in ("behind", "identical"):
@@ -904,7 +1058,11 @@ def metric_deploys(
         else:
             unresolved += 1
     if checked - unresolved == 0:
-        share: dict[str, Any] = unavailable("no deploy SHA could be compared with the branch", n=0, deploy_shas=len(shas))
+        share: dict[str, Any] = unavailable(
+            "no deploy SHA could be compared with the branch",
+            n=0,
+            deploy_shas=len(shas),
+        )
     else:
         resolved = on_branch + off_branch
         share = {
@@ -966,7 +1124,9 @@ def compute(
     runs_fetched = 0
     required_contexts: list[str] = []
     if prs:
-        earliest = min((p["created_at"] for p in prs if p["created_at"]), default=since) - timedelta(days=1)
+        earliest = min(
+            (p["created_at"] for p in prs if p["created_at"]), default=since
+        ) - timedelta(days=1)
         floor = since - timedelta(days=ci_lookback_days)
         if earliest < floor:
             notes.truncation.append(
@@ -974,11 +1134,16 @@ def compute(
                 "runs for older PR commits are not seen"
             )
             earliest = floor
-        latest = min(max(p["merged_at"] for p in prs) + timedelta(days=1), until + timedelta(days=1))
+        latest = min(
+            max(p["merged_at"] for p in prs) + timedelta(days=1),
+            until + timedelta(days=1),
+        )
         runs = fetch_runs(api, f"/repos/{repo}/actions/runs", earliest, latest, notes)
         runs_fetched = len(runs)
         try:
-            prot = api.get(f"/repos/{repo}/branches/{branch}/protection/required_status_checks")
+            prot = api.get(
+                f"/repos/{repo}/branches/{branch}/protection/required_status_checks"
+            )
             required_contexts = list(prot.get("contexts") or []) + [
                 c.get("context") for c in prot.get("checks") or [] if c.get("context")
             ]
@@ -987,18 +1152,26 @@ def compute(
 
     ci, ci_failure = metric_ci(prs, runs_fetched, runs, required_contexts, notes)
 
-    env_re = re.compile(deploy_environment, re.IGNORECASE) if deploy_environment else None
+    env_re = (
+        re.compile(deploy_environment, re.IGNORECASE) if deploy_environment else None
+    )
     if prs:
-        deploy = collect_deploy_records(api, repo, since, until, notes, max_deployments, env_re)
+        deploy = collect_deploy_records(
+            api, repo, since, until, notes, max_deployments, env_re
+        )
 
         def compare(base: str, head: str) -> str | None:
             try:
-                data = api.get(f"/repos/{repo}/compare/{base}...{head}", {"per_page": 1})
+                data = api.get(
+                    f"/repos/{repo}/compare/{base}...{head}", {"per_page": 1}
+                )
             except ApiError:
                 return None
             return data.get("status") if isinstance(data, dict) else None
 
-        deploys = metric_deploys(prs, deploy, compare, branch, since, until, max_compare, notes)
+        deploys = metric_deploys(
+            prs, deploy, compare, branch, since, until, max_compare, notes
+        )
     else:
         deploys = unavailable("no merged PRs in window")
 
@@ -1013,7 +1186,9 @@ def compute(
         "ci_failure_rate": ci_failure,
         "change_failure_rate": metric_change_failure(prs),
         "deploy_lead_time": deploys,
-        "operator_interventions_per_day": metric_interventions(interventions, since, until),
+        "operator_interventions_per_day": metric_interventions(
+            interventions, since, until
+        ),
     }
     return {
         "repo": repo,
@@ -1070,7 +1245,10 @@ def render_summary(report: dict[str, Any]) -> str:
         f"Merges per day: {mp['mean_per_day']} mean ({mp['total_merges']} merges over {mp['window_days']} days, n={mp['n']})"
         + ("  [SUSPICIOUS ZERO]" if mp.get("suspicious_zero") else "")
     )
-    lines.append("  per day: " + ", ".join(f"{s['date'][5:]}:{s['merges']}" for s in mp["series"]))
+    lines.append(
+        "  per day: "
+        + ", ".join(f"{s['date'][5:]}:{s['merges']}" for s in mp["series"])
+    )
 
     lt = m["pr_lead_time"]
     lines.append("PR lead time:")
@@ -1090,10 +1268,14 @@ def render_summary(report: dict[str, Any]) -> str:
             f"  runs: {ci['runs_attributed']} attributed of {ci['runs_fetched']} fetched;"
             f" {ci['prs_without_matched_runs']} PR(s) with no matched run"
         )
-        lines.append(_dist_line("required/summary run wall-clock", ci["required_run_wall_clock"]))
+        lines.append(
+            _dist_line("required/summary run wall-clock", ci["required_run_wall_clock"])
+        )
     cf = m["ci_failure_rate"]
     if cf["status"] == "ok":
-        lines.append(f"CI failure rate: {cf['rate']:.1%} ({cf['failed']} failed of {cf['n']} finished runs)")
+        lines.append(
+            f"CI failure rate: {cf['rate']:.1%} ({cf['failed']} failed of {cf['n']} finished runs)"
+        )
     else:
         lines.append(f"CI failure rate: unavailable ({cf['reason']})")
 
@@ -1111,11 +1293,15 @@ def render_summary(report: dict[str, Any]) -> str:
         lines.append(f"  unavailable ({dp.get('reason')})")
     else:
         lines.append(_dist_line("merge -> successful deploy", dp["merge_to_deploy"]))
-        lines.append(f"  merged PRs with no matching deploy: {dp['merge_to_deploy']['prs_without_matching_deploy']}")
+        lines.append(
+            f"  merged PRs with no matching deploy: {dp['merge_to_deploy']['prs_without_matching_deploy']}"
+        )
     if dp.get("deploy_sha_on_branch"):
         sb = dp["deploy_sha_on_branch"]
         if sb["status"] == "ok":
-            lines.append(f"  deploy SHAs on {report['branch']}: {sb['share_on_branch']:.1%} (n={sb['n']})")
+            lines.append(
+                f"  deploy SHAs on {report['branch']}: {sb['share_on_branch']:.1%} (n={sb['n']})"
+            )
         else:
             lines.append(f"  deploy SHAs on branch: unavailable ({sb['reason']})")
 
@@ -1140,20 +1326,55 @@ def render_summary(report: dict[str, Any]) -> str:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--repo", required=True, help="owner/name")
-    p.add_argument("--since", required=True, type=parse_window_arg, help="YYYY-MM-DD (UTC) start, inclusive")
-    p.add_argument("--until", type=parse_window_arg, default=None, help="YYYY-MM-DD (UTC) end, exclusive; default now")
-    p.add_argument("--branch", default=None, help="merge target branch; default: the repo's default branch")
+    p.add_argument(
+        "--since",
+        required=True,
+        type=parse_window_arg,
+        help="YYYY-MM-DD (UTC) start, inclusive",
+    )
+    p.add_argument(
+        "--until",
+        type=parse_window_arg,
+        default=None,
+        help="YYYY-MM-DD (UTC) end, exclusive; default now",
+    )
+    p.add_argument(
+        "--branch",
+        default=None,
+        help="merge target branch; default: the repo's default branch",
+    )
     p.add_argument("--json", action="store_true", help="machine-readable output")
-    p.add_argument("--interventions-file", default=None, help="JSON list of {date,count} or {at,note}")
-    p.add_argument("--max-calls", type=int, default=DEFAULT_MAX_CALLS, help="bound on GitHub API calls")
-    p.add_argument("--max-compare", type=int, default=DEFAULT_MAX_COMPARE, help="bound on compare API calls")
+    p.add_argument(
+        "--interventions-file",
+        default=None,
+        help="JSON list of {date,count} or {at,note}",
+    )
+    p.add_argument(
+        "--max-calls",
+        type=int,
+        default=DEFAULT_MAX_CALLS,
+        help="bound on GitHub API calls",
+    )
+    p.add_argument(
+        "--max-compare",
+        type=int,
+        default=DEFAULT_MAX_COMPARE,
+        help="bound on compare API calls",
+    )
     p.add_argument("--max-deployments", type=int, default=DEFAULT_MAX_DEPLOYMENTS)
     p.add_argument("--ci-lookback-days", type=int, default=DEFAULT_CI_LOOKBACK_DAYS)
-    p.add_argument("--deploy-environment", default=None, help="regex restricting GitHub Deployments by environment")
+    p.add_argument(
+        "--deploy-environment",
+        default=None,
+        help="regex restricting GitHub Deployments by environment",
+    )
     return p
 
 
-def main(argv: list[str] | None = None, transport: Callable[[str, dict[str, Any]], Any] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    transport: Callable[[str, dict[str, Any]], Any] | None = None,
+) -> int:
     args = build_parser().parse_args(argv)
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", args.repo):
         print("error: --repo must be owner/name", file=sys.stderr)
@@ -1185,7 +1406,11 @@ def main(argv: list[str] | None = None, transport: Callable[[str, dict[str, Any]
     except (ApiError, BudgetExceeded, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps(report, indent=2, sort_keys=False) if args.json else render_summary(report))
+    print(
+        json.dumps(report, indent=2, sort_keys=False)
+        if args.json
+        else render_summary(report)
+    )
     return 0
 
 
