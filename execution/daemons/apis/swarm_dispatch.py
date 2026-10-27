@@ -4199,6 +4199,9 @@ class SwarmDispatcher:
         # carry the first lens's exhaustion onto the second and silently skip it.
         self._missing_lens_retries: dict[str, dict[str, int]] = {}
         self._missing_lens_escalated: dict[str, set[str]] = {}
+        # Unknown remote outcomes also have a GitHub comment marker. This set
+        # only avoids another read within the current process.
+        self._remote_lens_holds: set[tuple[str, int, str, str]] = set()
         # ateles#511. Keyed by "owner/repo#N@<head sha>", not by ref: a new push
         # is a new attempt and must reset the budget, or three failures on one
         # revision would permanently suppress every later revision of that PR.
@@ -5640,10 +5643,34 @@ class SwarmDispatcher:
                     summary["label_gated"] = summary.get("label_gated", 0) + 1
                     continue
                 summary["scanned"] += len(lenses)
-                escalated = self._missing_lens_escalated.setdefault(ref, set())
-                per_lens = self._missing_lens_retries.setdefault(ref, {})
+                head = _normalise_full_sha((pr.get("head") or {}).get("sha") or "")
+                state_key = f"{ref}@{head}"
+                escalated = self._missing_lens_escalated.setdefault(state_key, set())
+                per_lens = self._missing_lens_retries.setdefault(state_key, {})
 
                 for lens in lenses:
+                    hold_key = (repository, number, head, lens)
+                    try:
+                        held = hold_key in self._remote_lens_holds or await self._has_remote_lens_hold(
+                            repository, number, head, lens
+                        )
+                    except Exception as exc:
+                        # An unreadable hold is not evidence that replay is safe.
+                        log.error(
+                            f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
+                            f"'{lens}' hold unreadable ({exc}) — not dispatching."
+                        )
+                        summary["failed"] += 1
+                        continue
+                    if held:
+                        self._remote_lens_holds.add(hold_key)
+                        escalated.add(lens)
+                        summary["escalated"] += 1
+                        log.info(
+                            f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
+                            f"'{lens}' held for unknown remote outcome on {head} — skipping."
+                        )
+                        continue
                     if lens in escalated:
                         continue
                     attempts = per_lens.get(lens, 0)
@@ -5678,6 +5705,17 @@ class SwarmDispatcher:
                     except RemoteLensOutcomeUnknown as exc:
                         # Final, not a retryable failure: the remote run may
                         # already have posted, so a re-dispatch could duplicate.
+                        self._remote_lens_holds.add(hold_key)
+                        try:
+                            await self._persist_remote_lens_hold(
+                                repository, number, head, lens
+                            )
+                        except Exception as hold_exc:
+                            log.error(
+                                f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
+                                f"'{lens}' could not persist remote-outcome hold "
+                                f"({hold_exc}) — restart safety is not established."
+                            )
                         log.error(
                             f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
                             f"'{lens}' outcome unknown ({exc}) — not retrying."
@@ -5699,6 +5737,91 @@ class SwarmDispatcher:
                             exc_info=True,
                         )
         return summary
+
+    _REMOTE_LENS_HOLD_RE = re.compile(
+        r"<!-- apis-remote-lens-hold:([0-9a-f]{40}):([a-z]+) -->"
+    )
+
+    async def _remote_lens_hold_comments(
+        self, repository: str, number: int
+    ) -> list[dict]:
+        """Read only exact hold markers authored by the dispatcher on this PR."""
+        async with httpx.AsyncClient(timeout=30) as client:
+            comments = await self._all_issue_comments(repository, number, client)
+            own_logins = await self._own_github_logins(client, repository)
+        if not own_logins:
+            raise RuntimeError("dispatcher comment identity unavailable")
+        return [
+            comment for comment in comments
+            if str((comment.get("user") or {}).get("login") or "").casefold()
+            in own_logins
+            and self._REMOTE_LENS_HOLD_RE.fullmatch(
+                str(comment.get("body") or "").strip()
+            )
+        ]
+
+    async def _has_remote_lens_hold(
+        self, repository: str, number: int, head: str, lens: str
+    ) -> bool:
+        marker = f"<!-- apis-remote-lens-hold:{head}:{lens} -->"
+        return any(
+            str(comment.get("body") or "").strip() == marker
+            for comment in await self._remote_lens_hold_comments(repository, number)
+        )
+
+    async def _persist_remote_lens_hold(
+        self, repository: str, number: int, head: str, lens: str
+    ) -> None:
+        """Use the existing GitHub PR-comment marker store for an unknown run."""
+        if not await self._require_github_write_credential(
+            repository, "remote lens hold", detail=f"{repository}#{number}"
+        ):
+            raise RuntimeError("GitHub write credential unavailable")
+        marker = f"<!-- apis-remote-lens-hold:{head}:{lens} -->"
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await self._github_write(
+                client, "post",
+                f"https://api.github.com/repos/{repository}/issues/{number}/comments",
+                repository, json={"body": marker},
+            )
+            response.raise_for_status()
+            comment_id = (response.json() or {}).get("id")
+            if not comment_id:
+                raise RuntimeError("hold comment has no id")
+            check = await client.get(
+                f"https://api.github.com/repos/{repository}/issues/comments/{comment_id}",
+                headers=self._github_headers(repository),
+            )
+            check.raise_for_status()
+            if (check.json() or {}).get("body") != marker:
+                raise RuntimeError("hold comment read-back mismatch")
+
+    async def release_remote_lens_hold(
+        self, repository: str, pr: int, head: str, lens: str
+    ) -> None:
+        """Release an exact unknown-outcome hold after reconciliation."""
+        head = _normalise_full_sha(head)
+        if not head:
+            raise ValueError("release requires a full PR head SHA")
+        marker = f"<!-- apis-remote-lens-hold:{head}:{lens} -->"
+        comments = await self._remote_lens_hold_comments(repository, pr)
+        matches = [c for c in comments if str(c.get("body") or "").strip() == marker]
+        if matches and not await self._require_github_write_credential(
+            repository, "remote lens hold release", detail=f"{repository}#{pr}"
+        ):
+            raise RuntimeError("GitHub write credential unavailable")
+        async with httpx.AsyncClient(timeout=30) as client:
+            for comment in matches:
+                response = await self._github_write(
+                    client, "delete",
+                    f"https://api.github.com/repos/{repository}/issues/"
+                    f"comments/{comment['id']}", repository,
+                )
+                response.raise_for_status()
+        self._remote_lens_holds.discard((repository, pr, head, lens))
+        state_key = f"{repository}#{pr}@{head}"
+        self._missing_lens_escalated.get(state_key, set()).discard(lens)
+        self._missing_lens_retries.get(state_key, {}).pop(lens, None)
 
     async def _prs_with_missing_lens(
         self, repository: str

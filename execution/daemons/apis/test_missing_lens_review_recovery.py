@@ -39,6 +39,22 @@ import pytest
 import skill_runner
 import swarm_dispatch as sd
 
+_real_has_remote_lens_hold = getattr(sd.SwarmDispatcher, "_has_remote_lens_hold", None)
+_real_persist_remote_lens_hold = getattr(sd.SwarmDispatcher, "_persist_remote_lens_hold", None)
+
+
+@pytest.fixture(autouse=True)
+def _no_remote_holds_by_default(monkeypatch):
+    """Existing sweep cases have no durable PR marker unless they set one up."""
+    async def no_hold(*args):  # noqa: ANN002
+        return False
+
+    async def recorded(*args):  # noqa: ANN002
+        return None
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_has_remote_lens_hold", no_hold, raising=False)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_persist_remote_lens_hold", recorded, raising=False)
+
 
 # ---------------------------------------------------------------------------
 # Pure parsers — the detection half
@@ -493,3 +509,174 @@ async def test_unknown_remote_outcome_escalates_once_without_retry(monkeypatch):
     assert len(calls) == 1, "an unknown remote outcome must not be re-dispatched"
     assert first["escalated"] == 1
     assert len(d.notifier.sent) == 1
+
+
+def _durable_hold_store(monkeypatch):
+    holds: set[tuple[str, int, str, str]] = set()
+
+    async def has_hold(self, repository, number, head, lens):  # noqa: ANN001
+        return (repository, number, head, lens) in holds
+
+    async def persist_hold(self, repository, number, head, lens):  # noqa: ANN001
+        holds.add((repository, number, head, lens))
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_has_remote_lens_hold", has_hold)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_persist_remote_lens_hold", persist_hold)
+    return holds
+
+
+@pytest.mark.asyncio
+async def test_unknown_remote_outcome_hold_survives_dispatcher_restart(monkeypatch):
+    holds = _durable_hold_store(monkeypatch)
+    calls: list[str] = []
+
+    async def candidates(repo):  # noqa: ANN001
+        return [(_pr(), ["security"])]
+
+    async def unknown(repository, pr, lens):  # noqa: ANN001
+        calls.append(lens)
+        raise sd.RemoteLensOutcomeUnknown("outcome unknown")
+
+    for index in range(2):
+        dispatcher = _dispatcher()
+        monkeypatch.setattr(dispatcher, "_prs_with_missing_lens", candidates)
+        monkeypatch.setattr(dispatcher, "_redispatch_missing_lens", unknown)
+        summary = await dispatcher.resume_missing_lens_reviews(["o/r"])
+        assert summary["escalated"] == 1
+        if index == 0:
+            first = dispatcher
+
+    assert calls == ["security"], "a new dispatcher must not replay the remote lens"
+    assert holds == {("o/r", 2153, "a" * 40, "security")}
+    assert len(first.notifier.sent) == 1
+    assert dispatcher.notifier.sent == [], "a held candidate sends no new notice"
+
+
+@pytest.mark.asyncio
+async def test_unknown_remote_hold_does_not_block_a_new_head(monkeypatch):
+    _durable_hold_store(monkeypatch)
+    current_head = ["a" * 40]
+    calls: list[str] = []
+
+    async def candidates(repo):  # noqa: ANN001
+        pr = _pr()
+        pr["head"]["sha"] = current_head[0]
+        return [(pr, ["security"])]
+
+    async def unknown(repository, pr, lens):  # noqa: ANN001
+        calls.append(pr["head"]["sha"])
+        raise sd.RemoteLensOutcomeUnknown("outcome unknown")
+
+    first = _dispatcher()
+    monkeypatch.setattr(first, "_prs_with_missing_lens", candidates)
+    monkeypatch.setattr(first, "_redispatch_missing_lens", unknown)
+    await first.resume_missing_lens_reviews(["o/r"])
+    current_head[0] = "b" * 40
+    await first.resume_missing_lens_reviews(["o/r"])
+
+    assert calls == ["a" * 40, "b" * 40]
+
+
+@pytest.mark.asyncio
+async def test_released_remote_hold_allows_same_tuple_again(monkeypatch):
+    holds = _durable_hold_store(monkeypatch)
+    calls: list[str] = []
+
+    async def candidates(repo):  # noqa: ANN001
+        return [(_pr(), ["security"])]
+
+    async def unknown(repository, pr, lens):  # noqa: ANN001
+        calls.append(lens)
+        raise sd.RemoteLensOutcomeUnknown("outcome unknown")
+
+    dispatcher = _dispatcher()
+    monkeypatch.setattr(dispatcher, "_prs_with_missing_lens", candidates)
+    monkeypatch.setattr(dispatcher, "_redispatch_missing_lens", unknown)
+    await dispatcher.resume_missing_lens_reviews(["o/r"])
+
+    marker = f"<!-- apis-remote-lens-hold:{'a' * 40}:security -->"
+
+    async def comments(*args):  # noqa: ANN002
+        return [{"id": 7, "body": marker}]
+
+    async def allowed(*args, **kwargs):  # noqa: ANN002, ANN003
+        return True
+
+    async def delete(self, client, method, url, repository, **kwargs):  # noqa: ANN001, ANN003
+        assert method == "delete" and url.endswith("/issues/comments/7")
+        holds.remove(("o/r", 2153, "a" * 40, "security"))
+        return type("Response", (), {"raise_for_status": lambda self: None})()
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+    monkeypatch.setattr(dispatcher, "_remote_lens_hold_comments", comments)
+    monkeypatch.setattr(dispatcher, "_require_github_write_credential", allowed)
+    monkeypatch.setattr(dispatcher, "_github_write", delete.__get__(dispatcher))
+    monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **kwargs: Client())
+
+    await dispatcher.release_remote_lens_hold("o/r", 2153, "a" * 40, "security")
+    await dispatcher.resume_missing_lens_reviews(["o/r"])
+
+    assert calls == ["security", "security"]
+
+
+@pytest.mark.asyncio
+async def test_remote_hold_marker_round_trips_in_dispatcher_pr_comments(monkeypatch):
+    dispatcher = _dispatcher()
+    marker = f"<!-- apis-remote-lens-hold:{'a' * 40}:security -->"
+    comments: list[dict] = [{
+        "id": 1, "body": marker, "user": {"login": "someone-else"},
+    }]
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, **kwargs):  # noqa: ANN001, ANN003
+            comment_id = int(url.rsplit("/", 1)[-1])
+            return sd.httpx.Response(
+                200, json=next(c for c in comments if c["id"] == comment_id),
+                request=sd.httpx.Request("GET", url),
+            )
+
+    async def all_comments(self, repository, number, client):  # noqa: ANN001
+        assert (repository, number) == ("o/r", 2153)
+        return comments
+
+    async def own_logins(self, client, repository):  # noqa: ANN001
+        return {"dispatcher-bot"}
+
+    async def allowed(*args, **kwargs):  # noqa: ANN002, ANN003
+        return True
+
+    async def write(self, client, method, url, repository, **kwargs):  # noqa: ANN001, ANN003
+        assert method == "post"
+        assert url.endswith("/repos/o/r/issues/2153/comments")
+        comments.append({
+            "id": 2, "body": kwargs["json"]["body"],
+            "user": {"login": "dispatcher-bot"},
+        })
+        return sd.httpx.Response(
+            201, json={"id": 2}, request=sd.httpx.Request("POST", url)
+        )
+
+    monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **kwargs: Client())
+    monkeypatch.setattr(sd.SwarmDispatcher, "_all_issue_comments", all_comments)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_own_github_logins", own_logins)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_require_github_write_credential", allowed)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_github_write", write)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_has_remote_lens_hold", _real_has_remote_lens_hold)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_persist_remote_lens_hold", _real_persist_remote_lens_hold)
+
+    assert not await dispatcher._has_remote_lens_hold("o/r", 2153, "a" * 40, "security")
+    await dispatcher._persist_remote_lens_hold("o/r", 2153, "a" * 40, "security")
+    assert await dispatcher._has_remote_lens_hold("o/r", 2153, "a" * 40, "security")
+    assert not await dispatcher._has_remote_lens_hold("o/r", 2153, "b" * 40, "security")
