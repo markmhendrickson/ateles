@@ -84,4 +84,9 @@ PARITY_CASES = [
         "something completely unrelated, but open a PR for it",
         None, "apis", "open_or_merge_pr", "content", "high",
     ),
+    (
+        "declared_low_with_outward_text_is_escalated",
+        "implement the local cleanup, then push it",
+        "local_edit", "cicada", "git_push", "declared_escalated", "high",
+    ),
 ]

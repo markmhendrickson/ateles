@@ -346,13 +346,27 @@ def test_the_new_resolver_never_loosens_anything():
 
 
 def test_declared_values_are_identical_to_the_old_resolver():
-    checked = 0
+    """A declared value is passed through untouched, EXCEPT that a declared type
+    the policy calls LOW is escalated when the task text names an outward action
+    (the gate reads task content, not only the label). Every other declared
+    value -- high, never, unrecognized -- is still identical to main, and an
+    escalation only ever moves a LOW declaration to something stricter."""
+    checked = escalated = 0
     for policy in _policies().values():
         for skill, snap in _corpus():
             if str(snap.get("action_type") or "").strip():
                 checked += 1
-                assert _new(skill, snap, policy) == _old(skill, snap), (skill, snap)
+                resolved = apis._resolve_gate_action_type(skill, snap, policy)
+                old = _old(skill, snap)
+                if resolved.source == "declared_escalated":
+                    escalated += 1
+                    assert policy.blast_radius_for(old) == BlastRadius.LOW, (skill, snap)
+                    assert _blast(policy, resolved.value) > _blast(policy, old), (skill, snap)
+                    assert resolved.note.startswith("declared "), (skill, snap)
+                else:
+                    assert resolved.value == old, (skill, snap)
     assert checked > 10000
+    assert escalated > 0, "the corpus must exercise the escalation or this test is decoration"
 
 
 def test_where_main_yields_never_the_new_code_yields_never_under_every_policy():
@@ -657,6 +671,38 @@ def test_dispatch_escalates_a_low_prior_agent_asked_to_send_external_mail(world)
     _dispatch(task)
     assert _only_brief(world)["action_type"] == "send_external_comms"
     assert world["spawns"] == []
+
+
+@pytest.mark.parametrize(
+    "title, expected_type, verb",
+    [
+        ("Send Alex the reply", "send_external_comms", "send"),
+        ("Push and deploy the four corrections", "git_push", "push"),
+        ("Finish and submit the tax questionnaire", "external_api_write", "submit"),
+    ],
+)
+def test_dispatch_holds_a_low_declared_task_whose_text_names_an_outward_action(
+    world, title, expected_type, verb
+):
+    # Declared LOW, confidence far above the 0.85 threshold: before the gate read
+    # task text this auto-executed.
+    task = _task(title=title, body="Handle it.", action_type="local_edit", confidence=0.99)
+    _dispatch(task)
+    brief = _only_brief(world)
+    assert brief["action_type"] == expected_type
+    assert brief["decision"].blast_radius is BlastRadius.HIGH
+    assert world["spawns"] == []
+    # The operator sees WHY: the reason names the declared type and the verb.
+    expected = f"declared local_edit, but the task text names an outward action ({verb})"
+    assert expected in brief["decision"].reason
+    assert world["statuses"][-1][2] == brief["decision"].reason
+
+
+def test_dispatch_still_auto_executes_a_low_declared_task_with_neutral_text(world):
+    task = _task(title="Refactor the send-gate tests", body="Rename a fixture.", confidence=0.99)
+    _dispatch(task)
+    assert world["briefs"] == []
+    assert world["spawns"] == [("cicada", "ent_task_1")]
 
 
 def test_dispatch_never_discards_a_declared_typo(world):

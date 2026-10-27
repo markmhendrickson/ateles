@@ -79,6 +79,21 @@ def test_a_declared_value_is_echoed_exactly_as_written():
     assert _route("implement the change", "  Open_Or_Merge_PR ")["action_type"] == "  Open_Or_Merge_PR "
 
 
+def test_a_low_declared_type_with_outward_text_is_reported_as_escalated():
+    result = _route("implement the local cleanup, then push it", "local_edit")
+    assert result["action_type"] == "git_push"
+    assert result["action_type_source"] == "declared_escalated"
+    assert result["action_blast_radius"] == "high"
+    assert "push" in result["action_type_note"]
+
+
+def test_a_low_declared_type_with_neutral_text_stays_declared_with_no_note():
+    result = _route("implement the local cleanup", "local_edit")
+    assert result["action_type"] == "local_edit"
+    assert result["action_type_source"] == "declared"
+    assert "action_type_note" not in result
+
+
 def test_report_only_language_does_not_make_the_preview_less_strict():
     report = _route("Review the code path. Write NOTHING - this job's only output is a divergence report.")
     explicit_pr = _route("implement the issue", "open_or_merge_pr")
@@ -143,6 +158,7 @@ def test_no_policy_means_no_escalation_only_the_prior():
     ("something unrelated but open a PR for it", None),
     ("something unrelated but pay the invoice", None),
     ("implement a new feature", "local_edit"),
+    ("implement the local cleanup, then push it", "local_edit"),
     ("implement a new feature", "operator_only"),
     ("implement a new feature", "unknown_action"),
 ])

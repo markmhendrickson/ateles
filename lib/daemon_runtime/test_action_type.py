@@ -196,8 +196,15 @@ def test_non_string_inputs_do_not_raise():
 # ── Resolution ───────────────────────────────────────────────────────────────
 
 
-def test_declared_is_passed_through_unchanged_whatever_the_text_says():
-    r = _r("cicada", action_type=" Local_Edit ", title="Open a PR and pay the invoice")
+def test_declared_low_is_passed_through_unchanged_when_the_text_is_benign():
+    r = _r("cicada", action_type=" Local_Edit ", title="Tidy the notes index")
+    assert r == ResolvedActionType("local_edit", "declared")
+
+
+def test_declared_without_a_verdict_is_never_touched_even_if_the_text_is_outward():
+    r = resolve_gate_action_type(
+        "cicada", {"action_type": "local_edit", "title": "Open a PR and pay the invoice"}
+    )
     assert r == ResolvedActionType("local_edit", "declared")
 
 
@@ -316,3 +323,212 @@ def test_an_unclassified_candidate_is_stricter_and_may_replace_a_low_prior():
         "fringilla", {"title": "Publish the post on the site"}, verdict=_verdict_for(p)
     )
     assert (r.value, r.source) == ("publish", "content")
+
+
+# ── A low DECLARED type no longer shields an outward task ────────────────────
+# The gate used to trust a declared action_type untouched, so once the policy
+# listed most work types as LOW, a task declared low but titled "Send Alex the
+# reply" ran unattended. The text is now read for declared types too.
+
+# A policy in which "docs" is a LOW work type, as in the operator's live policy.
+_DOCS_POLICY = _policy(high=set(gating._FALLBACK_HIGH_BLAST), low={"docs", "local_edit", "draft"})
+_DOCS_VERDICT = _verdict_for(_DOCS_POLICY)
+
+
+def _declared_docs(title, **more):
+    return resolve_gate_action_type(
+        None, {"action_type": "docs", "title": title, **more}, verdict=_DOCS_VERDICT
+    )
+
+
+@pytest.mark.parametrize(
+    "title, expected_type, verb",
+    [
+        ("Send Alex the reply", "send_external_comms", "send"),
+        ("Push and deploy the four corrections", "git_push", "push"),
+        ("Finish and submit the tax questionnaire", "external_api_write", "submit"),
+    ],
+)
+def test_the_three_queued_titles_are_escalated_despite_a_low_declared_type(title, expected_type, verb):
+    r = _declared_docs(title)
+    assert (r.value, r.source) == (expected_type, "declared_escalated")
+    assert _DOCS_POLICY.blast_radius_for(r.value) is gating.BlastRadius.HIGH
+    assert r.note == f"declared docs, but the task text names an outward action ({verb})"
+
+
+@pytest.mark.parametrize(
+    "title, verb",
+    [
+        ("Draft it, then send it to the client", "send"),
+        ("Fix the importer and push", "push"),
+        ("Please reply to the landlord", "reply"),
+        ("Sending the report to Alex", "send"),
+        ("Merge main into the release branch", "merge"),
+        ("Pay the instructor", "pay the instructor"),
+        ("Wire the money to Alex", "wire"),
+        ("Tweet the launch note", "tweet"),
+        ("Delete the stale user records", "delete"),
+        ("File the quarterly tax return", "file"),
+        ("DM Alex about Friday", "dm"),
+        ("Email Alex the invoice", "email"),
+    ],
+)
+def test_other_imperative_outward_phrasings_are_escalated(title, verb):
+    r = _declared_docs(title)
+    assert r.source == "declared_escalated", r
+    assert r.note.endswith(f"({verb})"), r
+
+
+def test_outward_verb_in_the_body_or_a_later_line_is_read_too():
+    r = _declared_docs("Weekly cleanup", description="Tidy the folder.\nThen send it to the client.")
+    assert r.source == "declared_escalated"
+    r = _declared_docs("Weekly cleanup", body="- [ ] tidy\n- [ ] deploy to staging")
+    assert (r.value, r.source) == ("release", "declared_escalated")
+
+
+@pytest.mark.parametrize("declared", ["open_or_merge_pr", "payment", "send_external_comms"])
+def test_a_declared_high_type_is_never_lowered_or_changed(declared):
+    r = resolve_gate_action_type(
+        None, {"action_type": declared, "title": "Tidy the notes index"}, verdict=_DOCS_VERDICT
+    )
+    assert r == ResolvedActionType(declared, "declared")
+    # Even when the text names a different (also high) outward action.
+    r = resolve_gate_action_type(
+        None, {"action_type": declared, "title": "Push the branch"}, verdict=_DOCS_VERDICT
+    )
+    assert r == ResolvedActionType(declared, "declared")
+
+
+@pytest.mark.parametrize("declared", ["operator_only", "open_pull_request", "weird"])
+def test_a_declared_never_or_unrecognized_type_is_never_rewritten_by_text(declared):
+    r = resolve_gate_action_type(
+        None, {"action_type": declared, "title": "Send Alex the reply"}, verdict=_DOCS_VERDICT
+    )
+    assert r == ResolvedActionType(declared, "declared")
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Refactor the send-gate tests",
+        "Write deployment docs",
+        "Review PR feedback",
+        "Handle pushback from reviewers",
+        "Review the post-merge cleanup",
+        "Draft the reply for Alex",
+        "Refactor the send gate",
+        "Document how to deploy",
+        "Update the release notes template",
+        "Fix the email parser",
+        "Message queue refactor",
+        "Resolve the merge conflict in the lockfile",
+        "Wire up the hook",
+        "Delete unused imports",
+        "Pay attention to the flaky test",
+        "Do not push or deploy; just prepare the change",
+        "Never send anything, only draft it",
+        "Tidy the notes index. It was sent last week and deployed on Monday.",
+    ],
+)
+def test_neutral_low_tasks_are_not_escalated(title):
+    r = _declared_docs(title)
+    assert r == ResolvedActionType("docs", "declared"), r
+
+
+def test_escalation_uses_the_strictest_candidate_under_the_policy():
+    r = _declared_docs("Send Alex the reply and then pay the invoice for rent")
+    assert r.source == "declared_escalated"
+    assert _DOCS_POLICY.blast_radius_for(r.value) is gating.BlastRadius.HIGH
+
+
+def test_undeclared_tasks_also_read_the_imperative_verbs_and_say_why():
+    r = resolve_gate_action_type("fringilla", {"title": "Send Alex the reply"}, verdict=VERDICT)
+    assert (r.value, r.source) == ("send_external_comms", "content")
+    assert r.note == "the task text names an outward action (send)"
+
+
+@pytest.mark.parametrize("title", ["Wire $500 to Alex", "Wire 200 euros to Alex", "Wire the money to Alex", "Wire 1,500.50 to Alex"])
+def test_wiring_an_amount_escalates_to_payment(title):
+    r = _declared_docs(title)
+    assert (r.value, r.source) == ("payment", "declared_escalated"), r
+    assert r.note.endswith("(wire)")
+
+
+@pytest.mark.parametrize("title", ["Wire up the hook", "Wire the hook into the router", "Wire up 3 handlers"])
+def test_wiring_code_is_not_a_payment(title):
+    assert _declared_docs(title) == ResolvedActionType("docs", "declared")
+
+
+# One phrasing per verb row, written so that no phrase pattern and no other row
+# also covers it: the row is then the only thing that can escalate the title.
+_ROW_PHRASINGS = {
+    "send": ("Send Alex the reply", "send_external_comms"),
+    "email": ("Email Alex the notes", "send_external_comms"),
+    "message": ("Message Alex about Friday", "send_external_comms"),
+    "dm": ("DM Alex about Friday", "send_external_comms"),
+    "reply": ("Reply to Alex", "send_external_comms"),
+    "respond": ("Respond to Alex", "send_external_comms"),
+    "notify": ("Notify Alex", "send_external_comms"),
+    "tweet": ("Tweet the launch note", "publish"),
+    "post": ("Post the update", "publish"),
+    "publish": ("Publish changelog", "publish"),
+    "push": ("Push the branch", "git_push"),
+    "deploy": ("Deploy the build", "release"),
+    "release": ("Release the build", "release"),
+    "ship": ("Ship the fix", "release"),
+    "merge": ("Merge the branch", "open_or_merge_pr"),
+    "submit": ("Submit the form", "external_api_write"),
+    "pay": ("Pay Alex", "payment"),
+    "transfer": ("Transfer the balance to Alex", "payment"),
+    "invoice": ("Invoice Alex for March", "send_external_comms"),
+    "wire": ("Wire $500 to Alex", "payment"),
+    "file": ("File the quarterly tax return", "external_api_write"),
+    "delete": ("Delete the stale user records", "delete_entity_or_data"),
+    "payment": ("Approve the payment to Alex", "payment"),
+    "external api write": ("Comment on the issue", "external_api_write"),
+}
+
+
+def test_every_verb_row_has_a_phrasing():
+    assert set(_ROW_PHRASINGS) == {label for label, *_ in at._VERBS}
+
+
+@pytest.mark.parametrize("label", sorted(_ROW_PHRASINGS))
+def test_each_verb_row_escalates_its_phrasing(label):
+    title, expected = _ROW_PHRASINGS[label]
+    r = _declared_docs(title)
+    assert (r.value, r.source) == (expected, "declared_escalated"), r
+    assert r.note.endswith(f"({label})"), r
+
+
+@pytest.mark.parametrize("label", sorted(_ROW_PHRASINGS))
+def test_each_verb_row_is_load_bearing(monkeypatch, label):
+    """Disable one row and its phrasing must stop escalating, so a row that was
+    silently dropped or broken turns exactly this test red."""
+    title, _ = _ROW_PHRASINGS[label]
+    monkeypatch.setattr(
+        at, "_VERB_PATTERNS", [row for row in at._VERB_PATTERNS if row[0] != label]
+    )
+    assert _declared_docs(title) == ResolvedActionType("docs", "declared")
+
+
+def test_a_negation_covers_every_verb_joined_by_and():
+    title = "Do not push and deploy the build"
+    assert _declared_docs(title) == ResolvedActionType("docs", "declared")
+    assert _declared_docs("Never send and email Alex") == ResolvedActionType("docs", "declared")
+
+
+def test_the_negation_skip_is_what_holds_the_and_form_at_declared(monkeypatch):
+    import re
+
+    # Control: with the skip disabled the same title IS escalated, so the test
+    # above can only pass because of the negation handling.
+    monkeypatch.setattr(at, "_NEGATED", re.compile(r"(?!)"))
+    r = _declared_docs("Do not push and deploy the build")
+    assert r.source == "declared_escalated", r
+
+
+def test_note_never_carries_raw_task_markup():
+    r = _declared_docs("Open a PR ```<script>``` now")
+    assert r.source == "declared_escalated"
+    assert "<" not in r.note and "`" not in r.note

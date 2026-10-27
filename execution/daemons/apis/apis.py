@@ -2208,6 +2208,13 @@ async def dispatch_task(
                         "operator approval rather than run on an unrecorded judgment"
                     ),
                 )
+        if resolved_action.note and decision.action != GateAction.AUTO_EXECUTE:
+            # The text, not the declared label, is why this task is held: say so
+            # in the reason the operator reads. Applied after every other
+            # rewrite of `decision` above so none of them can drop it.
+            decision = dataclasses.replace(
+                decision, reason=f"{decision.reason}; {resolved_action.note}"
+            )
         log.info(
             f"[{DAEMON_NAME}] gate: task={entity_id} → {skill} "
             f"action={action_type} ({resolved_action.source}) "
