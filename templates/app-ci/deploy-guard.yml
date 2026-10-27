@@ -8,6 +8,15 @@
 # Copy this file and fill in the deploy step, or add the `guard` job and
 # `needs: guard` to an existing deploy workflow. On a private repo without
 # branch protection (GitHub free plan) the guard is the binding check.
+#
+# The guard uses the action VENDORED into the app repo
+# (.github/actions/deployed-on-trunk, copied from the ateles repo), so there is
+# no cross-repo dependency in the deploy path. The guard stops accidents and
+# drift; it does not stop someone with write access from editing this workflow.
+# The scheduled trunk-audit.yml is the independent backstop for that.
+#
+# SUPPLY CHAIN: `uses:` lines are shown with movable tags for readability. In a
+# real repo pin every third-party action to a full commit SHA (see README).
 name: deploy
 
 on:
@@ -19,9 +28,14 @@ on:
   push:
     branches: [main]
 
-# Serialize deploys; never cancel one midway.
+# One group per commit: a deploy is never cancelled midway, and a later push
+# can never replace an earlier commit's deploy while it waits (GitHub keeps only
+# ONE pending run per group and drops the older ones, which a fixed group name
+# would do to a push-triggered deploy). Trade-off: two different commits can
+# deploy at the same time. If your target cannot tolerate that, make the deploy
+# command itself take a lock (most platforms do) rather than sharing a group.
 concurrency:
-  group: deploy-${{ github.workflow }}
+  group: deploy-${{ github.workflow }}-${{ inputs.sha || github.sha }}
   cancel-in-progress: false
 
 permissions:
@@ -34,21 +48,86 @@ env:
 jobs:
   guard:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # A hang guard, not the CI budget. It must outlast WAIT_TIMEOUT_SECONDS.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      checks: read # only the optional wait-for-CI step reads check runs
     steps:
+      # This checkout keeps its credentials (no persist-credentials: false):
+      # the guard action fetches the current trunk tip from origin, which needs
+      # them on a private repo. This job is read-only and uploads no artifacts.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # Recommended: pin to a full commit SHA instead of @main (see README).
-      - uses: markmhendrickson/ateles/.github/actions/deployed-on-trunk@main
+
+      # Default: the action vendored into this repo (copy
+      # .github/actions/deployed-on-trunk/action.yml from the ateles repo).
+      - uses: ./.github/actions/deployed-on-trunk
         with:
           sha: ${{ env.DEPLOY_SHA }}
           # branch defaults to the repository default branch
+      #
+      # Alternative to vendoring: use the ateles action directly, PINNED to a
+      # full commit SHA (never @main) and bumped deliberately:
+      # - uses: markmhendrickson/ateles/.github/actions/deployed-on-trunk@<40-char sha>
+
+      # OPTIONAL wait-for-CI gate, for repos WITHOUT branch protection (for
+      # example a private repo on the free plan), where nothing else stops a
+      # deploy of a commit whose CI is red or still running. Enable it by
+      # setting the repo variable WAIT_FOR_CI=true. Branch protection makes it
+      # redundant.
+      #
+      # Why a polling step and not a `workflow_run` trigger: workflow_run runs
+      # from the default branch's copy of the file and its sha handling differs
+      # per event, so it does not cover a manual deploy of a specific sha and is
+      # easy to get subtly wrong. Polling the CI summary check for the exact
+      # deploy sha behaves the same for push and manual dispatch, needs only
+      # `checks: read` on this job, and fails closed: a missing, failed, or
+      # still-pending check at the timeout blocks the deploy.
+      #
+      # CI_CHECK_NAME must equal the summary job's name (ci-summary unless the
+      # repo already required a different aggregate check). Optional repo
+      # variables: CI_CHECK_NAME, WAIT_TIMEOUT_SECONDS (default 1500).
+      - name: Wait for the CI summary check on this commit
+        if: ${{ vars.WAIT_FOR_CI == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CI_CHECK_NAME: ${{ vars.CI_CHECK_NAME || 'ci-summary' }}
+          WAIT_TIMEOUT_SECONDS: ${{ vars.WAIT_TIMEOUT_SECONDS || '1500' }}
+          WAIT_INTERVAL_SECONDS: "20"
+        run: |
+          deadline=$((SECONDS + WAIT_TIMEOUT_SECONDS))
+          while :; do
+            # `filter=latest` returns only the newest run of each check name, so
+            # a re-run supersedes an earlier failure.
+            # shellcheck disable=SC2016 # $c is a jq variable, not a shell one
+            state=$(gh api --method GET "repos/${REPO}/commits/${DEPLOY_SHA}/check-runs" \
+              -f check_name="$CI_CHECK_NAME" -f filter=latest \
+              --jq '[.check_runs[].conclusion] as $c
+                | if ($c | length) == 0 then "missing"
+                  elif any($c[]; . != null and . != "success") then "failed"
+                  elif any($c[]; . == null) then "pending"
+                  else "success" end') || state=error
+            echo "check '${CI_CHECK_NAME}' on ${DEPLOY_SHA}: ${state}"
+            case "$state" in
+              success) exit 0 ;;
+              failed)
+                echo "::error::CI check '${CI_CHECK_NAME}' did not succeed on ${DEPLOY_SHA}; not deploying."
+                exit 1 ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::CI check '${CI_CHECK_NAME}' was not green on ${DEPLOY_SHA} within ${WAIT_TIMEOUT_SECONDS}s (last state: ${state}); not deploying."
+              exit 1
+            fi
+            sleep "$WAIT_INTERVAL_SECONDS"
+          done
 
   deploy:
     needs: guard
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 20 # a hang guard for the deploy, not the CI budget
     permissions:
       contents: read
       deployments: write # create the Deployment and its statuses
@@ -56,6 +135,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.DEPLOY_SHA }}
+          persist-credentials: false # no later step uses git with credentials
 
       - name: Create GitHub Deployment record
         id: record
@@ -76,10 +156,13 @@ jobs:
       #   ENV GIT_SHA=$GIT_SHA
       #   LABEL org.opencontainers.image.revision=$GIT_SHA
       # and serve GET /version (no auth) returning {"commit": "<GIT_SHA>"}.
-      - name: Build and deploy (replace with your deploy command)
+      #
+      # FILL THIS SLOT. It fails on purpose so an unfilled copy of this template
+      # cannot record a successful deploy. Replace the whole step.
+      - name: Build and deploy (fails until replaced)
         run: |
-          echo "docker build --build-arg GIT_SHA=$DEPLOY_SHA ."
-          echo "deploy $DEPLOY_SHA to $DEPLOY_ENV"
+          echo "::error::deploy.yml has no deploy command yet: replace this step (docker build --build-arg GIT_SHA=$DEPLOY_SHA ..., then push and release)."
+          exit 1
 
       # Optional but recommended: confirm the live service reports the commit.
       # - name: Verify /version

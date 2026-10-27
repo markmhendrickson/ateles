@@ -28,8 +28,15 @@ runs:
           echo "::error::deployed-on-trunk: no branch given and no default branch in the event payload; pass the 'branch' input."
           exit 2
         fi
-        if ! printf '%s' "$sha" | grep -Eq '^[0-9a-fA-F]{7,40}$'; then
-          echo "::error::deployed-on-trunk: 'sha' is not a commit hash."
+        # Bash's [[ =~ ]] matches the WHOLE value, so a two-line input cannot
+        # pass (grep would test each line separately). Full 40-hex shas only: a
+        # short prefix is ambiguous and could resolve to a different commit.
+        if ! [[ $sha =~ ^[0-9a-fA-F]{40}$ ]]; then
+          echo "::error::deployed-on-trunk: 'sha' must be a full 40-character commit hash on a single line."
+          exit 2
+        fi
+        if [[ $branch == -* ]] || ! git check-ref-format "refs/heads/${branch}"; then
+          echo "::error::deployed-on-trunk: 'branch' is not a valid branch name."
           exit 2
         fi
         # The ancestry test needs the trunk's history and the commit itself.
