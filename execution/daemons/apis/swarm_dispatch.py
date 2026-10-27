@@ -7358,6 +7358,8 @@ class SwarmDispatcher:
             self._lanius_pr_prompt(trigger, parent),
             github_token=_lanius_token,
             include_github_contract=True,
+            # Read-only on Fly: the check reads gates and never delivers.
+            github_read_only=True,
             notifier=self.notifier,
             action_class=model_tiering.ACTION_CARRY_FORWARD_CHECK,
             escalation_signals=lanius_signals,
@@ -7393,6 +7395,7 @@ class SwarmDispatcher:
                 ),
                 github_token=_lanius_token,
                 include_github_contract=True,
+                github_read_only=True,
                 notifier=self.notifier,
                 action_class=model_tiering.ACTION_CARRY_FORWARD_CHECK,
                 repository=trigger.repository,

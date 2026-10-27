@@ -1014,6 +1014,51 @@ def test_seam_opted_in_class_falls_back_locally_when_ineligible(fly_env, seam, m
     assert fly_runner.get_executor().ledger.snapshot()["local_fallbacks"] == 1
 
 
+def test_seam_read_only_gate_check_runs_on_fly_with_the_read_token(fly_env, seam, monkeypatch):
+    # Lanius's gate check passes include_github_contract=True for its local
+    # prompt contract. Without github_read_only that flag became a delivery
+    # contract, which build_job refuses (#1535), so the check never left the Mac.
+    spawned, fake_exec = seam
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    executor, minted, _ = make_executor(
+        FakeFly(), record={"exit_code": 0, "stdout": "GATE_INHERITANCE: clear\n"}
+    )
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
+                       github_token="t-local", include_github_contract=True,
+                       github_read_only=True)  # fmt: skip
+    assert result.ok, result.error
+    assert spawned == []
+    assert minted == ["owner/repo"]
+
+
+def test_seam_github_contract_without_read_only_still_falls_back_locally(fly_env, seam, monkeypatch):
+    # Pins #1535: a delivery contract with no delivery plan is not Fly work.
+    spawned, fake_exec = seam
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    executor, minted, _ = make_executor(
+        FakeFly(), record={"exit_code": 0, "stdout": "GATE_INHERITANCE: clear\n"}
+    )
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
+                       github_token="t-local", include_github_contract=True)  # fmt: skip
+    assert result.ok and result.stdout == "local output"
+    assert len(spawned) == 1
+    assert minted == []
+
+
+def test_run_skill_refuses_read_only_with_a_fly_delivery(fly_env, seam, monkeypatch):
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: pytest.fail("Fly reached"))
+    result = asyncio.run(skill_runner.run_skill(
+        "lanius", "x", provider="claude", github_read_only=True,
+        fly_delivery={"repository": "owner/repo"}, repository="owner/repo",
+    ))  # fmt: skip
+    assert not result.ok
+    assert result.error == "github_read_only cannot be combined with a Fly delivery"
+
+
 def test_seam_forced_fly_returns_the_machine_result(fly_env, seam, monkeypatch):
     spawned, fake_exec = seam
     fake = FakeFly()

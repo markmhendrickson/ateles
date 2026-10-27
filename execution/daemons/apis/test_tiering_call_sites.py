@@ -270,6 +270,8 @@ def test_lanius_pr_check_is_a_carry_forward_check_on_mid(monkeypatch, world):
     lanius = rec.only("lanius")
     assert lanius["action_class"] == "carry_forward_check"
     assert tier_of(lanius).tier == "mid"
+    # The check only reads gates: on Fly it takes the read-class token.
+    assert lanius["github_read_only"] is True
 
 
 def test_lanius_pr_check_does_not_measure_the_diff(monkeypatch, world):
@@ -301,6 +303,7 @@ def test_lanius_verdict_retry_escalates_as_a_failed_prior_attempt(
     assert retry["action_class"] == "carry_forward_check"
     assert resolved.tier == "top"
     assert "prior_attempt_failed" in resolved.escalation_reasons
+    assert first["github_read_only"] is True and retry["github_read_only"] is True
 
 
 def test_vanellus_aggregation_names_a_class_and_runs_top(monkeypatch, world):

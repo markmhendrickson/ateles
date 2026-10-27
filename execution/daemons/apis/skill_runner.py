@@ -2881,6 +2881,7 @@ async def _run_skill_once(
     notifier=None,  # lib.notify.Notifier | None — kept optional to avoid hard dep
     github_token: str | None = None,
     include_github_contract: bool = False,
+    github_read_only: bool = False,
     cwd: str | None = None,
     owns_pending_gate: bool = False,
     command_wrapper: list[str] | None = None,
@@ -3886,7 +3887,10 @@ async def _run_skill_once(
                 codex_outer_sandboxed=codex_outer_sandboxed,
                 delivery=fly_delivery,
                 neotoma_tools_granted=bool(allowed_mcp_servers(agent_def.tools)),
-                github_delivery_contract=include_github_contract,
+                # A read-only check keeps the local contract but takes the
+                # read-class Fly token: the delivery contract would make
+                # build_job refuse it (no delivery plan) and send it home.
+                github_delivery_contract=include_github_contract and not github_read_only,
             )
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
@@ -4601,6 +4605,7 @@ async def run_skill(
     notifier=None,
     github_token: str | None = None,
     include_github_contract: bool = False,
+    github_read_only: bool = False,
     cwd: str | None = None,
     provider: str | None = None,
     preferred_provider: str | None = None,
@@ -4623,6 +4628,11 @@ async def run_skill(
 
     ``runner`` / ``repository``: forwarded to every ``_run_skill_once``
     attempt; see that function (ateles#1456, the Fly executor).
+
+    ``github_read_only``: On the Fly runner, take the read-class GitHub token
+    (contents and pull requests, read-only) and never the delivery contract,
+    even when include_github_contract=True. include_github_contract keeps its
+    local meaning (prompt contract, Codex network). No effect on a local run.
 
     ``resolved_tier``: a tier the caller already resolved (and, for a caller
     that enforces a ceiling, already checked). It is used as-is for every
@@ -4721,6 +4731,13 @@ async def run_skill(
         precomputed_tier = model_tiering.resolve_tier(
             action_class, signals=escalation_signals
         )
+    if github_read_only and fly_delivery is not None:
+        # A delivery pushes; a read-only token cannot. Refuse the contradiction
+        # rather than launch a job whose token is guaranteed to be wrong.
+        return SkillResult(
+            skill, False, None, "", "",
+            error="github_read_only cannot be combined with a Fly delivery",
+        )
     if fly_delivery is not None:
         runner = "fly"  # a delivery runs on Fly or the builder runs it locally
     fly_bound, fly_extra = _fly_routing(runner, action_class)
@@ -4738,6 +4755,7 @@ async def run_skill(
             notifier=notifier,
             github_token=github_token,
             include_github_contract=include_github_contract,
+            github_read_only=github_read_only,
             cwd=cwd,
             owns_pending_gate=deny_correct,
             command_wrapper=command_wrapper,
