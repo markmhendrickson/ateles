@@ -19,8 +19,11 @@ Run: pytest execution/scripts/test_approve_pr_as_app.py -v
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -146,7 +149,36 @@ class _FakeClient:
         rules: list | int | None = None,
         jobs: dict[int, dict] | None = None,
         runners: list[dict] | None = None,
+        scope_by_ref: "dict[str, str | int] | None" = None,
+        reported_changed_files: "int | None | str" = "auto",
+        base_ref_after_first_get: str | None = None,
+        file_rows: "list[dict] | None" = None,
+        workflow_runs: "list[dict] | None" = None,
+        actions_status: int = 200,
+        default_branch: "str | None" = BASE_REF,
+        checks_total: "int | None" = None,
+        checks_page_status: "dict[int, int] | None" = None,
     ):
+        # Actions workflow runs on the head (check_suite_id -> workflow_id), the
+        # repo's default branch (None: unreadable), and the check-runs listing's
+        # reported total / per-page failures.
+        self.workflow_runs = workflow_runs or []
+        self.actions_status = actions_status
+        self.default_branch = default_branch
+        self.checks_total = checks_total
+        self.checks_page_status = checks_page_status or {}
+        self.check_pages: list[int] = []
+        # What the PR itself says about how many files it changes ("auto" = the
+        # real count; None = the field is absent), and a base branch that moves
+        # after the first read of the PR.
+        self.reported_changed_files = reported_changed_files
+        self.base_ref_after_first_get = base_ref_after_first_get
+        # Full file rows to serve instead of bare filenames (renames).
+        self.file_rows = file_rows
+        # `.github/review_scope.json` as served per git ref: text, or an HTTP
+        # status int for a failing read. A ref with no entry answers 404.
+        self.scope_by_ref = scope_by_ref or {}
+        self.scope_refs: list[str] = []
         self.comments = comments
         self.check_runs = check_runs
         self.combined_state = combined_state
@@ -196,19 +228,53 @@ class _FakeClient:
         head = HEAD
         if self.pr_get_count > 1 and self.pr_head_after_first_get is not None:
             head = self.pr_head_after_first_get
-        return {
+        base = BASE_REF
+        if self.pr_get_count > 1 and self.base_ref_after_first_get is not None:
+            base = self.base_ref_after_first_get
+        payload = {
             "head": {"sha": head},
             "number": PR,
             "body": f"Closes #{PARENT_ISSUE}",
             "user": {"login": self.pr_author},
             "state": self.pr_state,
             "merged_at": self.pr_merged_at,
-            "base": {"ref": BASE_REF},
+            "base": {"ref": base},
         }
+        reported = self.reported_changed_files
+        if reported == "auto":
+            reported = len(self.file_rows) if self.file_rows is not None else len(self.changed_files)
+        if reported is not None:
+            payload["changed_files"] = reported
+        return payload
 
     async def get(self, url, headers=None, params=None):
         self.get_urls.append(url)
         page = (params or {}).get("page", 1)
+        if url == f"{target.GITHUB_API}/repos/{REPO}":
+            if self.default_branch is None:
+                return _FakeResponse({"message": "Not Found"}, status_code=404)
+            return _FakeResponse({"default_branch": self.default_branch})
+        if url.endswith("/actions/runs"):
+            if self.actions_status >= 400:
+                return _FakeResponse({"message": "error"}, status_code=self.actions_status)
+            rows = self.workflow_runs[(page - 1) * 100 : page * 100]
+            return _FakeResponse({"total_count": len(self.workflow_runs), "workflow_runs": rows})
+        if "/contents/" in url:
+            assert url.endswith("/contents/.github/review_scope.json"), url
+            ref = (params or {}).get("ref", "")
+            self.scope_refs.append(ref)
+            served = self.scope_by_ref.get(ref)
+            if served is None:
+                return _FakeResponse({"message": "Not Found"}, status_code=404)
+            if isinstance(served, int):
+                return _FakeResponse({"message": "error"}, status_code=served)
+            return _FakeResponse(
+                {
+                    "type": "file",
+                    "encoding": "base64",
+                    "content": base64.b64encode(served.encode()).decode(),
+                }
+            )
         if url.endswith(f"/branches/{BASE_REF}/protection/required_status_checks"):
             if self.protection_rsc is None:
                 return _FakeResponse({"message": "Not Found"}, status_code=404)
@@ -236,8 +302,12 @@ class _FakeClient:
             return _FakeResponse(self._pr_payload())
         if url.endswith(f"/pulls/{PR}/files"):
             page = (params or {}).get("page", 1)
-            rows = [{"filename": f} for f in self.changed_files]
-            return _FakeResponse(rows if page == 1 else [])
+            rows = (
+                self.file_rows
+                if self.file_rows is not None
+                else [{"filename": f} for f in self.changed_files]
+            )
+            return _FakeResponse(rows[(page - 1) * 100 : page * 100])
         if url.endswith(f"/issues/{PR}/comments"):
             page = (params or {}).get("page", 1)
             return _FakeResponse(self.comments if page == 1 else [])
@@ -249,7 +319,13 @@ class _FakeClient:
                 {"state": self.combined_state, "total_count": self.legacy_status_total_count}
             )
         if url.endswith("/check-runs"):
-            return _FakeResponse({"check_runs": self.check_runs})
+            self.check_pages.append(page)
+            if self.checks_page_status.get(page, 200) >= 400:
+                return _FakeResponse({"message": "error"}, status_code=self.checks_page_status[page])
+            total = self.checks_total if self.checks_total is not None else len(self.check_runs)
+            return _FakeResponse(
+                {"total_count": total, "check_runs": self.check_runs[(page - 1) * 100 : page * 100]}
+            )
         if "/reviews/" in url:
             # read-back of a just-posted review
             if self.review_readback is not None:
@@ -2296,18 +2372,51 @@ class TestPanelAllDefault:
             assert target._panel_all_default() is True
 
     def test_cli_default_reflects_bootstrap_mode(self, monkeypatch):
+        """Operator ruling 2026-10-27: the bootstrap default is the path-selected
+        panel, no longer the five-lens `all`."""
         monkeypatch.delenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", raising=False)
         monkeypatch.setattr(sys, "argv", ["approve_pr_as_app.py", "--repo", REPO, "--pr", str(PR)])
         parser_args = []
 
-        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False):
-            parser_args.append(panel_all)
+        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False, panel_mode=""):
+            parser_args.append((panel_all, panel_mode))
             return 0
 
         monkeypatch.setattr(target, "run", _capture_run)
         target.main()
 
-        assert parser_args == [True]
+        assert parser_args == [(False, "path")]
+
+    def test_cli_panel_all_still_works(self, monkeypatch):
+        monkeypatch.delenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", raising=False)
+        monkeypatch.setattr(
+            sys, "argv",
+            ["approve_pr_as_app.py", "--repo", REPO, "--pr", str(PR), "--panel", "all"],
+        )
+        parser_args = []
+
+        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False, panel_mode=""):
+            parser_args.append((panel_all, panel_mode))
+            return 0
+
+        monkeypatch.setattr(target, "run", _capture_run)
+        target.main()
+
+        assert parser_args == [(True, "")]
+
+    def test_opt_out_env_makes_required_the_cli_default(self, monkeypatch):
+        monkeypatch.setenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", "1")
+        monkeypatch.setattr(sys, "argv", ["approve_pr_as_app.py", "--repo", REPO, "--pr", str(PR)])
+        parser_args = []
+
+        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False, panel_mode=""):
+            parser_args.append((panel_all, panel_mode))
+            return 0
+
+        monkeypatch.setattr(target, "run", _capture_run)
+        target.main()
+
+        assert parser_args == [(False, "")]
 
     def test_cli_panel_required_overrides_bootstrap_default(self, monkeypatch):
         monkeypatch.delenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", raising=False)
@@ -2318,7 +2427,7 @@ class TestPanelAllDefault:
         )
         parser_args = []
 
-        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False):
+        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False, panel_mode=""):
             parser_args.append(panel_all)
             return 0
 
@@ -3909,3 +4018,723 @@ class TestAnUnusableLensAppIsNeverListedAsAnApprover:
         out = capsys.readouterr().out
         assert "approvers: per-lens (own App: pm, qa, arch, security)" in out
         assert "UNUSABLE" not in out
+
+
+# ── Operator ruling 2026-10-27: the panel is chosen by changed path ─────────
+#
+# Each test below was run red against the pre-change tool (or with the named
+# line reverted) before being relied on; the PR body records what each looked
+# like red.
+
+SCOPE_RISKY_FILE = "execution/daemons/apis/gate.py"
+SCOPE_UI_FILE = "site/pages/index.html"
+SCOPE_PLAIN_FILE = "lib/some_util.py"
+
+
+def _scope(**over) -> str:
+    data = {
+        "version": 1,
+        "full_panel_paths": ["execution/daemons/**", "payments/**", ".github/**"],
+        "reduced_paths": ["lib/**", "site/**", "docs/**", "README.md", "a_random_file.txt"],
+        "ux_paths": ["site/**", "docs/guide/**"],
+        "lens_scopes": {"arch": ["execution/**", "lib/**"], "ux": ["site/**"]},
+    }
+    data.update(over)
+    return json.dumps(data)
+
+
+def _path_client(files, comments, *, scope: "str | int | None" = None, **kw):
+    refs = {} if scope is None else {BASE_REF: scope}
+    return _FakeClient(
+        comments=comments,
+        check_runs=_green_checks(),
+        changed_files=files,
+        scope_by_ref=refs,
+        **kw,
+    )
+
+
+async def _run_path(monkeypatch, client, *, apply=True, extra=()):
+    _install_client(monkeypatch, client)
+    _install_app_mint(monkeypatch)
+    return await target.run(REPO, PR, list(extra), apply=apply, panel_mode="path")
+
+
+@pytest.mark.asyncio
+class TestPathSelectedPanel:
+    async def test_a_plain_change_needs_only_arch(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        code = await _run_path(monkeypatch, client)
+        assert code == 0
+        body = client.posted[0]["json"]["body"]
+        assert "Panel: one lens (arch), chosen by changed path." in body
+        assert "review_scope.json (base branch)" in body
+        assert "**pm**" not in body
+
+    async def test_a_plain_change_without_arch_is_refused(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["pm", "qa"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+
+    async def test_a_ui_change_needs_only_ux(self, monkeypatch):
+        client = _path_client([SCOPE_UI_FILE], _all_clear_comments(["ux"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        body = client.posted[0]["json"]["body"]
+        assert "Panel: one lens (ux)" in body and SCOPE_UI_FILE in body and "site/**" in body
+
+    async def test_a_ui_change_with_only_arch_is_refused(self, monkeypatch):
+        client = _path_client([SCOPE_UI_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+
+    async def test_a_risky_change_needs_all_five_and_names_the_file(self, monkeypatch):
+        files = [SCOPE_PLAIN_FILE, SCOPE_RISKY_FILE]
+        client = _path_client(files, _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+        client = _path_client(files, _all_clear_comments(FIVE), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        body = client.posted[0]["json"]["body"]
+        assert "Panel: full five-lens panel, chosen by changed path." in body
+        assert f"`{SCOPE_RISKY_FILE}` matches full_panel_paths `execution/daemons/**`" in body
+        for lens in FIVE:
+            assert f"**{lens}**" in body
+
+    async def test_risk_wins_over_ui(self, monkeypatch):
+        client = _path_client(
+            [SCOPE_UI_FILE, SCOPE_RISKY_FILE], _all_clear_comments(["ux"]), scope=_scope()
+        )
+        assert await _run_path(monkeypatch, client) == 1
+
+    @pytest.mark.parametrize(
+        "scope",
+        [
+            None,
+            500,
+            "{not json",
+            json.dumps([1]),
+            json.dumps({"version": 2, "full_panel_paths": ["a"]}),
+            json.dumps({"version": 1, "full_panel_paths": []}),
+            json.dumps({"version": 1, "full_panel_paths": ["a"], "typo_paths": []}),
+        ],
+        ids=["missing", "unreadable", "malformed", "not-object", "bad-version", "empty-full", "unknown-key"],
+    )
+    async def test_a_missing_or_invalid_scope_file_means_the_full_panel(
+        self, monkeypatch, scope, capsys
+    ):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=scope)
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+        out = capsys.readouterr().out
+        assert "Panel: full five-lens panel" in out and "scope file could not be used" in out
+        # ... and with every lens cleared the full panel approves, saying why.
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(FIVE), scope=scope)
+        assert await _run_path(monkeypatch, client) == 0
+        assert "scope file could not be used" in client.posted[0]["json"]["body"]
+
+    async def test_an_empty_changed_file_list_means_the_full_panel(self, monkeypatch):
+        client = _path_client([], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        client = _path_client([], _all_clear_comments(FIVE), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        assert "changed-file list is empty" in client.posted[0]["json"]["body"]
+
+    async def test_the_scope_is_read_from_the_base_branch_not_the_pr_head(self, monkeypatch):
+        """The head's copy declares nothing risky; the base's copy does. A PR
+        that edits the file to downgrade its own panel must still get the
+        base's full panel."""
+        permissive = _scope(full_panel_paths=["never/**"])
+        client = _FakeClient(
+            comments=_all_clear_comments(["arch"]),
+            check_runs=_green_checks(),
+            changed_files=[SCOPE_RISKY_FILE],
+            scope_by_ref={BASE_REF: _scope(), HEAD: permissive, "feature-branch": permissive},
+        )
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+        assert client.scope_refs and set(client.scope_refs) == {BASE_REF}
+
+    async def test_a_non_required_lens_that_objects_still_blocks(self, monkeypatch):
+        comments = _all_clear_comments(["arch"]) + [
+            _comment(
+                77,
+                _lens_comment_body(
+                    "security",
+                    "falco",
+                    verdict="REQUEST_CHANGES",
+                    extra="[BLOCKING] token handling needs a second look.",
+                ),
+            )
+        ]
+        client = _path_client([SCOPE_PLAIN_FILE], comments, scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+
+    async def test_a_plain_comment_from_a_non_required_lens_does_not_block(self, monkeypatch):
+        comments = _all_clear_comments(["arch"]) + [
+            _comment(78, _lens_comment_body("security", "falco", verdict="COMMENT"))
+        ]
+        client = _path_client([SCOPE_PLAIN_FILE], comments, scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+
+    async def test_lenses_flag_adds_a_lens_on_top_of_the_one(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client, extra=["security"]) == 1
+        client = _path_client(
+            [SCOPE_PLAIN_FILE], _all_clear_comments(["arch", "security"]), scope=_scope()
+        )
+        assert await _run_path(monkeypatch, client, extra=["security"]) == 0
+
+    async def test_a_red_required_check_still_refuses(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        client.check_runs = [{"name": "ateles-tests", "status": "completed", "conclusion": "failure"}]
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+
+    async def test_dry_run_prints_the_mode_and_submits_nothing(self, monkeypatch, capsys):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client, apply=False) == 0
+        assert client.posted == []
+        assert "Panel: one lens (arch), chosen by changed path." in capsys.readouterr().out
+
+    async def test_the_older_modes_still_work_and_say_so(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(FIVE), scope=_scope())
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, [], apply=True, panel_all=True) == 0
+        assert "Panel: all five bootstrap lenses" in client.posted[0]["json"]["body"]
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["pm", "qa"]), scope=_scope())
+        _install_client(monkeypatch, client)
+        assert await target.run(REPO, PR, [], apply=True) == 0
+        assert "Panel: the lenses the diff itself requires" in client.posted[0]["json"]["body"]
+
+
+@pytest.mark.asyncio
+class TestScopeBasedCarry:
+    def _client(self, delta_files, *, scope, earlier_blocked=False):
+        sides = {
+            OLD_HEAD: [_pr_file(SCOPE_PLAIN_FILE)],
+            HEAD: [_pr_file(SCOPE_PLAIN_FILE)] + [_pr_file(f) for f in delta_files],
+        }
+        old = _round_comments(OLD_HEAD, blocked=("arch",) if earlier_blocked else ())
+        comments = [c for c in old if "review:arch " in c["body"]]
+        return _CompareClient(
+            comments=comments,
+            check_runs=_green_checks(),
+            sides=sides,
+            changed_files=[SCOPE_PLAIN_FILE],
+            scope_by_ref={BASE_REF: scope},
+        )
+
+    async def test_arch_carries_when_the_delta_misses_its_scope(self, monkeypatch):
+        # `README.md` is on no arch glob; under today's rule it would touch arch.
+        client = self._client(["README.md"], scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        body = client.posted[0]["json"]["body"]
+        assert "CARRIED FORWARD" in body and f"at head `{OLD_HEAD}`" in body
+
+    async def test_arch_is_rerun_when_the_delta_hits_its_scope(self, monkeypatch, capsys):
+        client = self._client(["lib/other.py"], scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+        assert "declared scope" in capsys.readouterr().out
+
+    async def test_without_a_declared_scope_the_old_rule_applies(self, monkeypatch):
+        scope = _scope(lens_scopes={"ux": ["site/**"]})  # arch declares nothing
+        client = self._client(["README.md"], scope=scope)
+        # README.md is in no allowlist: under today's rule it touches every lens.
+        assert await _run_path(monkeypatch, client) == 1
+
+    async def test_a_lens_that_blocked_earlier_is_never_carried(self, monkeypatch):
+        client = self._client(["README.md"], scope=_scope(), earlier_blocked=True)
+        assert await _run_path(monkeypatch, client) == 1
+
+
+# ── Review round 2 on ateles#1531 ───────────────────────────────────────────
+#
+# Each test below was confirmed red against the code without its fix.
+
+
+def _rename(new: str, old: str) -> dict:
+    return {"filename": new, "previous_filename": old, "status": "renamed"}
+
+
+@pytest.mark.asyncio
+class TestPathPanelFailsClosedOnTheFileList:
+    async def test_a_rename_out_of_a_full_panel_path_selects_the_full_panel(self, monkeypatch):
+        """Item 1. The new path is a UI path; the OLD path was a workflow."""
+        rows = [_rename("docs/guide/ci.md", ".github/workflows/ci.yml")]
+        client = _path_client([], _all_clear_comments(["ux"]), scope=_scope(), file_rows=rows)
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+        client = _path_client([], _all_clear_comments(FIVE), scope=_scope(), file_rows=rows)
+        assert await _run_path(monkeypatch, client) == 0
+        body = client.posted[0]["json"]["body"]
+        assert ".github/workflows/ci.yml" in body
+
+    async def test_a_file_list_at_the_api_cap_selects_the_full_panel(self, monkeypatch, capsys):
+        """Item 2. 3000 rows is where the files API stops; it may be cut off."""
+        files = [f"lib/f{i}.py" for i in range(3000)]
+        client = _path_client(files, _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client, apply=False) == 1
+        out = capsys.readouterr().out
+        assert "Panel: full five-lens panel" in out and "may be truncated" in out
+
+    async def test_a_list_that_disagrees_with_the_prs_own_count_selects_the_full_panel(
+        self, monkeypatch, capsys
+    ):
+        client = _path_client(
+            [SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope(),
+            reported_changed_files=4,
+        )
+        assert await _run_path(monkeypatch, client, apply=False) == 1
+        assert "1 entries but the PR reports 4" in capsys.readouterr().out
+
+    async def test_a_pr_that_reports_no_count_selects_the_full_panel(self, monkeypatch, capsys):
+        client = _path_client(
+            [SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope(),
+            reported_changed_files=None,
+        )
+        assert await _run_path(monkeypatch, client, apply=False) == 1
+        assert "does not report how many files" in capsys.readouterr().out
+
+    async def test_a_complete_matching_list_still_selects_one_lens(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+
+    async def test_path_case_does_not_hide_a_full_panel_path(self, monkeypatch):
+        """Item 3. A case-insensitive checkout can produce `Execution/Daemons/...`."""
+        client = _path_client(
+            ["Execution/Daemons/apis/gate.py"], _all_clear_comments(["arch"]), scope=_scope()
+        )
+        assert await _run_path(monkeypatch, client) == 1
+        client = _path_client([".GitHub/workflows/x.yml"], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+
+    async def test_editing_the_scope_file_always_selects_the_full_panel(self, monkeypatch):
+        """Item 8, with a scope that does NOT list its own file."""
+        own = _scope(full_panel_paths=["never/**"])
+        client = _path_client([".github/review_scope.json"], _all_clear_comments(["arch"]), scope=own)
+        assert await _run_path(monkeypatch, client) == 1
+        client = _path_client([".github/review_scope.json"], _all_clear_comments(FIVE), scope=own)
+        assert await _run_path(monkeypatch, client) == 0
+        assert "scope file itself" in client.posted[0]["json"]["body"]
+
+    async def test_a_mixed_ui_and_code_change_needs_arch_not_ux(self, monkeypatch):
+        """Item 6."""
+        files = [SCOPE_UI_FILE, SCOPE_PLAIN_FILE]
+        client = _path_client(files, _all_clear_comments(["ux"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        client = _path_client(files, _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+
+    async def test_the_base_branch_moving_before_submit_refuses(self, monkeypatch, capsys):
+        """Item 7. The scope was read from `main`; the PR was retargeted."""
+        client = _path_client(
+            [SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope(),
+            base_ref_after_first_get="release-2",
+        )
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+        assert "base branch moved" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+class TestApprovalReviewWording:
+    """Item 10."""
+
+    async def test_the_panel_line_sits_directly_under_the_first_sentence(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        lines = client.posted[0]["json"]["body"].splitlines()
+        assert lines[0].startswith("Approved by")
+        assert lines[1].startswith("Panel: one lens (arch), chosen by changed path.")
+
+    async def test_a_one_lens_approval_says_how_to_add_another(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        body = client.posted[0]["json"]["body"]
+        assert "other lenses were not required" in body
+        assert "--lenses" in body and "objection" in body
+
+    async def test_a_full_panel_approval_does_not_claim_lenses_were_skipped(self, monkeypatch):
+        client = _path_client([SCOPE_RISKY_FILE], _all_clear_comments(FIVE), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        assert "not required" not in client.posted[0]["json"]["body"]
+
+    async def test_several_risky_files_are_counted(self, monkeypatch):
+        files = [SCOPE_RISKY_FILE, "execution/daemons/b.py", "payments/c.py", SCOPE_PLAIN_FILE]
+        client = _path_client(files, _all_clear_comments(FIVE), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        assert "(and 2 more changed files on full-panel paths)" in client.posted[0]["json"]["body"]
+
+    async def test_no_arrow_in_the_review_or_the_output(self, monkeypatch, capsys):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        assert "->" not in client.posted[0]["json"]["body"]
+        assert "->" not in capsys.readouterr().out
+
+    async def test_stdout_and_the_review_use_the_same_carry_wording(self, monkeypatch, capsys):
+        client = TestScopeBasedCarry()._client(["README.md"], scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        body = client.posted[0]["json"]["body"]
+        out = capsys.readouterr().out
+        assert "touched none of its declared scope" in body
+        assert "touched none of its declared scope" in out
+
+    async def test_the_default_rule_carry_says_areas_in_both(self, monkeypatch, capsys):
+        scope = _scope(lens_scopes={"ux": ["site/**"]})
+        sides = {OLD_HEAD: [_pr_file(SCOPE_PLAIN_FILE)], HEAD: [_pr_file(SCOPE_PLAIN_FILE), _pr_file("docs/guide/x.md")]}
+        old = [c for c in _round_comments(OLD_HEAD) if "review:arch " in c["body"]]
+        client = _CompareClient(
+            comments=old, check_runs=_green_checks(), sides=sides,
+            changed_files=[SCOPE_PLAIN_FILE], scope_by_ref={BASE_REF: scope},
+        )
+        # docs/guide is allowlisted to ux only under the default rule: arch carries on areas
+        assert await _run_path(monkeypatch, client) == 0
+        assert "touched none of its areas" in client.posted[0]["json"]["body"]
+        assert "touched none of its areas" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+class TestUnclearClassificationThroughTheTool:
+    async def test_a_file_on_no_list_takes_the_full_panel(self, monkeypatch, capsys):
+        client = _path_client(["unlisted/thing.bin"], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client, apply=False) == 1
+        out = capsys.readouterr().out
+        assert "Panel: full five-lens panel" in out and "unclear" in out
+
+    async def test_the_same_change_approves_with_all_five(self, monkeypatch):
+        client = _path_client(["unlisted/thing.bin"], _all_clear_comments(FIVE), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+
+
+# ── Re-run check-runs on one head (closed and reopened, CI re-triggered) ────
+
+
+def _cr(id_, conclusion="success", *, status="completed", started="2026-10-01T10:00:00Z",
+        completed="2026-10-01T10:05:00Z", name="pytest", app_id=15368, wf=1, suite=None):
+    """`wf` is the Actions workflow the run belongs to (None: a run with no
+    workflow, e.g. a non-Actions App); `suite` its check suite (default: one per run)."""
+    suite = suite if suite is not None else wf * 1000 + id_ if wf is not None else None
+    row = {"id": id_, "name": name, "status": status, "conclusion": conclusion,
+           "started_at": started, "completed_at": completed, "app": {"id": app_id},
+           "_wf": wf}
+    if suite is not None:
+        row["check_suite"] = {"id": suite}
+    if started is None:
+        row.pop("started_at")
+    if completed is None or status != "completed":
+        row.pop("completed_at")
+    if status != "completed":
+        row.pop("conclusion")
+    return row
+
+
+def _workflow_rows(runs):
+    """The Actions run for each (suite, workflow) pair the runs belong to."""
+    seen, rows = set(), []
+    for r in runs:
+        suite, wf = (r.get("check_suite") or {}).get("id"), r.get("_wf")
+        if suite is not None and wf is not None and suite not in seen:
+            seen.add(suite)
+            rows.append({"check_suite_id": suite, "workflow_id": wf, "name": f"workflow-{wf}"})
+    return rows
+
+
+async def _evaluate(runs, *, now=None, **client_kw):
+    client_kw.setdefault("workflow_runs", _workflow_rows(runs))
+    client = _FakeClient(comments=[], check_runs=runs, **client_kw)
+    outcomes, green = await target.evaluate_checks(client, repo=REPO, head_sha=HEAD, now=now)
+    _evaluate.client = client
+    return outcomes, green
+
+
+@pytest.mark.asyncio
+class TestReRunCheckRunsAreJudgedByTheNewest:
+    async def test_two_stale_failures_and_a_newer_success_are_green(self):
+        runs = [
+            _cr(10, "failure", started="2026-10-01T09:00:00Z", completed="2026-10-01T09:05:00Z"),
+            _cr(20, "failure", started="2026-10-01T09:30:00Z", completed="2026-10-01T09:35:00Z"),
+            _cr(30, "success", started="2026-10-01T10:00:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs)
+        assert green is True
+        states = {o.state for o in outcomes}
+        assert states == {"superseded by run 30 (workflow workflow-1)", "success"}
+        assert sum(o.superseded for o in outcomes) == 2  # listed, never dropped
+
+    async def test_an_older_success_never_overrides_a_newer_failure(self):
+        runs = [_cr(10, "success", started="2026-10-01T09:00:00Z"),
+                _cr(20, "failure", started="2026-10-01T10:00:00Z")]
+        outcomes, green = await _evaluate(runs)
+        assert green is False
+        assert [o.state for o in outcomes] == [
+            "superseded by run 20 (workflow workflow-1)", "failing (failure)"]
+
+    @pytest.mark.parametrize("status", ["queued", "in_progress"])
+    async def test_an_older_success_never_overrides_a_newer_pending_run(self, status):
+        runs = [_cr(10, "success", started="2026-10-01T09:00:00Z"),
+                _cr(20, status=status, started="2026-10-01T10:00:00Z")]
+        _, green = await _evaluate(runs)
+        assert green is False
+
+    async def test_a_newer_pending_run_with_no_start_time_still_wins(self):
+        runs = [_cr(10, "success"), _cr(20, status="queued", started=None)]
+        outcomes, green = await _evaluate(runs)
+        assert green is False
+        assert outcomes[0].superseded
+
+    async def test_an_older_failure_does_not_beat_a_newer_pending_run_to_green(self):
+        runs = [_cr(10, "failure", started="2026-10-01T09:00:00Z"),
+                _cr(20, status="in_progress", started="2026-10-01T10:00:00Z")]
+        outcomes, green = await _evaluate(runs)
+        assert green is False
+        assert outcomes[1].state == "pending (in_progress)"
+
+    async def test_order_is_by_start_time_not_by_id(self):
+        runs = [_cr(99, "failure", started="2026-10-01T08:00:00Z"),
+                _cr(5, "success", started="2026-10-01T10:00:00Z")]
+        _, green = await _evaluate(runs)
+        assert green is True
+
+    async def test_equal_start_times_fall_back_to_completed_then_id(self):
+        runs = [_cr(1, "failure", completed="2026-10-01T10:05:00Z"),
+                _cr(2, "success", completed="2026-10-01T10:09:00Z")]
+        assert (await _evaluate(runs))[1] is True
+        runs = [_cr(1, "success", completed="2026-10-01T10:05:00Z"),
+                _cr(2, "failure", completed="2026-10-01T10:09:00Z")]
+        assert (await _evaluate(runs))[1] is False
+        # completed_at outranks id: the lower id completed later
+        runs = [_cr(9, "success", completed="2026-10-01T10:09:00Z"),
+                _cr(2, "failure", completed="2026-10-01T10:05:00Z")]
+        assert (await _evaluate(runs))[1] is True
+        runs = [_cr(1, "success", completed="2026-10-01T10:05:00Z"),
+                _cr(2, "failure", completed="2026-10-01T10:09:00Z")]
+        assert (await _evaluate(runs))[1] is False
+        runs = [_cr(1, "failure"), _cr(2, "success")]
+        assert (await _evaluate(runs))[1] is True
+
+    async def test_runs_that_cannot_be_ordered_both_count(self):
+        twin = {"name": "pytest", "status": "completed"}
+        runs = [{**twin, "conclusion": "failure"}, {**twin, "conclusion": "success"}]
+        outcomes, green = await _evaluate(runs)
+        assert green is False
+        assert not any(o.superseded for o in outcomes)
+
+    async def test_the_same_name_from_another_app_is_a_different_check(self):
+        runs = [_cr(10, "failure", app_id=1), _cr(20, "success", app_id=2)]
+        _, green = await _evaluate(runs)
+        assert green is False
+
+    async def test_different_checks_are_judged_separately(self):
+        runs = [_cr(10, "failure", name="lint"), _cr(20, "success", name="pytest")]
+        _, green = await _evaluate(runs)
+        assert green is False
+
+    async def test_only_superseded_runs_are_never_a_signal_on_their_own(self):
+        """A lone run is its own newest; nothing is hidden when there is one."""
+        _, green = await _evaluate([_cr(10, "failure")])
+        assert green is False
+
+    async def test_the_table_names_superseded_runs(self, monkeypatch, capsys):
+        runs = [_cr(10, "failure", started="2026-10-01T09:00:00Z"), _cr(30, "success")]
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        client.check_runs = runs
+        client.workflow_runs = _workflow_rows(runs)
+        assert await _run_path(monkeypatch, client, apply=False) == 0
+        out = capsys.readouterr().out
+        assert "superseded by run 30 (workflow workflow-1)" in out and "SUPERSEDED" in out
+
+    async def test_a_stale_red_run_no_longer_blocks_an_approval(self, monkeypatch):
+        runs = [_cr(10, "failure", started="2026-10-01T09:00:00Z"),
+                _cr(20, "failure", started="2026-10-01T09:30:00Z"),
+                _cr(30, "success")]
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        client.check_runs = runs
+        client.workflow_runs = _workflow_rows(runs)
+        assert await _run_path(monkeypatch, client) == 0
+
+    async def test_a_newer_red_run_still_blocks_an_approval(self, monkeypatch):
+        runs = [_cr(10, "success", started="2026-10-01T09:00:00Z"), _cr(30, "failure")]
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        client.check_runs = runs
+        client.workflow_runs = _workflow_rows(runs)
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+
+
+# ── Round 3: workflow identity, future start times, pagination ──────────────
+
+
+NOW = datetime(2026, 10, 1, 10, 30, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+class TestSameNamedJobsInDifferentWorkflows:
+    """`pytest` runs in two workflows (daemon-tests.yml and ateles-tests.yml)."""
+
+    async def test_a_failure_in_one_workflow_is_not_superseded_by_a_pass_in_another(self):
+        runs = [
+            _cr(1, "failure", wf=111, started="2026-10-01T10:00:00Z"),
+            _cr(2, "success", wf=222, started="2026-10-01T10:01:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs)
+        assert green is False
+        assert not any(o.superseded for o in outcomes)
+        assert [o.passed for o in outcomes] == [False, True]
+
+    async def test_a_reopened_run_supersedes_within_its_workflow_only(self):
+        """Both cases in one head: workflow 111 was re-run (new suite, same
+        workflow) so its stale failure is superseded; workflow 222's own failure
+        has no newer run and still blocks."""
+        runs = [
+            _cr(1, "failure", wf=111, started="2026-10-01T09:00:00Z"),
+            _cr(2, "success", wf=111, started="2026-10-01T10:00:00Z"),   # reopen: new suite
+            _cr(3, "failure", wf=222, started="2026-10-01T09:30:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs)
+        assert outcomes[0].superseded and "workflow-111" in outcomes[0].state
+        assert not outcomes[2].superseded and not outcomes[2].passed
+        assert green is False
+        # ... and with workflow 222 green the head is green.
+        runs[2] = _cr(3, "success", wf=222, started="2026-10-01T09:30:00Z")
+        assert (await _evaluate(runs))[1] is True
+
+    async def test_a_rerun_inside_one_suite_is_still_the_same_workflow(self):
+        runs = [
+            _cr(1, "failure", wf=111, suite=5000, started="2026-10-01T09:00:00Z"),
+            _cr(2, "success", wf=111, suite=5000, started="2026-10-01T10:00:00Z"),
+        ]
+        assert (await _evaluate(runs))[1] is True
+
+    async def test_a_run_with_no_workflow_never_supersedes_or_is_superseded(self):
+        runs = [
+            _cr(1, "failure", wf=None, started="2026-10-01T09:00:00Z"),
+            _cr(2, "success", wf=None, started="2026-10-01T10:00:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs)
+        assert green is False and not any(o.superseded for o in outcomes)
+
+    async def test_an_unmapped_newer_pass_does_not_supersede_a_mapped_failure(self):
+        runs = [
+            _cr(1, "failure", wf=111, started="2026-10-01T09:00:00Z"),
+            _cr(2, "success", wf=None, started="2026-10-01T10:00:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs)
+        assert green is False and not any(o.superseded for o in outcomes)
+
+    async def test_a_mapped_newer_pass_does_not_supersede_an_unmapped_failure(self):
+        runs = [
+            _cr(1, "failure", wf=None, started="2026-10-01T09:00:00Z"),
+            _cr(2, "success", wf=111, started="2026-10-01T10:00:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs)
+        assert green is False and not any(o.superseded for o in outcomes)
+
+    async def test_a_failed_workflow_lookup_supersedes_nothing(self):
+        runs = [_cr(1, "failure", started="2026-10-01T09:00:00Z"),
+                _cr(2, "success", started="2026-10-01T10:00:00Z")]
+        outcomes, green = await _evaluate(runs, actions_status=500, workflow_runs=[])
+        assert green is False and not any(o.superseded for o in outcomes)
+
+    async def test_a_head_with_no_repeated_check_makes_no_workflow_lookup(self):
+        await _evaluate([_cr(1, "success", name="a"), _cr(2, "success", name="b")])
+        assert not [u for u in _evaluate.client.get_urls if "/actions/" in u]
+
+
+@pytest.mark.asyncio
+class TestFutureStartTimes:
+    async def test_a_run_dated_far_in_the_future_supersedes_nothing(self):
+        runs = [
+            _cr(1, "failure", started="2026-10-01T10:00:00Z"),
+            _cr(2, "success", started="2026-10-01T14:00:00Z"),   # four hours ahead
+        ]
+        outcomes, green = await _evaluate(runs, now=NOW)
+        assert green is False and not any(o.superseded for o in outcomes)
+
+    async def test_a_future_dated_failure_does_not_hide_behind_it_either(self):
+        runs = [
+            _cr(1, "success", started="2026-10-01T10:00:00Z"),
+            _cr(2, "failure", started="2026-10-01T14:00:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs, now=NOW)
+        assert green is False and not any(o.superseded for o in outcomes)
+
+    async def test_a_small_clock_skew_is_tolerated(self):
+        runs = [
+            _cr(1, "failure", started="2026-10-01T10:00:00Z"),
+            _cr(2, "success", started="2026-10-01T10:33:00Z"),   # three minutes ahead
+        ]
+        assert (await _evaluate(runs, now=NOW))[1] is True
+
+    async def test_an_unreadable_start_time_supersedes_nothing(self):
+        runs = [
+            _cr(1, "failure", started="2026-10-01T10:00:00Z"),
+            _cr(2, "success", started="not-a-time"),
+        ]
+        outcomes, green = await _evaluate(runs, now=NOW)
+        assert green is False and not any(o.superseded for o in outcomes)
+
+
+@pytest.mark.asyncio
+class TestCheckRunListIsReadInFull:
+    def _many(self, n, **kw):
+        return [_cr(i, "success", name=f"job-{i}", **kw) for i in range(1, n + 1)]
+
+    async def test_a_long_list_is_paginated_and_green_when_all_pass(self):
+        outcomes, green = await _evaluate(self._many(250))
+        assert green is True and len(outcomes) == 250
+        assert _evaluate.client.check_pages == [1, 2, 3]
+
+    async def test_a_failure_on_a_later_page_is_seen(self):
+        runs = self._many(250)
+        runs[220] = _cr(221, "failure", name="job-221")
+        assert (await _evaluate(runs))[1] is False
+
+    async def test_a_list_shorter_than_its_total_is_not_green(self):
+        outcomes, green = await _evaluate(self._many(250), checks_total=300)
+        assert green is False
+        assert any("read 250 of 300" in o.state for o in outcomes)
+
+    async def test_an_unreadable_page_is_not_green_and_says_why(self):
+        outcomes, green = await _evaluate(self._many(250), checks_page_status={2: 502})
+        assert green is False
+        assert any("page 2" in o.state and "502" in o.state for o in outcomes)
+
+    async def test_an_unreadable_first_page_is_not_green(self):
+        outcomes, green = await _evaluate(self._many(5), checks_page_status={1: 500})
+        assert green is False
+
+
+@pytest.mark.asyncio
+class TestPathPanelNeedsTheDefaultBranch:
+    async def test_a_non_default_base_takes_the_full_panel(self, monkeypatch, capsys):
+        client = _path_client(
+            [SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope(), default_branch="develop"
+        )
+        assert await _run_path(monkeypatch, client, apply=False) == 1
+        out = capsys.readouterr().out
+        assert "Panel: full five-lens panel" in out and "not the repository's default branch" in out
+
+    async def test_an_unreadable_default_branch_takes_the_full_panel(self, monkeypatch, capsys):
+        client = _path_client(
+            [SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope(), default_branch=None
+        )
+        assert await _run_path(monkeypatch, client, apply=False) == 1
+        assert "unreadable" in capsys.readouterr().out
+
+    async def test_the_default_base_still_selects_one_lens(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+
+
+@pytest.mark.asyncio
+class TestOneLensWording:
+    async def test_the_reason_glosses_the_scope_lists_and_points_at_a_review_comment(
+        self, monkeypatch
+    ):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        body = client.posted[0]["json"]["body"]
+        assert "the paths this repo marks as safe for one lens" in body
+        assert "post an objection as a review comment on the current head" in body
