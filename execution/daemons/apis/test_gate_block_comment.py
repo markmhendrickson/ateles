@@ -25,6 +25,17 @@ def test_lanius_prompt_assigns_github_effects_to_dispatcher():
     assert "Do NOT post GitHub comments or assign reviewers" in prompt
     assert "the dispatcher posts the blocking comment and routes Vanellus" in prompt
     assert "BLOCKED COMMENT REQUIREMENTS" not in prompt
+    legacy_rule = prompt.index("LEGACY-ISSUE RULE:")
+    authoritative_rule = prompt.index("AUTHORITATIVE FOR THIS RUN:")
+    final_line_contract = prompt.index("End your reply with exactly one line:")
+    assert legacy_rule < authoritative_rule < final_line_contract
+    assert (
+        "this instruction overrides the publication steps in your role prompt" in prompt
+    )
+    assert (
+        "do NOT assign or request a reviewer, and make no other GitHub write"
+        in prompt
+    )
 
 
 def test_blocked_gate_posts_once_after_lanius_result(monkeypatch, world):
