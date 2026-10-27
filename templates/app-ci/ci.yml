@@ -7,12 +7,17 @@ on:
   push:
     branches: [main]
 
-# A newer push to the same PR cancels the superseded run. Push-to-main runs are
-# never cancelled: they gate deploys, so every one must finish.
+# A newer push to the same PR cancels the superseded run. A push to main gets a
+# group of its own (its sha), so a later push can neither cancel it nor replace
+# it as a pending run: every main commit gets a complete CI result.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# SUPPLY CHAIN: the `uses:` lines below are pinned to movable tags for
+# readability. In a real repo pin every third-party action to a full commit SHA
+# (keep the tag in a trailing comment) and let a bot bump them; see README.
+#
 # Least privilege by default. Grant more per job only where a step needs it.
 permissions:
   contents: read
@@ -25,6 +30,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false # no step here pushes or fetches with git
 
       # --- Python slot -----------------------------------------------------
       # - uses: actions/setup-python@v5
@@ -49,8 +56,12 @@ jobs:
       # --- Hygiene (any stack) ---------------------------------------------
       # Secret scan, generated-file freshness, lockfile consistency, and
       # similar repo-specific checks belong here.
-      - name: Placeholder (delete once a real check is added)
-        run: echo "add lint, format, typecheck and hygiene checks above"
+      # FILL THIS SLOT. It fails on purpose so an unfilled copy of this template
+      # cannot report green. Delete the step once a real check is in place.
+      - name: Unfilled slot (fails until replaced)
+        run: |
+          echo "::error::ci.yml 'fast' job has no checks yet: add lint, format, typecheck and hygiene steps above, then delete this step."
+          exit 1
 
   test:
     needs: fast
@@ -65,6 +76,8 @@ jobs:
         shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # --- Python slot (pytest-split, pytest-xdist, or per-directory) ------
       # - uses: actions/setup-python@v5
@@ -82,18 +95,25 @@ jobs:
       # - run: npm ci
       # - run: npx vitest run --shard=${{ matrix.shard }}/3
 
-      - name: Placeholder (delete once a real test command is added)
-        run: echo "shard ${{ matrix.shard }} of 3 - add the test command above"
+      # FILL THIS SLOT. It fails on purpose so an unfilled copy of this template
+      # cannot report green. Delete the step once a real test command is in place.
+      - name: Unfilled slot (fails until replaced)
+        run: |
+          echo "::error::ci.yml 'test' job has no test command yet (shard ${{ matrix.shard }} of 3): add it above, then delete this step."
+          exit 1
 
   # The ONE aggregate check that branch protection (or the repo's approval
-  # tool) requires. It passes only when every job it needs succeeded, so jobs
-  # can be added, renamed, or split without touching protection.
+  # tool) requires. It passes only when every job it needs reports exactly
+  # `success` (a positive check: a failed, cancelled, skipped, or any future
+  # unknown result all fail it), so jobs can be added, renamed, or split without
+  # touching protection.
   #
   # NAME: the job id and name below are whatever the repo's protection or
   # approval tooling ALREADY requires. A repo that already requires a check
-  # called, say, `unit` (in a workflow named `tests`) keeps that exact job name
-  # and workflow name; adopting the template must not force a rename to
-  # `ci-summary`. Use `ci-summary` only in a repo with no existing required name.
+  # called, say, `unit` keeps that exact job name; adopting the template must
+  # not force a rename to `ci-summary`. The WORKFLOW name matters only if some
+  # tooling keys on it (an approval tool that looks up checks by workflow);
+  # otherwise leave it. Use `ci-summary` only in a repo with no existing name.
   ci-summary:
     if: always()
     needs: [fast, test]
@@ -104,8 +124,8 @@ jobs:
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          echo "$NEEDS_JSON"
-          if echo "$NEEDS_JSON" | grep -Eq '"result": "(failure|cancelled|skipped)"'; then
-            echo "One or more required jobs did not succeed."
+          printf '%s\n' "$NEEDS_JSON"
+          if ! printf '%s' "$NEEDS_JSON" | jq -e 'length > 0 and all(.[]; .result == "success")' >/dev/null; then
+            echo "::error::One or more required jobs did not succeed."
             exit 1
           fi

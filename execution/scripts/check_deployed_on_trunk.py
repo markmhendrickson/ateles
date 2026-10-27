@@ -7,6 +7,13 @@ is the head that is live. A deploy from an unmerged integration branch breaks
 that silently. `.github/actions/deployed-on-trunk` stops it at deploy time;
 this script audits it after the fact, from outside the deploy workflow.
 
+CAVEAT: this is a weaker, later check. Ancestry only grows, so it is judged as
+of NOW and cannot tell deployed-then-merged from merged-then-deployed: a commit
+deployed from an unmerged branch and merged later reads as on trunk. It is not
+proof that what was deployed had been reviewed on trunk; the deploy-time guard
+is the check that binds. (A Deployment record's `ref` is the commit sha and is
+provenance only.)
+
 Where the deployed sha comes from (exactly one):
     --sha SHA                       a commit you already know
     --from-url URL --json-field F   a version/health endpoint, e.g. /version
@@ -34,13 +41,20 @@ Exit codes:
        unknown repo/sha, no successful deployment, unreadable endpoint).
        Exit 2 is "unknown" and must never be reported as a pass.
 
+--from-url verifies what the running service SAYS its commit is. A service
+that reports a wrong or stale value passes this check; it does not inspect the
+image or the code. The deployment record (--from-deployments) is the second,
+independent source.
+
 Prints exactly one plain line. Stdlib only. Authenticates with GH_TOKEN (or
-GITHUB_TOKEN) when set and never prints it; without one, only public repos
-are readable.
+GITHUB_TOKEN) when set, never prints it, and never follows a redirect on
+api.github.com calls so the token cannot reach another host. Without a token,
+only public repos are readable.
 """
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -51,7 +65,10 @@ import urllib.request
 
 API_ROOT = "https://api.github.com"
 TIMEOUT_SECONDS = 20
-SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+# Full 40-hex shas only: a short prefix can be ambiguous, and an endpoint that
+# reports a prefix should be fixed to report the whole commit.
+SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
+REPO_RE = re.compile(r"[\w.-]+/[\w.-]+")
 
 EXIT_ON_TRUNK = 0
 EXIT_NOT_ON_TRUNK = 1
@@ -73,9 +90,22 @@ def _token() -> str:
     return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
 
 
-def _open(url: str, headers: dict[str, str]):
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect, so a 3xx surfaces as an HTTPError instead of
+    being followed with the Authorization header attached."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _open(url: str, headers: dict[str, str], follow_redirects: bool = True):
     request = urllib.request.Request(url, headers=headers)
-    return urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS)
+    if follow_redirects:
+        return urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS)
+    return _NO_REDIRECT_OPENER.open(request, timeout=TIMEOUT_SECONDS)
 
 
 def api_get(path: str):
@@ -90,7 +120,9 @@ def api_get(path: str):
         headers["Authorization"] = f"Bearer {token}"
     url = API_ROOT + path
     try:
-        with _open(url, headers) as response:
+        # api.github.com never needs a redirect here; refusing them keeps the
+        # token from being forwarded to any other host.
+        with _open(url, headers, follow_redirects=False) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
@@ -103,7 +135,7 @@ def api_get(path: str):
                 f"GitHub refused access (HTTP {exc.code}); check GH_TOKEN scope or rate limit"
             ) from exc
         raise CheckError(f"GitHub API error HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
         raise CheckError(f"network error reaching GitHub: {exc}") from exc
     except ValueError as exc:
         raise CheckError("GitHub returned a response that is not JSON") from exc
@@ -119,7 +151,7 @@ def fetch_json_url(url: str):
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raise CheckError(f"version endpoint returned HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
         raise CheckError(f"network error reaching version endpoint: {exc}") from exc
     except ValueError as exc:
         raise CheckError("version endpoint did not return JSON") from exc
@@ -132,7 +164,7 @@ def extract_field(payload, field: str) -> str:
         if not isinstance(value, dict) or part not in value:
             raise CheckError(f"field {field!r} not found in the version endpoint response")
         value = value[part]
-    if not isinstance(value, str) or not SHA_RE.match(value.strip()):
+    if not isinstance(value, str) or not SHA_RE.fullmatch(value.strip()):
         raise CheckError(f"field {field!r} does not hold a commit sha")
     return value.strip()
 
@@ -145,13 +177,17 @@ def latest_successful_deployment_sha(repo: str, environment: str) -> str:
     if not isinstance(deployments, list):
         raise CheckError("unexpected deployments response from GitHub")
     for deployment in deployments:
+        if not isinstance(deployment, dict):
+            raise CheckError("unexpected deployments response from GitHub")
         deployment_id = deployment.get("id")
         sha = deployment.get("sha")
         if deployment_id is None or not sha:
             continue
         statuses = api_get(f"/repos/{repo}/deployments/{deployment_id}/statuses?per_page=1")
         # Statuses are newest first; only the latest decides the state.
-        if isinstance(statuses, list) and statuses and statuses[0].get("state") == "success":
+        if not isinstance(statuses, list) or any(not isinstance(item, dict) for item in statuses):
+            raise CheckError("unexpected deployment statuses response from GitHub")
+        if statuses and statuses[0].get("state") == "success":
             return sha
     raise CheckError(
         f"no successful deployment found for environment {environment!r} in the "
@@ -189,7 +225,7 @@ def resolve_sha(args: argparse.Namespace) -> tuple[str, str]:
     else:
         sha = latest_successful_deployment_sha(args.repo, args.from_deployments)
         source = f"latest successful {args.from_deployments} deployment"
-    if not SHA_RE.match(sha):
+    if not SHA_RE.fullmatch(sha):
         raise CheckError(f"{sha!r} is not a commit sha")
     return sha, source
 
@@ -205,9 +241,11 @@ def run(args: argparse.Namespace) -> tuple[int, str]:
     if status in ON_TRUNK_STATUSES:
         return EXIT_ON_TRUNK, f"ON TRUNK: {short} from {source} is an ancestor of {branch} in {args.repo}"
     if status in OFF_TRUNK_STATUSES:
+        relation = f"ahead of {branch}" if status == "ahead" else f"diverged from {branch}"
         return (
             EXIT_NOT_ON_TRUNK,
-            f"NOT ON TRUNK: {short} from {source} is {status} of {branch} in {args.repo}",
+            f"NOT ON TRUNK: {short} from {source} is {relation} in {args.repo}; "
+            f"merge it to {branch} first, or deploy a commit that is already on {branch}",
         )
     return EXIT_COULD_NOT_RUN, f"UNKNOWN: could not check (unrecognised compare status {status!r})"
 
@@ -230,10 +268,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if not re.match(r"^[\w.-]+/[\w.-]+$", args.repo):
+    if not REPO_RE.fullmatch(args.repo):
         print(f"UNKNOWN: could not check (--repo must be owner/name, got {args.repo!r})")
         return EXIT_COULD_NOT_RUN
-    code, line = run(args)
+    try:
+        code, line = run(args)
+    except Exception as exc:  # noqa: BLE001 - exit 2 is the contract for every failure
+        # Name only the exception type: its message could echo a URL or header.
+        code, line = EXIT_COULD_NOT_RUN, f"UNKNOWN: could not check ({type(exc).__name__})"
     print(line)
     return code
 

@@ -6,9 +6,12 @@ never touch a token. The property under test is the exit-code contract: 0 only
 when the compare API says `behind` or `identical`, 1 when `ahead` or
 `diverged`, and 2 for everything that means "could not check" (never a pass).
 """
+import http.client
+import http.server
 import io
 import json
 import sys
+import threading
 import urllib.error
 import unittest
 from pathlib import Path
@@ -23,11 +26,18 @@ SHA = "a" * 40
 REPO = "owner/app"
 
 
+class UnexpectedCall(BaseException):
+    """Raised by the default mocks. It is a BaseException on purpose: main()
+    turns every Exception into `UNKNOWN ... exit 2`, so an Exception-based
+    mock would satisfy a bad-input test's exit-2 expectation by itself and let
+    broken validation pass. This one escapes the catch-all and fails the test."""
+
+
 def _run(argv, api=None, fetch=None):
     """Run main() with the API and endpoint fetchers mocked; return (code, stdout)."""
     out = io.StringIO()
-    with mock.patch.object(ctd, "api_get", api or mock.Mock(side_effect=AssertionError("unexpected api call"))):
-        with mock.patch.object(ctd, "fetch_json_url", fetch or mock.Mock(side_effect=AssertionError("unexpected fetch"))):
+    with mock.patch.object(ctd, "api_get", api or mock.Mock(side_effect=UnexpectedCall("unexpected api call"))):
+        with mock.patch.object(ctd, "fetch_json_url", fetch or mock.Mock(side_effect=UnexpectedCall("unexpected fetch"))):
             with mock.patch.object(sys, "stdout", out):
                 code = ctd.main(argv)
     return code, out.getvalue()
@@ -111,12 +121,14 @@ class ErrorTests(unittest.TestCase):
         self.assertEqual(code, 2)
 
     def test_malformed_sha_is_unknown(self):
-        code, _ = _run(["--repo", REPO, "--sha", "not-a-sha"])
+        code, out = _run(["--repo", REPO, "--sha", "not-a-sha"])
         self.assertEqual(code, 2)
+        self.assertIn("is not a commit sha", out)
 
     def test_malformed_repo_is_unknown(self):
-        code, _ = _run(["--repo", "nonsense", "--sha", SHA])
+        code, out = _run(["--repo", "nonsense", "--sha", SHA])
         self.assertEqual(code, 2)
+        self.assertIn("--repo must be owner/name", out)
 
     def test_no_sha_source_is_unknown(self):
         with self.assertRaises(SystemExit) as ctx:
@@ -151,22 +163,25 @@ class FromUrlTests(unittest.TestCase):
         self.assertEqual(code, 1)
 
     def test_missing_field_is_unknown(self):
-        code, _ = _run(
+        code, out = _run(
             ["--repo", REPO, "--from-url", "https://app.example/version", "--json-field", "commit"],
             fetch=lambda url: {"status": "ok"},
         )
         self.assertEqual(code, 2)
+        self.assertIn("not found in the version endpoint response", out)
 
     def test_health_ok_string_is_not_a_sha(self):
-        code, _ = _run(
+        code, out = _run(
             ["--repo", REPO, "--from-url", "https://app.example/health", "--json-field", "commit"],
             fetch=lambda url: {"commit": "ok"},
         )
         self.assertEqual(code, 2)
+        self.assertIn("does not hold a commit sha", out)
 
     def test_requires_json_field(self):
-        code, _ = _run(["--repo", REPO, "--from-url", "https://app.example/version"], fetch=lambda url: {})
+        code, out = _run(["--repo", REPO, "--from-url", "https://app.example/version"], fetch=lambda url: {})
         self.assertEqual(code, 2)
+        self.assertIn("--from-url requires --json-field", out)
 
     def test_endpoint_unreachable_is_unknown(self):
         def fetch(url):
@@ -179,8 +194,9 @@ class FromUrlTests(unittest.TestCase):
         self.assertEqual(code, 2)
 
     def test_non_http_url_rejected(self):
-        with self.assertRaises(ctd.CheckError):
+        with self.assertRaises(ctd.CheckError) as ctx:
             ctd.fetch_json_url("file:///etc/passwd")
+        self.assertIn("must be an http(s) URL", str(ctx.exception))
 
 
 def _deployments_api(deployments, statuses, compare="behind"):
@@ -282,7 +298,7 @@ class TokenSafetyTests(unittest.TestCase):
             def read(self):
                 return json.dumps({"ok": True}).encode()
 
-        def fake_open(url, headers):
+        def fake_open(url, headers, **kwargs):
             captured.update(headers)
             return FakeResponse()
 
@@ -290,6 +306,124 @@ class TokenSafetyTests(unittest.TestCase):
             with mock.patch.object(ctd, "_open", side_effect=fake_open):
                 self.assertEqual(ctd.api_get("/repos/o/r"), {"ok": True})
         self.assertEqual(captured["Authorization"], "Bearer tok")
+
+
+class HardeningTests(unittest.TestCase):
+    """Behaviours added after lens review. Each fails on the previous code."""
+
+    def test_unexpected_exception_is_unknown_exit_2_without_traceback(self):
+        api = mock.Mock(side_effect=RuntimeError("secret detail that must not leak"))
+        code, out = _run(["--repo", REPO, "--sha", SHA], api=api)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.strip(), "UNKNOWN: could not check (RuntimeError)")
+
+    def test_incomplete_read_is_unknown(self):
+        class Boom:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                raise http.client.IncompleteRead(b"par")
+
+        with mock.patch.object(ctd, "_open", return_value=Boom()):
+            code, out = _run_real_api(["--repo", REPO, "--sha", SHA, "--branch", "main"])
+        self.assertEqual(code, 2)
+        self.assertTrue(out.startswith("UNKNOWN"))
+        self.assertIn("network error", out)
+
+    def test_incomplete_read_from_version_endpoint_is_checkerror(self):
+        with mock.patch.object(ctd, "_open", side_effect=http.client.RemoteDisconnected("gone")):
+            with self.assertRaises(ctd.CheckError):
+                ctd.fetch_json_url("https://app.example/version")
+
+    def test_non_object_deployment_element_is_unknown(self):
+        for bad in (["x"], [None], [7], [[1]]):
+            with self.subTest(bad=bad):
+                api = _deployments_api(bad, {})
+                code, out = _run(FromDeploymentsTests.ARGS, api=api)
+                self.assertEqual(code, 2)
+                self.assertTrue(out.startswith("UNKNOWN"))
+
+    def test_non_object_status_element_is_unknown(self):
+        def api(path):
+            if "/statuses" in path:
+                return ["success"]
+            if "/deployments?" in path:
+                return [{"id": 1, "sha": SHA}]
+            raise AssertionError(path)
+
+        code, _ = _run(FromDeploymentsTests.ARGS, api=api)
+        self.assertEqual(code, 2)
+
+    def test_short_sha_is_rejected(self):
+        for bad in ("abcdef1", "a" * 39, "a" * 41, SHA + "\n" + SHA):
+            with self.subTest(bad=bad):
+                code, out = _run(["--repo", REPO, "--sha", bad])
+                self.assertEqual(code, 2)
+                self.assertIn("is not a commit sha", out)
+
+    def test_short_sha_from_endpoint_is_rejected(self):
+        code, out = _run(
+            ["--repo", REPO, "--from-url", "https://app.example/version", "--json-field", "commit"],
+            fetch=lambda url: {"commit": "abcdef1"},
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("does not hold a commit sha", out)
+
+    def test_api_calls_do_not_follow_redirects_so_the_token_stays_on_github(self):
+        seen = {"target_auth": None, "target_hit": False}
+
+        class Target(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen["target_hit"] = True
+                seen["target_auth"] = self.headers.get("Authorization")
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *a):
+                pass
+
+        target = http.server.HTTPServer(("127.0.0.1", 0), Target)
+
+        class Redirector(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{target.server_port}/stolen")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        origin = http.server.HTTPServer(("127.0.0.1", 0), Redirector)
+        threads = [threading.Thread(target=srv.serve_forever, daemon=True) for srv in (target, origin)]
+        for t in threads:
+            t.start()
+        try:
+            with mock.patch.object(ctd, "API_ROOT", f"http://127.0.0.1:{origin.server_port}"):
+                with mock.patch.dict("os.environ", {"GH_TOKEN": "tok-should-not-travel"}):
+                    with self.assertRaises(ctd.CheckError):
+                        ctd.api_get("/repos/o/r")
+        finally:
+            origin.shutdown()
+            target.shutdown()
+        self.assertFalse(seen["target_hit"], "the redirect was followed")
+        self.assertIsNone(seen["target_auth"])
+
+
+class CaveatTests(unittest.TestCase):
+    def test_help_states_the_as_of_now_limit(self):
+        out = io.StringIO()
+        with mock.patch.object(sys, "stdout", out):
+            with self.assertRaises(SystemExit):
+                ctd.main(["--help"])
+        text = " ".join(out.getvalue().split())
+        self.assertIn("as of NOW", text)
+        self.assertIn("deployed-then-merged from merged-then-deployed", text)
+        self.assertIn("deploy-time guard is the check that binds", text)
 
 
 if __name__ == "__main__":

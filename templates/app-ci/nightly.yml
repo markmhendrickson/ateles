@@ -12,9 +12,11 @@ on:
     tags: ["rc-*"]
     branches: ["release/*"]
 
-# Never cancel a scheduled or release-candidate run midway.
+# Never cancel a scheduled or release-candidate run midway. The sha in the group
+# keeps two different commits on one ref from replacing each other as a pending
+# run; the same commit queued twice just runs in turn.
 concurrency:
-  group: nightly-${{ github.workflow }}-${{ github.ref }}
+  group: nightly-${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 
 permissions:
@@ -30,6 +32,8 @@ jobs:
         suite: [performance, native-store, evals]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false # no step here pushes or fetches with git
 
       # Install dependencies as in ci.yml (with caching), then run the suite.
       # --- Python slot -----------------------------------------------------
@@ -48,8 +52,12 @@ jobs:
       # - run: npm ci
       # - run: npm run test:${{ matrix.suite }}
 
-      - name: Placeholder (delete once a real suite command is added)
-        run: echo "suite ${{ matrix.suite }} - add the command above"
+      # FILL THIS SLOT. It fails on purpose so an unfilled copy of this template
+      # cannot report green. Delete the step once a real suite command is in place.
+      - name: Unfilled slot (fails until replaced)
+        run: |
+          echo "::error::nightly.yml suite ${{ matrix.suite }} has no command yet: add it above, then delete this step."
+          exit 1
 
   nightly-summary:
     if: always()
@@ -61,7 +69,8 @@ jobs:
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          echo "$NEEDS_JSON"
-          if echo "$NEEDS_JSON" | grep -Eq '"result": "(failure|cancelled|skipped)"'; then
+          printf '%s\n' "$NEEDS_JSON"
+          if ! printf '%s' "$NEEDS_JSON" | jq -e 'length > 0 and all(.[]; .result == "success")' >/dev/null; then
+            echo "::error::One or more required jobs did not succeed."
             exit 1
           fi

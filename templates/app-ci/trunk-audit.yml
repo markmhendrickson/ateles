@@ -1,0 +1,56 @@
+# Daily independent audit: is the latest successful production deployment an
+# ancestor of the default branch? Copy to .github/workflows/trunk-audit.yml and
+# copy execution/scripts/check_deployed_on_trunk.py from the ateles repo to
+# scripts/check_deployed_on_trunk.py in this repo.
+#
+# This is the backstop for what the deploy-time guard cannot stop: someone with
+# write access editing the deploy workflow, or a deploy path that skips it. It
+# runs from the default branch's copy of the workflow, reads the GitHub
+# Deployment history, and fails the run on exit 1 (NOT on trunk) AND on exit 2
+# (could not check, which is never a pass). Failed scheduled runs notify the
+# workflow's owners; also point a notification at this workflow.
+#
+# Limit: the audit judges ancestry as of now, so it cannot tell deployed-then-
+# merged from merged-then-deployed. It is a weaker, later check than the
+# deploy-time guard, which is the one that binds.
+#
+# GitHub disables scheduled workflows in a repo with no activity for 60 days;
+# re-enable it (or push a commit) if the audit stops appearing in the run list.
+name: trunk-audit
+
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: trunk-audit
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10 # a hang guard
+    permissions:
+      contents: read
+      deployments: read # list deployments and their statuses
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false # the audit talks to the API, not to git
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The environment name must match DEPLOY_ENV in the deploy workflow.
+      - name: Latest successful production deployment is on trunk
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Any non-zero exit fails the step: 1 = not on trunk, 2 = unknown.
+          python3 scripts/check_deployed_on_trunk.py --repo "$REPO" --from-deployments production
