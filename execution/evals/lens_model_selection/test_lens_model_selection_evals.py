@@ -44,13 +44,30 @@ def test_scenarios_are_unique_and_cover_the_required_contract():
     ('review_prompt_invalid_control', 'no_validation'),
     ('invalid_empty_dry', 'no_validation'),
     ('invalid_empty_compare', 'no_validation'),
-    ('explicit_terra_overrides_class', 'drop_model'),
     ('action_class_resolves_each_comparison_provider', 'drop_action_class'),
 ])
 def test_eval_checks_detect_removed_contract(scenario_id, mutation, tmp_path):
     scenario = BY_ID[scenario_id]
     obs = harness.run_scenario(scenario, tmp_path, mutation=mutation)
     assert harness.check(scenario, obs), 'the eval cannot detect this mutation'
+
+
+def test_model_propagation_mutation_reaches_child_and_restores_green(tmp_path):
+    scenario = BY_ID['explicit_terra_overrides_class']
+    mutated_dir = tmp_path / 'mutated'
+    mutated_dir.mkdir()
+    mutated = harness.run_scenario(scenario, mutated_dir, mutation='drop_model')
+    assert mutated['exit_code'] == 0
+    assert len(mutated['provider_calls']) == 1
+    assert mutated['provider_calls'][0]['model'] is None
+    assert '--model' not in mutated['provider_calls'][0]['argv']
+    assert 'actual provider model argv differs' in harness.check(scenario, mutated)
+
+    restored_dir = tmp_path / 'restored'
+    restored_dir.mkdir()
+    restored = harness.run_scenario(scenario, restored_dir)
+    assert restored['provider_calls'][0]['model'] == 'gpt-5.6-terra'
+    assert harness.check(scenario, restored) == []
 
 
 @pytest.mark.parametrize('scenario_id', ['dispatch_cli_omitted', 'dispatch_cli_explicit'])

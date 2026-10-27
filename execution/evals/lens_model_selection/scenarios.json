@@ -3,7 +3,7 @@
   "scenarios": [
     {
       "id": "omitted_selectors_preserve_default",
-      "why": "Omission retains existing provider-default behavior.",
+      "why": "Omission uses the required PM action policy and provider binding.",
       "args": [
         "--provider",
         "codex"
@@ -12,7 +12,7 @@
         "exit_code": 0,
         "launches": 1,
         "models": [
-          null
+          "gpt-5.6-terra"
         ]
       }
     },
@@ -35,6 +35,7 @@
     },
     {
       "id": "explicit_terra_overrides_class",
+      "lens": "arch",
       "why": "Explicit selection retains precedence over the existing action-class resolver.",
       "args": [
         "--provider",
@@ -54,6 +55,7 @@
     },
     {
       "id": "action_class_resolves_each_comparison_provider",
+      "lens": "arch",
       "why": "Comparison uses the existing binding independently for each provider.",
       "args": [
         "--compare",
@@ -72,7 +74,7 @@
     },
     {
       "id": "omitted_selectors_comparison_preserves_defaults",
-      "why": "Comparison retains default selection for each provider when selectors are omitted.",
+      "why": "Comparison resolves the required PM policy independently for each provider when selectors are omitted.",
       "args": [
         "--compare",
         "codex,cursor"
@@ -81,8 +83,8 @@
         "exit_code": 0,
         "launches": 2,
         "models": [
-          null,
-          null
+          "gpt-5.6-terra",
+          "gpt-5.6-terra-medium"
         ]
       }
     },
@@ -97,12 +99,13 @@
       "expect": {
         "exit_code": 0,
         "launches": 0,
-        "dry_model": null,
+        "dry_model": "gpt-5.6-terra",
         "dispatches": 0
       }
     },
     {
       "id": "dry_run_class",
+      "lens": "arch",
       "why": "The agent sees the same selection in native guarded dry-run output.",
       "args": [
         "--provider",
@@ -120,6 +123,7 @@
     },
     {
       "id": "dry_run_explicit",
+      "lens": "arch",
       "why": "The agent sees the same selection in native guarded dry-run output.",
       "args": [
         "--provider",
@@ -1213,6 +1217,7 @@
     },
     {
       "id": "reader_available_exact_head_positive",
+      "lens": "arch",
       "why": "The matched healthy real reader retains canonical verdict validation after one inert provider effect.",
       "reader_dependency": "available",
       "args": [

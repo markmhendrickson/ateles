@@ -218,7 +218,10 @@ to filter on):
         --lens pm --provider claude \\
         --brief <path-to-lens-brief> --task-entity-id ent_... \\
         [--post] [--dry-run] [--compare claude,codex]
-        [--model MODEL] [--action-class ACTION_CLASS]
+        [--model MODEL] [--action-class lens_review:pm]
+
+Omitting both selectors derives lens_review:<lens> and requires a bound model
+for that class. An explicit --action-class must match the selected lens.
 
 The one command a session runs to MONITOR it — purely from Neotoma, no
 access to this process or its stdout required — via the Neotoma MCP/REST
@@ -259,7 +262,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1929,6 +1932,7 @@ def dry_run_report(
     target: LensTarget,
     *,
     provider: str,
+    admission: harness_router.ProviderAdmission | None = None,
     sandbox: HarnessSandbox,
     task_text: str,
     worktree_path: Path,
@@ -1945,7 +1949,7 @@ def dry_run_report(
     """
     model = validate_model_selector(model)
     # Use the same live tier and vendor-binding resolvers as run_skill.
-    # An explicit model wins; omitting both selectors keeps the provider default.
+    # An explicit model wins; the review entry point resolves its policy class.
     selected_model = model
     selected_tier = None
     model_refusal = None
@@ -1957,6 +1961,18 @@ def dry_run_report(
             )
         except dispatch_role.model_tiering.UnboundTierError as exc:
             model_refusal = str(exc)
+    if admission is not None:
+        selected_model = admission.resolved_model
+        selected_tier = (
+            None if admission.explicit_model_override or not admission.resolved_tier
+            else dispatch_role.model_tiering.ResolvedTier(
+                tier=admission.resolved_tier,
+                source=admission.tier_source,
+                action_class=admission.action_class,
+                escalation_reasons=admission.escalation_reasons,
+            )
+        )
+        model_refusal = None if admission.admitted else admission.reason
     if provider == "codex":
         sandbox_mode = (
             "danger-full-access"
@@ -2018,6 +2034,11 @@ def dry_run_report(
         "model": selected_model,
         "action_class": action_class,
         "tier": selected_tier.tier if selected_tier else None,
+        **({
+            "provider_admission": admission.as_dict(),
+            "resolved_tier": admission.resolved_tier,
+            "resolved_model": admission.resolved_model,
+        } if admission is not None else {}),
         "repo": target.repo,
         "pr": target.pr,
         "head": target.head,
@@ -2559,13 +2580,7 @@ async def run_one(
     model: str | None = None,
     action_class: str | None = None,
 ) -> dict:
-    """Run the lens once on one provider. Returns a JSON-serializable report.
-
-    Refuse an unavailable canonical reader before review preparation or inference.
-    Raises HeadroomExhausted before creating a worktree or dispatching
-    when the provider's configured headroom is exactly 0 — the operator-reset
-    gate named in the task.
-    """
+    """Run one lens on an admitted provider with a bound child model."""
     model = validate_model_selector(model)
     if swarm_dispatch is None:
         reason = (
@@ -2576,7 +2591,55 @@ async def run_one(
             "ok": False, "provider": provider, "reason": reason,
             "refusal_reason": reason, "no_model_call_made": True, "posted": False,
         }
-    check_headroom(provider)
+    canonical_lens = target.lens.strip().lower()
+    if canonical_lens not in dispatch_role.model_tiering.KNOWN_LENSES:
+        reason = f"unknown review lens {target.lens!r}"
+        return {"ok": False, "provider": provider, "reason": reason,
+                "refusal_reason": reason, "no_model_call_made": True, "posted": False}
+    expected_action_class = dispatch_role.model_tiering.lens_review_class(canonical_lens)
+    identity_error = dispatch_role.model_tiering.review_identity_error(
+        target.agent, expected_action_class
+    )
+    if identity_error:
+        return {"ok": False, "provider": provider, "reason": identity_error,
+                "refusal_reason": identity_error, "no_model_call_made": True,
+                "posted": False}
+    if action_class is not None and action_class != expected_action_class:
+        reason = (
+            f"review lens {canonical_lens!r} requires action class "
+            f"{expected_action_class!r}; got {action_class!r}"
+        )
+        return {"ok": False, "provider": provider, "reason": reason,
+                "refusal_reason": reason, "no_model_call_made": True, "posted": False}
+    action_class = expected_action_class
+    admission = harness_router.resolve_provider_admission(
+        provider,
+        action_class=action_class,
+        required_policy=True,
+    )
+    if not admission.admitted:
+        # Preserve the existing operator-reset exception contract for exact
+        # zero headroom, but derive it only after the shared resolver refused.
+        value, source = headroom_resolution().get(
+            provider, (1.0, harness_router.HEADROOM_SOURCE_DEFAULT)
+        )
+        if value <= 0.0 and admission.reason_code in {
+            "policy_refusal",
+            "provider_limit",
+        }:
+            raise HeadroomExhausted(_headroom_refusal(provider, value, source))
+        return {
+            "ok": False,
+            "provider": provider,
+            "reason": admission.reason,
+            "refusal_reason": admission.reason,
+            "provider_admission": admission.as_dict(),
+            "posted": False,
+        }
+    if model is not None:
+        admission = replace(
+            admission, resolved_model=model, explicit_model_override=True
+        )
 
     worktree_path = (
         scratch_root / f"{repo_worktree_name}-wt-{target.lens}-{target.pr}-{provider}"
@@ -2616,6 +2679,7 @@ async def run_one(
             report = dry_run_report(
                 target,
                 provider=provider,
+                admission=admission,
                 sandbox=sandbox,
                 task_text=task_text,
                 worktree_path=worktree.path,
@@ -2695,6 +2759,7 @@ async def run_one(
                 command_wrapper=sandbox.command_wrapper,
                 codex_outer_sandboxed=sandbox.codex_outer_sandbox_probed,
                 local_review=True,
+                provider_admission=admission,
                 expected_role_fingerprint=role_fingerprint,
             )
         except Exception as dispatch_error:
@@ -2785,6 +2850,7 @@ async def run_one(
         report = {
             "ok": check.ok,
             "provider": provider,
+            "provider_admission": admission.as_dict(),
             "lens": target.lens,
             "agent": target.agent,
             "role_entity_id": role_id,
@@ -2992,13 +3058,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--model", default=None, type=_cli_model_selector,
         help="Explicit provider model identifier without whitespace/control characters; "
-        "overrides --action-class tier selection. "
-        "Omit both selectors to retain the provider's existing default.",
+        "overrides the model bound to the review's policy tier. "
+        "Without --model, the matching lens_review:<lens> class requires a bound model.",
     )
     parser.add_argument(
         "--action-class", default=None,
-        help="Resolve a model through the existing live action_policy/vendor_binding, "
-        "e.g. lens_review:arch. --model takes precedence.",
+        help="Policy class must match the selected lens (e.g. lens_review:arch); "
+        "defaults to lens_review:<lens>. --model takes precedence for model selection.",
     )
     parser.add_argument(
         "--provider", choices=list(HARNESSES), help="Single-provider run"
