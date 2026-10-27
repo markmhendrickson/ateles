@@ -125,6 +125,7 @@ def release_store(monkeypatch, tmp_path):
             "entity_type": CHECKPOINT_TYPE,
             "observation_count": 1,
             "last_observation_at": "2026-09-21T00:00:00Z",
+            "entity_version": "v1",
             "snapshot": {
                 "status": "awaiting_operator",
                 "resolved_dispatched": False,
@@ -161,11 +162,22 @@ def release_store(monkeypatch, tmp_path):
     def get(path, params=None):
         return records.get(path.rsplit("/", 1)[-1])
 
-    def correct(entity_id, entity_type, field, value, idempotency_key, **_kwargs):
+    def _bump_version(record):
+        # Each committed write moves the entity version, as Neotoma's does.
+        version = record.get("entity_version")
+        if isinstance(version, str) and version.startswith("v"):
+            record["entity_version"] = f"v{int(version[1:]) + 1}"
+
+    def correct(entity_id, entity_type, field, value, idempotency_key, **kwargs):
         record = records.get(entity_id)
         if record is None or record["entity_type"] != entity_type:
             return False
+        expected = kwargs.get("expected_version")
+        if expected and expected != record.get("entity_version"):
+            # 409 ERR_FIELD_VERSION_CONFLICT: nothing written.
+            return False
         record["snapshot"][field] = value
+        _bump_version(record)
         return True
 
     def fetch_task(task_entity_id):
@@ -181,8 +193,16 @@ def release_store(monkeypatch, tmp_path):
             records[task_entity_id]["snapshot"]["blocked_reason"] = reason
         return True
 
-    def stamp(checkpoint_entity_id, *, handler):
-        records[checkpoint_entity_id]["snapshot"]["resolved_dispatched"] = True
+    def stamp(checkpoint_entity_id, *, handler, expected_version=None):
+        # Models the /correct the real stamp sends: a stale expected_version is
+        # refused (409 ERR_FIELD_VERSION_CONFLICT) and writes nothing; a
+        # committed write bumps the version. The idempotent path is modelled as
+        # returning a non-null snapshot, so it alone never refuses a claim.
+        record = records[checkpoint_entity_id]
+        if expected_version and expected_version != record.get("entity_version"):
+            return False
+        record["snapshot"]["resolved_dispatched"] = True
+        _bump_version(record)
         return True
 
     def close_without_release(checkpoint_entity_id, *, handler, reason):
@@ -908,7 +928,7 @@ async def test_failed_stamp_does_not_dispatch(monkeypatch, release_store):
 
     monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
     monkeypatch.setattr(
-        apis, "stamp_checkpoint_dispatched", lambda checkpoint_id, *, handler: False
+        apis, "stamp_checkpoint_dispatched", lambda checkpoint_id, *, handler, expected_version: False
     )
     monkeypatch.setattr(apis.Notifier, "from_neotoma", lambda: notifier)
 
@@ -919,6 +939,64 @@ async def test_failed_stamp_does_not_dispatch(monkeypatch, release_store):
     assert records[brief_id]["snapshot"]["resolved_dispatched"] is False
     assert "re-dispatched" not in result["action_taken"]
     assert not any("re-dispatch" in message for message in notifier.sent)
+
+
+@pytest.mark.asyncio
+async def test_two_consumers_reading_same_version_release_once(
+    monkeypatch, release_store
+):
+    """Two consumers that read the same checkpoint version: one release only.
+
+    Both reads return the pre-stamp record, and the stamp's idempotent path
+    returns a non-null snapshot both times, so nothing but the version check
+    tells the second consumer it lost. Before the version-checked stamp, both
+    consumers stamped and both dispatched.
+    """
+    records, brief_id, _task_id = release_store
+    records[brief_id]["snapshot"]["status"] = "approved"
+    pre_stamp = json.loads(json.dumps(records[brief_id]))
+    monkeypatch.setattr(apis, "fetch_checkpoint_record", lambda entity_id: pre_stamp)
+    dispatches: list[str] = []
+
+    async def spy_dispatch(entity_id, *args, **kwargs):
+        dispatches.append(entity_id)
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    await apis.handle_checkpoint_brief(brief_id, pre_stamp["snapshot"], _Notifier())
+    await apis.handle_checkpoint_brief(brief_id, pre_stamp["snapshot"], _Notifier())
+
+    assert len(dispatches) == 1
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_without_version_is_not_stamped_or_released(
+    monkeypatch, release_store
+):
+    """No entity_version means no version-checked claim: hold, never release."""
+    records, brief_id, _task_id = release_store
+    records[brief_id]["snapshot"]["status"] = "approved"
+    del records[brief_id]["entity_version"]
+    stamps: list[str] = []
+    dispatches: list[str] = []
+
+    def spy_stamp(checkpoint_id, *, handler, expected_version=None):
+        stamps.append(checkpoint_id)
+        return True
+
+    async def spy_dispatch(entity_id, *args, **kwargs):
+        dispatches.append(entity_id)
+
+    monkeypatch.setattr(apis, "stamp_checkpoint_dispatched", spy_stamp)
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+
+    released = await apis.handle_checkpoint_brief(
+        brief_id, records[brief_id]["snapshot"], _Notifier()
+    )
+
+    assert released is False
+    assert stamps == []
+    assert dispatches == []
 
 
 _CICADA_PR_HEADER = (
@@ -1031,7 +1109,7 @@ async def test_unmaterialized_stamp_never_claims_release(monkeypatch, release_st
     """A 2xx-like True without a read-back is not a replay claim."""
     records, brief_id, task_id = release_store
     monkeypatch.setattr(
-        apis, "stamp_checkpoint_dispatched", lambda checkpoint_id, *, handler: True
+        apis, "stamp_checkpoint_dispatched", lambda checkpoint_id, *, handler, expected_version: True
     )
 
     result = await _resolve(brief_id, "approve")
@@ -1265,7 +1343,9 @@ async def test_failed_close_and_stamp_denial_survives_consumer_restart(
     async def spy_dispatch(*args, **kwargs):
         dispatches.append((args, kwargs))
 
-    def fail_denial_stamp_then_allow_release(checkpoint_id, *, handler):
+    def fail_denial_stamp_then_allow_release(
+        checkpoint_id, *, handler, expected_version
+    ):
         nonlocal stamp_attempts
         stamp_attempts += 1
         if stamp_attempts == 1:

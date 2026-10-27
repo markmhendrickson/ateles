@@ -3143,7 +3143,9 @@ def _deny_checkpoint_release(checkpoint_id: str, *, reason: str) -> None:
     # happened, so use it only on terminalization failure and log the degraded
     # representation loudly. If that write also fails, a host-persistent
     # marker blocks this approval across daemon restarts and consumer processes.
-    if stamp_checkpoint_dispatched(checkpoint_id, handler=DAEMON_NAME):
+    if stamp_checkpoint_dispatched(
+        checkpoint_id, handler=DAEMON_NAME, expected_version=None
+    ):
         log.error(
             f"[{DAEMON_NAME}] checkpoint {checkpoint_id} denial could not be "
             "terminalized; consumed replay claim as a fail-closed fallback"
@@ -3809,6 +3811,10 @@ def _decision_consistent_with_approval(
     )
 
 
+# Per-process claim guard: one lock per checkpoint_brief entity id.
+_checkpoint_locks: dict[str, asyncio.Lock] = {}
+
+
 async def handle_checkpoint_brief(
     entity_id: str,
     snapshot: dict,
@@ -3829,299 +3835,323 @@ async def handle_checkpoint_brief(
     Re-dispatch is also safe because the task skill owns its own idempotency, but
     the stamp avoids spawning the work twice on SSE redelivery.
     """
-    # SSE carries the snapshot from the status correction event. The inline MCP
-    # consumer may already have stamped and dispatched after that event was
-    # emitted, so the event snapshot is stale by construction. Refresh before
-    # the replay guard; failure is unknown and therefore holds.
-    checkpoint_record = fetch_checkpoint_record(entity_id)
-    current_snapshot = _record_snapshot(checkpoint_record)
-    if current_snapshot is None:
-        log.warning(
-            f"[{DAEMON_NAME}] checkpoint_brief {entity_id} could not be refreshed "
-            "— not acting on a potentially stale resolution"
-        )
-        return False
-    snapshot = current_snapshot
+    # Two consumers in this process (the event loop and the MCP server's inline
+    # consumer) can act on the same resolution. Serialize everything up to and
+    # including the stamp per checkpoint; the version-checked stamp is what
+    # closes the race across processes. Dispatch runs outside the lock.
+    async with _checkpoint_locks.setdefault(entity_id, asyncio.Lock()):
+        # SSE carries the snapshot from the status correction event. The inline MCP
+        # consumer may already have stamped and dispatched after that event was
+        # emitted, so the event snapshot is stale by construction. Refresh before
+        # the replay guard; failure is unknown and therefore holds.
+        checkpoint_record = fetch_checkpoint_record(entity_id)
+        current_snapshot = _record_snapshot(checkpoint_record)
+        if current_snapshot is None:
+            log.warning(
+                f"[{DAEMON_NAME}] checkpoint_brief {entity_id} could not be refreshed "
+                "— not acting on a potentially stale resolution"
+            )
+            return False
+        snapshot = current_snapshot
+        # The version of the same read the snapshot came from. The claim stamp is
+        # conditioned on it, so a consumer that read before another's stamp loses.
+        version = checkpoint_record.get("entity_version")
 
-    if _checkpoint_denial_persisted(entity_id):
-        log.critical(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} has a durable denial marker "
-            "— refusing replay"
-        )
-        return False
+        if _checkpoint_denial_persisted(entity_id):
+            log.critical(
+                f"[{DAEMON_NAME}] checkpoint {entity_id} has a durable denial marker "
+                "— refusing replay"
+            )
+            return False
 
-    resolution = read_checkpoint_resolution(snapshot)
-    if resolution is None:
-        log.info(
-            f"[{DAEMON_NAME}] checkpoint_brief {entity_id} still pending "
-            f"(status={snapshot.get('status')!r}) — no action"
-        )
-        return False
+        resolution = read_checkpoint_resolution(snapshot)
+        if resolution is None:
+            log.info(
+                f"[{DAEMON_NAME}] checkpoint_brief {entity_id} still pending "
+                f"(status={snapshot.get('status')!r}) — no action"
+            )
+            return False
 
-    if checkpoint_already_dispatched(snapshot):
-        log.info(
-            f"[{DAEMON_NAME}] checkpoint_brief {entity_id} already dispatched "
-            f"(resolution={resolution}) — no-op on replay"
-        )
-        return False
+        if checkpoint_already_dispatched(snapshot):
+            log.info(
+                f"[{DAEMON_NAME}] checkpoint_brief {entity_id} already dispatched "
+                f"(resolution={resolution}) — no-op on replay"
+            )
+            return False
 
-    task_id = snapshot.get("task_entity_id")
-    if not task_id:
-        log.warning(
-            f"[{DAEMON_NAME}] checkpoint_brief {entity_id} {resolution} but has no "
-            "task_entity_id — cannot act"
-        )
-        return False
+        task_id = snapshot.get("task_entity_id")
+        if not task_id:
+            log.warning(
+                f"[{DAEMON_NAME}] checkpoint_brief {entity_id} {resolution} but has no "
+                "task_entity_id — cannot act"
+            )
+            return False
 
-    title = snapshot.get("title", "(untitled)")
+        title = snapshot.get("title", "(untitled)")
 
-    if resolution == "rejected":
+        if resolution == "rejected":
+            authorization = read_authenticated_checkpoint_authorization(
+                entity_id, checkpoint_record
+            )
+            expected_user_id = (authorization or {}).get("user_id")
+            brief_user_id = read_verified_entity_owner(
+                entity_id, checkpoint_record, expected_user_id=expected_user_id
+            )
+            task_user_id = read_verified_entity_owner(
+                task_id, fetch_task_record(task_id), expected_user_id=expected_user_id
+            )
+            required_approver_sub = str(
+                (authorization or {}).get("required_approver_sub") or ""
+            ).strip()
+            required_approver_jkt = str(
+                (authorization or {}).get("required_approver_jkt") or ""
+            ).strip()
+            authenticated_rejection = read_authenticated_checkpoint_resolution(
+                entity_id,
+                checkpoint_record,
+                required_approver_sub=required_approver_sub,
+                required_approver_jkt=required_approver_jkt,
+                expected_user_id=str(brief_user_id or ""),
+                expected_resolution="rejected",
+            )
+            if (
+                authorization is None
+                or not brief_user_id
+                or not task_user_id
+                or brief_user_id != task_user_id
+                or authenticated_rejection is None
+            ):
+                log.warning(
+                    f"[{DAEMON_NAME}] checkpoint {entity_id} rejection lacks "
+                    "authenticated resolver authority — task remains held"
+                )
+                _deny_checkpoint_release(
+                    entity_id,
+                    reason="rejection lacks authenticated required-resolver authority",
+                )
+                return False
+            if not isinstance(version, str) or not version:
+                log.error(
+                    f"[{DAEMON_NAME}] checkpoint {entity_id} has no entity_version "
+                    "— cannot claim the rejection with a version-checked stamp"
+                )
+                return False
+            if not mark_task_declined(
+                task_id,
+                reason=f"operator rejected checkpoint {entity_id}",
+                handler=DAEMON_NAME,
+            ):
+                return False
+            if not stamp_checkpoint_dispatched(
+                entity_id, handler=DAEMON_NAME, expected_version=version
+            ):
+                return False
+            notifier.send(
+                f"Checkpoint rejected: {title[:70]}\n  task={task_id} declined",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
+            return True
+
+        # approved → fetch the live task before deciding whether the old approval
+        # still authorizes its current action.
+        task_record = fetch_task_record(task_id)
+        task_snapshot = _record_snapshot(task_record)
+        if task_snapshot is None:
+            log.warning(
+                f"[{DAEMON_NAME}] checkpoint {entity_id} approved but task {task_id} "
+                "could not be fetched — not dispatching"
+            )
+            notifier.send(
+                f"Checkpoint approved but task {task_id} unreachable — manual dispatch needed",
+                priority=Priority.WARN,
+                handler=DAEMON_NAME,
+            )
+            return False
+
+        brief_user_id = read_verified_entity_owner(entity_id, checkpoint_record)
+        task_user_id = read_verified_entity_owner(task_id, task_record)
+        if not brief_user_id or not task_user_id or brief_user_id != task_user_id:
+            log.warning(
+                f"[{DAEMON_NAME}] checkpoint {entity_id} and task {task_id} do not have "
+                "matching present tenant provenance — closing without dispatch"
+            )
+            _deny_checkpoint_release(
+                entity_id, reason="missing or mismatched tenant provenance"
+            )
+            return False
+
+        gate_action = str(snapshot.get("gate_action", "")).strip().lower()
+        blast_radius = str(snapshot.get("blast_radius", "")).strip().lower()
+        releasable_actions = {
+            GateAction.CHECKPOINT.value,
+            GateAction.CHECKPOINT_WITH_ALTERNATIVES.value,
+        }
+        assigned_to = _canonical_assignee(task_snapshot.get("assigned_to"))
+        safety_skill = assigned_to
+        if not safety_skill:
+            task_tags = task_snapshot.get("tags", []) or []
+            if isinstance(task_tags, str):
+                import json as _json
+
+                try:
+                    task_tags = _json.loads(task_tags)
+                except (ValueError, TypeError):
+                    task_tags = []
+            safety_skill = _resolve_skill(task_tags, assigned_to=assigned_to)
+
+        current_policy = resolve_policy_for_agent(safety_skill)
+        current_action_type = _resolve_gate_action_type(
+            safety_skill or "", task_snapshot, current_policy
+        ).value
+        if current_action_type == "operator_only":
+            log.warning(
+                f"[{DAEMON_NAME}] checkpoint {entity_id} references operator-only task "
+                f"{task_id} — closing resolution without dispatch"
+            )
+            _deny_checkpoint_release(entity_id, reason="referenced task is operator_only")
+            return False
+
+        # A malformed safety classification is terminally non-releasable even if
+        # the authorization envelope is also absent or stale.  Consume it through
+        # the durable denial path before considering migration or replacement.
+        if gate_action not in releasable_actions:
+            log.info(
+                f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
+                f"gate_action={gate_action!r} — closing resolution without dispatch"
+            )
+            _deny_checkpoint_release(
+                entity_id, reason=f"non-releasable gate_action={gate_action!r}"
+            )
+            return False
+        if blast_radius not in {"low", "high"}:
+            log.info(
+                f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
+                f"blast_radius={blast_radius!r} — closing resolution without dispatch"
+            )
+            _deny_checkpoint_release(
+                entity_id, reason=f"non-releasable blast_radius={blast_radius!r}"
+            )
+            return False
+
         authorization = read_authenticated_checkpoint_authorization(
             entity_id, checkpoint_record
         )
-        expected_user_id = (authorization or {}).get("user_id")
-        brief_user_id = read_verified_entity_owner(
-            entity_id, checkpoint_record, expected_user_id=expected_user_id
+        authorization_bound = authorization is not None
+        if not authorization_bound:
+            _require_fresh_release_authority(
+                entity_id,
+                task_id=task_id,
+                task_snapshot=task_snapshot,
+                notifier=notifier,
+                reason=("checkpoint has no current AAuth-backed authorization observation"),
+            )
+            return False
+
+        auth_action_type = str(authorization.get("action_type") or "").strip().lower()
+        if not current_policy.loaded:
+            _require_fresh_release_authority(
+                entity_id,
+                task_id=task_id,
+                task_snapshot=task_snapshot,
+                notifier=notifier,
+                reason=(
+                    "authoritative execution policy is unavailable; fallback policy "
+                    "cannot release authority"
+                ),
+            )
+            return False
+        # Judge the task on the same confidence the hold used (explicit score, else
+        # the estimate the hold signed in), never on the raw field: that reads 0.0
+        # for an unscored task and made every approved high-blast one unreleasable.
+        release_confidence, release_unscored = _gate_confidence(
+            task_snapshot,
+            skill=safety_skill,
+            action_type=current_action_type,
+            policy=current_policy,
+            bound_confidence=_bound_hold_confidence(authorization),
         )
-        task_user_id = read_verified_entity_owner(
-            task_id, fetch_task_record(task_id), expected_user_id=expected_user_id
+        current_decision = evaluate_gate(
+            confidence=release_confidence,
+            action_type=current_action_type,
+            policy=current_policy,
+            successful_recurrences=_successful_recurrences(task_snapshot),
+            confidence_unscored=release_unscored,
         )
+        exact_authority = (
+            authorization.get("task_entity_id") == task_id
+            and authorization.get("user_id") == brief_user_id == task_user_id
+            and authorization.get("task_revision") == entity_record_digest(task_record)
+            and authorization.get("task_observation_count")
+            == task_record.get("observation_count")
+            and authorization.get("task_last_observation_at")
+            == task_record.get("last_observation_at")
+            and auth_action_type == current_action_type
+            and authorization.get("policy_entity_id") == current_policy.entity_id
+            and authorization.get("policy_revision")
+            == execution_policy_revision(current_policy)
+            and authorization.get("gate_action") == gate_action
+            and authorization.get("blast_radius") == blast_radius
+            and _decision_consistent_with_approval(
+                current_decision, gate_action=gate_action, blast_radius=blast_radius
+            )
+        )
+        if not exact_authority:
+            _require_fresh_release_authority(
+                entity_id,
+                task_id=task_id,
+                task_snapshot=task_snapshot,
+                notifier=notifier,
+                reason="task or execution policy changed after approval",
+            )
+            return False
+
         required_approver_sub = str(
-            (authorization or {}).get("required_approver_sub") or ""
+            authorization.get("required_approver_sub") or ""
         ).strip()
         required_approver_jkt = str(
-            (authorization or {}).get("required_approver_jkt") or ""
+            authorization.get("required_approver_jkt") or ""
         ).strip()
-        authenticated_rejection = read_authenticated_checkpoint_resolution(
+        approval = read_authenticated_checkpoint_resolution(
             entity_id,
             checkpoint_record,
             required_approver_sub=required_approver_sub,
             required_approver_jkt=required_approver_jkt,
-            expected_user_id=str(brief_user_id or ""),
-            expected_resolution="rejected",
+            expected_user_id=brief_user_id,
         )
-        if (
-            authorization is None
-            or not brief_user_id
-            or not task_user_id
-            or brief_user_id != task_user_id
-            or authenticated_rejection is None
+        if approval is None:
+            _require_fresh_release_authority(
+                entity_id,
+                task_id=task_id,
+                task_snapshot=task_snapshot,
+                notifier=notifier,
+                reason=(
+                    "approval attribution is missing, unreadable, untrusted, or "
+                    "does not match the required approver principal"
+                ),
+            )
+            return False
+
+        log.info(
+            f"[{DAEMON_NAME}] checkpoint {entity_id} APPROVED — re-dispatching task "
+            f"{task_id} with gate override"
+        )
+        # The stamp is the existing replay claim. If it does not land, this attempt
+        # owns nothing and must not dispatch; a later consumer delivery may retry.
+        if not isinstance(version, str) or not version:
+            log.error(
+                f"[{DAEMON_NAME}] checkpoint {entity_id} has no entity_version "
+                "— cannot claim the release with a version-checked stamp"
+            )
+            return False
+        if not stamp_checkpoint_dispatched(
+            entity_id, handler=DAEMON_NAME, expected_version=version
         ):
             log.warning(
-                f"[{DAEMON_NAME}] checkpoint {entity_id} rejection lacks "
-                "authenticated resolver authority — task remains held"
-            )
-            _deny_checkpoint_release(
-                entity_id,
-                reason="rejection lacks authenticated required-resolver authority",
+                f"[{DAEMON_NAME}] checkpoint {entity_id} could not be stamped as "
+                "dispatched — not releasing task"
             )
             return False
-        if not mark_task_declined(
-            task_id,
-            reason=f"operator rejected checkpoint {entity_id}",
-            handler=DAEMON_NAME,
-        ):
-            return False
-        if not stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME):
-            return False
-        notifier.send(
-            f"Checkpoint rejected: {title[:70]}\n  task={task_id} declined",
-            priority=Priority.INFO,
-            handler=DAEMON_NAME,
-        )
-        return True
-
-    # approved → fetch the live task before deciding whether the old approval
-    # still authorizes its current action.
-    task_record = fetch_task_record(task_id)
-    task_snapshot = _record_snapshot(task_record)
-    if task_snapshot is None:
-        log.warning(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} approved but task {task_id} "
-            "could not be fetched — not dispatching"
-        )
-        notifier.send(
-            f"Checkpoint approved but task {task_id} unreachable — manual dispatch needed",
-            priority=Priority.WARN,
-            handler=DAEMON_NAME,
-        )
-        return False
-
-    brief_user_id = read_verified_entity_owner(entity_id, checkpoint_record)
-    task_user_id = read_verified_entity_owner(task_id, task_record)
-    if not brief_user_id or not task_user_id or brief_user_id != task_user_id:
-        log.warning(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} and task {task_id} do not have "
-            "matching present tenant provenance — closing without dispatch"
-        )
-        _deny_checkpoint_release(
-            entity_id, reason="missing or mismatched tenant provenance"
-        )
-        return False
-
-    gate_action = str(snapshot.get("gate_action", "")).strip().lower()
-    blast_radius = str(snapshot.get("blast_radius", "")).strip().lower()
-    releasable_actions = {
-        GateAction.CHECKPOINT.value,
-        GateAction.CHECKPOINT_WITH_ALTERNATIVES.value,
-    }
-    assigned_to = _canonical_assignee(task_snapshot.get("assigned_to"))
-    safety_skill = assigned_to
-    if not safety_skill:
-        task_tags = task_snapshot.get("tags", []) or []
-        if isinstance(task_tags, str):
-            import json as _json
-
-            try:
-                task_tags = _json.loads(task_tags)
-            except (ValueError, TypeError):
-                task_tags = []
-        safety_skill = _resolve_skill(task_tags, assigned_to=assigned_to)
-
-    current_policy = resolve_policy_for_agent(safety_skill)
-    current_action_type = _resolve_gate_action_type(
-        safety_skill or "", task_snapshot, current_policy
-    ).value
-    if current_action_type == "operator_only":
-        log.warning(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} references operator-only task "
-            f"{task_id} — closing resolution without dispatch"
-        )
-        _deny_checkpoint_release(entity_id, reason="referenced task is operator_only")
-        return False
-
-    # A malformed safety classification is terminally non-releasable even if
-    # the authorization envelope is also absent or stale.  Consume it through
-    # the durable denial path before considering migration or replacement.
-    if gate_action not in releasable_actions:
-        log.info(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
-            f"gate_action={gate_action!r} — closing resolution without dispatch"
-        )
-        _deny_checkpoint_release(
-            entity_id, reason=f"non-releasable gate_action={gate_action!r}"
-        )
-        return False
-    if blast_radius not in {"low", "high"}:
-        log.info(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} approved with non-releasable "
-            f"blast_radius={blast_radius!r} — closing resolution without dispatch"
-        )
-        _deny_checkpoint_release(
-            entity_id, reason=f"non-releasable blast_radius={blast_radius!r}"
-        )
-        return False
-
-    authorization = read_authenticated_checkpoint_authorization(
-        entity_id, checkpoint_record
-    )
-    authorization_bound = authorization is not None
-    if not authorization_bound:
-        _require_fresh_release_authority(
-            entity_id,
-            task_id=task_id,
-            task_snapshot=task_snapshot,
-            notifier=notifier,
-            reason=("checkpoint has no current AAuth-backed authorization observation"),
-        )
-        return False
-
-    auth_action_type = str(authorization.get("action_type") or "").strip().lower()
-    if not current_policy.loaded:
-        _require_fresh_release_authority(
-            entity_id,
-            task_id=task_id,
-            task_snapshot=task_snapshot,
-            notifier=notifier,
-            reason=(
-                "authoritative execution policy is unavailable; fallback policy "
-                "cannot release authority"
-            ),
-        )
-        return False
-    # Judge the task on the same confidence the hold used (explicit score, else
-    # the estimate the hold signed in), never on the raw field: that reads 0.0
-    # for an unscored task and made every approved high-blast one unreleasable.
-    release_confidence, release_unscored = _gate_confidence(
-        task_snapshot,
-        skill=safety_skill,
-        action_type=current_action_type,
-        policy=current_policy,
-        bound_confidence=_bound_hold_confidence(authorization),
-    )
-    current_decision = evaluate_gate(
-        confidence=release_confidence,
-        action_type=current_action_type,
-        policy=current_policy,
-        successful_recurrences=_successful_recurrences(task_snapshot),
-        confidence_unscored=release_unscored,
-    )
-    exact_authority = (
-        authorization.get("task_entity_id") == task_id
-        and authorization.get("user_id") == brief_user_id == task_user_id
-        and authorization.get("task_revision") == entity_record_digest(task_record)
-        and authorization.get("task_observation_count")
-        == task_record.get("observation_count")
-        and authorization.get("task_last_observation_at")
-        == task_record.get("last_observation_at")
-        and auth_action_type == current_action_type
-        and authorization.get("policy_entity_id") == current_policy.entity_id
-        and authorization.get("policy_revision")
-        == execution_policy_revision(current_policy)
-        and authorization.get("gate_action") == gate_action
-        and authorization.get("blast_radius") == blast_radius
-        and _decision_consistent_with_approval(
-            current_decision, gate_action=gate_action, blast_radius=blast_radius
-        )
-    )
-    if not exact_authority:
-        _require_fresh_release_authority(
-            entity_id,
-            task_id=task_id,
-            task_snapshot=task_snapshot,
-            notifier=notifier,
-            reason="task or execution policy changed after approval",
-        )
-        return False
-
-    required_approver_sub = str(
-        authorization.get("required_approver_sub") or ""
-    ).strip()
-    required_approver_jkt = str(
-        authorization.get("required_approver_jkt") or ""
-    ).strip()
-    approval = read_authenticated_checkpoint_resolution(
-        entity_id,
-        checkpoint_record,
-        required_approver_sub=required_approver_sub,
-        required_approver_jkt=required_approver_jkt,
-        expected_user_id=brief_user_id,
-    )
-    if approval is None:
-        _require_fresh_release_authority(
-            entity_id,
-            task_id=task_id,
-            task_snapshot=task_snapshot,
-            notifier=notifier,
-            reason=(
-                "approval attribution is missing, unreadable, untrusted, or "
-                "does not match the required approver principal"
-            ),
-        )
-        return False
-
-    log.info(
-        f"[{DAEMON_NAME}] checkpoint {entity_id} APPROVED — re-dispatching task "
-        f"{task_id} with gate override"
-    )
-    # The stamp is the existing replay claim. If it does not land, this attempt
-    # owns nothing and must not dispatch; a later consumer delivery may retry.
-    if not stamp_checkpoint_dispatched(entity_id, handler=DAEMON_NAME):
-        log.warning(
-            f"[{DAEMON_NAME}] checkpoint {entity_id} could not be stamped as "
-            "dispatched — not releasing task"
-        )
-        return False
     await dispatch_task(
         task_id,
         task_snapshot,

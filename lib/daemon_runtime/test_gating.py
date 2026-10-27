@@ -865,7 +865,49 @@ def test_checkpoint_stamp_requires_materialized_readback(monkeypatch):
         },
     )
 
-    assert stamp_checkpoint_dispatched("ent_cp", handler="apis") is False
+    assert stamp_checkpoint_dispatched("ent_cp", handler="apis", expected_version=None) is False
+
+
+def test_checkpoint_stamp_sends_expected_version_and_loses_on_conflict(monkeypatch):
+    """A version-checked stamp sends the version and loses a 409 conflict."""
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    bodies: list[dict] = []
+
+    class _Conflict:
+        status_code = 409
+
+        def raise_for_status(self):
+            raise AssertionError("a version conflict must not be raised as an error")
+
+        def json(self):
+            return {"error_code": "ERR_FIELD_VERSION_CONFLICT"}
+
+    def post(url, headers=None, json=None, timeout=None):
+        bodies.append(json)
+        return _Conflict()
+
+    monkeypatch.setattr(gating_module.httpx, "post", post)
+    monkeypatch.setattr(
+        gating_module,
+        "_fetch_entity",
+        lambda entity_id: {
+            "entity_type": "checkpoint_" + "brief",
+            "snapshot": {"resolved_dispatched": True},
+        },
+    )
+
+    assert (
+        stamp_checkpoint_dispatched("ent_cp", handler="apis", expected_version="v7")
+        is False
+    )
+    assert bodies[0]["expected_version"] == "v7"
+
+    bodies.clear()
+    monkeypatch.setattr(
+        gating_module.httpx, "post", lambda url, **kwargs: bodies.append(kwargs["json"])
+    )
+    stamp_checkpoint_dispatched("ent_cp", handler="apis", expected_version=None)
+    assert "expected_version" not in bodies[0]
 
 
 def test_checkpoint_stamp_duplicate_caller_does_not_own_claim(monkeypatch):
@@ -892,7 +934,7 @@ def test_checkpoint_stamp_duplicate_caller_does_not_own_claim(monkeypatch):
         },
     )
 
-    assert stamp_checkpoint_dispatched("ent_cp", handler="apis") is False
+    assert stamp_checkpoint_dispatched("ent_cp", handler="apis", expected_version=None) is False
 
 
 @pytest.mark.parametrize(

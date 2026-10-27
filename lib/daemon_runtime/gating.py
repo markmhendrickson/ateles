@@ -1499,12 +1499,21 @@ def checkpoint_already_dispatched(snapshot: dict) -> bool:
     return val is True or str(val).strip().lower() in {"true", "1", "yes"}
 
 
-def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> bool:
+def stamp_checkpoint_dispatched(
+    checkpoint_entity_id: str, *, handler: str, expected_version: str | None
+) -> bool:
     """
     Claim a checkpoint_brief resolution with `resolved_dispatched: true` once
     the consumer has decided it can act, so SSE replays are no-ops. The caller
     must not dispatch if this write fails. Best-effort; logs and returns False
     on failure.
+
+    `expected_version` is the brief's `entity_version` from the read the caller
+    decided on. The write is then version-checked: if another consumer stamped
+    first, Neotoma refuses it with 409 ERR_FIELD_VERSION_CONFLICT and this
+    returns False, so only one consumer can acquire the claim. None sends the
+    unconditional write, which is for the deny fallback only: it consumes the
+    claim without releasing anything.
     """
     if not NEOTOMA_BEARER_TOKEN:
         log.warning("[gating] no bearer token — cannot stamp checkpoint dispatched")
@@ -1516,6 +1525,8 @@ def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> b
         "value": True,
         "idempotency_key": f"checkpoint-dispatched-{handler}-{checkpoint_entity_id}",
     }
+    if isinstance(expected_version, str) and expected_version:
+        body["expected_version"] = expected_version
     try:
         resp = httpx.post(
             f"{NEOTOMA_BASE_URL}/correct",
@@ -1523,6 +1534,17 @@ def stamp_checkpoint_dispatched(checkpoint_entity_id: str, *, handler: str) -> b
             json=body,
             timeout=15,
         )
+        if "expected_version" in body and resp.status_code == 409:
+            try:
+                code = (resp.json() or {}).get("error_code")
+            except ValueError:
+                code = None
+            if code == "ERR_FIELD_VERSION_CONFLICT":
+                log.info(
+                    "[gating] checkpoint %s changed since it was read — claim not acquired",
+                    checkpoint_entity_id,
+                )
+                return False
         resp.raise_for_status()
         response_body = resp.json()
         if not isinstance(response_body, dict) or response_body.get("snapshot") is None:

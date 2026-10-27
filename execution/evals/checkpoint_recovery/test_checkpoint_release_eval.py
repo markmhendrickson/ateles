@@ -84,6 +84,7 @@ def test_mcp_approval_of_a_recovered_checkpoint_releases_the_task_exactly_once(
 ):
     checkpoints = recover(world, monkeypatch, capsys)
     cp = checkpoints["ent_task_held_plain"]
+    stale_version = world.record(cp)["entity_version"]
 
     result = asyncio.run(mcp_resolve(world, cp, "approve"))
 
@@ -91,6 +92,26 @@ def test_mcp_approval_of_a_recovered_checkpoint_releases_the_task_exactly_once(
     assert world.dispatches.calls == [("ent_task_held_plain", "approved", True)]
     assert task_fields(world, "ent_task_held_plain")["status"] == "routed"
     assert task_fields(world, "ent_task_held_plain")["blocked_reason"] == ""
+    assert world.entities[cp]["fields"]["resolved_dispatched"] is True
+
+    # A claimant holding the pre-resolution version cannot undo the release.
+    writes = list(world.write_log)
+    current_version = world.record(cp)["entity_version"]
+    assert current_version != stale_version
+    conflict = world.post(
+        "https://neotoma.test/correct",
+        json={
+            "entity_id": cp,
+            "field": "resolved_dispatched",
+            "value": False,
+            "expected_version": stale_version,
+            "idempotency_key": "stale-checkpoint-release",
+        },
+    )
+    assert conflict.status_code == 409
+    assert conflict.json() == {"error_code": "ERR_FIELD_VERSION_CONFLICT"}
+    assert world.write_log == writes
+    assert world.record(cp)["entity_version"] == current_version
     assert world.entities[cp]["fields"]["resolved_dispatched"] is True
 
     # Repeated delivery, on every surface, cannot release it again.
