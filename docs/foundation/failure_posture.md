@@ -287,6 +287,37 @@ is that its judgement is independent of the thing it watches, and a detector tha
 an opinion and a hand on the lever. Remediation is an action, taken by a principal through the gate, on the
 detector's report.
 
+## Approved bounded native bootstrap capsule-loss design (uninstalled)
+
+For an isolated native first-flow deployment, every native-capable startup and reader pool must read a
+protected admission for the *exact* instance generation and database binding from the deployment
+custodian's existing configuration lifecycle, independently of `creation.json`, `commit.json`, and
+`admission.json`. The custodian's admission advances monotonically from positively established
+`legacy_only` to `native_required` with a capsule reference. Runtime, graph owner, restore, and ordinary
+configuration writers cannot roll it back or substitute another generation. `legacy_only` is valid only
+for a namespace positively known never to have been native-admitted; file absence cannot establish it.
+The controller admission grants no requester or service capability. Original rows and the complete
+capsule remain the evidence for native origin.
+
+With `native_required`, missing, unreadable, malformed, or mismatched admission or capsule state
+refuses ordinary and native serving except metadata-only health. This includes all-three-file loss,
+partial loss, failed mount, stale manifest, copied database or changed inode, reader-pool mismatch, and
+controller/capsule disagreement. An absent, unreadable, or ambiguous controller admission also refuses
+serving on a native-capable deployment. A compatible upgrade preserves the first runtime pin and checks
+the separately permitted current build. The custodian must refuse a downgrade to a binary that cannot
+understand the admitted capsule. Restore or relocation requires a separately admitted cutover preserving
+original history and advancing the same protected lifecycle. If independent monotone custody cannot be
+established, no legacy inference from missing files is available. This costs availability.
+
+This replaces the proposed R3-C1 branch that treated loss of all capsule files as ordinary legacy
+serving. It is a proposed deployment requirement for owning architecture and security review, not an installed
+controller, schema, grant, or trust root. A flag stored with the capsule cannot survive loss of that
+mount; a graph-owner-writable flag cannot attest to original creation. The deployment custodian remains
+in the proposed trusted computing base. Production acceptance of that custodian and the restore posture
+is a separate operator trust and availability choice before installation. Tests must show refusal after
+all-file and partial loss, admission rollback, copied-file binding, reader mismatch, unsupported driver
+and controller downgrade, and must show a compatible upgrade continues under the original pin.
+
 ## Repeated lapse raises a checkpoint
 
 A lease that lapses is not returned by anything; the task is simply claimable again (`work_model.md`).

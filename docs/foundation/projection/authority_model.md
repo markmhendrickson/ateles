@@ -5,7 +5,7 @@
 
 Every rule `authority_model.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`authority_model.md`](../authority_model.md) and are not repeated here (decision 66).
 
-28 rules.
+32 rules.
 
 ## [The tuple](../authority_model.md#the-tuple)
 
@@ -58,9 +58,13 @@ Every rule `authority_model.md` owns, one entry each: the rule's own statement f
 
 ## [What the credential binding carries, and what a check reads to resolve a credential to a principal](../authority_model.md#what-the-credential-binding-carries-and-what-a-check-reads-to-resolve-a-credential-to-a-principal)
 
-- **AU-22** — resolver-outcome table, row 1: `Permit` (resolved) — at least one live (unended, unexpired) `principal_binding` matches the presented `credential_kind` + `credential_value` (+ `credential_issuer` when required), and every match targets the same principal *[M (decision 101; no resolver exists yet in this checkout, so this row is red until one is built — the operator's 2026-09-18 ruling on ateles#925 requires the row to exist and be able to fail, not to pass)]*
+- **AU-22** — resolver-outcome table, row 1: `Permit` (resolved) — at least one live (unended, unexpired) presentable `principal_binding` matches the presented non-`acts_as` `credential_kind` + `credential_value` (+ `credential_issuer` when required), and every match targets the same principal *[M (decision 101; no resolver exists yet in this checkout, so this row is red until one is built — the operator's 2026-09-18 ruling on ateles#925 requires the row to exist and be able to fail, not to pass)]*
 - **AU-23** — the same table, row 2: `Deny` (no binding) — no matching edge for the presented key; recorded as unattributed, never defaulted to the operator *[M (same red-by-design status as AU-22)]*
 - **AU-24** — the same table, row 3: `Deny` (expired-only) — matching edges exist but all are ended or `now >= expires_at`; distinct from no-binding *[M (same red-by-design status as AU-22)]*
-- **AU-25** — the same table, row 4: `Indeterminate` (binding source unreadable/partial) — the relationship store is unreachable, timed out, or the read is incomplete; the enforcement point treats it as `Deny` and the third value is kept in diagnostics rather than coerced to a plain `Deny` in the recorded decision *[M (same red-by-design status as AU-22)]*
+- **AU-25** — the same table, row 4: `Indeterminate` (binding source unreadable/partial) — the relationship store is unreachable, timed out, or the read is incomplete; under proposed `principal-binding-v2`, a live secret-bearing candidate with missing, unknown or unavailable `verifier_key_version` is also indeterminate; enforcement denies while retaining the third value in diagnostics *[M (decision 101 red by design; verifier version branch proposed and uninstalled)]*
 - **AU-26** — the same table, row 5: `Deny` (ambiguous/conflicting) — two or more live matching edges target different principals; fail closed, never pick the first edge *[M (same red-by-design status as AU-22)]*
 - **AU-27** — the same table, row 6: `Deny` (malformed presentation) — the presented credential is missing a required key part (`credential_kind` / `credential_value` / issuer when the kind requires one), or the kind is unrecognized *[M (same red-by-design status as AU-22)]*
+- **AU-29** — (ruled decisions 107–109): `acts_as` is traversal-only agent → operator exactly, carries only its kind, and agent → agent authority uses `delegation_edge` *[M — removing presentation-kind exclusion, either endpoint check, or traversal-field absence turns this row red; storage/API strategy remains uninstalled]*
+- **AU-30** — proposed `principal-binding-v2` secret-bearing verifier version, *[M, proposed and uninstalled; remove each version validation or readback guard to make its effect test red]*
+- **AU-31** — approved bounded ordinary `acts_as` writer/source design at the shared sink, same authority section *[M, proposed and uninstalled; deleting the current-writer/source equality guard makes every negative entrance red]*
+- **AU-32** — post-resolution acts-as traversal: a complete current read with exactly one valid A→operator edge yields interest only even with properly ended history; zero current, multiple current identities, malformed current, and incomplete current read refuse under their stated `Deny` or retained `Indeterminate`; ended-only diagnosis needs separate admitted history inspection *[M — design row; runtime effect and cross-surface tests follow separately admitted resolver/contract work, not this source proposal]*

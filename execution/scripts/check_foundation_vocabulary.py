@@ -126,6 +126,7 @@ UNDEFINED_WORD_THRESHOLD = 150
 ALLOWLIST_WORDS = frozenset(
     """
     that what with never from which this every rather than would nothing already because written
+    those else
     where does through before against above other into without both after below over must they
     itself there says once here about when stated section naming
     binding channel effect recorded delivery rules level source
@@ -149,6 +150,8 @@ ALLOWLIST_WORDS = frozenset(
     fields surface their then half thing later different stays reaches refused refuses stored
     request answer defect confirmed release
     absent accepted added applied classes data entities foundation like place target draft next mark part
+    acts admitted shared writer
+    changed fails lands current ordinary
     """.split()
 )
 # `fields` tipped the advisory bound on ateles#899 (decision-93 ruling prose merged with main);
@@ -158,8 +161,14 @@ ALLOWLIST_WORDS = frozenset(
 # conditioned-payment ruling's prose, decision 144), as the plain verb and adjective they are.
 # `absent` through `target` crossed it with the application-on-an-instance pass (decisions 145 to 157, which
 # added a document and sections of the same register), as ordinary English that carries no bound sense.
+# `acts`, `admitted`, `shared`, and `writer` crossed the advisory threshold when the first-flow
+# registry contract was integrated with main. They describe ordinary actions or participants; the
+# contract's bound terms remain registration, principal, and record-owned write qualification.
 # `draft` and `next` crossed it with the review fixes to that pass, on the same ground.
 # `mark` and `part` crossed it with the instance-owner section, on the same ground.
+# `those` and `else` are function words; `changed`, `fails`, and `lands` are ordinary
+# inflected verbs. `current` and `ordinary` are descriptive adjectives, not bound terms.
+# Their base nouns (`change`, `failure`) remain candidates for a human to assess.
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z']*")
 _TESTID_ABBREVIATIONS = frozenset(
