@@ -22,8 +22,8 @@ or denies a write. It sits on the money-touching MCP path, so it only:
 
 Classification mirrors the Claude Code hook (stop_finalizer.py):
   - no domain writes            -> exempt   (grace path)
-  - domain writes + plan + turns -> integral
-  - domain writes + (no plan OR no turns) -> violated
+  - domain writes + plan + conversation capture -> integral
+  - domain writes + (no plan OR no conversation capture) -> violated
 
 Fail-open everywhere: a missing bearer token, an unreachable Neotoma, or any
 unexpected error is logged to stderr and swallowed — it must never raise into

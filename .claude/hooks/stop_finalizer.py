@@ -3,17 +3,24 @@
 
 Analogous to the global ~/.claude git stop-hook: it inspects the finished
 session and BLOCKS a clean stop only when it can POSITIVELY determine the
-session is write-bearing but non-integral (no bound plan, or zero stored
-turns). Everything else is allowed through:
+session is write-bearing but non-integral (no bound plan or task, or no
+conversation capture at all). Everything else is allowed through:
 
-  - no-op sessions (no domain writes)      -> exempt  (grace path, §6)
-  - write-bearing + plan + turns           -> integral
-  - write-bearing + (no plan OR no turns)  -> violated -> BLOCK
+  - no-op sessions (no domain writes)                  -> exempt  (grace path, §6)
+  - write-bearing + plan/task + conversation capture   -> integral
+  - write-bearing + (no plan/task OR no capture)       -> violated -> BLOCK
+
+"Conversation capture" follows the operator ruling of 2026-10-27 (agent_policy
+ent_cc109b186805de3d5e141eca): write to Neotoma per state change, not per turn.
+A state-changing turn stores its result with its conversation capture in the
+same turn; a turn that changed nothing writes nothing. So the test is that the
+transcript shows at least one conversation / conversation_message /
+agent_message store, never a stored row for every turn.
 
 Rollout posture (§6): default is WARN — emit the audit + a stderr notice but
 exit 0. Set ATELES_SESSION_INTEGRITY_ENFORCE=1 to flip to BLOCK mode, where a
 violation prevents a clean stop so the agent is forced to bind a plan / store
-its turns before exiting. Either way a harness_event audit row is emitted.
+its conversation capture before exiting. Either way a harness_event audit row is emitted.
 
 Fail-open everywhere: a parse error, missing transcript, or emission failure
 never blocks.
@@ -29,7 +36,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _session_integrity import (  # noqa: E402
+# load_state is no longer called here but stays importable: tests patch sf.load_state.
+from _session_integrity import (  # noqa: E402, F401
     read_hook_input, load_state, scan_transcript, emit_harness_event, log,
     neotoma_credentials, missing_credentials_warning_text,
     credentials_warning_already_delivered, mark_credentials_warning_delivered,
@@ -48,10 +56,9 @@ def main() -> int:
 
     transcript = ev.get("transcript_path")
     summary = scan_transcript(transcript)
-    state = load_state(session_id)
-
-    # Merge the cheap counter signal with the transcript scan.
-    turns = max(int(summary.get("turns", 0)), int(state.get("turn_count", 0)))
+    # Per-state-change capture (ruling 2026-10-27): the session recorded its
+    # conversation alongside the writes that changed state. Not a per-turn count.
+    captured_conversation = bool(summary.get("captured_conversation"))
     wrote_domain = bool(summary.get("wrote_domain"))
     # Plan binding must be EVIDENCED by the transcript (an actual plan touch /
     # link), not merely the SessionStart default intent — otherwise the
@@ -66,7 +73,7 @@ def main() -> int:
 
     if not wrote_domain:
         status = "exempt"  # grace path: pure read/no-op session
-    elif bound and turns > 0:
+    elif bound and captured_conversation:
         status = "integral"
     else:
         status = "violated"
@@ -105,7 +112,7 @@ def main() -> int:
     emit_harness_event(session_id, summary, status, suppress_stderr_warning=notice_pending)
 
     # /end convergence (task-spine plan, task #3): a substantive session that
-    # stored no learning artifact is nudged to run /end (which captures turns +
+    # stored no learning artifact is nudged to run /end (which captures the conversation +
     # learnings and finalizes the plan). Soft by design — encouraged, not blocked,
     # so it applies uniformly to HITL and spawned autonomous agents (both hit this
     # same Stop hook) without forcing /end on every trivial write.
@@ -123,14 +130,18 @@ def main() -> int:
     reasons = []
     if not bound:
         reasons.append("no plan OR task link (conversation not PART_OF any plan or task)")
-    if turns == 0:
-        reasons.append("no stored turns (conversation_message/agent_message rows missing)")
+    if not captured_conversation:
+        reasons.append(
+            "no conversation capture (no conversation/conversation_message/"
+            "agent_message store alongside the state-changing writes)"
+        )
     detail = (
         "Session integrity violation: this session made domain writes but has "
         + " and ".join(reasons)
-        + ". Per docs/session_integrity.md, bind the conversation to a plan "
-        "(default ent_99ace4dd6673aa36ed08b1fe) OR a task, store the turns, and "
-        "run /end to finalize before stopping."
+        + ". Per docs/session_integrity.md, bind the conversation to the plan "
+        "for this workstream OR a task, record the conversation capture for the "
+        "turns that changed state (per state change, not per turn), and run "
+        "/end to finalize before stopping."
     )
 
     if not ENFORCE:
