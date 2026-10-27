@@ -269,27 +269,48 @@ def usage_reading(provider: str, *, now_wall: float | None = None) -> UsageReadi
             provider, READING_FRESH, _wall_from_iso(entry.get("observed_at")), None,
             max_age, f"exhaustion recorded until {render_wall(exhausted_until)}",
         )
-    probe = entry.get("probe")
-    observed_values = [
-        _wall_from_iso(entry.get("observed_at")),
-        _wall_from_iso(probe.get("observed_at")) if isinstance(probe, dict) else None,
-    ]
-    observed_known = [value for value in observed_values if value is not None]
-    if not observed_known:
+    windows = entry.get("windows")
+    has_windows = isinstance(windows, list) and bool(windows)
+    probe = entry.get("probe") if isinstance(entry.get("probe"), dict) else None
+    entry_observed = _wall_from_iso(entry.get("observed_at"))
+    probe_observed = _wall_from_iso(probe.get("observed_at")) if probe else None
+    # The SAME predicate live_headroom applies. With windows, the windows' own
+    # observation time decides: a refresh probe that FAILED later writes a newer
+    # probe time beside the old windows, and must not make those windows current
+    # (that is the 2026-10-27 shape: stale since the 21st, probe failing since).
+    # Only an entry with no windows is judged by its probe.
+    observed_at = (
+        entry_observed if has_windows or probe_observed is None else probe_observed
+    )
+    if observed_at is None:
         return UsageReading(
             provider, READING_NONE, None, None, max_age, "no valid observed_at"
         )
-    observed_at = max(observed_known)
     age = max(0.0, moment - observed_at)
+    if not has_windows and provider in WEEKLY_PACED_PROVIDERS:
+        # live_headroom takes no opinion here either: a bare availability
+        # observation is not budget evidence for a provider paced weekly.
+        return UsageReading(
+            provider, READING_UNKNOWN, observed_at, age, max_age,
+            f"no usage windows recorded for {provider}; a capacity observation at "
+            f"{render_wall(observed_at)} does not say how much weekly budget is left",
+        )
+    if not has_windows and probe is not None and probe.get("status") == "unknown":
+        # A current observation that capacity could not be read is not a reading.
+        detail = str(probe.get("detail") or "no detail")
+        return UsageReading(
+            provider, READING_UNKNOWN, observed_at, age, max_age,
+            f"the capacity probe at {render_wall(observed_at)} could not read "
+            f"usage: {detail}",
+        )
     if age <= max_age:
         return UsageReading(
             provider, READING_FRESH, observed_at, age, max_age,
             f"observed {render_wall(observed_at)}",
         )
-    windows = entry.get("windows")
     resets = (
         [_wall_from_iso(w.get("resets_at")) for w in windows if isinstance(w, dict)]
-        if isinstance(windows, list) and windows else []
+        if has_windows else []
     )
     if resets and all(r is not None and r <= moment for r in resets):
         return UsageReading(

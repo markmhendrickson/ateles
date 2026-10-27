@@ -100,7 +100,9 @@ def _cooling_view(provider: str) -> dict[str, object] | None:
     }
 
 
-def _gate_view(provider: str, headroom: float) -> dict[str, object]:
+def _gate_view(
+    provider: str, headroom: float, *, headroom_unknown: bool = False
+) -> dict[str, object]:
     """Snapshot age, ceiling, pace line and the dispatch verdict for one provider."""
     gate = harness_router.usage_gate(provider)
     if gate is None:
@@ -115,7 +117,12 @@ def _gate_view(provider: str, headroom: float) -> dict[str, object]:
             "summary": (
                 f"{provider}: not usage-gated (gate off, or no automatic live "
                 f"source); frontier dispatch {'ALLOWED' if allowed else 'REFUSED'} "
-                f"on headroom {headroom:.2f} and cooling alone"
+                + (
+                    f"on UNKNOWN headroom (stale reading; the neutral {headroom:.2f} "
+                    "is used for selection, not measured) and cooling alone"
+                    if headroom_unknown
+                    else f"on headroom {headroom:.2f} and cooling alone"
+                )
             ),
         }
     view: dict[str, object] = {
@@ -173,7 +180,10 @@ def _provider_view(
         },
         "cooling": _cooling_view(provider),
         "windows": [] if unknown else windows,
-        "usage_gate": _gate_view(provider, values[provider]),
+        "usage_gate": _gate_view(
+            provider, values[provider],
+            headroom_unknown=source == harness_router.HEADROOM_SOURCE_UNKNOWN,
+        ),
     }
     if unknown:
         row["headroom_used_for_selection"] = headroom

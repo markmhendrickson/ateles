@@ -10,7 +10,7 @@ raises the alert:
 * ``report_outage`` sends one operator notification per outage, through the
   existing ``lib.notify.Notifier``'s repeat-condition dedupe: the first call
   delivers, every later call for the same open outage is suppressed, and
-  ``clear_outage`` (called when a provider next works) re-arms it, so an outage
+  ``clear_outage`` (called when a provider next completes work) re-arms it, so an outage
   that recurs after a recovery is reported again and a burst of failing
   dispatches is reported once.
 * A wait that ends by itself at a stated time (a cooling window, the weekly
@@ -43,15 +43,31 @@ def outage_message(reasons: Mapping[str, str]) -> str:
     return f"no subscription-backed harness provider has usable headroom — {listed}"
 
 
+def outage_notification(reasons: Mapping[str, str]) -> str:
+    """The operator notification: one provider per line, the runbook last."""
+    lines = [
+        "Dispatch is stopped: no subscription-backed harness provider can run.",
+        *(f"- {name}: {reason}" for name, reason in reasons.items()),
+        "What each reason means and what to run: "
+        "docs/runbooks/harness-headroom-restore.md, section 'A stale reading is "
+        "unknown, and an outage is reported once'. Sent once per outage; it "
+        "repeats only after a provider has completed work and then failed again.",
+    ]
+    return "\n".join(lines)
+
+
 def is_self_clearing(
     providers: Collection[str], *, fly_bound: Collection[str] = ()
 ) -> bool:
     """True when EVERY listed provider is waiting on a time that ends the wait.
 
     That is a live cooling window (a stated reset) or the weekly pace line
-    (``returns_at``). A stale, missing, malformed or unknown reading, an
-    exhausted headroom, a missing binary or a failed login does not clear by
-    itself, so an outage containing one is operator-actionable.
+    (``returns_at``). Everything else is treated as operator-actionable and
+    pages: a stale, missing, malformed or unknown reading, a missing binary, a
+    failed login, and also an exhausted headroom, which does end at its stated
+    reset but whose cause the operator may want to know about and which the
+    dispatcher cannot distinguish from a hand-set zero. Erring toward paging is
+    the safe direction.
     """
     if not providers:
         return False
@@ -79,12 +95,7 @@ def report_outage(notifier, reasons: Mapping[str, str]) -> bool:
     try:
         from lib.notify import Priority
 
-        message = (
-            "Dispatch is stopped: "
-            f"{outage_message(reasons)}. "
-            "Sent once per outage; it repeats only after a provider has worked "
-            "again and then failed again."
-        )
+        message = outage_notification(reasons)
         return bool(
             notifier.send(
                 message,

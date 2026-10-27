@@ -407,3 +407,207 @@ def test_the_cursor_home_is_not_given_a_credential(tmp_path, monkeypatch):
         if p.is_file() and "operator-login-state-sentinel" in p.read_text(errors="ignore")
     ]
     assert leaked == []
+
+
+# ── round 1 review: the incident's own shape, and the branches it named ----------
+
+
+def _stale_then_failing_probe(provider="claude"):
+    """Stale since day N, then every refresh probe fails: the 2026-10-27 state."""
+    _record(provider, age_seconds=6 * 24 * 3600.0, used=97.0)
+    harness_router.record_probe_unknown(
+        provider, source="claude_rate_limit_event", detail="Not logged in",
+        observed_at=time.time(),
+    )
+
+
+def test_a_failed_refresh_probe_does_not_make_stale_windows_current():
+    """Red on the first head: the probe's NEW time made the six-day-old windows fresh."""
+    _stale_then_failing_probe()
+
+    reading = harness_router.usage_reading("claude")
+
+    assert reading.state == harness_router.READING_UNKNOWN
+    assert harness_router.live_headroom("claude") is None  # the two agree
+    _value, source = harness_router.headroom_resolution()["claude"]
+    assert source == harness_router.HEADROOM_SOURCE_UNKNOWN
+
+
+def test_show_still_withholds_the_windows_when_the_probe_is_failing(capsys):
+    import harness_usage
+
+    _stale_then_failing_probe()
+    assert harness_usage.main(["show"]) == 0
+    row = json.loads(capsys.readouterr().out)["claude"]
+
+    assert row["reading"]["state"] == "unknown"
+    assert row["windows"] == [] and row["windows_withheld"] == 1
+    assert row["headroom"] is None
+    # the gate names the login failure; show carries it
+    assert "Not logged in" in row["usage_gate"]["reason"]
+
+
+def test_a_windowless_paced_provider_with_an_availability_probe_is_unknown():
+    """live_headroom takes no opinion there either: availability is not budget."""
+    now = time.time()
+    harness_router._usage_path().write_text(json.dumps({"claude": {
+        "observed_at": harness_router._iso_from_wall(now),
+        "windows": [],
+        "probe": {"status": "available", "observed_at": harness_router._iso_from_wall(now),
+                  "source": "probe", "detail": None},
+    }}))
+    assert harness_router.live_headroom("claude") is None
+    assert harness_router.usage_reading("claude").state == harness_router.READING_UNKNOWN
+
+
+def test_ungated_show_does_not_present_the_neutral_value_as_measured(capsys, monkeypatch):
+    import harness_usage
+
+    monkeypatch.setenv("APIS_USAGE_GATED_PROVIDERS", "codex")  # claude not gated
+    _record("claude", age_seconds=6 * 24 * 3600.0, used=97.0)
+    assert harness_usage.main(["show"]) == 0
+    summary = json.loads(capsys.readouterr().out)["claude"]["usage_gate"]["summary"]
+    assert "UNKNOWN headroom" in summary
+    assert "on headroom 1.00" not in summary
+
+
+def test_the_notification_is_one_provider_per_line_and_points_at_the_runbook():
+    text = provider_outage.outage_notification(
+        {"claude": "usage reading stale", "codex": "headroom=0.000",
+         "cursor": "binary unavailable"}
+    )
+    lines = text.splitlines()
+    assert lines[0].startswith("Dispatch is stopped")
+    assert lines[1:4] == [
+        "- claude: usage reading stale",
+        "- codex: headroom=0.000",
+        "- cursor: binary unavailable",
+    ]
+    assert "harness-headroom-restore.md" in lines[-1]
+
+
+def test_the_codex_login_path_is_rendered_without_the_username(monkeypatch, tmp_path):
+    import harness_lens_runner as hlr
+
+    monkeypatch.setattr(hlr.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(hlr, "_codex_auth_source", lambda: tmp_path / ".codex" / "auth.json")
+    text = hlr.authentication_setup_failure("codex")
+    assert "~/.codex/auth.json" in text
+    assert str(tmp_path) not in text
+
+
+# the branches the first review found unwatched
+
+
+def test_the_final_branch_names_all_three_and_alerts_once(monkeypatch):
+    """No candidate, not cooled, not gated: the generic branch."""
+    monkeypatch.setenv("APIS_USAGE_GATE", "off")
+    harness_router.record_exhausted("codex", time.time() + 5 * 3600.0)
+    binaries = {"claude": None, "codex": "/bin/codex", "cursor": None}
+    notifier = RecordingNotifier()
+
+    first = _dispatch(binaries, notifier)
+    second = _dispatch(binaries, notifier)
+
+    for result in (first, second):
+        assert "claude: binary unavailable" in result.error
+        assert "codex: headroom=0.000" in result.error
+        assert "cursor: binary unavailable" in result.error
+    assert len(notifier.delivered) == 1 and notifier.suppressed == 1
+
+
+def test_a_cooling_window_beside_providers_that_will_not_clear_pages(monkeypatch):
+    monkeypatch.setenv("APIS_USAGE_GATE", "off")
+    harness_router.record_cooling("claude", time.time() + 3600, reason="session_limit")
+    harness_router.record_exhausted("codex", time.time() + 5 * 3600.0)
+    binaries = {"claude": "/bin/claude", "codex": "/bin/codex", "cursor": None}
+    notifier = RecordingNotifier()
+
+    result = _dispatch(binaries, notifier)
+
+    assert result.cooled_until  # still the self-clearing shape for the panel
+    assert "other providers:" in result.error
+    assert "cursor: binary unavailable" in result.error
+    assert len(notifier.delivered) == 1
+
+
+def test_a_pinned_provider_that_the_gate_refuses_is_not_an_outage():
+    """Pin claude with a stale reading: it reaches the gate branch, and must not page."""
+    _record("claude", age_seconds=6 * 24 * 3600.0, used=97.0)
+    notifier = RecordingNotifier()
+
+    result = _dispatch(ALL, notifier, provider="claude")
+
+    assert "stale" in result.error
+    assert "other providers:" not in result.error
+    assert notifier.delivered == []
+
+
+def test_the_weekly_pace_line_is_a_self_clearing_wait():
+    now = time.time()
+    harness_router.record_usage(
+        "claude",
+        [{"name": "weekly", "used_percent": 59.0,
+          "resets_at": harness_router._iso_from_wall(now + 6 * 24 * 3600.0)}],
+        observed_at=now,
+    )
+    gate = harness_router.usage_gate("claude")
+    assert gate is not None and gate.code == harness_router.GATE_PACED
+    assert provider_outage.is_self_clearing(["claude"]) is True
+    assert provider_outage.is_self_clearing(["claude", "cursor"]) is False  # cursor is not waiting
+
+
+def test_being_a_candidate_does_not_rearm_the_alert_only_completed_work_does(monkeypatch):
+    """The router admits a provider on a neutral headroom that a login problem
+    later refuses: such a run must not reset the outage and cause a second page."""
+    binaries = _outage_world(monkeypatch)
+    notifier = RecordingNotifier()
+    _dispatch(binaries, notifier)
+    assert len(notifier.delivered) == 1
+
+    _record("claude", age_seconds=60.0, used=10.0)  # claude is a candidate again
+
+    async def fails(selected):
+        return skill_runner.SkillResult(
+            "cicada", False, 1, "", "authentication required", provider=selected
+        )
+
+    asyncio.run(
+        skill_runner._run_provider_attempts(
+            "cicada", fails, binaries=binaries, notifier=notifier
+        )
+    )
+    assert notifier._open == {provider_outage.OUTAGE_DEDUPE_KEY}  # still open
+
+
+def test_a_broken_clear_never_breaks_a_successful_dispatch(monkeypatch):
+    binaries = _outage_world(monkeypatch)
+    _record("claude", age_seconds=60.0, used=10.0)
+
+    class Broken:
+        def send(self, *a, **k):
+            raise RuntimeError("down")
+
+        def clear_dedupe(self, key):
+            raise RuntimeError("journal unreadable")
+
+    async def ok(selected):
+        return skill_runner.SkillResult("cicada", True, 0, "done", "", provider=selected)
+
+    result = asyncio.run(
+        skill_runner._run_provider_attempts(
+            "cicada", ok, binaries=binaries, notifier=Broken()
+        )
+    )
+    assert result.ok
+
+
+def test_gathering_the_reasons_failing_keeps_the_original_refusal(monkeypatch):
+    binaries = _outage_world(monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("snapshot unreadable")
+
+    monkeypatch.setattr(skill_runner, "provider_exclusion_reasons", boom)
+    result = _dispatch(binaries, RecordingNotifier())
+    assert not result.ok and result.error  # still a result, not an exception

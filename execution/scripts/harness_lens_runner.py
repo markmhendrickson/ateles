@@ -1884,6 +1884,15 @@ def refuse_if_credential_files_in_worktree(worktree: Path) -> str | None:
     return None
 
 
+def _home_relative(path: Path) -> str:
+    """``~/...`` for a path under the home directory, so messages that travel
+    into logs and PR comments carry no username."""
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
 def authentication_setup_failure(provider: str) -> str:
     """Report a provider that has no login inside its isolated harness home.
 
@@ -1909,7 +1918,7 @@ def authentication_setup_failure(provider: str) -> str:
         )
     elif provider == "codex":
         missing = (
-            f"Codex's login file ({_codex_auth_source()}) is not present, so "
+            f"Codex's login file ({_home_relative(_codex_auth_source())}) is not present, so "
             "there is nothing to link into the isolated CODEX_HOME; the "
             "operator logs Codex in again"
         )

@@ -4830,21 +4830,23 @@ async def _run_provider_attempts(
         head = [p for p in candidates[:1] if p == local_provider.LOCAL_PROVIDER]
         rest = [p for p in candidates if p not in head and p != preferred_provider]
         candidates = [*head, preferred_provider, *rest]
-    if candidates:
-        # A provider can run: any open "no provider usable" alert is over, so a
-        # later outage is reported afresh instead of staying suppressed.
-        if provider is None:
-            provider_outage.clear_outage(notifier)
-    else:
+    if not candidates:
         # Every candidate's own reason, gathered once: the message names ALL of
         # them (not just the one this branch happens to test), and one operator
         # notification per outage goes out through the notifier's repeat dedupe.
         # An unpinned run only: a hard-pinned provider being ineligible is not
-        # "no provider is usable".
-        outage_reasons = (
-            provider_exclusion_reasons(binaries, fly_bound=fly_bound, fly_extra=fly_extra)
-            if provider is None else {}
-        )
+        # "no provider is usable". Diagnostics only: if gathering them fails the
+        # refusal below still returns with its original message.
+        try:
+            outage_reasons = (
+                provider_exclusion_reasons(
+                    binaries, fly_bound=fly_bound, fly_extra=fly_extra
+                )
+                if provider is None else {}
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[apis] could not gather provider outage reasons: {exc}")
+            outage_reasons = {}
 
         def _outage_suffix(named=()) -> str:
             others = {n: r for n, r in outage_reasons.items() if n not in named}
@@ -4854,11 +4856,15 @@ async def _run_provider_attempts(
 
         def _alert_outage() -> None:
             # A wait that ends by itself at a stated time is not an outage the
-            # operator can act on; anything else is.
-            if outage_reasons and not provider_outage.is_self_clearing(
-                list(outage_reasons), fly_bound=fly_bound
-            ):
-                provider_outage.report_outage(notifier, outage_reasons)
+            # operator can act on; anything else is. Runs in a worker thread:
+            # delivery may shell out (email) and must not stall the event loop.
+            try:
+                if outage_reasons and not provider_outage.is_self_clearing(
+                    list(outage_reasons), fly_bound=fly_bound
+                ):
+                    provider_outage.report_outage(notifier, outage_reasons)
+            except Exception as exc:  # noqa: BLE001 — an alert never breaks dispatch
+                log.warning(f"[apis] provider-outage alert failed: {exc}")
 
         # Cooling is checked FIRST, over exactly the providers this run could
         # have used (the deny-capable narrowing for a gate-owning run, the pinned
@@ -4871,7 +4877,7 @@ async def _run_provider_attempts(
             msg, earliest = _cooled_message(windows)
             msg += _outage_suffix(windows)
             log.warning(f"[apis] {skill} not dispatched — {msg}")
-            _alert_outage()
+            await asyncio.to_thread(_alert_outage)
             return SkillResult(
                 skill, False, None, "", "", error=msg, cooled_until=earliest,
             )
@@ -4880,7 +4886,7 @@ async def _run_provider_attempts(
             msg, retry_at = _usage_gate_message(gated)
             msg += _outage_suffix(gated)
             log.warning(f"[apis] {skill} not dispatched — {msg}")
-            _alert_outage()
+            await asyncio.to_thread(_alert_outage)
             return SkillResult(
                 skill, False, None, "", "", error=msg, cooled_until=retry_at,
             )
@@ -4913,7 +4919,7 @@ async def _run_provider_attempts(
             f"(configured={configured}; cooling={cooling})"
         )
         log.error(f"[apis] {skill} not dispatched — {msg}")
-        _alert_outage()
+        await asyncio.to_thread(_alert_outage)
         return SkillResult(skill, False, None, "", "", error=msg)
 
     attempted: list[str] = []
@@ -5029,6 +5035,11 @@ async def _run_provider_attempts(
         )
 
         if result.ok and failure_kind is None:
+            # A provider actually completed work: any open "no provider usable"
+            # alert is over, so a later outage is reported afresh. (A provider
+            # being a CANDIDATE is not that: the router admits one on a neutral
+            # headroom that a login problem later refuses.)
+            provider_outage.clear_outage(notifier)
             return result
         if gate_preflight_refusal:
             # No child started, so an unpinned review may safely try the next
