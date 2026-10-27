@@ -3035,6 +3035,10 @@ class RemoteLensOutcomeUnknown(RuntimeError):
     escalates once instead of counting as a retryable attempt."""
 
 
+class RemoteLensVerdictUnconfirmed(RuntimeError):
+    """The lens completed, but its verdict could not be persisted and posted."""
+
+
 def review_failure_class(result: SkillResult) -> str:
     """Return a public-safe reason for one incomplete review invocation."""
     # A remote run whose outcome is unknown may already have posted: checked
@@ -5573,18 +5577,23 @@ class SwarmDispatcher:
         # failure this sweep exists to fix.
         captured = [(lens.lens, result.stdout)]
         agents_by_lens = {lens.lens: lens.agent}
-        await self._persist_panel_reviews(
-            trigger,
-            captured,
-            agents_by_lens,
-            reviewed_head=reviewed_head,
-        )
-        await self._post_missing_panel_comments(
-            trigger,
-            captured,
-            agents_by_lens,
-            reviewed_head=reviewed_head,
-        )
+        try:
+            await self._persist_panel_reviews(
+                trigger,
+                captured,
+                agents_by_lens,
+                reviewed_head=reviewed_head,
+            )
+            await self._post_missing_panel_comments(
+                trigger,
+                captured,
+                agents_by_lens,
+                reviewed_head=reviewed_head,
+            )
+        except Exception as exc:
+            raise RemoteLensVerdictUnconfirmed(
+                f"lens '{lens_name}' completed but its verdict was not confirmed"
+            ) from exc
 
     async def resume_missing_lens_reviews(self, repositories: list[str]) -> dict:
         """Re-dispatch a lens that never answered on an otherwise-clear panel.
@@ -5644,6 +5653,13 @@ class SwarmDispatcher:
                     continue
                 summary["scanned"] += len(lenses)
                 head = _normalise_full_sha((pr.get("head") or {}).get("sha") or "")
+                if not head:
+                    log.error(
+                        f"[{DAEMON_NAME}] missing-lens sweep: {ref} has no "
+                        "verified full head SHA — not dispatching."
+                    )
+                    summary["skipped"] = summary.get("skipped", 0) + len(lenses)
+                    continue
                 state_key = f"{ref}@{head}"
                 escalated = self._missing_lens_escalated.setdefault(state_key, set())
                 per_lens = self._missing_lens_retries.setdefault(state_key, {})
@@ -5668,7 +5684,7 @@ class SwarmDispatcher:
                         summary["escalated"] += 1
                         log.info(
                             f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
-                            f"'{lens}' held for unknown remote outcome on {head} — skipping."
+                            f"'{lens}' reserved or held on {head} — skipping."
                         )
                         continue
                     if lens in escalated:
@@ -5693,6 +5709,18 @@ class SwarmDispatcher:
                         summary["escalated"] += 1
                         continue
 
+                    try:
+                        await self._persist_remote_lens_reservation(
+                            repository, number, head, lens
+                        )
+                    except Exception as exc:
+                        log.error(
+                            f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
+                            f"'{lens}' reservation failed ({exc}) — not dispatching."
+                        )
+                        summary["skipped"] = summary.get("skipped", 0) + 1
+                        continue
+                    self._remote_lens_holds.add(hold_key)
                     log.warning(
                         f"[{DAEMON_NAME}] missing-lens sweep: {ref} is clear "
                         f"(Blocking: 0) but lens '{lens}' never reported — "
@@ -5702,9 +5730,20 @@ class SwarmDispatcher:
                     try:
                         await self._redispatch_missing_lens(repository, pr, lens)
                         summary["resumed"] += 1
-                    except RemoteLensOutcomeUnknown as exc:
-                        # Final, not a retryable failure: the remote run may
-                        # already have posted, so a re-dispatch could duplicate.
+                        try:
+                            await self.release_remote_lens_hold(
+                                repository, number, head, lens,
+                                reset_retries=False,
+                            )
+                        except Exception as release_exc:
+                            log.error(
+                                f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
+                                f"'{lens}' reservation release failed "
+                                f"({release_exc})."
+                            )
+                    except (RemoteLensOutcomeUnknown, RemoteLensVerdictUnconfirmed) as exc:
+                        # The reservation remains until the result is reconciled.
+                        # A re-dispatch here could duplicate a completed run.
                         self._remote_lens_holds.add(hold_key)
                         try:
                             await self._persist_remote_lens_hold(
@@ -5713,16 +5752,16 @@ class SwarmDispatcher:
                         except Exception as hold_exc:
                             log.error(
                                 f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
-                                f"'{lens}' could not persist remote-outcome hold "
-                                f"({hold_exc}) — restart safety is not established."
+                                f"'{lens}' could not persist reconciliation hold "
+                                f"({hold_exc}) — reservation remains in force."
                             )
                         log.error(
                             f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
-                            f"'{lens}' outcome unknown ({exc}) — not retrying."
+                            f"'{lens}' needs reconciliation ({exc}) — not retrying."
                         )
                         self.notifier.send(
-                            f"🔴 {ref}: the '{lens}' lens ran on a remote runner "
-                            "and its outcome is unknown. It will not be "
+                            f"🔴 {ref}: the '{lens}' lens may have completed, "
+                            "but its review result is unconfirmed. It will not be "
                             "re-dispatched automatically (that could duplicate "
                             "its review), so merge is held on this lens.",
                             priority=Priority.BLOCKER,
@@ -5736,10 +5775,21 @@ class SwarmDispatcher:
                             f"'{lens}' re-dispatch failed ({exc})",
                             exc_info=True,
                         )
+                        try:
+                            await self.release_remote_lens_hold(
+                                repository, number, head, lens,
+                                reset_retries=False,
+                            )
+                        except Exception as release_exc:
+                            log.error(
+                                f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
+                                f"'{lens}' reservation release failed "
+                                f"({release_exc})."
+                            )
         return summary
 
     _REMOTE_LENS_HOLD_RE = re.compile(
-        r"<!-- apis-remote-lens-hold:([0-9a-f]{40}):([a-z]+) -->"
+        r"<!-- apis-remote-lens-(?:hold|reservation):([0-9a-f]{40}):([a-z]+) -->"
     )
 
     async def _remote_lens_hold_comments(
@@ -5763,21 +5813,39 @@ class SwarmDispatcher:
     async def _has_remote_lens_hold(
         self, repository: str, number: int, head: str, lens: str
     ) -> bool:
-        marker = f"<!-- apis-remote-lens-hold:{head}:{lens} -->"
+        markers = {
+            f"<!-- apis-remote-lens-{state}:{head}:{lens} -->"
+            for state in ("hold", "reservation")
+        }
         return any(
-            str(comment.get("body") or "").strip() == marker
+            str(comment.get("body") or "").strip() in markers
             for comment in await self._remote_lens_hold_comments(repository, number)
+        )
+
+    async def _persist_remote_lens_reservation(
+        self, repository: str, number: int, head: str, lens: str
+    ) -> None:
+        """Reserve a missing-lens dispatch before a remote run can begin."""
+        await self._persist_remote_lens_marker(
+            repository, number, head, lens, "reservation"
         )
 
     async def _persist_remote_lens_hold(
         self, repository: str, number: int, head: str, lens: str
     ) -> None:
         """Use the existing GitHub PR-comment marker store for an unknown run."""
+        await self._persist_remote_lens_marker(
+            repository, number, head, lens, "hold"
+        )
+
+    async def _persist_remote_lens_marker(
+        self, repository: str, number: int, head: str, lens: str, state: str
+    ) -> None:
         if not await self._require_github_write_credential(
-            repository, "remote lens hold", detail=f"{repository}#{number}"
+            repository, f"remote lens {state}", detail=f"{repository}#{number}"
         ):
             raise RuntimeError("GitHub write credential unavailable")
-        marker = f"<!-- apis-remote-lens-hold:{head}:{lens} -->"
+        marker = f"<!-- apis-remote-lens-{state}:{head}:{lens} -->"
         async with httpx.AsyncClient(timeout=30) as client:
             response = await self._github_write(
                 client, "post",
@@ -5797,15 +5865,22 @@ class SwarmDispatcher:
                 raise RuntimeError("hold comment read-back mismatch")
 
     async def release_remote_lens_hold(
-        self, repository: str, pr: int, head: str, lens: str
+        self, repository: str, pr: int, head: str, lens: str,
+        *, reset_retries: bool = True,
     ) -> None:
-        """Release an exact unknown-outcome hold after reconciliation."""
+        """Release an exact hold or reservation after reconciliation."""
         head = _normalise_full_sha(head)
         if not head:
             raise ValueError("release requires a full PR head SHA")
-        marker = f"<!-- apis-remote-lens-hold:{head}:{lens} -->"
+        markers = {
+            f"<!-- apis-remote-lens-{state}:{head}:{lens} -->"
+            for state in ("hold", "reservation")
+        }
         comments = await self._remote_lens_hold_comments(repository, pr)
-        matches = [c for c in comments if str(c.get("body") or "").strip() == marker]
+        matches = [
+            c for c in comments
+            if str(c.get("body") or "").strip() in markers
+        ]
         if matches and not await self._require_github_write_credential(
             repository, "remote lens hold release", detail=f"{repository}#{pr}"
         ):
@@ -5819,9 +5894,10 @@ class SwarmDispatcher:
                 )
                 response.raise_for_status()
         self._remote_lens_holds.discard((repository, pr, head, lens))
-        state_key = f"{repository}#{pr}@{head}"
-        self._missing_lens_escalated.get(state_key, set()).discard(lens)
-        self._missing_lens_retries.get(state_key, {}).pop(lens, None)
+        if reset_retries:
+            state_key = f"{repository}#{pr}@{head}"
+            self._missing_lens_escalated.get(state_key, set()).discard(lens)
+            self._missing_lens_retries.get(state_key, {}).pop(lens, None)
 
     async def _prs_with_missing_lens(
         self, repository: str
