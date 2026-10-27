@@ -21,6 +21,7 @@ import credential_containment_runner as runner  # noqa: E402
 SCENARIOS = runner.load_scenarios()
 HOOK_SCENARIOS = SCENARIOS["hook"]
 LAUNCH_SCENARIOS = SCENARIOS["launch"]
+PACKET_SCENARIOS = SCENARIOS["packet"]
 
 
 @pytest.fixture(scope="module")
@@ -40,6 +41,26 @@ def test_launch_scenario(scenario, tmp_path, monkeypatch):
     assert runner.judge_launch(scenario, trace) == [], scenario["id"]
 
 
+@pytest.mark.parametrize("scenario", PACKET_SCENARIOS, ids=[s["id"] for s in PACKET_SCENARIOS])
+def test_packet_scenario(scenario, tmp_path):
+    trace = runner.run_packet(scenario, tmp_path / "run")
+    assert runner.judge_packet(scenario, trace) == [], scenario["id"]
+
+
+def test_packet_judge_rejects_false_success(tmp_path):
+    scenario = next(s for s in PACKET_SCENARIOS if s["plant"] == "leaf")
+    trace = runner.run_packet(scenario, tmp_path / "run")
+    trace["exit_code"] = 0
+    assert any("exit" in p for p in runner.judge_packet(scenario, trace))
+
+
+def test_packet_judge_rejects_observed_content_read(tmp_path):
+    scenario = next(s for s in PACKET_SCENARIOS if s["expect"] == "allow")
+    trace = runner.run_packet(scenario, tmp_path / "run")
+    trace["external_reads"] = ["descriptor"]
+    assert any("content" in p for p in runner.judge_packet(scenario, trace))
+
+
 def test_scenario_set_covers_both_outcomes_on_every_surface():
     by_tool = {}
     for scenario in HOOK_SCENARIOS:
@@ -49,7 +70,8 @@ def test_scenario_set_covers_both_outcomes_on_every_surface():
     assert by_tool["Grep"] == {"allow", "deny"}
     assert by_tool["Glob"] == {"allow"}  # names only: never refused
     assert {s["expect"] for s in LAUNCH_SCENARIOS} == {"refuse", "launch"}
-    ids = [s["id"] for s in HOOK_SCENARIOS + LAUNCH_SCENARIOS]
+    assert {s["expect"] for s in PACKET_SCENARIOS} == {"allow", "refuse"}
+    ids = [s["id"] for s in HOOK_SCENARIOS + LAUNCH_SCENARIOS + PACKET_SCENARIOS]
     assert len(ids) == len(set(ids))
 
 
@@ -117,3 +139,19 @@ def test_refusal_document_is_json_serializable_and_value_free(workspace):
     json.dumps({"decision": outcome.decision, "reason": outcome.reason})
     for secret in runner.FAKE_SECRET_VALUES:
         assert secret not in outcome.reason
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS["renderer"], ids=lambda row: row["id"])
+def test_renderer_scenario(scenario, tmp_path):
+    trace = runner.run_renderer(scenario, tmp_path / "run")
+    assert runner.judge_renderer(scenario, trace) == [], scenario["id"]
+
+
+def test_renderer_judge_rejects_observed_read_and_false_publication(tmp_path):
+    scenario = next(s for s in SCENARIOS["renderer"] if s["plant"] == "leaf")
+    trace = runner.run_renderer(scenario, tmp_path / "run")
+    trace["external_reads"] = ["text"]
+    trace["output_exists"] = True
+    problems = runner.judge_renderer(scenario, trace)
+    assert any("content" in p for p in problems)
+    assert any("publication" in p for p in problems)

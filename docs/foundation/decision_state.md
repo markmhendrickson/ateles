@@ -99,7 +99,7 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 81 | whether within-tenant default visibility is private-first ("see only my own book") or … | yes | yes | unknown | the soft-wall of that document's section 5 |
 | 82 | whether the fork case is a single hosted instance serving many forkers … | yes | yes | unknown | whether that document's section 3 is a hedge or a requirement |
 | 83 | the capability ceiling of a non-owner operator within a tenant: whether minting … | yes | yes | unknown | the shape of grants minted before the org's own ceiling is enforced |
-| 84 | what distinguishes a task with no intake batch because it is still … | no | no | unknown | nothing in the design; whether an assembling task is claimable before it is finished … |
+| 84 | what distinguishes a workflow-entering task still being assembled — several agents each … | yes | yes | unknown | whether an assembling task is claimable before it is finished being written without creating … |
 | 85 | where an artifact a principal produces about an issue or a pull … | no | no | unknown | nothing in the design; which outbound row of `github.md` a principal's own artifact takes, … |
 | 86 | by what grammar a capability names a tool, and therefore what the … | yes | yes | unknown | — |
 | 87 | whether a harness may provide a principal any capability its grant does … | yes | yes | unknown | decision 86, which supplied the grammar this rule is stated in and deliberately admitted … |
@@ -135,4 +135,20 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 142 | whether the foundation fixes a role set, or treats a role as … | yes | yes | unknown | nothing in the design; `owner_role`, `swarm_roster`, and the declaration-time and claim-time resolution checks are … |
 | 143 | whether the builder of a change may sign the required review of … | yes | yes | unknown | nothing in the design; the lapsed-lease and contradicting-conclusion refusals and the `waived` verdict are … |
 | 144 | whether a payment resolved by its parameters may be taken without a … | yes | yes | unknown | nothing in the design; the dedup key, the unknown case, the disjoint `reconcile`, and … |
+| 145 | where the application concept lives, and what an application is — two … | yes | yes | unknown | nothing in the design; decisions 15, 35, 37, 76, 82, and 97 are unchanged, … |
+| 146 | what kind of principal a client's staff member is — a client's … | yes | yes | unknown | nothing in the design; decision 82 is unchanged, and decision 47 is amended by … |
+| 147 | the edit-and-approve gesture in an application — a staff member editing and … | yes | yes | unknown | nothing in the design; the `outreach` rule that the consented draft is the sent … |
+| 148 | what is deployed per client instance, so that a client's delivery does … | yes | yes | unknown | nothing in the design; decisions 76, 90, 91, and 97 are unchanged |
+| 149 | where display labels for record types and fields live, so that a … | yes | yes | unknown | nothing in the design; `locale_profile` is unchanged |
+| 150 | what an environment is, and how a governed change moves between them … | yes | yes | unknown | nothing in the design; decisions 76, 90, 91, and 100 are unchanged |
+| 151 | where the direction of truth for a class of business records is … | yes | yes | unknown | nothing in the design; the direction-of-truth table above is unchanged for the swarm's own … |
+| 152 | whether a business matter — a customer incident, an overdue receivable — … | yes | yes | unknown | nothing in the design; the work model, parent and child tasks, and the rule … |
+| 153 | how a customer-service app's agentic capabilities enter the foundation as declared workflows, … | yes | yes | unknown | nothing in the design; intake is still the only core workflow and decision 116 … |
+| 154 | where each console module's layout lives, so that a new client's console … | yes | yes | unknown | nothing in the design; decision 37 is unchanged |
+| 155 | who installs and upgrades an application on an instance, and through what … | yes | yes | unknown | nothing in the design; decision 145's placement is unchanged |
+| 156 | whether a business matter's closed state is stored on the record or … | yes | yes | unknown | nothing in the design; decision 152's placement is unchanged |
+| 157 | what a held write becomes when a cutover lands — decision 151 … | yes | yes | unknown | nothing in the design |
+| 158 | who holds the acts the design reserves to the operator now that … | yes | yes | unknown | nothing in the design beyond the amendment below; the rule that the waiver is … |
+| 159 | who may invoke the operator's halt and who may lift it, now … | yes | yes | unknown | nothing in the design; the halt's read-back is unchanged |
+| 160 | who sets or changes a per-payee payment cap — the cap is … | yes | yes | unknown | nothing in the design; the five conditions of decision 144 and the take-time read … |
 

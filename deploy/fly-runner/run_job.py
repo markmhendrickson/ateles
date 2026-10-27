@@ -339,8 +339,10 @@ def load_job(job_dir: Path) -> Job:
             secrets[DELIVERY_TOKEN_NAME])[0][1]
     elif DELIVERY_TOKEN_NAME in secrets:
         raise JobError("a delivery token was shipped without a delivery")
-    if (WORKSPACE_PLACEHOLDER in argv) != (delivery is not None):
-        raise JobError("the workspace placeholder and the delivery must come together")
+    # The workspace flag is a delivery's alone (Claude needs none: the runner
+    # sets its working directory to the checkout).
+    if WORKSPACE_PLACEHOLDER in argv and delivery is None:
+        raise JobError("the workspace placeholder needs a delivery")
     return Job(
         run_id=run_id,
         role=spec["role"],

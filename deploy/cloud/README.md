@@ -1,5 +1,14 @@
 # Ateles cloud hosting — deploy artifacts & runbook
 
+> **Superseded VM runbook.** The Hetzner + Tailscale target below is no longer
+> current; Fly is the current cloud-runner target. Do not provision the current
+> target using M1 or `bootstrap-host.sh`. The historical Bucket-A daemon
+> scaffolding is retained below. Bucket-C jobs use
+> [`deploy/fly-runner/`](../fly-runner/fly.toml), not this directory's
+> full-snapshot secret materialization. See the
+> [current cloud guide](../../docs/cloud_hosting.md) for the implemented runner
+> boundary and the separate activation prerequisites.
+
 Task #5 of plan `ent_aff87747b49e338790568af6`. Design rationale + the bucket
 classification (which daemon moves vs stays device-side) live in
 [`docs/cloud_hosting.md`](../../docs/cloud_hosting.md). This directory is the

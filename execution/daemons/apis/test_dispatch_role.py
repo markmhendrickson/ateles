@@ -118,6 +118,19 @@ def test_dispatch_forwards_role_provider_and_cwd(monkeypatch) -> None:
     assert seen["prompt"] == "do the thing"
 
 
+def test_dispatch_forwards_expected_role_fingerprint(monkeypatch) -> None:
+    seen = []
+    async def capture(skill, prompt, **kwargs):
+        seen.append(kwargs.get("expected_role_fingerprint"))
+        return SkillResult(skill, True, 0, "out", "", provider="codex")
+    monkeypatch.setattr(dispatch_role, "run_skill", capture)
+    expectation = "a" * 64
+    result = asyncio.run(dispatch_role.dispatch(
+        "pavo", "task", provider="codex", expected_role_fingerprint=expectation,
+    ))
+    assert result.ok and seen == [expectation]
+
+
 def test_dispatch_forwards_action_class_and_model(monkeypatch) -> None:
     """CLI surface (operator ruling 2026-09-29, model_tiering.py): --action-class
     and --model reach run_skill unchanged, the same way --provider/--cwd do
@@ -205,6 +218,9 @@ def captured_codex_dispatches(fake_repo, monkeypatch):
     """Capture real ``run_skill`` subprocess boundaries without launching Codex."""
     captured: list[dict] = []
     agent_def = _stub_def()
+    # This fixture is imported by ledger tests too: carry its external-policy
+    # fixture with it instead of depending on this module's autouse fixtures.
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda *a, **kw: "")
 
     monkeypatch.setenv("APIS_HARNESS_PROVIDERS", "codex")
     monkeypatch.setenv("APIS_HARNESS_HEADROOM", '{"codex": 1.0}')
@@ -590,16 +606,13 @@ def test_headroom_note_falls_back_to_env_when_no_file(tmp_path, monkeypatch) -> 
     assert "claude=0.2" in note
 
 
-def test_inconsistent_tool_allowlist_types_all_coerce(monkeypatch) -> None:
-    """tool_allowlist is inconsistently typed across agent_definition entities
-    (arrays, one comma/JSON string, some nulls). Every shape must yield a usable
-    list — a null must mean 'all tools', never a crash or an empty allowlist
-    that would confine the agent to nothing."""
+def test_tool_allowlist_parsing_preserves_only_declared_authority(monkeypatch) -> None:
+    """Legacy arrays and strings remain valid; absent authority grants no tools."""
     from lib.daemon_runtime import AgentDefinition
 
-    assert AgentDefinition(tool_allowlist=None).tools == ["*"]
+    assert AgentDefinition(tool_allowlist=None).tools == []
     assert AgentDefinition(tool_allowlist="*").tools == ["*"]
-    assert AgentDefinition(tool_allowlist="").tools == ["*"]
+    assert AgentDefinition(tool_allowlist="").tools == []
     assert AgentDefinition(tool_allowlist=["Bash", "Read"]).tools == ["Bash", "Read"]
     assert AgentDefinition(tool_allowlist='["Bash", "Read"]').tools == [
         "Bash",
@@ -1030,3 +1043,12 @@ def test_a_cooled_result_envelope_carries_cooled_until(
     env = _envelope(capsys)
     assert env["cooled_until"] == "2026-09-29T12:30+02:00"
     assert "cooled until" in env["reason"]
+
+
+@pytest.fixture(autouse=True)
+def _verified_empty_policy_admission(monkeypatch):
+    """Keep unrelated adapter tests off live policy reads; real failure/absence
+    behavior is exercised by test_policy_authority_dispatch.py.
+    """
+    import skill_runner
+    monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda *a, **kw: "")

@@ -178,7 +178,7 @@ held is refused at the write (decision 44).
 [`conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step`](conformance_suite.md#whether-a-verdict-from-a-step-owner-whose-lease-has-lapsed-closes-the-step).
 **Never:** "claimant" (retired: say lease holder).
 **Not for:** "claim fields" for the lease (the task carries none); "lock" for a lease (a lock outlives its holder); "heartbeat" for the lease (the heartbeat
-renews the lease; it is not the lease); owner standing alone, for the lease holder or for anything else — the word carries five meanings
+renews the lease; it is not the lease); owner standing alone, for the lease holder or for anything else — the word carries six meanings
 and always takes its qualifier (step owner, plan owner, grant owner, business owner, current owner, routed
 owner); holder without the lease in front of it.
 
@@ -224,10 +224,16 @@ The task's own transition vocabulary is `created` plus its status; [lease](#leas
 **Not for:** published as a separate state; routed, claimed, or released as task transitions.
 
 ### claimable
-**Definition:** the derived property of a [task](#task) whose status is not terminal, on which no [lease](#lease) is
-held, which no open [checkpoint](#checkpoint) holds from claim (every task-subject [reason class](#reason-class) but
-`unclaimed_step` — `failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), and whose
-`assigned_to` is unset or names the [principal](#principal) about to [claim](#claim).
+**Definition:** the derived property of a [task](#task) with immutable creator-time
+`admission_class: workflow_entering` whose status is not terminal, which carries no unresolved
+persistent assembly exclusion, on which no [lease](#lease) is held, which no open [checkpoint](#checkpoint) holds
+from claim (every task-subject [reason class](#reason-class) but `unclaimed_step` —
+`failure_posture.md#checkpoints-on-tasks-one-queue-one-protocol`), and whose `assigned_to` is unset or names the
+[principal](#principal) about to [claim](#claim). An unresolved persistent assembly exclusion has one narrow
+exception: only its open [`classify` step](#step) is claimable, and only by the principal that resolves as the
+[intake](#intake) declaration's [`pm` step owner](#step-owner); it exposes no ordinary task claim.
+An `admission_class: aggregate_parent` is never claimable; a missing or ambiguous class is refused pending
+reconciliation. Current child [edges](#edge) cannot change this read.
 **See:** [`work_model.md#what-a-claim-predicate-treats-as-claimable`](work_model.md#what-a-claim-predicate-treats-as-claimable).
 **Never:** `blocked` as a stored [task](#task) status (retired: see [Retired names](#retired-names)). The
 ordinary verb and adjective are untouched — a [step](#step) blocked on its owner, a blocked claim, a change
@@ -327,8 +333,11 @@ Reads: "the tasks entered the feature workflow", "the batch is at `qa`", "the ba
 **Not for:** run for a batch; instance for a batch, unqualified; bundle for a batch.
 
 ### parent task
-**Definition:** a [task](#task) that groups [child tasks](#child-task) through `PART_OF` [edges](#edge) from each child, whose completion is
-derived from its children's terminal states and which never enters a [workflow](#workflow).
+**Definition:** a [task](#task) with immutable creator-time `admission_class: aggregate_parent` that groups
+[child tasks](#child-task) through `PART_OF` [edges](#edge) from each child, whose completion is derived only
+with at least one current child, every child terminal and landed, and applicable planning `completion_criteria[]`
+having effect evidence. It remains a parent before its first child and after its last child is removed;
+both childless reads are incomplete. It never enters a [workflow](#workflow).
 **See:** [`work_model.md#parent-and-child-tasks`](work_model.md#parent-and-child-tasks).
 **Never:** "epic", "umbrella".
 **Not for:** a stored parent status.
@@ -619,7 +628,7 @@ swallowed. Written as one word (a verdict); the act of writing one is to sign of
 **Conclusion values:** `signed` (the step's [condition](#condition) is met), a blocking conclusion (it is not,
 and the step's `on_fail` says which earlier step opens again), and `waived` (the [operator](#operator) [principal](#principal) closed
 an unsigned required step, carrying the reason). `waived` is the only conclusion a principal other than the
-step owner may write, and only the operator principal may write it — the right is not delegable
+step owner may write, and only an [instance owner](#instance-owner) may write it — the right is not delegable
 ([`gates_and_workflows.md#declaration-batch-projection`](gates_and_workflows.md#declaration-batch-projection)).
 **[Waiver scope](#waiver-scope):** one [batch](#batch)'s unsigned required steps, one `waived` verdict **per step**, each
 naming its step and carrying its reason — so a waived step is queryable as waived rather than recorded as a
@@ -1101,6 +1110,8 @@ outright in this design. [Effect dedup](#effect-dedup) exists so a re-claimed st
 effect that already happened, and decision 40 refuses the adjacent shape — a stored reasoning trace a later
 reader replays to reconstruct a step's judgement
 (`gates_and_workflows.md#what-a-step-leaves-at-close-what-it-produced-and-a-reference-to-what-it-read`).
+A reviewed [governance write](#governance-write) applied again to **another instance** of the record is not a replay: it is a
+[reissue](#reissue), a first take on that instance through its own [gate](#gate).
 **Not for:** the sense of a public essay series (*The Human Inversion*, Part 4: reading a session's
 reasoning chain months later). That sense is an as-of read over what a [verdict](#verdict) names it
 read, resolved at its `signed_at` (decision 40) — never a stored trace and never a second doing. Where
@@ -1109,6 +1120,23 @@ read, resolved at its `signed_at` (decision 40) — never a stored trace and nev
 **Never:** "replay protection" (see [effect dedup](#effect-dedup)).
 **Not for:** the essay's sense above; deterministic code replay (`docs/durable_execution_substrate.md`,
 which this design also refuses in favour of explicit persisted state machines).
+
+### reissue
+**Definition:** applying a reviewed [governance write](#governance-write), unchanged, to another instance of the
+[record](#record) as a first take there: it passes that instance's [action gate](#action-gate) afresh, is judged on
+that instance's policy and [grants](#grant) as read then, and carries its own [idempotency key](#idempotency-key)
+scoped to that instance, so a reissue that reaches an instance twice lands once.
+Nothing is redone from a stored trace and no consent-gated [action](#action) is taken again, which is what separates it
+from a [replay](#replay). Writes are reissued in the order they were first taken, because a later write may read an
+earlier one, and only writes that are the same on every instance are reissued: declarations, policy values,
+registry changes, [intake rules](#intake-rule), and bundle enablement pinned to a version or content hash. A write that fails on the
+target stops the reissue at that write and raises its [checkpoint](#checkpoint) there.
+**See:** [`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order`](adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order),
+[`failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated`](failure_posture.md#refuse-resume-by-replay-where-actions-are-consent-gated).
+**Never:** —
+**Not for:** [replay](#replay) (doing a prior step again from a stored trace on the same instance, which is refused);
+copying an entity by hand from one instance to another; the carrying of an instance's own record into the design's
+types, which is `migration.md`.
 
 ## Core workflows (`workflows.md`)
 
@@ -1424,6 +1452,57 @@ past [drop](#dropped) or hold are all derived through it, which is why none of t
 an as-of read along event time for what was known (that is the look-ahead the ingestion axis exists to
 prevent).
 
+## Application (`application.md`)
+
+### application
+**Definition:** the console deployed against one instance of the [record](#record) and composed at runtime from
+that instance's entities: which modules show, which labels and brand apply, which of the record's bundles'
+screens appear, and who may see and write what.
+It is a surface and holds no state that is a source of truth; it carries whichever [principal](#principal) is
+signed in and is never itself a principal, an [adapter](#adapter), or a second [gate](#gate). The program is the
+same on every instance, and the application is that program on one of them.
+**See:** [`application.md#what-an-application-is`](application.md#what-an-application-is),
+[`application.md#where-each-part-lives`](application.md#where-each-part-lives).
+**Never:** "client app" for the one program every instance runs.
+**Not for:** the console when the composition on a particular instance is meant (the console is the program the
+product specification describes; the application is it on an instance); an [adapter](#adapter), which crosses the
+one boundary the design has, where an application crosses none.
+
+### environment
+**Definition:** an instance of the [record](#record) that serves one stage of a deployment's life, such as
+development, a demo, or production, with its own `deployment_configuration`, bindings, grants, and data.
+No environment flag or dimension exists inside the record; two environments are two instances, and a governed
+change reaches the next one by [reissue](#reissue) of the same writes, in order.
+**See:** [`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order`](adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order).
+**Never:** —
+**Not for:** the process environment a program reads variables from; a [stage](#stage) of a workflow, which
+groups contiguous steps of one declaration; tenant (the isolation boundary, which an environment may sit
+inside).
+
+### business record
+**Definition:** a record an instance keeps about its owner's own business, such as an invoice, a company, a
+receivable, a price list, a policy, or a customer incident, as distinct from the swarm's own records ([tasks](#task),
+[batches](#batch), [verdicts](#verdict)) and from an [artifact](#artifact), which an [external system](#external-system) holds.
+A business record is shipped as a type in one of the record's bundles. A [business matter](#business-matter) is one
+kind. Which side of a class of business record is authoritative, the record or an external source, is a field of the source's
+[binding](#vendor_binding).
+**See:** [`work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`](work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task),
+[`adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event`](adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event).
+**Never:** "domain record".
+**Not for:** an [artifact](#artifact); a [domain](#domain), which is a term of the [authority](#authority) tuple and
+names a region a grant covers.
+
+### business matter
+**Definition:** a [business record](#business-record) that a client's staff organise their work around, such as a
+customer incident, an overdue receivable, or an order exception, with a lifecycle of its own and effects of its own in
+[external systems](#external-system); [tasks](#task) refer to it and it is not itself a task.
+A customer incident is a business matter of one kind, and no separate term names it. The word is chosen because
+a matter is the thing the work is about, and a [task](#task) is a unit of the work.
+**See:** [`work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`](work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task).
+**Never:** "domain record"; "customer matter" as a term of its own.
+**Not for:** a [task](#task), which is the unit a [workflow](#workflow) carries and a [lease](#lease) holds; an
+[artifact](#artifact), which an external system holds.
+
 ## Planning model (`planning_model.md`)
 
 ### planning record
@@ -1589,10 +1668,28 @@ The [authority](#authority) [edges](#edge) attach here: an `ownership_grant`, a 
 a [separation-of-duties](#separation-of-duties) constraint. `operator_profile` is a **descriptive** record — identity details,
 locale, preferences — and carries none of them. [Credentials](#credential) bind to the `operator`,
 many-to-one, as they do to any principal.
+An operator's reach is what its [grants](#grant) admit; a client's staff member is an operator of the instance they
+work in with narrower grants, and no other kind of human principal exists (decision 146). Where the design reserves
+an act to "the operator", it reserves it to the [instance owner](#instance-owner), never to every operator and never by a grant
+(`authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`).
 **See:** [`authority_model.md#principals`](authority_model.md#principals).
 **Never:** "admin"; "forker".
 **Not for:** user when authority is meant; `operator_profile` for the principal (it is the descriptive
 record beside it).
+
+### instance owner
+**Definition:** an [operator](#operator) that carries the `instance_owner` mark and so holds the acts the design
+reserves to the operator: writing a `waived` [verdict](#verdict), the marked self-resolution of a [checkpoint](#checkpoint) the resolver
+raised, resolving a checkpoint on an `operator_only` [action](#action), approving a reserved-class [governance write](#governance-write), and
+out-of-band provisioning.
+An instance may have several, each holding every reserved act independently; an instance with none refuses them
+all. No [grant](#grant) extends a reserved act to a non-owner, and a client who wants someone else to hold one
+makes that person an owner. It is not [ownership](#ownership) of an object, which confers the required seat on
+that object's checkpoints and nothing else, and not a new kind of [principal](#principal).
+**See:** [`authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`](authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them).
+**Never:** —
+**Not for:** owner seat for an instance owner (an owner seat is the principal an object's `ownership_grant` names); a
+[step owner](#step-owner); the book-of-business owner of `multi_tenant.md`.
 
 ### agent
 **Definition:** a non-human [principal](#principal) defined by an `agent` entity and acting as a bound principal.
@@ -1691,7 +1788,7 @@ A timeout is a terminal state that never continues. The principal that raised a 
 resolve it; the one exception is the [operator](#operator) resolving a checkpoint the operator raised, admitted
 with the `self_resolved` mark and refused without it (decision 47).
 **See:** [`authority_model.md#approval`](authority_model.md#approval),
-[`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`](authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked).
+[`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked`](authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked).
 **Never:** "silent continuation".
 **Not for:** resolved without who; verdict for an approval (that closes a step); an unmarked self-resolution.
 
@@ -1988,9 +2085,9 @@ they appear in a document, a schema, a prompt, or an error message.
 | a step, on a condition its owner cannot yet judge | **holds**, under a held lease, with a finding naming the condition; the hold **ends** by verdict, checkpoint, or lapse | "is paused", "is waiting", "is blocked" (a task with an open checkpoint on it is held by it; `blocked` as a status is retired) |
 | a batch, on closing | its tasks **enter** one successor, or the batch closes with none | "flows into", "triggers" the next workflow |
 
-## Owner: five meanings, one word forbidden alone
+## Owner: six meanings, one word forbidden alone
 
-`owner` on its own is forbidden. Sources use it for five things (C10); each has its own term:
+`owner` on its own is forbidden. Sources use it for five things (C10), and decision 158 adds a sixth, the [instance owner](#instance-owner); each has its own term:
 
 | Meaning | Term | Field |
 |---|---|---|
@@ -1998,6 +2095,7 @@ they appear in a document, a schema, a prompt, or an error message.
 | the step a batch is at | **current step** | derived from the batch's step states; projected as `current_owner` |
 | the implementer a blocking finding's remedy is routed to | **routed agent** | none; the remedy is a task entering intake, and the step owner keeps the verdict (`gates_and_workflows.md#findings-conclusions-and-what-a-blocking-finding-obliges`) |
 | the operator with the book of business for a customer | **book-of-business owner** | `multi_tenant.md` section 5 |
+| the operator who holds the acts the design reserves to the operator on an instance | **instance owner** | the `instance_owner` mark on the `operator` entity |
 | named accountability for a workflow, domain, or queue | **ownership** (above) | `ownership_grant` |
 
 The [principal](#principal) holding a [task](#task)'s [lease](#lease) is its lease holder, never its owner; the principal an

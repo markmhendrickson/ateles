@@ -22,11 +22,11 @@ reference workflow and has no section here; where its purpose is stated is
 
 ## Scope
 
-Fourteen reference workflows: intake, feature, bug, security, copy, social content, release, outreach, payment,
+Fifteen reference workflows: intake, feature, bug, security, copy, social content, release, outreach, customer reply, payment,
 research and analysis, meeting processing, operator-only, planning, and postmortem, with session digestion
 beside them as the recovery path of the one execution mechanism that holds no lease. Each is a **generic
 design by purpose**, not a live workflow: an instance may seed a draft declaration from one, but none of
-the fourteen is live by default, and a section here binds no instance to run it. **Intake is the one
+the fifteen is live by default, and a section here binds no instance to run it. **Intake is the one
 exception, and the only core workflow** — every task enters through it, so an instance has no path to
 work at all without a live intake declaration; the operator's 2026-09-26 ruling withdraws any other
 workflow's earlier default liveness (payment, meeting processing, session digestion, and planning had been
@@ -205,10 +205,15 @@ The list itself is kept outside this directory, as the reference implementation'
 **Purpose:** turn a created task into a routed one: classified, linked to the records it concerns,
 deduplicated, prioritized, and handed to exactly one successor workflow, to none, or to the operator.
 
-**Entry condition:** a task exists in the record and has no intake batch. Creation is publication
-(`work_model.md#the-transition-vocabulary`), so every task meets this condition once, at creation, and no
-task meets it twice. A task with no intake batch is by that fact unrouted; there is no separate unrouted
-state (`work_model.md#intake-is-every-tasks-first-workflow`).
+**Entry condition:** every workflow-entering task enters with its intake batch and `ADDRESSED_BY` edge admitted atomically at
+creation. Its immutable creator-time `admission_class: workflow_entering` is part of that unit. The only
+other admitted value is `aggregate_parent`, which has no batch or `ADDRESSED_BY`; missing or ambiguous
+classification refuses admission rather than defaulting to intake. Creation is publication (`work_model.md#the-transition-vocabulary`), so this boundary is crossed
+once and no workflow-entering task enters intake twice. The aggregate parent is the explicit exception: it
+is not claimable, never enters a workflow, and has no intake batch. Decision 84's assembly exception differs
+only by adding the persistent
+`classify` hold finding to that same creation unit. A task is unrouted while its intake batch has no closing
+`route` verdict; there is no separate unrouted state (`work_model.md#intake-is-every-tasks-first-workflow`).
 
 **Steps**
 
@@ -223,6 +228,12 @@ state (`work_model.md#intake-is-every-tasks-first-workflow`).
 | 5 | `route` | `pm` step owner | yes | | the closing verdict names one successor workflow, or none, or `operator-only` |
 
 <!-- /rendered -->
+
+`classify` does not change `admission_class`: its name is for action classes, assignment and placement.
+If the work proves to need an aggregate, an authorized task creator admits a distinct
+`aggregate_parent` task and relates workflow-entering children to it through `PART_OF`; it cannot turn
+the already admitted workflow peer into a parent by adding child edges. The task-creation authority and
+the ordinary `PART_OF` checks still apply; this rule grants neither a new creator nor a new step owner.
 
 The steps exist because each failure they prevent has a name. Without `classify`, blast radius is inferred
 from the handling agent at the moment the action is taken (`gates_and_workflows.md#confidence-and-three-blast-tiers`).
@@ -676,6 +687,135 @@ is the cue to sign on the step's alternative close rather than a checkpoint
 routed by its own intake.
 
 **Fast paths:** none. Every outward message passes the gate.
+
+## customer_reply
+
+**Ruled (decision 153, 2026-10-19, the operator's): `customer_reply` is a reference workflow, the fifteenth, with
+the same status as `outreach`.** Registered as ruled in `conformance.md#the-register-of-open-design-decisions`.
+An instance may seed a draft `workflow` entity from it. It is not live by default, it is not part of a record
+bundle, and it is not an application's code. Collections and stock correction stay as workflows created in the
+instance's own scope (decision 116) until a second instance needs them (below).
+
+**Purpose:** answer a customer's inbound message, grounded in the business's own records and policies, with the
+reply checked mechanically, consented to by a staff operator, sent through the action gate, and the thread filed.
+
+**Entry condition:** intake closed naming `customer_reply`. The task arrives from the mail adapter's fourth
+inbound outcome, a new inbound thread on a bound mailbox, which reaches intake as a task; a new message on a
+thread already tracked is the second outcome and updates the artifact instead
+(`adapters.md#no-external-event-advances-a-step-by-itself`). At intake the instance's own seat for `classify` and
+`route` admits the thread as a [business matter](vocabulary.md#business-matter) (here, a customer incident) or closes it with no successor, and the closing verdict carries a
+finding naming why, so that every exclusion names its reason and staff can disagree with it; pulling a message
+back is a new task through intake, because closed work is never reopened. `link` resolves the customer by the
+normalised sender address only, never by name or subject, and attaches a cited order only if it belongs to that
+customer; nothing is attached on relevance alone (`#what-link-attaches-and-what-it-leaves-to-hydration`).
+`dedupe` and `prioritize` are as specified, with the priority from the instance's `priority_rubric`.
+
+**Steps**
+
+<!-- rendered: workflow=<declaration_scope>|customer_reply steps -->
+
+| # | Step | Step owner (role) | Required | Parallel / join | Closes on |
+|---|---|---|---|---|---|
+| 1 | `draft` | reply drafter | yes | | a draft exists in the record, in the language of the customer's latest message; customer text reached the model only inside untrusted-content fencing; policy wording is quoted verbatim from the policy records; every fact is traced to a linked record; the verdict references what it read |
+| 2 | `grounding_lint` | lint runner | yes | on fail: `draft` | policy quotes match the stored rows exactly; no remedy is offered that a policy exception excludes for the linked order's lines; every order, shipment, date, and amount resolves to a linked record; the language check passes; third parties are checked as in `outreach`'s `disclosure_lint` |
+| 3 | `review` | reviewer, an agent other than the drafter | no: `applies_when` the draft is model-generated or the untrusted-text screen flagged an embedded instruction | on fail: `draft` | the draft is judged for facts, for tone against the `brand_voice` entity and the style-rule records, and for scope |
+| 4 | `consent` | operator-facing agent | yes | on fail: `draft` | the checkpoint on the `send_external_comms` action, carrying the full draft, is resolved by a staff operator in the instance's application (`authority_model.md#an-application-resolves-checkpoints-and-holds-no-approval-state-of-its-own`) |
+| 5 | `send` | reply drafter | yes | | the action taken through the action gate by way of the mail adapter, and the sent message read back from the mailbox |
+| 6 | `file` | reply drafter | yes | | the thread is moved to the instance's closed folder through the adapter and read back by its immutable message id; the verdict closes the batch |
+
+<!-- /rendered -->
+
+`grounding_lint` is the mechanical half of what `review` used to carry alone, for the reason `disclosure_lint`
+exists in `outreach`: the capture purpose makes an unbounded read the normal failure, and a mechanical pass is
+cheaper and more reliable than a reviewer's attention for every property it can compute. A policy quote that
+differs from the stored row by a character, a remedy the order's policy exception excludes, and a date that
+resolves to no record are all defects a machine finds; none should reach a person. It precedes `review` and
+`consent` so that the staff operator sees a draft that has already been checked, and the draft consented to is
+the draft sent: any change after consent, including a staff operator's edit, is a new `draft` that re-enters at
+`grounding_lint` (`authority_model.md#an-application-resolves-checkpoints-and-holds-no-approval-state-of-its-own`).
+`review` is optional here, unlike in `outreach`: a reviewer is warranted when a model wrote the draft or the
+untrusted-text screen raised an embedded-instruction flag, and where neither holds the mechanical check is the
+whole of the review. The agent that reviews is never the agent that drafted
+(`gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review`). `file` is a step of the same batch so
+that a thread left in the inbox after a sent reply has a step owner until the batch closes, and so that the
+filing is read back like every other effect.
+
+**Three rules the step table does not carry.**
+
+- **"Sending is switched off" is data, not a code flag.** It is the instance's `action_policy` value for
+  `send_external_comms`, so that the same declaration runs drafting and consent on an instance that has not
+  yet turned sending on, and the held action is visible as one.
+- **A stale draft is caught at the take.** An order or a shipment may change after the draft is made. The gate
+  compares the read references the draft carries with the record at the take, a changed input holds the action,
+  and `draft` opens again
+  (`gates_and_workflows.md#the-checkpoint-is-written-where-the-gate-first-holds-the-action-and-the-permit-is-decided-at-the-take`).
+- **Filing is a second action class and needs a home in the action vocabulary.** Moving a thread out of an
+  inbox is an effect on an external system, so it is an action with a class and a blast radius. The class is
+  added to the action vocabulary on **both** sides of the blast classification with a low tier, so that a class
+  missing from either side is not read as the default
+  (`gates_and_workflows.md#confidence-and-three-blast-tiers`). Which name it takes is the action vocabulary's to
+  set; this section requires that it have one.
+
+**Stages:** composition (`draft`, `grounding_lint`, `review`); consent (`consent`); delivery (`send`, `file`).
+
+**Artifacts:** the sent message; the thread, in its closed folder. The draft is an entity in the record, not an
+artifact.
+
+**Typical action classes:** `send_external_comms`, and the filing class named above.
+
+**Data read:** the `customer`, order, shipment, and return-policy records (policy exceptions among them), the
+style-rule records, the `brand_voice` and `locale_profile` entities, and the thread history. Order and shipment
+state is hydrated through the shop and carrier adapters named by their `vendor_binding` entities
+(`#what-link-attaches-and-what-it-leaves-to-hydration`).
+
+**Successors:** none. A refund or an exchange shipment is a new task, routed by its own intake and referring to
+the same business matter (`work_model.md#a-business-matter-is-a-record-that-tasks-refer-to-and-is-not-itself-a-task`).
+
+**Fast paths:** none. Every outward message passes the gate.
+
+**What a customer service application's other capabilities become.** They are not workflows, or are not yet
+reference workflows, and the reason for each is stated so a later author does not rediscover it. The step shape
+recorded for collections and stock correction is what the one instance that needs them first used, kept so the
+next author starts from it; it gives them no standing as reference designs.
+
+- **Collections (a chase of a past-due receivable) start as a workflow created in the instance's scope under
+  decision 116.** It is a near fit of `outreach` with `payment`'s separation of duties: `assemble` builds the
+  netted balance, refusing an unreadable amount cell and never guessing it; `verify`, a role other than the
+  collector, checks the figures and the recipient against the account records; `draft`; `lint`, which holds the
+  draft's figures and recipient equal to the verified ones; `consent`, whose checkpoint is pinned to exactly the
+  figures `verify` signed (decision 27's pattern); `send`; and `follow_up`, with `hold_bound` as the chase
+  interval. Its entry is an intake rule that fires when a receivable, netted of credit notes, is past due and
+  unpaid with no chase batch open for that account. It becomes a reference workflow when a second instance needs it.
+- **Order-line stock correction is a candidate, not a reference.** An intake rule on a new shop order containing
+  composite lines creates a task; a deterministic step computes component units, an inventory-adjust action
+  goes through the shop adapter (low blast, so an `action_policy` may let it go without a checkpoint), and the
+  result is read back.
+- **Adapter jobs are not workflows.** Subscription renewal, recovery polls, and liveness are the adapter's
+  inbound side (`adapters.md#continual-inbound-is-the-inbound-side-and-an-intake-rule-evaluates-downstream-of-it`).
+- **Staff edits to master data are not workflows.** Invoices, company records, policy text, price lists, and reply
+  addresses are internal operational writes under a person's grant, attributed to that person
+  (`application.md#module-layout`).
+- **Spreadsheet cutover is not a workflow.** It is a field of the source's binding and a one-way event
+  (`adapters.md#the-direction-of-truth-for-a-business-record-class-is-a-field-of-its-sources-binding-and-moving-it-is-a-one-way-event`).
+- **Draft-quality evaluations are standing findings.** Each obliges an amendment to the declaration that produced
+  the draft (decision 116: a workflow is improved by every task it carries).
+
+**The rejected alternatives.** All three as workflows created in the instance's scope needs no foundation
+change, but the next client re-derives `customer_reply`. All three as reference workflows now would be designs
+generalised from a single user. **Cost accepted:** the other two are designed only for the one instance that
+needs them, and the promotion test is a second instance, not a calendar. **What would reopen it:** a second
+instance that needs collections or stock correction, which promotes the instance's declaration to a reference.
+
+**Matrix.** No row is added here. The planted refusals this ruling calls for are: a draft whose policy quote
+differs from the stored row by one character, a draft offering a remedy a policy exception excludes for the
+linked order's lines, and a draft whose date, amount, order, or shipment resolves to no linked record, each
+failing `grounding_lint`; a draft in a language other than the customer's latest message, failing the language
+check; a draft naming a third party that `link` did not attach; customer text that reached the model outside
+untrusted-content fencing; a `review` signed by the drafting agent; a send taken with sending switched off in
+the instance's `action_policy`; a draft whose read references the record no longer matches, taken instead of held;
+a sent message not read back from the mailbox; and a filing action class present on only one side of the blast
+classification, which must read as low and not as the default; they are added to `conformance_suite.md` in a
+later change.
 
 ## payment
 
@@ -1346,7 +1486,7 @@ proposal at `judge` or `amend`.
 `gates_and_workflows.md#declaration-batch-projection` defined a stage as a contiguous named group of steps
 and gave each declared step a `phase` field. No rule reads either: no gate, conclusion, fast path,
 `applies_when`, successor, or checkpoint keys on a stage, and where a batch is is already its current step
-(`vocabulary.md#owner-five-meanings-one-word-forbidden-alone`). The grouping was stated in two homes — the
+(`vocabulary.md#owner-six-meanings-one-word-forbidden-alone`). The grouping was stated in two homes — the
 prose line and the declaration's field — with no mechanism behind either, the shape principle 9 names, and
 the second option considered is the one that holds: keep the Stages line as authored prose, so the grouping
 has one home, and drop the field, since the declaration should carry nothing no rule reads.
@@ -1363,7 +1503,7 @@ question that was never about that word's other use.
 **Cost accepted.** `gates_and_workflows.md#declaration-batch-projection` and `vocabulary.md#step` (and any
 declared-step field list) drop `phase` from the fields a step carries; a workflow's grouping into stages is
 authored prose only, read by a person and not resolved by any rule, and a reader who wants "where a batch
-is" reads its current step, per `vocabulary.md#owner-five-meanings-one-word-forbidden-alone`, exactly as
+is" reads its current step, per `vocabulary.md#owner-six-meanings-one-word-forbidden-alone`, exactly as
 before this ruling.
 
 **What this leaves open.** The *Stages* prose itself — whether its wording, granularity, or presence per
@@ -1372,7 +1512,9 @@ that the field is dropped and the prose is kept; it does not touch what the pros
 
 ## What no workflow in this document does
 
-None lets a task that has no intake batch enter it, except intake itself. None names two successors.
+None admits a `workflow_entering` task without its intake batch; `admission_class: aggregate_parent`
+is fixed at creation, is not claimable, and enters no workflow at all. None lets an assembling task enter another workflow while
+decision 84's persistent hold stands. None names two successors.
 None takes a step on an issue or a pull request rather than on the batch's tasks. None takes an outward
 effect outside the action gate, none carries a second gate beside it, and none raises task-level failure
 anywhere but the checkpoint queue.

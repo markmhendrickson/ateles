@@ -16,8 +16,8 @@ Every piece of provider routing, identity, credential stripping, and
 harness_event bookkeeping already exists in
 ``execution/daemons/apis/dispatch_role.py`` and the ``skill_runner`` /
 ``harness_router`` it wraps. This script adds NOTHING to that layer except
-three threaded-through kwargs (``env_extra``, ``seated_reviewer``,
-``command_wrapper`` — see ``dispatch_role.dispatch`` and
+threaded-through guard kwargs (``env_extra``, ``seated_reviewer``,
+``command_wrapper``, and ``expected_role_fingerprint`` — see ``dispatch_role.dispatch`` and
 ``skill_runner._run_skill_once``). Its own job, and nothing else:
 
   1. render the shared lens brief + the lens's agent_definition prompt into
@@ -54,7 +54,7 @@ whose absence has a concrete blast radius, and PROBES each one — against a
 fixture, never a real credential file or the real shared git dir — before
 ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
 ``probe_sandbox_exec_denies_read/write``,
-``probe_stash_effect_denied_across_git_binaries``):
+``probe_protected_ref_effects``):
 
   * **Credential-file reads, binding integrity, and user-config writes** — a macOS
     ``sandbox-exec`` profile (``build_sandbox_exec_profile``) denies
@@ -138,14 +138,11 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
       entirely (an absolute-path invocation, a binary this host adds
       tomorrow), the sandbox-exec deny above still stops the write.
 
-    ``HarnessSandbox.git_stash_denied`` is set from
-    ``probe_stash_effect_denied_across_git_binaries``, which exercises this
-    deny against every real git invocation this host happens to offer
-    (``PATH``-resolved ``git``, ``/usr/bin/git`` by absolute path, ``xcrun
-    git``, and Xcode's bundled binary by its own absolute path — see
-    ``discover_probe_git_invocations``) — building empirical confidence
-    across several real binaries, but the deny's CORRECTNESS never depended
-    on that list being exhaustive, unlike round 3's mechanism.
+    ``HarnessSandbox.git_stash_denied`` is set by direct file-effect probes
+    against inert ref-shaped fixtures inside the allowed runtime root. Each
+    read and mutation is denied by the production profile, succeeds without
+    confinement and with only the protected rules removed, and leaves the
+    production fixture unchanged. No Git stash command is used by the probe.
 
     **Residual, stated rather than hidden**: once ``refs/stash`` has been
     folded into the shared ``packed-refs`` file, this profile cannot deny
@@ -167,9 +164,8 @@ ever deciding a dispatch may proceed (see ``HarnessSandbox.build()``,
   ``HarnessSandbox.build()`` before any real dispatch: the credential/
   user-config denies are tested with a real ``cat``/``touch`` against a
   fixture file this script creates (never the operator's own files), and the
-  stash-ref deny is tested with a real ``git stash push`` — via several real
-  git invocations this host offers — inside a scratch repo this script
-  ``git init``s for the probe (never the shared clone or its stash ref). The
+  stash-ref deny is tested with direct file operations on inert fixtures
+  inside the otherwise writable runtime root. The
   resulting booleans (``credential_read_denied``,
   ``credential_binding_protected``, ``user_config_write_denied``, and
   ``git_stash_denied``) are what ``HarnessSandbox.fully_guarded`` and
@@ -222,6 +218,7 @@ to filter on):
         --lens pm --provider claude \\
         --brief <path-to-lens-brief> --task-entity-id ent_... \\
         [--post] [--dry-run] [--compare claude,codex]
+        [--model MODEL] [--action-class ACTION_CLASS]
 
 The one command a session runs to MONITOR it — purely from Neotoma, no
 access to this process or its stdout required — via the Neotoma MCP/REST
@@ -250,6 +247,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
@@ -279,7 +277,10 @@ from lib.credential_templates import (  # noqa: E402
 import harness_router  # noqa: E402
 from harness_router import headroom_resolution  # noqa: E402
 from review_panel import lens_by_name  # noqa: E402
-from skill_runner import SkillResult  # noqa: E402
+from skill_runner import (  # noqa: E402
+    AgentDefinitionUnavailable, SkillResult, _load_agent_def,
+    canonical_role_fingerprint,
+)
 
 try:
     import swarm_dispatch  # noqa: E402
@@ -510,7 +511,7 @@ class LensTarget:
     pr: int
     head: str
     lens: str  # short label, e.g. "pm"
-    agent: str  # docs/agents/<agent>.md name, e.g. "pavo"
+    agent: str  # canonical agent_definition name, e.g. "pavo"
     focus_notes: str = ""
     # Neotoma task entity this dispatch is PART_OF, if any. Optional — a
     # one-off comparison run need not have one — but when present it is the
@@ -525,11 +526,8 @@ def render_lens_task(target: LensTarget, brief_path: Path) -> str:
     task string, exactly as the bootstrap-mode operator-run subagent brief
     describes doing it by hand (see the brief's step 2).
 
-    The agent's own ``docs/agents/<agent>.md`` prompt is read from the LOCAL
-    worktree the caller is about to dispatch into (passed in via
-    ``agent_prompt_source``-equivalent callers use ``read_agent_prompt``
-    below) — not fetched again here — so the two reads are guaranteed to be
-    against the SAME head the lens will actually review.
+    The caller supplies the freshly admitted canonical agent_definition prompt.
+    The review checkout supplies source code only, never role instructions.
     """
     if not brief_path.is_file():
         raise FileNotFoundError(
@@ -550,16 +548,15 @@ def render_lens_task(target: LensTarget, brief_path: Path) -> str:
     return f"{launch}\n---\n\n{brief}"
 
 
-def read_agent_prompt(worktree: Path, agent: str) -> str:
-    """Read docs/agents/<agent>.md from the worktree (i.e. from TARGET HEAD's
-    own tree state at fetch time — the worktree is created from origin, and
-    docs/agents is generated from Neotoma on origin/main, per the lens brief's
-    own instruction to read it from ``origin/main`` rather than the PR branch).
-    """
-    path = worktree / "docs" / "agents" / f"{agent}.md"
-    if not path.is_file():
-        raise FileNotFoundError(f"{path} does not exist — unknown lens agent {agent!r}")
-    return path.read_text(encoding="utf-8")
+def load_canonical_role(agent: str) -> tuple[str, str, str, str | None]:
+    """Read the exact active role independently of the checkout under review."""
+    agent_def = _load_agent_def(agent, fresh=True)
+    fingerprint = canonical_role_fingerprint(agent, agent_def)
+    if not isinstance(fingerprint, str) or not re.fullmatch(r'[0-9a-f]{64}', fingerprint):
+        raise AgentDefinitionUnavailable(agent, 'bad_response', 1)
+    snapshot = agent_def.raw.get('snapshot', {}) if isinstance(agent_def.raw, dict) else {}
+    revision = snapshot.get('revision') if isinstance(snapshot, dict) else None
+    return agent_def.prompt_markdown, agent_def.entity_id, fingerprint, revision
 
 
 def final_child_instruction(verdict_path: Path) -> str:
@@ -956,17 +953,9 @@ def build_sandbox_exec_profile(
     stops ``stash push``/``pop``/``apply``/``drop``/``clear`` regardless of
     which binary attempts it, with no enumeration to keep current.
 
-    Denying READS too (not just writes) additionally stops ``stash
-    apply``/``list``/``show`` from consuming an existing stash entry — a
-    dispatched child that finds an ALREADY-STASHED entry left by another
-    session could otherwise read (and thereby exfiltrate or reason about)
-    that entry's diff even without writing anything itself. Verified
-    empirically: a sandboxed ``stash list`` against a fixture repo with a
-    real pre-existing entry returns exit 0 with EMPTY output rather than an
-    error — Seatbelt's deny makes git behave as if the ref does not exist,
-    which is functionally the desired outcome (the entry is not visible) even
-    though it is not a nonzero exit code; the probe below checks for this
-    exact "denied reads as absent" shape rather than assuming an error code.
+    Denying READS too (not just writes) prevents direct consumption of a
+    loose protected ref. The probe verifies direct file-open denial on inert
+    fixture bytes and requires the trusted parent to observe unchanged state.
 
     RESIDUAL, NOT CLOSED BY THIS MECHANISM, BOTH READ AND WRITE (stated here,
     not hidden): ``packed-refs`` is the one file that determines
@@ -1394,145 +1383,155 @@ def probe_sandbox_exec_preserves_credential_binding(
     )
 
 
-@dataclass(frozen=True)
-class StashListRead:
-    """One attempt to observe the real stash stack."""
+_REF_PROBE_PATHS = (
+    '.git/refs/stash',
+    '.git/logs/refs/stash',
+    '.git/worktrees/probe/refs/stash',
+    '.git/worktrees/probe/logs/refs/stash',
+)
+_REF_PROBE_OPERATIONS = ('read', 'append', 'overwrite', 'unlink', 'rename', 'create')
+_REF_PROBE_BASELINE = b'protected-ref-fixture\n'
+_REF_PROBE_HELPER = '''import json, os, sys
+operation, name = sys.argv[1:]
+content = None
+try:
+    if operation == "read":
+        with open(name, "rb") as stream: content = stream.read().hex()
+    elif operation == "append":
+        with open(name, "ab") as stream: stream.write(b"changed")
+    elif operation == "overwrite":
+        with open(name, "wb") as stream: stream.write(b"changed")
+    elif operation == "unlink": os.unlink(name)
+    elif operation == "rename": os.replace(name + ".replacement", name)
+    elif operation == "create":
+        with open(name, "xb") as stream: stream.write(b"changed")
+    else: raise ValueError("unknown operation")
+except OSError as exc:
+    print(json.dumps({"result": "denied", "errno": exc.errno}))
+else:
+    response = {"result": "ok"}
+    if content is not None: response["content"] = content
+    print(json.dumps(response))
+'''
 
-    succeeded: bool
-    listing: str | None
 
-
-def _real_stash_list(scratch_git_dir: Path) -> StashListRead:
-    """Read the REAL stash stack directly via the unmodified system git — the
-    verification instrument, never the mechanism under test. Every probe
-    below refuses to trust its own subject's exit code alone (a shim or
-    sandbox that silently swallows the mutation while reporting failure
-    would otherwise look identical to one that genuinely blocked it); this
-    reads the ACTUAL on-disk ref state after each attempt.
-    """
-    real_git = shutil.which("git") or "git"
-    listing = subprocess.run(
-        [real_git, "-C", str(scratch_git_dir), "stash", "list"],
-        capture_output=True,
-        text=True,
+def _ref_probe_state(path: Path) -> tuple[bytes | None, bytes | None, tuple[str, ...]]:
+    """Trusted-parent observation; a read failure invalidates the probe."""
+    replacement = Path(f'{path}.replacement')
+    for candidate in (path, replacement):
+        if candidate.is_symlink():
+            raise OSError('probe fixture contains a symlink')
+    return (
+        path.read_bytes() if path.exists() else None,
+        replacement.read_bytes() if replacement.exists() else None,
+        tuple(sorted(child.name for child in path.parent.iterdir())),
     )
-    if listing.returncode != 0:
-        return StashListRead(succeeded=False, listing=None)
-    return StashListRead(succeeded=True, listing=listing.stdout)
 
 
-def probe_git_shim_denies_stash_push(shim_path: Path, scratch_git_dir: Path) -> bool:
-    """Return True iff invoking `git stash push` THROUGH THE SHIM (PATH-first,
-    the normal resolution path) in a SCRATCH git repo (never the shared
-    clone) exits non-zero AND leaves the real stash stack untouched.
-
-    ADVISORY-ONLY as of PR #1308 round 4 (ent_9e88db1882c668e6c5c32be9's own
-    round-4 follow-up): this probe verifies the shim's friendly early-refusal
-    message still works for the common PATH-resolved case, but
-    `HarnessSandbox.git_stash_denied` no longer depends on this probe's
-    result — the actual control is
-    `probe_stash_effect_denied_across_git_binaries`, which tests the
-    sandbox-exec deny on the stash ref itself rather than the shim. Kept as
-    a standalone, separately testable diagnostic for the shim's own
-    behaviour rather than removed outright, since the shim itself is kept
-    (as advisory UX, not enforcement) rather than removed.
-
-    *scratch_git_dir* must already contain at least one commit — otherwise a
-    real, unshimmed `git stash push` would ALSO fail (with "You do not have
-    the initial commit yet"), which would make this probe pass for the wrong
-    reason on a broken shim that never actually refuses anything.
-    """
-    env = {**os.environ, "PATH": f"{shim_path.parent}:{os.environ.get('PATH', '')}"}
-    before = _real_stash_list(scratch_git_dir)
-    if not before.succeeded:
-        return False
-    push = subprocess.run(
-        ["git", "-C", str(scratch_git_dir), "stash", "push"],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    if push.returncode == 0:
-        return False
-    after = _real_stash_list(scratch_git_dir)
-    return after.succeeded and after.listing == before.listing
-
-
-def discover_probe_git_invocations(scratch_git_dir: Path) -> list[list[str]]:
-    """Return several DISTINCT ways to invoke `git stash push` against
-    *scratch_git_dir*, covering every git binary this host happens to have —
-    used ONLY to build confidence in the probe below across several real
-    binaries, never as the deny mechanism itself (round 3 tried enumerating
-    binaries as the mechanism; round 4 replaces that with a deny on the
-    EFFECT, which does not need enumeration to be correct — see
-    build_sandbox_exec_profile). Distinct invocations tried, whichever exist
-    on this host: the `git` resolved via PATH, `/usr/bin/git` by absolute
-    path, `xcrun git` (Xcode's own resolution mechanism, which the previous
-    round's PATH-only enumeration missed entirely), and Xcode's bundled git
-    binary by its own absolute path (`xcrun -f git`'s answer). Each is
-    returned as an argv PREFIX (before `-C <repo> stash push`); a binary this
-    host does not have is simply omitted, never fabricated.
-    """
-    invocations: list[list[str]] = []
-    on_path = shutil.which("git")
-    if on_path:
-        invocations.append(["git"])
-    if Path("/usr/bin/git").is_file():
-        invocations.append(["/usr/bin/git"])
-    if shutil.which("xcrun"):
-        xcrun_result = subprocess.run(
-            ["xcrun", "-f", "git"], capture_output=True, text=True
+def _run_ref_probe(wrapper: list[str], interpreter: Path, operation: str, path: Path) -> dict:
+    try:
+        result = subprocess.run(
+            [*wrapper, str(interpreter), '-c', _REF_PROBE_HELPER, operation, str(path)],
+            capture_output=True, text=True, timeout=10,
         )
-        if xcrun_result.returncode == 0 and xcrun_result.stdout.strip():
-            xcode_git = xcrun_result.stdout.strip()
-            invocations.append(["xcrun", "git"])
-            if xcode_git not in (on_path, "/usr/bin/git"):
-                invocations.append([xcode_git])
-    return invocations
+        response = json.loads(result.stdout)
+        if not isinstance(response, dict) or result.stderr or result.returncode != 0:
+            return {}
+        if response == {'result': 'ok'} or response == {
+            'result': 'ok', 'content': _REF_PROBE_BASELINE.hex()
+        } or (
+            set(response) == {'result', 'errno'}
+            and response['result'] == 'denied'
+            and response['errno'] in (errno.EPERM, errno.EACCES)
+        ):
+            return response
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return {}
 
 
-def probe_stash_effect_denied_across_git_binaries(
-    command_wrapper: list[str], scratch_git_dir: Path
-) -> bool:
-    """Return True iff `git stash push` is refused AND leaves the real stash
-    stack untouched, for EVERY git invocation `discover_probe_git_invocations`
-    finds on this host — proving the deny is binary-agnostic rather than
-    merely re-testing one binary, without the probe ITSELF depending on
-    enumeration being exhaustive (unlike round 3's mechanism, this round's
-    deny targets the ref path, so any binary this probe happens to miss would
-    still be denied in production — this function only builds empirical
-    confidence across as many real binaries as this host happens to offer).
+def _without_ref_denies(profile: Path, destination: Path) -> None:
+    """Remove only the four protected regex lines from a disposable profile."""
+    source = profile.read_text(encoding='utf-8')
+    changed = source
+    for pattern in _STASH_REF_DENY_REGEXES:
+        line = f'  (regex #"{pattern}")\n'
+        if changed.count(line) != 2:
+            raise ValueError('protected deny profile shape changed')
+        changed = changed.replace(line, '')
+    destination.write_text(changed, encoding='utf-8')
 
-    An empty *command_wrapper* (no sandbox-exec available) always returns
-    False. If NO git invocation is discovered at all, also returns False —
-    that would mean the probe proved nothing, which must not be misread as a
-    pass.
+
+def probe_protected_ref_effects(command_wrapper: list[str], runtime_root: Path) -> bool:
+    """Bind each protected filesystem effect to the production Seatbelt profile.
+
+    All paths are inert fixtures in the otherwise writable runtime root. The
+    same operation must succeed outside confinement and with only the protected
+    rules removed, then be explicitly denied by the production profile while
+    the parent sees unchanged state. Generic process failure is never a pass.
     """
-    if not command_wrapper:
+    if (len(command_wrapper) != 3 or command_wrapper[:2] !=
+            [str(TRUSTED_MACOS_SANDBOX_EXEC), '-f']):
         return False
-    invocations = discover_probe_git_invocations(scratch_git_dir)
-    if not invocations:
+    profile = Path(command_wrapper[2])
+    interpreter = Path(sys.executable).resolve()
+    if not profile.is_file() or not interpreter.is_file() or not os.access(interpreter, os.X_OK):
         return False
-    before = _real_stash_list(scratch_git_dir)
-    if not before.succeeded:
-        return False
-    for prefix in invocations:
-        attempt = subprocess.run(
-            [*command_wrapper, *prefix, "-C", str(scratch_git_dir), "stash", "push"],
-            capture_output=True,
-            text=True,
-        )
-        # Seatbelt's read/write deny on refs/stash makes the WRITE attempt
-        # fail outright (nonzero exit) in every case observed — but the
-        # verification is the real stash list, not the exit code, per this
-        # module's own standing practice of never trusting a subject's own
-        # report of its result.
-        if attempt.returncode == 0:
+    fixture_root = runtime_root / 'protected-ref-probe'
+    relaxed_profile = runtime_root / 'protected-ref-probe-relaxed.sb'
+    try:
+        root = runtime_root.resolve(strict=True)
+        fixture_root.mkdir(parents=True, exist_ok=True)
+        if fixture_root.resolve(strict=True).is_relative_to(root) is False:
             return False
-        after = _real_stash_list(scratch_git_dir)
-        if not after.succeeded or after.listing != before.listing:
-            return False
-    return True
+        _without_ref_denies(profile, relaxed_profile)
+        relaxed_wrapper = [*command_wrapper[:2], str(relaxed_profile)]
+        for relative in (*_REF_PROBE_PATHS, 'benign/sibling'):
+            path = fixture_root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if any(part.is_symlink() for part in (path, *path.parents) if part == fixture_root or fixture_root in part.parents):
+                return False
+            if not path.parent.resolve(strict=True).is_relative_to(root):
+                return False
+            for operation in _REF_PROBE_OPERATIONS:
+                expected_success = (
+                    {'result': 'ok', 'content': _REF_PROBE_BASELINE.hex()}
+                    if operation == 'read' else {'result': 'ok'}
+                )
+                def reset() -> tuple[bytes | None, bytes | None, tuple[str, ...]]:
+                    path.unlink(missing_ok=True)
+                    replacement = Path(f'{path}.replacement')
+                    replacement.unlink(missing_ok=True)
+                    if operation != 'create':
+                        path.write_bytes(_REF_PROBE_BASELINE)
+                    if operation == 'rename':
+                        replacement.write_bytes(b'replacement\n')
+                    return _ref_probe_state(path)
+
+                baseline = reset()
+                if _run_ref_probe([], interpreter, operation, path) != expected_success:
+                    return False
+                if (_ref_probe_state(path) == baseline) != (operation == 'read'):
+                    return False
+                reset()
+                if relative == 'benign/sibling':
+                    if _run_ref_probe(command_wrapper, interpreter, operation, path) != expected_success:
+                        return False
+                    if (_ref_probe_state(path) == baseline) != (operation == 'read'):
+                        return False
+                    continue
+                if _run_ref_probe(relaxed_wrapper, interpreter, operation, path) != expected_success:
+                    return False
+                if (_ref_probe_state(path) == baseline) != (operation == 'read'):
+                    return False
+                reset()
+                if _run_ref_probe(command_wrapper, interpreter, operation, path).get('result') != 'denied':
+                    return False
+                if _ref_probe_state(path) != baseline:
+                    return False
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 @dataclass
@@ -1740,15 +1739,8 @@ class HarnessSandbox:
             if "mcp_fixture" in locals():
                 mcp_fixture.unlink(missing_ok=True)
 
-        # ── git-stash: the shim is advisory-only (a friendly early message
-        # for the common PATH-resolved case); the REAL control is the
-        # sandbox-exec profile's deny on refs/stash, already built above.
-        # This probe exercises the sandbox effect across every real git
-        # invocation this host happens to offer (see
-        # discover_probe_git_invocations) to build confidence the deny is
-        # genuinely binary-agnostic — it does NOT need to be exhaustive for
-        # production correctness, unlike round 3's enumeration-as-mechanism,
-        # because production denies the ref path, not a list of binaries.
+        # The shim remains advisory. Probe the profile's protected file
+        # effects directly on inert fixtures inside the allowed runtime root.
         shim_dir = sandbox_home / "shim-bin"
         shim_dir.mkdir(parents=True, exist_ok=True)
         shim_path = shim_dir / "git"
@@ -1760,52 +1752,7 @@ class HarnessSandbox:
                 encoding="utf-8",
             )
             shim_path.chmod(0o755)
-            scratch_repo = sandbox_home / "stash-probe-repo"
-            scratch_repo.mkdir(parents=True, exist_ok=True)
-            subprocess.run(
-                ["git", "init", "-q", str(scratch_repo)],
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(scratch_repo),
-                    "config",
-                    "user.email",
-                    "probe@example.com",
-                ],
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(scratch_repo), "config", "user.name", "probe"],
-                check=True,
-                capture_output=True,
-            )
-            (scratch_repo / "probe.txt").write_text("probe\n", encoding="utf-8")
-            subprocess.run(
-                ["git", "-C", str(scratch_repo), "add", "-A"],
-                check=True,
-                capture_output=True,
-            )
-            # A REAL commit — required so a real, unsandboxed `git stash
-            # push` would actually succeed, which is what makes the probe
-            # below meaningful: on a broken guard, this commit is what lets
-            # the bypass produce a real stash entry for the probe to catch,
-            # rather than failing on its own with "no initial commit" for an
-            # unrelated reason. See probe_stash_effect_denied_across_git_
-            # binaries's docstring.
-            subprocess.run(
-                ["git", "-C", str(scratch_repo), "commit", "-q", "-m", "probe"],
-                check=True,
-                capture_output=True,
-            )
-            (scratch_repo / "probe.txt").write_text("probe changed\n", encoding="utf-8")
-            git_stash_denied = probe_stash_effect_denied_across_git_binaries(
-                command_wrapper, scratch_repo
-            )
+            git_stash_denied = probe_protected_ref_effects(command_wrapper, sandbox_home)
         except (RuntimeError, subprocess.CalledProcessError, OSError):
             git_stash_denied = False
         env_extra["PATH"] = f"{shim_dir}:{os.environ.get('PATH', '')}"
@@ -1814,8 +1761,8 @@ class HarnessSandbox:
         if not git_stash_denied:
             unavailable.append(
                 "git_stash_guard (sandbox-exec unavailable, or its "
-                "refs/stash deny did not probe as denying a real stash "
-                "push across the git binaries this host offers — see the "
+                "refs/stash deny did not probe as denying direct file effects "
+                "on inert fixtures — see the "
                 "sandbox's own probe result, not asserted)"
             )
         if not credential_read_denied:
@@ -1974,6 +1921,10 @@ def refuse_if_guard_required(sandbox: "HarnessSandbox") -> str | None:
 # ── dry-run rendering -------------------------------------------------------------
 
 
+validate_model_selector = dispatch_role.model_tiering.validate_model_selector
+_cli_model_selector = dispatch_role.model_tiering.parse_model_selector
+
+
 def dry_run_report(
     target: LensTarget,
     *,
@@ -1981,6 +1932,8 @@ def dry_run_report(
     sandbox: HarnessSandbox,
     task_text: str,
     worktree_path: Path,
+    model: str | None = None,
+    action_class: str | None = None,
 ) -> dict:
     """Everything --dry-run prints: the exact command shape, prompt size, and
     guard configuration — and NO model call. This mirrors, rather than calls,
@@ -1990,6 +1943,20 @@ def dry_run_report(
     drift between this preview and the real dispatch is visible as a diff
     against `_provider_command` in review, not a silent divergence.
     """
+    model = validate_model_selector(model)
+    # Use the same live tier and vendor-binding resolvers as run_skill.
+    # An explicit model wins; omitting both selectors keeps the provider default.
+    selected_model = model
+    selected_tier = None
+    model_refusal = None
+    if selected_model is None and action_class is not None:
+        selected_tier = dispatch_role.model_tiering.resolve_tier(action_class)
+        try:
+            selected_model = dispatch_role.model_tiering.model_for_tier(
+                provider, selected_tier.tier
+            )
+        except dispatch_role.model_tiering.UnboundTierError as exc:
+            model_refusal = str(exc)
     if provider == "codex":
         sandbox_mode = (
             "danger-full-access"
@@ -1999,6 +1966,7 @@ def dry_run_report(
         example_cmd = [
             "codex",
             "exec",
+            *(["--model", selected_model] if selected_model else []),
             "--sandbox",
             sandbox_mode,
             *(
@@ -2023,12 +1991,17 @@ def dry_run_report(
             "--approve-mcps",
             "--output-format",
             "text",
+            *(["--model", selected_model] if selected_model else []),
             "--workspace",
             str(worktree_path),
             "<prompt omitted — see prompt_chars>",
         ]
     else:
-        example_cmd = ["claude", "--print", "--append-system-prompt", "<system prompt>"]
+        example_cmd = [
+            "claude", "--print",
+            *(["--model", selected_model] if selected_model else []),
+            "--append-system-prompt", "<system prompt>",
+        ]
 
     # command_wrapper is prepended to the REAL argv by skill_runner
     # (see _run_skill_once's command_wrapper param) — shown here too so the
@@ -2036,12 +2009,15 @@ def dry_run_report(
     # of it that could drift.
     example_cmd = [*sandbox.command_wrapper, *example_cmd]
 
-    refusal = refuse_if_guard_required(sandbox)
+    refusal = refuse_if_guard_required(sandbox) or model_refusal
 
     report = {
         "ok": refusal is None,
         "dry_run": True,
         "provider": provider,
+        "model": selected_model,
+        "action_class": action_class,
+        "tier": selected_tier.tier if selected_tier else None,
         "repo": target.repo,
         "pr": target.pr,
         "head": target.head,
@@ -2555,6 +2531,21 @@ def post_verdict(*, repo: str, pr: int, verdict_text: str) -> str:
 # ── Single-provider run -----------------------------------------------------------
 
 
+def _canonical_role_refusal(
+    target: LensTarget, provider: str, error: AgentDefinitionUnavailable,
+) -> dict:
+    reason = (
+        f"canonical reviewer role {target.agent!r} is unavailable: {error}; "
+        "check its active agent_definition and retry"
+    )
+    return {
+        "ok": False, "provider": provider, "lens": target.lens,
+        "agent": target.agent, "role": target.agent,
+        "reason": reason, "refusal_reason": reason,
+        "no_model_call_made": True, "posted": False,
+    }
+
+
 async def run_one(
     target: LensTarget,
     *,
@@ -2565,13 +2556,26 @@ async def run_one(
     scratch_root: Path,
     brief_path: Path,
     timeout: int | None,
+    model: str | None = None,
+    action_class: str | None = None,
 ) -> dict:
     """Run the lens once on one provider. Returns a JSON-serializable report.
 
-    Raises HeadroomExhausted before anything else (no worktree, no dispatch)
+    Refuse an unavailable canonical reader before review preparation or inference.
+    Raises HeadroomExhausted before creating a worktree or dispatching
     when the provider's configured headroom is exactly 0 — the operator-reset
     gate named in the task.
     """
+    model = validate_model_selector(model)
+    if swarm_dispatch is None:
+        reason = (
+            "canonical review reader could not be imported; cannot validate "
+            "verdicts — refusing before a model call"
+        )
+        return {
+            "ok": False, "provider": provider, "reason": reason,
+            "refusal_reason": reason, "no_model_call_made": True, "posted": False,
+        }
     check_headroom(provider)
 
     worktree_path = (
@@ -2598,7 +2602,10 @@ async def run_one(
                 review_worktree=worktree.path,
                 verdict_path=verdict_path,
             )
-            agent_prompt = read_agent_prompt(worktree.path, target.agent)
+            try:
+                agent_prompt, role_id, role_fingerprint, role_revision = load_canonical_role(target.agent)
+            except AgentDefinitionUnavailable as error:
+                return _canonical_role_refusal(target, provider, error)
             task_text = (
                 render_lens_task(target, brief_path)
                 + "\n\n---\n\n"
@@ -2612,7 +2619,11 @@ async def run_one(
                 sandbox=sandbox,
                 task_text=task_text,
                 worktree_path=worktree.path,
+                model=model,
+                action_class=action_class,
             )
+            report.update(role_entity_id=role_id, role_fingerprint=role_fingerprint,
+                          role_revision=role_revision)
             dotenv_refusal = refuse_if_credential_files_in_worktree(worktree.path)
             if dotenv_refusal:
                 report["ok"] = False
@@ -2642,7 +2653,10 @@ async def run_one(
         refusal = refuse_if_guard_required(sandbox)
         if refusal:
             return {"ok": False, "provider": provider, "reason": refusal}
-        agent_prompt = read_agent_prompt(worktree.path, target.agent)
+        try:
+            agent_prompt, role_id, role_fingerprint, role_revision = load_canonical_role(target.agent)
+        except AgentDefinitionUnavailable as error:
+            return _canonical_role_refusal(target, provider, error)
         task_text = (
             render_lens_task(target, brief_path)
             + "\n\n---\n\n"
@@ -2671,6 +2685,8 @@ async def run_one(
                 target.agent,
                 task_text,
                 provider=provider,
+                model=model,
+                action_class=action_class,
                 cwd=str(worktree.path),
                 timeout=timeout,
                 task_entity_id=target.task_entity_id,
@@ -2679,6 +2695,7 @@ async def run_one(
                 command_wrapper=sandbox.command_wrapper,
                 codex_outer_sandboxed=sandbox.codex_outer_sandbox_probed,
                 local_review=True,
+                expected_role_fingerprint=role_fingerprint,
             )
         except Exception as dispatch_error:
             stash_ref_failure = verify_stash_ref_unchanged_after_dispatch(
@@ -2770,6 +2787,9 @@ async def run_one(
             "provider": provider,
             "lens": target.lens,
             "agent": target.agent,
+            "role_entity_id": role_id,
+            "role_fingerprint": role_fingerprint,
+            "role_revision": role_revision,
             "lens_verdict": check.lens_verdict,
             "sign_off_warranted": check.sign_off_warranted,
             "pre_post": check.pre_post,
@@ -2882,6 +2902,8 @@ async def run_compare(
     scratch_root: Path,
     brief_path: Path,
     timeout: int | None,
+    model: str | None = None,
+    action_class: str | None = None,
 ) -> dict:
     """Run the same lens on the same head via each of *providers* and report
     both verdicts side by side.
@@ -2894,6 +2916,7 @@ async def run_compare(
     providers' verdicts posted runs that provider again, alone, via
     ``run_one``/``--provider`` after inspecting the comparison.
     """
+    model = validate_model_selector(model)
     results = {}
     for provider in providers:
         results[provider] = await run_one(
@@ -2905,6 +2928,8 @@ async def run_compare(
             scratch_root=scratch_root,
             brief_path=brief_path,
             timeout=timeout,
+            model=model,
+            action_class=action_class,
         )
     return {"compare": True, "lens": target.lens, "pr": target.pr, "results": results}
 
@@ -2929,7 +2954,7 @@ def main(argv: list[str] | None = None) -> int:
         "--agent",
         default=None,
         help=(
-            "docs/agents/<agent>.md name. Optional when --lens names a lens "
+            "canonical agent_definition name. Optional when --lens names a lens "
             "in review_panel.LENSES (the same registry select_panel/"
             "approve_pr_as_app.py derive a PR's required-lens panel from): "
             "the agent is then resolved via review_panel.lens_by_name so a "
@@ -2964,6 +2989,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--timeout", type=int, default=None)
+    parser.add_argument(
+        "--model", default=None, type=_cli_model_selector,
+        help="Explicit provider model identifier without whitespace/control characters; "
+        "overrides --action-class tier selection. "
+        "Omit both selectors to retain the provider's existing default.",
+    )
+    parser.add_argument(
+        "--action-class", default=None,
+        help="Resolve a model through the existing live action_policy/vendor_binding, "
+        "e.g. lens_review:arch. --model takes precedence.",
+    )
     parser.add_argument(
         "--provider", choices=list(HARNESSES), help="Single-provider run"
     )
@@ -3045,6 +3081,8 @@ def main(argv: list[str] | None = None) -> int:
                         scratch_root=scratch_root,
                         brief_path=brief_path,
                         timeout=args.timeout,
+                        model=args.model,
+                        action_class=args.action_class,
                     )
                 )
             else:
@@ -3058,6 +3096,8 @@ def main(argv: list[str] | None = None) -> int:
                         scratch_root=scratch_root,
                         brief_path=brief_path,
                         timeout=args.timeout,
+                        model=args.model,
+                        action_class=args.action_class,
                     )
                 )
         except HeadroomExhausted as exc:

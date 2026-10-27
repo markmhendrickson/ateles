@@ -268,6 +268,7 @@ async def dispatch(
     regenerate_commands: list[str] | None = None,
     runner: str | None = None,
     repository: str = "",
+    expected_role_fingerprint: str | None = None,
 ) -> SkillResult:
     """Dispatch one piece of work to a named role via the harness router.
 
@@ -335,6 +336,7 @@ async def dispatch(
     dispatch into the deterministic-first path: see ``mechanical_first``. Without
     them every class runs on the model path exactly as before.
     """
+    model = model_tiering.validate_model_selector(model)
     run_kwargs = dict(
         role=role,
         task_entity_id=task_entity_id,
@@ -352,6 +354,7 @@ async def dispatch(
         action_class=action_class,
         escalation_signals=escalation_signals,
         model=model,
+        expected_role_fingerprint=expected_role_fingerprint,
     )
     if runner is not None:
         run_kwargs["runner"] = runner
@@ -775,9 +778,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--model",
+        type=model_tiering.parse_model_selector,
         help=(
             "Explicit model id, overriding any --action-class tier "
-            "resolution outright. Passed as the provider's own --model flag "
+            "resolution outright. Use one non-empty identifier without "
+            "whitespace/control characters or a leading '-'. Passed as the provider's own --model flag "
             "(claude/codex/cursor); has no effect on claude-local."
         ),
     )
@@ -991,9 +996,11 @@ def main(argv: list[str] | None = None) -> int:
         emitter.emit_failure(refusal)
         return 1
 
-    # Report the identity actually loaded, so a degraded dispatch (Neotoma
-    # unreachable -> stub definition, wildcard tools) is visible at the point of
-    # dispatch rather than inferred afterwards from a harness_event.
+    # Report the identity actually loaded, so an unavailable definition is
+    # visible at the point of dispatch. This preload is reporting only: work that
+    # needs no definition (the deterministic mechanical path) must still run, and
+    # run_skill refuses independently, before any model launch, when the
+    # definition cannot be loaded (DEFINITION_UNAVAILABLE_PREFIX).
     try:
         agent_def = _load_agent_def(role)
         tools = agent_def.tools
@@ -1064,6 +1071,9 @@ def main(argv: list[str] | None = None) -> int:
             "stdout": result.stdout,
             "stderr": result.stderr,
             **({"cooled_until": result.cooled_until} if result.cooled_until else {}),
+            # A configuration the operator must repair (not a wait).
+            **({"configuration_repair": result.configuration_repair}
+               if getattr(result, "configuration_repair", "") else {}),
             **({"output_truncated": True} if getattr(result, "output_truncated", False) else {}),
             # Every Fly run reports its identity and machine state, whether
             # its outcome is known or not: cleanup and outcome are separate.

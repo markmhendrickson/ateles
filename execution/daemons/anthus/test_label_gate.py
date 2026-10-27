@@ -35,6 +35,8 @@ import orchestrator
 import participation
 import pytest
 
+from lib.daemon_runtime import AgentDefinition
+
 CANARY = "swarm-canary"
 REPO = "markmhendrickson/ateles"
 
@@ -66,9 +68,11 @@ class _Notifier:
         return None
 
 
-class _AgentDef:
-    entity_id = "ent_agentdef"
-    last_observation_id = "obs_1"
+class _AgentDef(AgentDefinition):
+    def __init__(self):
+        super().__init__(entity_id="ent_agentdef", last_observation_id="obs_1",
+                         name="pavo", status="active", prompt_markdown="Canonical role",
+                         tool_allowlist=["Read"])
 
 
 class _Loader:
@@ -77,6 +81,9 @@ class _Loader:
 
     def load(self):
         return _AgentDef()
+
+    def render_policy_prompt(self, **kwargs):
+        return ""
 
 
 @pytest.fixture
@@ -320,3 +327,124 @@ def test_skip_warns_once_per_item_then_debug(monkeypatch, harness, caplog):
     skips = [r for r in caplog.records if "label gate active" in r.message]
     assert [r.levelno for r in skips] == [logging.WARNING, logging.DEBUG]
     assert not _launched(harness)
+
+
+# ── a gate owner whose definition cannot be loaded is not dispatched ─────────
+
+
+class _UnavailableLoader:
+    """Neotoma timed out on the owner's definition (the loader already retried)."""
+
+    code = "timeout"
+
+    def __init__(self, name):  # noqa: ANN001
+        self.name = name
+
+    def load(self):
+        from lib.daemon_runtime import AgentDefinitionUnavailable
+
+        raise AgentDefinitionUnavailable(self.name, self.code, 3)
+
+
+def test_a_gate_owner_whose_definition_cannot_load_is_not_spawned(monkeypatch, harness):
+    monkeypatch.delenv("ATELES_SWARM_REQUIRE_LABEL", raising=False)
+    monkeypatch.setattr(anthus, "AgentLoader", _UnavailableLoader)
+
+    _run("issue", "ent_i9", {"repository": REPO, "github_number": 91, "labels": []})
+
+    assert harness["spawned"] == []
+    assert anthus._gate_states.get("ent_i9", {}).get("pm") is None or (
+        anthus._gate_states["ent_i9"]["pm"].status != "dispatched"
+    ), "the gate must stay ready so a later pass dispatches it"
+
+
+def test_a_gate_owner_with_no_definition_is_not_spawned(monkeypatch, harness):
+    """A local skill supplies no authority for an unregistered gate owner."""
+    monkeypatch.delenv("ATELES_SWARM_REQUIRE_LABEL", raising=False)
+
+    class _NoDefinition(_UnavailableLoader):
+        code = "not_found"
+
+    monkeypatch.setattr(anthus, "AgentLoader", _NoDefinition)
+
+    _run("issue", "ent_i10", {"repository": REPO, "github_number": 92, "labels": []})
+
+    assert harness["spawned"] == []
+
+
+# Capture the real launch entry before the existing transport harness replaces it.
+_CANONICAL_SPAWN_ENTRY = anthus._spawn_agent
+
+
+def _actual_gate_launch(monkeypatch, tmp_path, harness, *, status="active", tools=None, policy_error=False):
+    from types import SimpleNamespace
+    from lib.daemon_runtime import AgentDefinition
+    import shutil
+
+    definition = AgentDefinition(
+        entity_id="ent_canonical_owner", name="pavo", status=status,
+        prompt_markdown="Canonical gate owner instructions",
+        tool_allowlist=["Read"] if tools is None else tools,
+    )
+    class CanonicalLoader:
+        def __init__(self, name):
+            self.name = name
+        def load(self):
+            return definition
+        def render_policy_prompt(self, **kwargs):
+            if policy_error:
+                from lib.daemon_runtime import AgentPolicyUnavailable
+                raise AgentPolicyUnavailable("pavo", "query", "timeout")
+            return ""
+    skill = tmp_path / ".claude/skills/pavo/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("Local skill supplement")
+    monkeypatch.setenv("ATELES_REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(anthus, "AgentLoader", CanonicalLoader)
+    monkeypatch.setattr(anthus, "_spawn_agent", _CANONICAL_SPAWN_ENTRY)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/true")
+    launched, recorded = [], []
+    async def child(*args, **kwargs):
+        entry = {"argv": args, "kwargs": kwargs}
+        launched.append(entry)
+        async def communicate(input=None):
+            entry["stdin"] = input
+            return b"Synthetic admitted owner result", b""
+        return SimpleNamespace(pid=123, returncode=0, communicate=communicate)
+    async def record(**kwargs):
+        recorded.append(kwargs)
+    monkeypatch.setattr(anthus.asyncio, "create_subprocess_exec", child)
+    monkeypatch.setattr(participation, "record_dispatched", record)
+    monkeypatch.delenv("ATELES_SWARM_REQUIRE_LABEL", raising=False)
+    _run("issue", "ent_canonical_gate", {"repository": REPO, "github_number": 42, "labels": []})
+    return launched, recorded
+
+
+@pytest.mark.parametrize("status", ["retired", "disabled", "undefined", "unrecognized"])
+def test_actual_gate_entry_refuses_canonical_owner_before_record_or_child(monkeypatch, tmp_path, harness, status):
+    launched, recorded = _actual_gate_launch(monkeypatch, tmp_path, harness, status=status)
+    assert not launched, "refused canonical owner must not reach a local provider"
+    assert not recorded, "refused owner must not be recorded as dispatched"
+
+
+def test_actual_gate_entry_binds_restrictive_canonical_tools_and_prompt(monkeypatch, tmp_path, harness):
+    launched, recorded = _actual_gate_launch(monkeypatch, tmp_path, harness)
+    assert launched and recorded
+    argv = launched[0]["argv"]
+    assert "--allowed-tools" in argv
+    assert argv[argv.index("--allowed-tools") + 1] == "Read"
+    assert "--dangerously-skip-permissions" not in argv
+    assert any("Canonical gate owner instructions" in str(arg) for arg in argv)
+
+
+def test_policy_read_failure_is_neither_recorded_dispatched_nor_launched(monkeypatch, tmp_path, harness):
+    launched, recorded = _actual_gate_launch(monkeypatch, tmp_path, harness, policy_error=True)
+    assert not launched
+    assert not recorded
+    assert anthus._gate_states["ent_canonical_gate"]["pm"].status != "dispatched"
+
+
+@pytest.mark.parametrize("status", ["active", "planned", "proposed", "draft"])
+def test_actual_gate_entry_keeps_registered_owner_positive(monkeypatch, tmp_path, harness, status):
+    launched, recorded = _actual_gate_launch(monkeypatch, tmp_path, harness, status=status)
+    assert len(launched) == len(recorded) == 1

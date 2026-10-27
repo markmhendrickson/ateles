@@ -292,8 +292,9 @@ than a state the swarm guesses between. Commissioning a parent reaches every des
 **The frontier is derived from dependencies and the controls above each leaf.** `DEPENDS_ON` may run from
 a task or planning record to a task or planning record; a dependency on a planning record is satisfied
 only by that record's proved completion, never by its cancellation. The **dependency-ready frontier** of
-a commissioned record is the set of non-terminal, non-parent task leaves beneath it that are otherwise
-claimable, whose own outbound dependencies and every dependency on their ascent are satisfied, and whose
+a commissioned record is the set of non-terminal task leaves beneath it with immutable creator-time
+`admission_class: workflow_entering` that are otherwise claimable, whose own outbound dependencies and
+every dependency on their ascent are satisfied, and whose
 ascent contains no pause or cancellation. A dependency from a planning record blocks that record's whole
 subtree. The live `planning` task is the control loop and is excluded from the delivery frontier. The
 **maximum safe parallelism** is the largest subset of that frontier whose simultaneous claims satisfy the
@@ -845,7 +846,7 @@ second. Decision 43 rules that the operator's own governance write after bootstr
 resolved by the operator as a marked self-resolution
 (`conformance_suite.md#what-the-bootstrap-set-is-and-whether-the-operators-later-governance-writes-are-gated`);
 decision 47 rules that a raiser does not resolve, the operator's marked self-resolution the one exception
-(`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`);
+(`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked`);
 and decision 56 puts the governance types on the engine's grant alone, so that a second grant on the
 operator's credential would make the sole writer not sole
 (`gates_and_workflows.md#where-the-enforcement-point-for-a-governance-write-sits`). An amendment to a

@@ -669,7 +669,7 @@ The general adapter rules are `adapters.md`'s and are cited here, not restated. 
 list, its two disjoint roles, and its stages are `workflows.md#payment`'s. The gate's decision function and
 the checkpoint's protocol are `gates_and_workflows.md`'s. Whether the raiser of a checkpoint may resolve it,
 and what quorum a payment might require, are `authority_model.md`'s, ruled 2026-09-06 and bearing directly here:
-the raiser does not resolve, the operator's self-resolution excepted and marked (decision 47, `authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`), and a
+the raiser does not resolve, the operator's self-resolution excepted and marked (decision 47, `authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked`), and a
 payment class's quorum is a value of its `action_policy`, every awaited principal until written (decision 50).
 Decision 15 (adapter packaging) is ruled there, 2026-09-05: adapters are bundled in this repository until a
 second consumer of them exists (`adapters.md#the-adapter-and-the-engine-are-two-roles`), and this document's
@@ -828,7 +828,7 @@ payee known under condition 1: only a payment checkpoint the operator resolved d
 
 **The reference checkpoint.** Conditions 1, 2 and 3 and the bound on releases below are read against one
 record, the payee's reference checkpoint: the payee's most recent payment checkpoint to have closed, provided the
-operator principal resolved it `approved` and its action was confirmed at its declared terminal state. Most recent
+operator principal resolved it `approved`, being an operator whose grant makes them a required approver for the payment class (granted per class, never implied by a general resolve grant), and its action was confirmed at its declared terminal state. Most recent
 is by the engine's ingestion time of the close, never by when the checkpoint was created and never by a time a
 writer supplied. A payee whose most recent closed payment checkpoint was resolved otherwise (`denied` or
 `vetoed`), or closed without the operator's resolution (`timed out`), or whose action is `unknown`, failed, or not
@@ -896,7 +896,7 @@ the `action_policy` is a governance write and an action of its own
 (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`), and the engine
 is the only writer of a governance write (decision 56), so the writer of every cap is the engine and says nothing
 about who decided. The cap is therefore read from the write's permitting action: an entry of `payee_caps[]` is a
-cap only if a checkpoint the operator principal resolved `approved` permitted the write that put it there. The
+cap only if a checkpoint that an instance owner resolved `approved` permitted the write that put it there. **Ruled (decision 160, 2026-10-22, the operator's): setting or changing a per-payee cap is the instance owner's only** (the operator's choice over the owner raising a cap while staff may lower it), so the permitting checkpoint is the instance owner's resolution and a staff operator's, however granted, does not make a cap (`authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`). The planted refusals are a cap written, or changed, on a checkpoint a staff operator resolved; they are added to `conformance_suite.md` in a later change. Approving an ordinary payment checkpoint, by contrast, is the staff operator's where their grant makes them a required approver for the payment class: it is granted per class and never implied by a general grant to resolve checkpoints. The
 field is written whole, so the rule is read on the field: every entry stands only if the field's last write has
 such a checkpoint, and a field rewritten since without one holds no cap. For a cap the permitting checkpoint is
 required whatever tier governance writes are placed in (decision 18). The design owns the shape and the operator

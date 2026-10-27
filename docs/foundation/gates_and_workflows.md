@@ -300,7 +300,7 @@ evaluated on its own (below).
 **Only the operator principal may waive, and a waiver is scoped to one batch's unsigned required steps,
 written as one `waived` verdict per step.** The right is not delegable: a step owner able to write
 `waived` on its own step is the self-settable clearance this model exists to remove, restated in a conclusion
-value instead of a boolean. The scope is the batch — one invocation from the operator clears the unsigned
+value instead of a boolean. The operator principal here is an instance owner, never every `operator` of the instance, and no grant extends the waiver to anyone (`authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`). The scope is the batch — one invocation from the operator clears the unsigned
 required steps of one batch, which is the shape in use and costs the operator nothing — but the **record**
 is per step: one `waived` verdict for each step cleared, each attributed to the operator principal, each
 naming its step and carrying the reason. That keeps step state derived from verdicts rather than from a
@@ -851,10 +851,10 @@ batch which `PRODUCES` an artifact the operator authored. No new mark is added.
 **Which reference steps are which class.** The class is declared, not inferred, and the reference workflows
 declare it as follows.
 
-- `review`: `ux`, `arch`, `pr_review`, `qa`, and `legal` where they appear; outreach `review`; postmortem
+- `review`: `ux`, `arch`, `pr_review`, `qa`, and `legal` where they appear; outreach `review`; customer reply `review`; postmortem
   `pr_review`; payment `verify` and `reconcile`; release `verify_deployed`, which confirms what `release` left and
   so has its own slot, distinct from `release`'s.
-- `deterministic`: `draft_lint` of social content and `disclosure_lint` of outreach.
+- `deterministic`: `draft_lint` of social content, `disclosure_lint` of outreach, and `grounding_lint` of customer reply.
 - `work`: every other step. That includes `pm`, which states the scope and may open the issue that carries it;
   `impl`, `copy`, `draft`, `post`, `send`, `follow_up`, `prepare`, `pay`, `consent`, and the operator-only steps;
   release `criteria` and `release`; intake's five steps; the research and meeting steps; and all four steps of
@@ -1098,7 +1098,7 @@ closed: it produces an institutionalization task as decision 17 already rules.
 task returning to open is a status mutation a process would have to perform, and the `task` row already
 lists a reopened status among the things that are deliberately not a field (`data_model.md#concepts`).
 *Sequencing is data* (`#sequencing-is-data-successors-and-the-chain`): a batch is opened only by a closing
-verdict naming a successor, or at intake for a created task, and a closed batch has no verdict left to
+verdict naming a successor, or in the atomic creation unit of a workflow-entering task for intake, and a closed batch has no verdict left to
 write, so reopening one would open a batch by a mechanism formation does not have. *A verdict is terminal
 and pinned* (`data_model.md#record-conventions`): the closed batch's conclusions were made against the artifact
 heads they name and stay true as the account of what was judged then; a redo that wrote new verdicts into
@@ -1236,7 +1236,7 @@ operator's own governance write after bootstrap passes the same point
 (`conformance_suite.md#what-the-bootstrap-set-is-and-whether-the-operators-later-governance-writes-are-gated`),
 so the operator's path runs through the engine's grant and never around it — the operator's task produces
 the action, the gate holds it, the operator resolves it as a marked self-resolution (decision 47,
-`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`),
+`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked`),
 and the engine writes. Had 43 gone the other way the operator's credential would hold a second grant over the
 governance types, and the sole writer would not be sole.
 
@@ -1717,7 +1717,7 @@ and a timeout is a terminal state that never continues
 free-text field, so the queue is read from the record. The raiser and the resolver are distinct roles on
 the object, and the same principal does not hold both, save the operator resolving a checkpoint the operator
 raised, which is marked as a self-resolution (decision 47,
-`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-operators-self-resolution-is-marked`). One decision queue, one
+`authority_model.md#the-raiser-of-a-checkpoint-does-not-resolve-it-and-the-instance-owners-self-resolution-is-marked`). One decision queue, one
 resolution protocol: a checkpoint on a task is presented and resolved exactly as a checkpoint on an
 action is (principle 6).
 

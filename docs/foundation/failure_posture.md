@@ -212,6 +212,7 @@ apart at the checkpoint itself, rather than `capability_unavailable` riding as t
 **The rules in this section.**
 
 - The operator-invoked halt is verified to have stopped, by a read-back.
+- Any operator whose grants admit it may invoke a halt, and only the instance owner may lift one.
 - Every action class names its recovery, even where the recovery is only a forward fix.
 - The record's home for the map is the policy.
 
@@ -231,6 +232,14 @@ wrong. The read-back is the absence of live leases and open claims, read from th
 new activity is not the read-back, since an idle swarm and a halted one are indistinguishable by that
 measure — which is rule 2's failure restated. Until the read-back confirms it, the swarm is not halted,
 and the operator is told so.
+
+**Ruled (decision 159, 2026-10-22, the operator's): any operator whose grants admit it may invoke the halt, and
+only the instance owner may lift it.** Registered as ruled in `conformance.md#the-register-of-open-design-decisions`. Client staff can then stop a runaway action without waiting
+for the owner. **Invoking a halt is not a reserved act and lifting one is,** so the rule that no grant extends a
+reserved act (`authority_model.md#the-acts-the-design-reserves-to-the-operator-are-the-instance-owners-alone-and-no-grant-extends-them`) holds without exception: a grant can admit the invocation precisely because stopping only ever restricts, and nothing
+admits the lift to a non-owner. Resuming work after a halt is the owner's act whoever invoked the halt, so a halt an owner places cannot be undone by a staff credential, and the lift is subject
+to the same read-back as the stop. How a halt is lifted is not designed here. **Cost accepted:** a staff member can stop work that was fine, and only the owner can resume it. **What would reopen it:**
+a stop that must be undone by a non-owner, argued as a narrower holder and not as a grant. The planted refusals are a staff operator lifting a halt and an owner's halt lifted by a staff credential; they are added to `conformance_suite.md` in a later change.
 
 **Every action class names its recovery, even where the recovery is only a forward fix.** An action is an
 intended effect on an external system, and the classes with the largest blast are the ones the design has been
@@ -519,6 +528,13 @@ effect that ran before the interrupt; with consent-gated sends and payments, tha
 LangGraph's resume semantics (the runtime restarts the whole node) as the pattern to refuse. The
 consequence for the work model is that at-least-once delivery is the assumption and effect dedup is
 mandatory (`work_model.md`).
+
+**A governance write applied to another instance is not a resume by replay.** A reviewed declaration, policy
+value, registry change, or intake rule that is applied again to a different instance of the record is a
+[reissue](vocabulary.md#reissue): a first take there, through that instance's own gate, judged afresh and keyed
+to that instance. It re-executes no code from before an interruption and takes no consent-gated effect again from
+a stored trace, so this section's refusal does not reach it
+(`adapters.md#an-environment-is-a-separate-instance-of-the-record-and-promotion-reissues-the-same-governed-writes-in-order`).
 
 ## Contradictions this document settles
 

@@ -84,6 +84,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from lib.daemon_runtime.action_type import (  # noqa: E402
+    AGENT_ACTION_TYPE_PRIOR,
+    resolve_gate_action_type,
+)
+
+from lib.daemon_runtime.gating import _parse_policy  # noqa: E402
+
 log = logging.getLogger("ateles")
 
 # Keep release-acceptance work alive if the MCP caller times out or cancels.
@@ -529,7 +536,10 @@ def _checkpoint_resolver_authority(
     checkpoint_id: str, checkpoint_record: dict
 ) -> tuple[str, str, str] | None:
     """Return the authenticated resolver subject, key pin, and tenant."""
-    from lib.daemon_runtime.gating import read_authenticated_checkpoint_authorization
+    from lib.daemon_runtime.gating import (
+        read_authenticated_checkpoint_authorization,
+        read_verified_entity_owner,
+    )
 
     authority = read_authenticated_checkpoint_authorization(
         checkpoint_id, checkpoint_record
@@ -538,14 +548,15 @@ def _checkpoint_resolver_authority(
         return None
     required_sub = str(authority.get("required_approver_sub") or "").strip()
     required_jkt = str(authority.get("required_approver_jkt") or "").strip()
-    tenant_id = str(authority.get("user_id") or "").strip()
-    snapshot_tenant = str(_snapshot_of(checkpoint_record).get("user_id") or "").strip()
+    tenant_id = authority.get("user_id")
     if (
         not required_sub
         or "@" not in required_sub
         or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
-        or not tenant_id
-        or snapshot_tenant != tenant_id
+        or not isinstance(tenant_id, str)
+        or read_verified_entity_owner(
+            checkpoint_id, checkpoint_record, expected_user_id=tenant_id
+        ) is None
     ):
         return None
     return required_sub, required_jkt, tenant_id
@@ -896,7 +907,9 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
     )
     policy_data = _get(f"/entities/{policy_id}")
     policy = None
+    effective_policy = None
     if policy_data:
+        effective_policy = _parse_policy(policy_id, policy_data)
         psnap = _snapshot_of(policy_data)
         policy = {
             "entity_id": policy_id,
@@ -924,46 +937,44 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
         result["agent_definition"] = agent_def
     if policy:
         result["execution_policy"] = policy
-    if action_type:
-        result["action_type"] = action_type
+    # Same resolution the dispatcher's gate applies (ateles#682): a declared
+    # action_type is taken as given; otherwise the matched agent's prior, which
+    # the task description can only ESCALATE, and only where that is strictly
+    # stricter under THIS policy. Before this, a caller who omitted
+    # `action_type` got no blast classification at all. `action_type_source` says
+    # which of declared / content / agent_prior the verdict rests on. With no
+    # policy to compare under there is no escalation, only the prior.
+    #
+    # Limit: the preview reads the description only. The dispatcher reads the
+    # task's title, body and description fields, so a phrase in a field this
+    # call cannot see can make the gate stricter than the preview says.
+    # Parse the original record through the enforcing path, including omitted
+    # and empty action-set fallbacks and blast-default normalization. The
+    # returned policy remains the raw advisory metadata for API compatibility.
+    verdict = (
+        (lambda at: effective_policy.blast_radius_for(at).value)
+        if effective_policy is not None else None
+    )
+    resolved = resolve_gate_action_type(
+        best_agent,
+        {"action_type": action_type, "title": task_description},
+        AGENT_ACTION_TYPE_PRIOR,
+        verdict=verdict,
+    )
+    if resolved.value:
+        # A declared value is echoed exactly as the caller wrote it, as before.
+        result["action_type"] = action_type if action_type else resolved.value
+        result["action_type_source"] = resolved.source
         if policy:
-            result["action_blast_radius"] = _action_blast_radius(action_type, policy)
+            result["action_blast_radius"] = effective_policy.blast_radius_for(
+                resolved.value
+            ).value
     return result
 
 
 def _action_blast_radius(action_type: str, policy: dict) -> str:
-    """Classify an action type's blast radius for the routing advisory.
-
-    Mirrors `lib.daemon_runtime.gating.ExecutionPolicy.blast_radius_for`, which
-    is the enforcing path; this one is advisory (it tells a caller what the gate
-    will decide). The two must agree, or the advice misleads.
-
-    Ordering, per ateles#715:
-
-    * `operator_only` → "never", ahead of both policy sets. Never auto-executable
-      at any confidence or recurrence count.
-    * explicitly low → "low"; explicitly high → "high".
-    * declared but in neither set → "never", not "low". The previous
-      `else "low"` was the same fail-open as the enforcing path: an action type
-      nobody had classified was advertised as safe.
-    """
-    at = action_type.strip().lower()
-    if at in NEVER_AUTO_EXECUTE_ACTION_TYPES:
-        return "never"
-
-    def _as_list(v) -> list[str]:
-        if isinstance(v, str):
-            try:
-                v = json.loads(v)
-            except (json.JSONDecodeError, TypeError):
-                return []
-        return [str(x).strip().lower() for x in v] if isinstance(v, list) else []
-
-    if at in _as_list(policy.get("low_blast_action_types")):
-        return "low"
-    if at in _as_list(policy.get("high_blast_action_types")):
-        return "high"
-    return "never"
+    """Use the dispatcher's effective-policy semantics for routing advice."""
+    return _parse_policy("routing-advisory", policy).blast_radius_for(action_type).value
 
 
 #: Briefs returned per call. The queue is 372 deep as of 2026-09-16, so a
@@ -1279,8 +1290,18 @@ async def _resolve_checkpoint(
         )
         task_data = _get(f"/entities/{task_id}") if task_id else None
         task_snap = _snapshot_of(task_data or {})
-        brief_user_id = resolved_snap.get("user_id")
-        task_user_id = task_snap.get("user_id")
+        from lib.daemon_runtime.gating import read_verified_entity_owner
+
+        brief_user_id = read_verified_entity_owner(
+            checkpoint_id, consumed_data, expected_user_id=checkpoint_user_id
+        )
+        task_user_id = (
+            read_verified_entity_owner(
+                task_id, task_data, expected_user_id=checkpoint_user_id
+            )
+            if task_id
+            else None
+        )
         same_tenant = bool(
             brief_user_id
             and task_user_id
@@ -3359,8 +3380,12 @@ TOOLS = [
             "Given a task description, resolves the owning agent from the swarm "
             "roster by role, fetches its agent_definition (prompt, context types, "
             "tool allowlist), and the applicable execution_policy. Returns the "
-            "complete dispatch context in one call. Optionally pass action_type to "
-            "get the blast radius classification for that action."
+            "complete dispatch context in one call. Returns the blast radius the "
+            "dispatcher's gate would assign: from action_type when passed, else "
+            "from the matched agent, which the description can only make "
+            "stricter (action_type_source says which). A preview, not the "
+            "decision: it reads only this description, while the dispatcher "
+            "reads the task's title, body and description."
         ),
         inputSchema={
             "type": "object",
