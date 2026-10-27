@@ -275,6 +275,7 @@ from lib.credential_templates import (  # noqa: E402
     placeholder_template_sandbox_regexes,
 )
 import harness_router  # noqa: E402
+from lib import github_app_token as _github_app_token  # noqa: E402
 from harness_router import headroom_resolution  # noqa: E402
 from review_panel import lens_by_name  # noqa: E402
 from skill_runner import (  # noqa: E402
@@ -619,24 +620,162 @@ def _shared_fetch_lock(repo_path: Path):
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def _fetch_origin_serialized(repo_path: Path) -> None:
-    """Fetch origin while holding the repository's shared-ref update lock."""
-    with _shared_fetch_lock(repo_path):
-        subprocess.run(
-            ["git", "-C", str(repo_path), "fetch", "-q", "origin"],
-            check=True,
+class RepoAccessError(RuntimeError):
+    """The runner has no repository-scoped credential for the target repository.
+
+    Raised instead of falling back to whatever git or gh credential happens to
+    be ambient in the daemon's environment. The message never contains a token.
+    """
+
+
+# Variables that can hand git or gh a credential other than the one this module
+# mints for the repository. Removed from every environment built below.
+_AMBIENT_CREDENTIAL_VARS = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+)
+
+# git credential helpers are reset and replaced with gh's, which answers from
+# GH_TOKEN. The reset covers the generic key and the github.com-specific key
+# that ``gh auth setup-git`` writes, so no keychain or stored helper can answer
+# before, or instead of, the scoped token.
+_SCOPED_GIT_CREDENTIAL_ARGS = (
+    "-c", "credential.helper=",
+    "-c", "credential.https://github.com.helper=",
+    "-c", "credential.https://github.com.helper=!gh auth git-credential",
+)
+
+_HTTPS_GITHUB_REMOTE_RE = re.compile(r"^https://github\.com/[^@\s]+$")
+
+# git's wording when a credential is refused or the repository is not visible.
+_FETCH_ACCESS_MARKERS = (
+    "write access to repository not granted",
+    "permission to",
+    "authentication failed",
+    "repository not found",
+    "could not read username",
+    "terminal prompts disabled",
+    "returned error: 403",
+    "returned error: 401",
+    "returned error: 404",
+)
+
+
+def repo_scoped_env(repo: str) -> dict[str, str]:
+    """Environment for git and gh calls against *repo*, and nothing else.
+
+    Mints a swarm GitHub App installation token proven to reach *repo* (see
+    ``github_app_token.repo_scoped_token``) and returns a copy of the process
+    environment in which that token is the only GitHub credential: the ambient
+    token variables and askpass hooks are removed and App private keys are
+    dropped. The live process environment itself is never changed, so a child
+    process started elsewhere never sees the token.
+
+    Raises ``RepoAccessError`` when no installation covers *repo* or the App is
+    not configured on this host. It never falls back to the ambient credential.
+    """
+    try:
+        info = _github_app_token.repo_scoped_token(repo)
+    except _github_app_token.AppTokenError as exc:
+        raise RepoAccessError(
+            f"no repository-scoped credential for {repo}: {exc}. The lens runner "
+            "does not fall back to the ambient git or gh credential; install the "
+            "swarm GitHub App on that repository with read access to contents, "
+            "pull requests and issues, and make its App variables "
+            "(ATELES_REVIEWER_APP_ID and key) available to this process."
+        ) from None
+    env = _github_app_token.without_app_keys(dict(os.environ))
+    for name in _AMBIENT_CREDENTIAL_VARS:
+        env.pop(name, None)
+    env.update(
+        {
+            "GH_TOKEN": info.token,
+            "GITHUB_TOKEN": info.token,
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    return env
+
+
+def _origin_is_https_github(repo_path: Path) -> bool:
+    """True when ``origin`` is a plain https github.com URL with no embedded login."""
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and bool(
+        _HTTPS_GITHUB_REMOTE_RE.match((result.stdout or "").strip())
+    )
+
+
+def _fetch_origin_serialized(repo_path: Path, *, env: dict[str, str]) -> None:
+    """Fetch origin with *env*'s scoped credential, holding the ref-update lock.
+
+    *env* is required, not defaulted: a caller that has no repository-scoped
+    environment must not reach the network with an ambient credential.
+    """
+    token = env.get("GH_TOKEN", "")
+    if not _origin_is_https_github(repo_path):
+        raise RepoAccessError(
+            f"{repo_path.name}: origin is not a plain https://github.com remote, so "
+            "the repository-scoped token cannot be the credential that fetches it; "
+            "refusing to fetch with whatever credential the remote would otherwise use"
         )
+    with _shared_fetch_lock(repo_path):
+        result = subprocess.run(
+            [
+                "git",
+                *_SCOPED_GIT_CREDENTIAL_ARGS,
+                "-C",
+                str(repo_path),
+                "fetch",
+                "-q",
+                "origin",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if result.returncode == 0:
+        return
+    detail = (getattr(result, "stderr", "") or "").strip()
+    if token:
+        detail = detail.replace(token, "***")
+    if any(marker in detail.lower() for marker in _FETCH_ACCESS_MARKERS):
+        raise RepoAccessError(
+            f"{repo_path.name}: git fetch was refused with the repository-scoped "
+            f"token ({detail[-300:]}); the swarm GitHub App installation does not "
+            "grant read access to this repository"
+        )
+    raise subprocess.CalledProcessError(
+        result.returncode, ["git", "fetch", "-q", "origin"], stderr=detail
+    )
 
 
 @dataclass
 class Worktree:
     repo_name: str
     path: Path
+    # owner/name on GitHub. Required to create: the fetch is made with a token
+    # scoped to this repository, so a Worktree with no slug cannot fetch.
+    remote_repo: str = ""
     _created: bool = field(default=False, repr=False)
 
     def create(self, *, head: str) -> None:
         repo_path = Path.home() / "repos" / self.repo_name
-        _fetch_origin_serialized(repo_path)
+        if not self.remote_repo:
+            raise RepoAccessError(
+                f"{self.repo_name}: no owner/name given, so no repository-scoped "
+                "credential can be minted; refusing to fetch with an ambient one"
+            )
+        _fetch_origin_serialized(repo_path, env=repo_scoped_env(self.remote_repo))
         subprocess.run(
             [
                 "git",
@@ -2228,6 +2367,7 @@ def current_pr_head(*, repo: str, pr: int) -> str:
         capture_output=True,
         text=True,
         check=False,
+        env=repo_scoped_env(repo),
     )
     try:
         return json.loads(result.stdout or "{}").get("headRefOid", "")
@@ -2411,6 +2551,7 @@ def _pr_comments(*, repo: str, pr: int) -> list[dict]:
         capture_output=True,
         text=True,
         check=True,
+        env=repo_scoped_env(repo),
     )
     pages = json.loads(result.stdout or "[]")
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
@@ -2581,7 +2722,9 @@ async def run_one(
     worktree_path = (
         scratch_root / f"{repo_worktree_name}-wt-{target.lens}-{target.pr}-{provider}"
     )
-    worktree = Worktree(repo_name=repo_worktree_name, path=worktree_path)
+    worktree = Worktree(
+        repo_name=repo_worktree_name, path=worktree_path, remote_repo=target.repo
+    )
     verdict_path = worktree.path / f"{target.lens}{target.pr}_verdict.md"
 
     if dry_run:
@@ -3100,6 +3243,8 @@ def main(argv: list[str] | None = None) -> int:
                         action_class=args.action_class,
                     )
                 )
+        except RepoAccessError as exc:
+            report = {"ok": False, "reason": str(exc), "no_model_call_made": True}
         except HeadroomExhausted as exc:
             report = {"ok": False, "reason": str(exc)}
         except (FileNotFoundError, subprocess.CalledProcessError) as exc:
