@@ -17,7 +17,7 @@ materialization entrypoint.
 |---|---|
 | [Fly executor](../execution/daemons/apis/fly_runner.py) and [job entrypoint](../deploy/fly-runner/run_job.py) | Merged in [#1460](https://github.com/markmhendrickson/ateles/pull/1460). Supports explicitly forced Fly dispatch and vetted classes listed in `APIS_FLY_RUNNER_CLASSES`; an unset list opts in no classes. |
 | [Repository delivery inside a job](../deploy/fly-runner/repo_delivery.py) | Merged in [#1473](https://github.com/markmhendrickson/ateles/pull/1473). A job with a delivery specification can clone, commit, push and open or update a PR. This alone does not route normal builder work to Fly. |
-| Dispatcher routing for builder delivery | Proposed in [#1475](https://github.com/markmhendrickson/ateles/pull/1475), not part of the merged implementation described here. It adds the explicit `open_or_merge_pr` opt-in; this guide does not enable it. |
+| Dispatcher routing for builder delivery | Merged in [#1475](https://github.com/markmhendrickson/ateles/pull/1475) (2026-10-20, `8656c9a2`). It adds the explicit `open_or_merge_pr` opt-in; merging it does not enable it, and this guide does not enable it. A delivery counts as verified only after the pull request is read back from GitHub and matches the runner's reported repository, base, branch and commit. |
 
 The design starts at [#1456](https://github.com/markmhendrickson/ateles/issues/1456).
 Later accepted rulings use a single login machine per provider, stopped between

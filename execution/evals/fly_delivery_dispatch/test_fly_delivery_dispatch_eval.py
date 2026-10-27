@@ -29,6 +29,7 @@ import build_delivery as delivery  # noqa: E402
 import fly_delivery_eval as job_eval  # noqa: E402
 import skill_runner  # noqa: E402
 import fly_runner  # noqa: E402
+from lib.daemon_runtime import artifact_resolver  # noqa: E402
 from test_fly_runner import FakeFly, make_executor, FLY_TOKEN  # noqa: E402
 from test_swarm_dispatch import (  # noqa: E402
     SwarmDispatcher,
@@ -78,6 +79,24 @@ def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
         action_type="open_or_merge_pr",
         status="pending",
     )
+
+    def stand_in_gh(repo, number):
+        # GitHub's answer, built from the stand-in remote and PR API rather
+        # than from the runner's report: the branch head is read off the bare
+        # remote the job pushed to.
+        jt = traces[-1] if traces else None
+        head = jt.remote_after.get(f"refs/heads/{job_eval.BRANCH}") if jt else None
+        if not head:
+            return 1, "", "HTTP 404: Not Found"
+        pr = job_eval._pr(number)
+        return 0, json.dumps({
+            "number": number, "baseRefName": pr["base"]["ref"],
+            "headRefName": pr["head"]["ref"], "headRefOid": head,
+            "headRepository": {"nameWithOwner": pr["head"]["repo"]["full_name"]},
+        }), ""
+
+    monkeypatch.setattr(artifact_resolver, "_gh_pr_view", stand_in_gh)
+    monkeypatch.setattr(artifact_resolver.time, "sleep", lambda s: None)
 
     async def run(skill, prompt, **kw):
         launches.append((prompt, kw))
