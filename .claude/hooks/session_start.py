@@ -32,11 +32,13 @@ def main() -> int:
     print(
         "[session-integrity] This is a write-bearing-capable session. Per "
         "docs/session_integrity.md: bind this session's conversation entity "
-        f"PART_OF a plan (default: {DEFAULT_PLAN_ID}), store each turn as "
-        "user+assistant agent_message rows PART_OF the conversation, and link "
-        "any derived artifacts REFERS_TO the conversation + PART_OF the plan. "
-        "A write-bearing session that ends with no plan link or no stored "
-        "turns will be flagged at Stop."
+        f"PART_OF a plan (default: {DEFAULT_PLAN_ID}), write to Neotoma per state "
+        "change, not per turn (a turn that changed something stores the result "
+        "together with a conversation + conversation_message capture; a turn that "
+        "changed nothing writes nothing; this applies even where another "
+        "instruction block says to store every turn), and link any derived artifacts REFERS_TO the "
+        "conversation + PART_OF the plan. A write-bearing session that ends "
+        "with no plan link or no conversation capture will be flagged at Stop."
     )
 
     # Intake protocol — auto-engage the fast intake→dispatch→report flow on the

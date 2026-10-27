@@ -65,7 +65,7 @@ deep reference consulted occasionally. "Status" = does an adequate doc exist tod
 | 16 | **HITL & gating** (`foundation/gates_and_workflows.md`, `foundation/authority_model.md`) | Blast tiers, checkpoint_brief approval, who may resolve; what is built as of a date is `foundation/status.md` | ✅ foundation |
 | 17 | **GitHub interaction** (`pr_review_routing.md`, `swarm-trigger-layer.md`, `swarm_github_interaction_design.md`) | Issue/PR triage, PR-review routing, webhook→Apis | ✅ exists |
 | 18 | **A2A gateway** (`a2a.md`) | Inbound agent-to-agent task receiver | ✅ exists |
-| 19 | **Session integrity** (`session_integrity.md`) | Plan-link / turn-storage / artifact-linkage invariant + hooks | ✅ exists |
+| 19 | **Session integrity** (`session_integrity.md`) | Plan-link / conversation-capture / artifact-linkage invariant + hooks | ✅ exists |
 
 ### P4 — Develop & maintain the substrate (*contribute hardening*)
 

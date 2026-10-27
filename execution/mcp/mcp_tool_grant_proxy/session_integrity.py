@@ -5,25 +5,30 @@ Implements layer 2 of docs/session_integrity.md: the cross-harness backstop the
 Claude Code lifecycle hooks cannot provide alone. It rides the SAME chokepoint
 as the #26 grant proxy — the stdio `tools/call` interceptor — so Cursor, Codex,
 and autonomous ateles/OpenClaw daemons (none of which expose client hooks) are
-held to the same plan-link + turn-storage guarantee as Claude Code.
+held to the same plan-link guarantee as Claude Code (conversation capture is
+checked by the client hook only; see the classification note below).
 
 OBSERVE + AUDIT ONLY (operator decision 2026-06-03): this tracker NEVER blocks
 or denies a write. It sits on the money-touching MCP path, so it only:
 
-  1. Tracks per-session write-bearing state, plan binding, and turn storage by
+  1. Tracks per-session write-bearing state and plan binding by
      inspecting the `tools/call` stream (store / correct / create_relationship /
      submit_*), keyed on the AAuth agent identity (ATELES_AGENT_SUB).
   2. Emits a `harness_event` (schema 689230f4-cd83-49b6-baa7-a752cf70629d,
      previously defined-but-unused) at session end as the per-session audit
-     record — carrying harness type, agent identity, plan_id, turn refs, and the
+     record — carrying harness type, agent identity, plan_id, and the
      integrity classification.
-  3. Surfaces a violation (write-bearing but unbound / turn-less) as an
+  3. Surfaces a violation (write-bearing but unbound) as an
      `escalation` so non-compliant autonomous sessions are visible to Ateles.
 
 Classification mirrors the Claude Code hook (stop_finalizer.py):
   - no domain writes            -> exempt   (grace path)
-  - domain writes + plan + turns -> integral
-  - domain writes + (no plan OR no turns) -> violated
+  - domain writes + plan -> integral
+  - domain writes + no plan -> violated
+The proxy classifies on the plan link ONLY. Conversation capture (operator
+ruling 2026-10-27: write per state change, not per turn) is tested by the
+client Stop hook alone, because the proxy sees tool calls, not conversation
+turns, and daemons write no conversation entities.
 
 Fail-open everywhere: a missing bearer token, an unreachable Neotoma, or any
 unexpected error is logged to stderr and swallowed — it must never raise into

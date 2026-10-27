@@ -1,10 +1,10 @@
-# Session Integrity — Mechanical Plan-Link, Turn Storage, and Artifact Linkage
+# Session Integrity — Mechanical Plan-Link, Conversation Capture, and Artifact Linkage
 
 **Status:** Design (Phase 6)
 **Tasks:** `ent_1e11760c9761d67cc66baa86` (enforcement design, p1) + `ent_872bf00817aba111cdda441a` (canonical artifact taxonomy, p2)
 **Plan:** `ent_99ace4dd6673aa36ed08b1fe` (Ateles Agent Swarm Architecture)
 
-> This document specifies how **every write-bearing session** — whether human-in-the-loop (Claude Code, Cursor, Codex) or autonomous (ateles daemons/agents) — is *mechanically required* to (a) link to at least one plan that it keeps current, (b) store its turns as `conversation` + `agent_message` entities related `PART_OF` the plan, and (c) link any derived artifacts it produces back to both the conversation (`REFERS_TO`) and the plan (`PART_OF`). It also defines the **canonical artifact taxonomy** the linkage invariant consumes (satisfying the dependency task in one place).
+> This document specifies how **every write-bearing session** — whether human-in-the-loop (Claude Code, Cursor, Codex) or autonomous (ateles daemons/agents) — is *mechanically required* to (a) link to at least one plan that it keeps current, (b) record its conversation capture (`conversation` + `agent_message` entities related `PART_OF` the plan) for the turns that changed state, and (c) link any derived artifacts it produces back to both the conversation (`REFERS_TO`) and the plan (`PART_OF`). It also defines the **canonical artifact taxonomy** the linkage invariant consumes (satisfying the dependency task in one place).
 
 ---
 
@@ -12,7 +12,7 @@
 
 All three behaviors are **instruction-only** today:
 
-- The `CLAUDE.md` "apply on every turn" rules and the Neotoma MCP `[TURN LIFECYCLE]` block are **prompt-level guidance**, not enforced. A model that ignores them produces no error.
+- The `CLAUDE.md` plan-maintenance rules and the Neotoma MCP `[TURN LIFECYCLE]` block are **prompt-level guidance**, not enforced. A model that ignores them produces no error.
 - The only mechanical session gate that exists is the global `~/.claude/stop-hook-git-check.sh` (blocks exit on uncommitted/unpushed git). It says nothing about plans, turns, or artifacts.
 - No in-repo `.claude/settings.json` exists; there are no `SessionStart` / `UserPromptSubmit` / `SessionEnd` hooks.
 - The `harness_event` schema (`689230f4-cd83-49b6-baa7-a752cf70629d`) is defined but **unused**.
@@ -39,12 +39,14 @@ Every write-bearing session MUST be bound to **≥1 `plan` entity** via a stable
 
 A session with genuinely no home plan MUST either (a) create one, or (b) attach to a standing catch-all plan for its repo (e.g. the Ateles plan for ateles-repo work). "No applicable plan" is not an exemption from binding; it is a prompt to create/choose one.
 
-### 2.3 Turn
+### 2.3 Turn and state-changing turn
 
-One `(user_input, assistant_reply)` exchange (HITL) or one `(trigger, agent_action_batch)` exchange (autonomous). Each turn produces:
+A turn is one `(user_input, assistant_reply)` exchange (HITL) or one `(trigger, agent_action_batch)` exchange (autonomous). A **state-changing turn** is a turn that produced a decision, a task state change, an artifact, a finding, or an operator answer.
+
+**Write per state change, not per turn** (operator ruling 2026-10-27, agent_policy `ent_cc109b186805de3d5e141eca`, superseding "every agent turn must touch Neotoma at least once"). A state-changing turn stores its result **with its conversation capture, in the same turn**:
 - one `agent_message` (role=user / sender_kind=user, or the autonomous trigger record), and
 - one `agent_message` (role=assistant / sender_kind=assistant) capturing the reply/outcome,
-both related `PART_OF` the session `conversation`, which is `PART_OF` the bound plan(s).
+both related `PART_OF` the session `conversation`, which is `PART_OF` the bound plan(s). A turn that changed nothing writes nothing and owes no row.
 
 ### 2.4 Derived session artifact
 
@@ -59,8 +61,8 @@ A write-bearing session is **integral** iff all three hold at session end:
 ### 3.1 Plan-link invariant
 `conversation.plan_ids` is non-empty, every referenced plan exists, and at least one bound plan received an update observation during the session window.
 
-### 3.2 Turn-storage invariant
-For every turn that issued a write, both `agent_message` rows exist and are `PART_OF` the `conversation`; the `conversation` is `PART_OF` each bound plan. (Reuse the `store-neotoma` skill conventions for entity shape and `turn_key` idempotency.)
+### 3.2 Conversation-capture invariant
+For every state-changing turn (§2.3), the conversation capture exists: both `agent_message` rows are `PART_OF` the `conversation`, and the `conversation` is `PART_OF` each bound plan. There is no requirement for a row on a turn that changed nothing. The Claude Code Stop hook (§5.1) tests this at session granularity: a write-bearing session is integral only if its transcript shows at least one `conversation` / `conversation_message` / `agent_message` store alongside its domain writes; a write-bearing session with no conversation capture at all is violated. (Reuse the `store-neotoma` skill conventions for entity shape and `turn_key` idempotency.)
 
 ### 3.3 Artifact-linkage invariant
 Every derived session artifact (a canonical bucket per §4) produced during the session carries **both**:
@@ -127,8 +129,8 @@ Hooks are the obvious primitive, but **only Claude Code exposes lifecycle hooks*
 Add an in-repo `.claude/settings.json` with:
 
 - **`SessionStart`** — record session start; if the session declares intent to write, prompt for / resolve a `plan_id` and stamp it on the `conversation`.
-- **`UserPromptSubmit`** / **`PostToolUse`** — lightweight turn accounting (ensures `agent_message` rows are being written; warns if a domain write occurred with no turn record).
-- **`SessionEnd` / `Stop`** — run the **integrity check** (§3) and **block exit** if a write-bearing session is non-integral, mirroring the existing git stop-hook pattern. Emit one `harness_event` per turn as the audit record (consuming the dormant `harness_event` schema `689230f4`).
+- **`UserPromptSubmit`** / **`PostToolUse`** — lightweight turn counter only (liveness signal; no warning is implemented here). The conversation-capture check runs at `Stop`; no row is required for a turn that changed nothing.
+- **`SessionEnd` / `Stop`** — run the **integrity check** (§3) and **block exit** if a write-bearing session is non-integral, mirroring the existing git stop-hook pattern. Emit one `harness_event` per Stop as the audit record (consuming the dormant `harness_event` schema `689230f4`).
 
 Covers: Claude Code (the primary HITL harness and all autonomous ateles agents that run under it).
 
@@ -153,7 +155,7 @@ Covers: **all** harnesses (Claude Code, Cursor, Codex, autonomous daemons), beca
 | Concern | Claude Code hook | MCP/proxy invariant |
 |---|---|---|
 | Plan binding at start | ✅ proactive prompt | ✅ lazy, enforced at first write |
-| Turn storage | ✅ accounting + warn | ✅ `harness_event` audit |
+| Conversation capture | ✅ `Stop` checks capture exists | ❌ not checked (plan link only); `harness_event` audit |
 | Artifact linkage | ✅ end-of-session check | ✅ per-write check |
 | Block on violation | ✅ `Stop` hook | ⚠️ see §6 (warn→block ramp) |
 | Cursor / Codex coverage | ❌ | ✅ |
@@ -177,7 +179,7 @@ Design task `ent_1e11760c9761d67cc66baa86`:
 3. ✅ Specifies derived-artifact linkage invariant referencing the taxonomy (§3.3, §4).
 4. ✅ Specifies the two enforcement layers and per-harness coverage (§5).
 5. ✅ Defines warn-vs-block + grace path for no-op sessions (§6).
-6. ✅ Specifies `harness_event` emission per turn as the audit record (§5.1, §5.2).
+6. ✅ Specifies `harness_event` emission as the audit record: per Stop in the hook (§5.1), per intercepted turn in the proxy (§5.2).
 
 Taxonomy task `ent_872bf00817aba111cdda441a`:
 1. ✅ Canonical bucket set, reconciled with existing schemas (§4.1).
