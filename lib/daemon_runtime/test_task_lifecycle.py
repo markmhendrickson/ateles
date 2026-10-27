@@ -98,7 +98,39 @@ def test_set_status_done_writes_result(monkeypatch):
     calls = _capture(monkeypatch)
     tl.set_task_status("ent_t", TaskStatus.DONE, handler="apis", result="ok", key_suffix="created")
     fields = {c["json"]["field"] for c in calls}
-    assert fields == {"status", "result"}
+    assert fields == {"status", "result", "blocked_reason"}
+
+
+def test_set_status_done_clears_a_stale_blocked_reason(monkeypatch):
+    """A task blocked once and later finished must not read done with a reason."""
+    calls = _capture(monkeypatch)
+    assert tl.set_task_status("ent_t", TaskStatus.DONE, handler="apis", key_suffix="k")
+    by_field = {c["json"]["field"]: c["json"] for c in calls}
+    assert by_field["blocked_reason"]["value"] == ""
+    assert by_field["blocked_reason"]["idempotency_key"] == "taskreason-apis-ent_t-done-k"
+
+
+def test_a_failed_clear_does_not_fail_a_done_write(monkeypatch):
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    attempted: list[str] = []
+
+    def post(url, headers=None, json=None, timeout=None):
+        attempted.append(json["field"])
+        if json["field"] == "blocked_reason":
+            raise RuntimeError("write rejected")
+        return _Resp()
+
+    monkeypatch.setattr(tl.httpx, "post", post)
+    assert tl.set_task_status("ent_t", TaskStatus.DONE, handler="apis", result="ok") is True
+    assert "blocked_reason" in attempted
+
+
+def test_set_status_blocked_clears_nothing(monkeypatch):
+    calls = _capture(monkeypatch)
+    tl.set_task_status("ent_t", TaskStatus.BLOCKED, handler="apis", reason="x")
+    reasons = [c["json"]["value"] for c in calls if c["json"]["field"] == "blocked_reason"]
+    assert reasons == ["x"]
 
 
 def test_set_status_remediation(monkeypatch):
@@ -200,8 +232,39 @@ def test_complete_writes_result_before_status_and_reads_both_back(monkeypatch):
         from_status="executing",
     )
     assert outcome and outcome.stage == "done"
-    assert [f for f, _ in store.writes] == ["result", "status"]
-    assert store.fields == {"status": "done", "result": _HEADER}
+    assert [f for f, _ in store.writes] == ["result", "blocked_reason", "status"]
+    assert store.fields == {"status": "done", "result": _HEADER, "blocked_reason": ""}
+
+
+def test_complete_clears_blocked_reason_after_result_and_before_status(monkeypatch):
+    store = _FakeTaskStore()
+    store.fields["blocked_reason"] = "refused duplicate dispatch"
+    _use_store(monkeypatch, store)
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result=_HEADER, fetch_snapshot=store.snapshot,
+    )
+    assert outcome
+    assert store.writes == [("result", _HEADER), ("blocked_reason", ""), ("status", "done")]
+    assert store.fields["blocked_reason"] == ""
+
+
+def test_complete_still_succeeds_when_the_clear_fails(monkeypatch):
+    store = _FakeTaskStore()
+    real_post = store.post
+
+    def post(url, headers=None, json=None, timeout=None):
+        if json["field"] == "blocked_reason":
+            store.writes.append((json["field"], json["value"]))
+            raise RuntimeError("write rejected")
+        return real_post(url, headers=headers, json=json, timeout=timeout)
+
+    monkeypatch.setattr(tl, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(tl.httpx, "post", post)
+    outcome = tl.complete_task_with_result(
+        "ent_t", handler="apis", result=_HEADER, fetch_snapshot=store.snapshot,
+    )
+    assert outcome and outcome.stage == "done"
+    assert ("blocked_reason", "") in store.writes
 
 
 def test_complete_never_writes_done_when_result_does_not_read_back(monkeypatch):

@@ -164,7 +164,7 @@ async def test_dispatch_persists_one_session_across_spawn_turns_and_completion(
     )
 
     # DONE rests on the agent's exact header, read back after the session closed.
-    assert task_fields == {"result": _PR_HEADER, "status": "done"}
+    assert task_fields == {"result": _PR_HEADER, "blocked_reason": "", "status": "done"}
     assert created == [
         {
             "task_id": "ent_task",

@@ -583,8 +583,10 @@ def test_accepted_header_is_done_only_after_both_read_backs(
     spawn.result = _SpawnResult(stdout=f"{_PR_HEADER}\n")
     _dispatch("ent_rb_ok", _cicada_task())
 
-    assert ent.fields == {"status": "done", "result": _PR_HEADER}
-    assert ent.writes == ["result", "status"], "result must land before status"
+    assert ent.fields == {"status": "done", "result": _PR_HEADER, "blocked_reason": ""}
+    assert ent.writes == ["result", "blocked_reason", "status"], (
+        "result and blocked_reason clear must land before status"
+    )
     assert len(job.finished_events) == 1 and not job.failed_events
     assert "done" in stages
     assert not [w for w in status_writes if _status_of(w) in {"failed", "blocked"}]
