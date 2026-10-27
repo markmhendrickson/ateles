@@ -21,6 +21,7 @@ guard's own credential-path check and asserts the suite would then go red.
 import json
 import os
 import shutil
+import string
 import subprocess
 import sys
 import tempfile
@@ -1927,17 +1928,9 @@ PATTERN_TEXT_ALLOW = [
     ("rg launchctl print as pattern", f"rg 'launchctl print' {PLAIN}"),
     ("rg pgrep -f as pattern", f"rg 'pgrep -f' {PLAIN}"),
     ("grep ps -E as pattern", f"grep -n 'ps -E' {PLAIN}"),
-    ("egrep alternation of credential names", f"egrep -n 'neotoma/.env|claude.json' {PLAIN}"),
-    ("grep -e twice", f"grep -e 'neotoma/.env' -e 'claude.json' {PLAIN}"),
-    ("grep clustered -ie", f"grep -ie 'neotoma/.env' {PLAIN}"),
-    ("grep --regexp separate", f"grep --regexp 'neotoma/.env' {PLAIN}"),
     ("grep pattern after --", f"grep -n -- 'neotoma/.env' {PLAIN}"),
     ("grep pattern, option after the file", f"grep 'neotoma/.env' {PLAIN} -n"),
-    ("grep pattern with context option", f"grep -A 2 'neotoma/.env' {PLAIN}"),
-    ("git grep dotenv fragment", f"git grep -n 'neotoma/.env' -- {PLAIN}"),
-    ("git -C grep dotenv fragment", f"git -C /tmp grep -n 'neotoma/.env' -- {PLAIN}"),
     ("pipeline into grep for the path text", f"cat {PLAIN} | grep 'neotoma/.env'"),
-    ("env prefix and path pattern", f"env LC_ALL=C grep -n 'neotoma/.env' {PLAIN}"),
     ("pattern in a later command of a chain", f"cd /tmp && rg 'neotoma/.env' {PLAIN}"),
 ]
 
@@ -2045,14 +2038,12 @@ def test_masking_replaces_only_literal_pattern_words():
     guard = _guard()
     mask = guard._MASKED_PATTERN
     assert guard._mask_search_patterns("grep -n 'a b' f") == f"grep -n {mask} f"
-    assert guard._mask_search_patterns("rg -e 'x y' -e z f") == f"rg -e {mask} -e {mask} f"
-    assert guard._mask_search_patterns("git grep -n x -- f") == f"git grep -n {mask} -- f"
+    assert guard._mask_search_patterns("rg -n x f") == f"rg -n {mask} f"
     assert guard._mask_search_patterns("grep -- x f") == f"grep -- {mask} f"
+    assert guard._mask_search_patterns("grep -nri x f g") == f"grep -nri {mask} f g"
     # What it leaves alone: the file operands and every other command.
-    assert guard._mask_search_patterns("grep x f g") == f"grep {mask} f g"
     assert guard._mask_search_patterns("cat f; grep x f") == f"cat f; grep {mask} f"
     assert guard._mask_search_patterns("echo x") == "echo x"
-
 
 @pytest.mark.parametrize(
     "cmd",
@@ -2106,13 +2097,11 @@ def test_lex_spans_slice_each_token_back_to_its_raw_text():
             assert raw == text
 
 
-def test_names_only_and_pattern_masking_share_one_pattern_set():
+def test_names_only_listing_of_a_credential_file_is_still_allowed_and_unmasked():
     guard = _guard()
-    assert "^[A-Z_]*=" in guard._NAMES_ONLY_PATTERNS
     cmd = f"grep -o '^[A-Z_]*=' {ENV}"
-    assert guard._mask_search_patterns(cmd) == cmd
+    assert guard._mask_search_patterns(cmd) == cmd  # -o is not a masked option
     assert guard.check_bash(cmd) is None
-
 
 def test_credential_in_a_file_slot_is_refused_across_search_shapes():
     """Property sweep: wherever the credential file sits as something the
@@ -2210,7 +2199,6 @@ MASKING_ROUND2_ALLOW = [
     ("second grep filter", f"grep -n 'neotoma/.env' {PLAIN} | grep -v x"),
     ("bare wrapper before the search", f"env grep -n 'neotoma/.env' {PLAIN}"),
     ("command wrapper before the search", f"command grep -n 'neotoma/.env' {PLAIN}"),
-    ("assignment before the search", f"LC_ALL=C grep -n 'neotoma/.env' {PLAIN}"),
     ("search before an unrelated pipeline", f"grep -n 'neotoma/.env' {PLAIN}; echo x | xargs echo"),
 ]
 
@@ -2236,13 +2224,6 @@ def test_a_wrapper_option_value_spelled_like_a_search_tool_never_hides_the_real_
 def test_masking_declines_whole_commands_it_cannot_trust():
     guard = _guard()
     for cmd in (
-        "env -u grep node -e 'x'",
-        "cat <<EOF\ngrep 'a' f\nEOF",
-        "grep -o 'a' f",
-        "grep -no 'a' f",
-        "grep --only-matching 'a' f",
-        "rg -o 'a' f",
-        "grep 'a' f > out",
         "grep 'a' f | xargs cat",
         "grep 'a' f | sh",
         "cat <(grep 'a' f)",
@@ -2251,13 +2232,20 @@ def test_masking_declines_whole_commands_it_cannot_trust():
         "grep() { cat; }; grep 'a' f",
         "alias grep=cat; grep 'a' f",
         "PATH=/x grep 'a' f",
+        "LC_ALL=C grep 'a' f",
+        "env LC_ALL=C grep 'a' f",
+        "env -u grep node -e 'x'",
+        "cat <<EOF\ngrep 'a' f\nEOF",
+        "grep -o 'a' f",
+        "grep -no 'a' f",
+        "grep --only-matching 'a' f",
+        "rg -o 'a' f",
+        "grep 'a' f > out",
     ):
         assert guard._mask_search_patterns(cmd) == cmd, cmd
     mask = guard._MASKED_PATTERN
     assert guard._mask_search_patterns("grep 'a' f | head -2") == f"grep {mask} f | head -2"
     assert guard._mask_search_patterns("env grep 'a' f") == f"env grep {mask} f"
-    assert guard._mask_search_patterns("LC_ALL=C grep 'a' f") == f"LC_ALL=C grep {mask} f"
-
 
 def test_a_failure_inside_the_masking_leaves_the_command_judged_as_written(monkeypatch):
     guard = _guard()
@@ -2386,29 +2374,25 @@ def test_masking_round3_keeps_relief_for_plain_commands(label, cmd):
 # Each flag in each table, in the file-operand position: a mutation that moves a
 # flag between the neutral and valued sets, or that lets the masking take the
 # credential file for the pattern, turns one of these red.
-@pytest.mark.parametrize("tool", ["grep", "egrep", "fgrep", "rg", "git grep --no-index"])
+@pytest.mark.parametrize("tool", ["grep", "rg"])
 def test_every_listed_flag_leaves_the_credential_file_judged_as_an_operand(tool):
+    """Literal oracle: the options a masked search may carry are written out
+    here by hand, never read from the table under test, so moving a flag
+    between sets, adding one, or dropping one turns this red."""
     guard = _guard()
-    key = "grep" if tool in ("grep", "egrep", "fgrep") else ("git grep" if tool.startswith("git") else "rg")
-    neutral, valued, _long_neutral, _long_valued = guard._SEARCH_SPECS[key]
-    safe_modes = set("clL")  # count / files-only modes never print content and stay allowed
-    for flag in sorted(neutral - safe_modes):
-        cmd = f"{tool} -{flag} foo {ENV}"
-        assert guard.check_bash(cmd), cmd
-    for flag in sorted(valued):
-        value = "3" if flag in "ABCmMjdE" else "foo"
-        if flag in ("e",):
-            continue
-        if flag == "f":
-            cmd = f"{tool} -f {ENV} {PLAIN}"
-        else:
-            cmd = f"{tool} -{flag} {value} foo {ENV}"
-        assert guard.check_bash(cmd), cmd
-    for flag in sorted(valued):
-        if flag == "e":
-            assert guard.check_bash(f"{tool} -e foo {ENV}"), tool
-            assert guard.check_bash(f"{tool} -{flag}foo {ENV}"), tool
-
+    accepted = {"grep": set("nirRHhwFEIs"), "rg": set("niwFHIs")}[tool]
+    for letter in string.ascii_letters + string.digits:
+        probe = f"{tool} -{letter} foo f"
+        masked = guard._mask_search_patterns(probe) != probe
+        assert masked == (letter in accepted), (tool, letter)
+        if letter in accepted:
+            # An accepted flag takes no value, so the credential stays an operand.
+            assert guard.check_bash(f"{tool} -{letter} foo {ENV}"), (tool, letter)
+        elif letter not in "clL":  # count and files-only modes never print content
+            # Any other flag (valued or not) leaves the command judged as written,
+            # so the credential text is seen wherever it sits.
+            assert guard.check_bash(f"{tool} -{letter} {ENV} {PLAIN}"), (tool, letter)
+            assert guard.check_bash(f"{tool} -{letter}{ENV} {PLAIN}"), (tool, letter)
 
 @pytest.mark.parametrize("sub", ["diff", "log", "show", "blame", "cat-file", "status", "stash"])
 def test_a_git_subcommand_other_than_grep_is_never_masked(sub):
@@ -2467,3 +2451,177 @@ def test_masking_precondition_is_positive():
     }
     for cmd, expected in safe.items():
         assert guard._mask_search_patterns(cmd) == expected, cmd
+
+
+# ---------------------------------------------------------------------------
+# Scope cut after review round 3: only plain grep and rg, a short list of
+# value-less options, and NO environment assignment before any command. These
+# tests pin the cut and the shapes the third round's reviewers listed.
+# ---------------------------------------------------------------------------
+
+LONG_ACCEPTED = {
+    "grep": [
+        "--line-number", "--ignore-case", "--recursive", "--fixed-strings",
+        "--extended-regexp", "--word-regexp", "--with-filename", "--no-filename",
+    ],
+    "rg": [
+        "--line-number", "--ignore-case", "--fixed-strings", "--word-regexp",
+        "--with-filename", "--no-filename",
+    ],
+}  # fmt: skip
+LONG_DECLINED = [
+    "--regexp", "--file", "--context", "--only-matching", "--color", "--glob",
+    "--max-count", "--files", "--pre", "--include", "--exclude", "--after-context",
+    "--before-context", "--count", "--files-with-matches", "--null", "--json",
+    "--line-regexp", "--invert-match", "--no-ignore", "--hidden", "--type", "--sort",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("tool", ["grep", "rg"])
+def test_long_options_are_a_literal_short_list(tool):
+    guard = _guard()
+    mask = guard._MASKED_PATTERN
+    for flag in LONG_ACCEPTED[tool]:
+        assert guard._mask_search_patterns(f"{tool} {flag} 'x' f") == f"{tool} {flag} {mask} f", flag
+    for flag in LONG_DECLINED:
+        cmd = f"{tool} {flag} 'x' f"
+        assert guard._mask_search_patterns(cmd) == cmd, flag
+        cmd = f"{tool} {flag}=x 'y' f"
+        assert guard._mask_search_patterns(cmd) == cmd, flag
+
+
+ASSIGNMENT_PREFIXED = [
+    ("GREP_OPTIONS before grep", f"GREP_OPTIONS='-e foo' grep {ENV}"),
+    ("GREP_OPTIONS before grep, pattern naming the file", f"GREP_OPTIONS='-e foo' grep {_P} {PLAIN}"),
+    ("RIPGREP_CONFIG_PATH before rg", f"RIPGREP_CONFIG_PATH=/tmp/c rg {ENV}"),
+    ("RIPGREP_CONFIG_PATH before rg, pattern naming the file", f"RIPGREP_CONFIG_PATH=/tmp/c rg {_P} {PLAIN}"),
+    ("assignment after env", f"env GREP_OPTIONS=-e grep {ENV}"),
+    ("harmless-looking locale assignment", f"LC_ALL=C grep -n {_P} {PLAIN}"),
+    ("harmless-looking assignment after env", f"env LC_ALL=C grep -n {_P} {PLAIN}"),
+    ("assignment as its own statement", f"GREP_OPTIONS=-e; grep {ENV}"),
+    ("assignment on an earlier command", f"GREP_OPTIONS=-e true; grep -n {_P} {PLAIN}"),
+    ("exported assignment", f"export GREP_OPTIONS=-e; grep {ENV}"),
+    ("assignment on a later stage", f"cat {PLAIN} | GREP_OPTIONS=-e grep {ENV}"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,cmd", ASSIGNMENT_PREFIXED, ids=[label for label, _ in ASSIGNMENT_PREFIXED]
+)
+def test_an_environment_assignment_before_any_command_declines_masking(label, cmd):
+    """The cut: ANY assignment, no list of harmless names. The command is then
+    judged exactly as it is on main, so it is refused (the credential path text
+    is visible)."""
+    guard = _guard()
+    assert guard._mask_search_patterns(cmd) == cmd, label
+    assert run_bash(cmd) == 2, label
+
+
+CUT_TOOLS_AND_OPTIONS_DECLINED = [
+    ("egrep", f"egrep -n {_P} {PLAIN}"),
+    ("fgrep", f"fgrep -n {_P} {PLAIN}"),
+    ("git grep", f"git grep -n {_P} -- {PLAIN}"),
+    ("git -C grep", f"git -C /tmp grep -n {_P} -- {PLAIN}"),
+    ("-e", f"grep -e {_P} {PLAIN}"),
+    ("two -e", f"grep -e {_P} -e 'claude.json' {PLAIN}"),
+    ("clustered -ie", f"grep -ie {_P} {PLAIN}"),
+    ("--regexp", f"grep --regexp {_P} {PLAIN}"),
+    ("-A context", f"grep -A 2 {_P} {PLAIN}"),
+    ("-C context", f"grep -C 2 {_P} {PLAIN}"),
+    ("-m max count", f"grep -m 1 {_P} {PLAIN}"),
+    ("-o only matching", f"grep -o {_P} {PLAIN}"),
+    ("rg -g glob", f"rg -g '*.py' {_P} {PLAIN}"),
+    ("rg -t type", f"rg -t py {_P} {PLAIN}"),
+    ("rg --glob=", f"rg --glob='*.py' {_P} {PLAIN}"),
+    ("rg -o", f"rg -o {_P} {PLAIN}"),
+    ("--color", f"grep --color=always {_P} {PLAIN}"),
+    ("--include", f"grep -r --include='*.py' {_P} {PLAIN}"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,cmd", CUT_TOOLS_AND_OPTIONS_DECLINED, ids=[label for label, _ in CUT_TOOLS_AND_OPTIONS_DECLINED]
+)
+def test_tools_and_options_outside_the_cut_scope_are_judged_as_written(label, cmd):
+    guard = _guard()
+    assert guard._mask_search_patterns(cmd) == cmd, label
+    assert run_bash(cmd) == 2, label  # the original false positive, kept on purpose
+
+
+# Shapes review round 3 listed, each of which must decline masking.
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "grep 'a' f >& out",
+        "grep 'a' f 1>&3",
+        "grep 'a' f > /dev/null/../x",
+        "grep 'a' f </dev/null >//dev/null",
+        "grep 'a' f <&3",
+        "grep 'a' f <>out",
+        "until true; do grep 'a' f; done",
+        "select x in a; do grep 'a' f; done",
+        "grep 'a' f | sort -ofoo",
+        "grep 'a' f | sort -o foo",
+        "grep 'a' f | uniq -- - out",
+        "grep 'a' f | uniq - out",
+        "/usr/bin/../bin/grep 'a' f",
+        ". defs.sh; grep 'a' f",
+        "source defs.sh; grep 'a' f",
+        "grep 'a' f | head -n \u0661",
+        "grep 'a' f | head -n 5 f",
+        "grep 'a' f | grep -f x",
+    ],
+)
+def test_round3_listed_shapes_decline_masking(cmd):
+    guard = _guard()
+    assert guard._mask_search_patterns(cmd) == cmd, cmd
+
+
+def test_relief_that_the_cut_keeps_is_still_masked():
+    guard = _guard()
+    mask = guard._MASKED_PATTERN
+    kept = {
+        "grep -n 'neotoma/.env' f": f"grep -n {mask} f",
+        "rg -n 'neotoma/.env' d": f"rg -n {mask} d",
+        "grep -rn 'neotoma/.env' d 2>/dev/null": f"grep -rn {mask} d 2>/dev/null",
+        "rg -n 'x' d 2>&1 | head -5": f"rg -n {mask} d 2>&1 | head -5",
+        "/usr/bin/grep -n 'x' f": f"/usr/bin/grep -n {mask} f",
+        "env grep -n 'x' f": f"env grep -n {mask} f",
+        "grep -n 'x' f; echo done": f"grep -n {mask} f; echo done",
+        "grep -n 'x' f | sort -u | uniq -c": f"grep -n {mask} f | sort -u | uniq -c",
+    }
+    for cmd, expected in kept.items():
+        assert guard._mask_search_patterns(cmd) == expected, cmd
+
+
+def test_a_filter_stage_with_a_glob_operand_leaves_the_earlier_search_unmasked():
+    guard = _guard()
+    mask = guard._MASKED_PATTERN
+    # The second grep is itself a search whose pattern is masked, but because it
+    # is not a plain filter (a glob could expand to file names) the FIRST search,
+    # whose output feeds it, keeps its pattern visible.
+    assert guard._mask_search_patterns("grep 'a' f | grep '*.py'") == f"grep 'a' f | grep {mask}"
+    assert guard._mask_search_patterns("grep 'a' f | rg 'a$b'") == f"grep 'a' f | rg {mask}"
+
+
+@pytest.mark.parametrize("pattern", ["^foo", "a#b", "*.py", "a?b", "{a,b}", "~x", "[ab]", "a!b"])
+def test_an_unquoted_pattern_that_any_shell_could_glob_is_not_masked(pattern):
+    guard = _guard()
+    cmd = f"grep -n {pattern} f"
+    assert guard._mask_search_patterns(cmd) == cmd, pattern
+    quoted = f"grep -n '{pattern}' f"
+    assert guard._mask_search_patterns(quoted) == f"grep -n {guard._MASKED_PATTERN} f"
+
+
+def test_each_layer_that_rejects_an_assignment_rejects_it_alone():
+    """The assignment rule is enforced twice (the wrapper-prefix check and the
+    whole-command check); each is pinned on its own so neither can be dropped
+    on the grounds that the other one covers it."""
+    guard = _guard()
+    assert guard._bare_prefixes_only(["env", "GREP_OPTIONS=-e", "grep"], 2) is False
+    assert guard._bare_prefixes_only(["GREP_OPTIONS=-e", "grep"], 1) is False
+    assert guard._search_command_kind(["GREP_OPTIONS=-e", "grep", "x"]) == (None, 0)
+    command = "GREP_OPTIONS=-e true; grep -n x f"
+    assert guard._masking_is_safe_for(command, guard._lex(command)) is False
+    command = "grep -n x f"
+    assert guard._masking_is_safe_for(command, guard._lex(command)) is True
