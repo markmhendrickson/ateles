@@ -6,14 +6,17 @@ hooks). These hooks are MECHANICAL and FAIL-OPEN: any unexpected error, a
 missing bearer token, or an unreachable Neotoma must never crash a session
 or block a clean exit on a false negative. Enforcement (the Stop finalizer)
 blocks ONLY when it can positively determine the session is write-bearing
-and unlinked/turn-less.
+and unlinked or without any conversation capture.
 
 Design contract (see docs/session_integrity.md):
   - A session is "write-bearing" if it issued any non-bookkeeping Neotoma
     write. We approximate this from the transcript by detecting any Neotoma
     store/correct/create_relationship/submit_* tool use whose entity_type is
     not purely conversation/conversation_message bookkeeping.
-  - An integral session has (a) >=1 bound plan and (b) >=1 stored turn pair.
+  - An integral session has (a) >=1 bound plan or task and (b) conversation capture: at least one
+    conversation / conversation_message / agent_message store alongside its
+    domain writes. Written per state change, not per turn (operator ruling
+    2026-10-27); no row is required for a turn that changed nothing.
   - Genuine no-op sessions (no writes) are exempt — never blocked (grace path).
 
 State is kept in a per-session JSON file under the project .claude/.session_state/
@@ -293,13 +296,22 @@ def save_state(session_id: str, state: dict) -> None:
 def scan_transcript(transcript_path: str | None) -> dict:
     """Walk the JSONL transcript and summarize integrity-relevant signals.
 
-    Returns: {turns: int, wrote_domain: bool, bound_plan: bool, write_types: set}
+    Returns: {turns: int, wrote_domain: bool, bound_plan: bool, bound_task: bool,
+    captured_learning: bool, captured_conversation: bool, write_types: set}
+    `turns` counts transcript user/assistant events (a liveness signal only).
+    `captured_conversation` is the per-state-change capture signal: True when
+    any Neotoma write stored a conversation / conversation_message /
+    agent_message entity (alone or alongside the domain entities of the same
+    store call). Operator ruling 2026-10-27 (agent_policy
+    ent_cc109b186805de3d5e141eca): write per state change, not per turn, so
+    the integrity test asks whether capture exists, never for a row per turn.
     Fail-open: an unreadable transcript yields a conservative no-op summary
     (turns=0, wrote_domain=False) so the finalizer does not block on it.
     """
     summary = {
         "turns": 0, "wrote_domain": False, "bound_plan": False,
-        "bound_task": False, "captured_learning": False, "write_types": set(),
+        "bound_task": False, "captured_learning": False,
+        "captured_conversation": False, "write_types": set(),
     }
     if not transcript_path or not os.path.exists(transcript_path):
         return summary
@@ -340,6 +352,8 @@ def _inspect_event(ev: dict, summary: dict) -> None:
         # outside the bookkeeping set, OR it's a correct/relationship/submit
         # on a domain entity. Plan binding is detected from any plan touch.
         domain_types = etypes - BOOKKEEPING_TYPES
+        if etypes & BOOKKEEPING_TYPES:
+            summary["captured_conversation"] = True
         if "plan" in etypes or _mentions_plan(payload):
             summary["bound_plan"] = True
         # Plan-optionality (task-spine plan): a session may anchor to a TASK

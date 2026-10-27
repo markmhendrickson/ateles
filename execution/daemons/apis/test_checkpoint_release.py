@@ -2128,3 +2128,302 @@ async def test_release_rechecks_inferred_action_under_changed_effective_policy(
     assert resolved == [("open_or_merge_pr", "content", "high")]
     assert brief["resolved_dispatched"] is False
     assert brief["status"] == "approved_requires_fresh_approval"
+
+
+# ── Unscored high-blast task: hold and release must judge the same confidence ──
+#
+# A task nobody scored is held on the mechanical estimate (`_resolve_confidence`).
+# The release of the approved checkpoint used to re-judge it on the raw field,
+# which reads 0.0 for an unscored task, so the recomputed decision was "propose
+# alternatives" against an approval granted for "plan approval" and the approval
+# was thrown away for a fresh one, every time.
+
+
+def _unscored_high_blast_policy() -> ExecutionPolicy:
+    # Threshold below the mechanical estimate (0.76 for this task), so the hold
+    # is a plain plan-approval checkpoint rather than one with alternatives.
+    return ExecutionPolicy(
+        entity_id="default",
+        confidence_threshold=0.7,
+        high_blast_action_types=frozenset({"open_or_merge_pr"}),
+        low_blast_action_types=frozenset(),
+        loaded=True,
+    )
+
+
+def _hold_unscored_high_blast(
+    monkeypatch, records, brief_id, task_id, *, bind_confidence=True
+):
+    """File the approval the way dispatch_task holds an unscored high-blast task."""
+    policy = _unscored_high_blast_policy()
+    task = records[task_id]["snapshot"]
+    task.pop("confidence", None)
+    task.pop("confidence_score", None)
+    task["action_type"] = "open_or_merge_pr"
+    confidence, unscored = apis._resolve_confidence(
+        task, has_owner=True, action_type_recognized=True
+    )
+    assert unscored is True
+    hold = evaluate_gate(
+        confidence=confidence,
+        action_type="open_or_merge_pr",
+        policy=policy,
+        confidence_unscored=True,
+    )
+    assert hold.action.value == "checkpoint_plan_approval"
+    encoded = build_checkpoint_authorization_envelope(
+        task_record=records[task_id],
+        policy=policy,
+        decision=hold,
+        action_type="open_or_merge_pr",
+        user_id=TEST_OWNER,
+        required_approver_jkt=TEST_RESOLVER_JKT,
+    )
+    authority = json.loads(encoded)
+    if not bind_confidence:
+        # An approval filed before the hold bound its confidence.
+        authority.pop("confidence", None)
+        authority.pop("confidence_unscored", None)
+    brief = records[brief_id]["snapshot"]
+    brief.update(
+        {
+            "status": "approved",
+            "body": encoded,
+            "gate_action": hold.action.value,
+            "blast_radius": hold.blast_radius.value,
+            "policy_entity_id": policy.entity_id,
+        }
+    )
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_authorization",
+        lambda checkpoint_id, record: dict(authority),
+    )
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: policy)
+    return policy, authority
+
+
+def _spy_dispatch(monkeypatch) -> list:
+    """Record dispatches and run the real one (it proves the lifecycle writes)."""
+    dispatches: list[tuple] = []
+    original = apis.dispatch_task
+
+    async def spy(*args, **kwargs):
+        dispatches.append((args, kwargs))
+        await original(*args, **kwargs)
+
+    monkeypatch.setattr(apis, "dispatch_task", spy)
+    return dispatches
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bind_confidence", [True, False])
+async def test_approved_unscored_high_blast_task_is_released(
+    monkeypatch, release_store, bind_confidence
+):
+    records, brief_id, task_id = release_store
+    _hold_unscored_high_blast(
+        monkeypatch, records, brief_id, task_id, bind_confidence=bind_confidence
+    )
+    brief = records[brief_id]["snapshot"]
+    dispatches = _spy_dispatch(monkeypatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is True
+    assert len(dispatches) == 1
+    assert brief["status"] != "approved_requires_fresh_approval"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bind_confidence", [True, False])
+async def test_unscored_high_blast_task_changed_after_approval_needs_fresh_approval(
+    monkeypatch, release_store, bind_confidence
+):
+    records, brief_id, task_id = release_store
+    _hold_unscored_high_blast(
+        monkeypatch, records, brief_id, task_id, bind_confidence=bind_confidence
+    )
+    brief = records[brief_id]["snapshot"]
+    records[task_id]["snapshot"]["body"] = "Changed recipient and amount"
+    dispatches = _spy_dispatch(monkeypatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert brief["status"] == "approved_requires_fresh_approval"
+
+
+@pytest.mark.asyncio
+async def test_explicitly_scored_high_blast_task_still_releases_on_its_own_score(
+    monkeypatch, release_store
+):
+    records, brief_id, task_id = release_store
+    policy = _unscored_high_blast_policy()
+    records[task_id]["snapshot"]["confidence"] = 0.9
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type="open_or_merge_pr",
+        policy=policy,
+    )
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "approved"
+    assert brief["gate_action"] == "checkpoint_plan_approval"
+    dispatches = _spy_dispatch(monkeypatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is True
+    assert len(dispatches) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound_unscored_estimate", [False, True])
+async def test_confidence_lowered_after_approval_regates_even_if_revision_unchanged(
+    monkeypatch, release_store, bound_unscored_estimate
+):
+    """The confidence axis alone must refuse, so the task revision check is held
+    constant here; a bound estimate must never shield an explicit lower score."""
+    records, brief_id, task_id = release_store
+    policy = _unscored_high_blast_policy()
+    if bound_unscored_estimate:
+        _hold_unscored_high_blast(monkeypatch, records, brief_id, task_id)
+    else:
+        records[task_id]["snapshot"]["confidence"] = 0.9
+        _bind_v2_authorization(
+            monkeypatch,
+            records,
+            brief_id,
+            task_id,
+            action_type="open_or_merge_pr",
+            policy=policy,
+        )
+        records[brief_id]["snapshot"]["status"] = "approved"
+    brief = records[brief_id]["snapshot"]
+    held_authority = apis.read_authenticated_checkpoint_authorization(
+        brief_id, records[brief_id]
+    )
+    # Lowered below the threshold after approval; the revision check is held
+    # constant so only the confidence axis can notice.
+    records[task_id]["snapshot"]["confidence"] = 0.2
+    monkeypatch.setattr(apis, "entity_record_digest", lambda record: "constant")
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_authorization",
+        lambda checkpoint_id, record: {**held_authority, "task_revision": "constant"},
+    )
+    dispatches = _spy_dispatch(monkeypatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert brief["status"] == "approved_requires_fresh_approval"
+
+
+def test_replacement_checkpoint_for_unscored_task_carries_the_hold_estimate(
+    monkeypatch,
+):
+    policy = _unscored_high_blast_policy()
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: policy)
+    task = {
+        "assigned_to": "cicada",
+        "title": "Implement the bounded change",
+        "body": "Engineering work in the dispatcher.",
+        "action_type": "open_or_merge_pr",
+    }
+
+    _skill, _action, _policy, decision = apis._task_gate_context(task)
+
+    assert decision.confidence == pytest.approx(0.76)
+    assert decision.confidence_unscored is True
+    assert decision.action.value == "checkpoint_plan_approval"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bind_confidence, expect_release", [(True, True), (False, False)]
+)
+async def test_producer_scored_hold_releases_only_when_its_score_was_bound(
+    monkeypatch, release_store, bind_confidence, expect_release
+):
+    """A producer score is not on the task, so the mechanical estimate (0.76)
+    would read below this policy's 0.8 bar.  The hold that used the producer's
+    0.9 releases when it bound that score, and fails closed when it did not."""
+    records, brief_id, task_id = release_store
+    policy = ExecutionPolicy(
+        entity_id="default",
+        confidence_threshold=0.8,
+        high_blast_action_types=frozenset({"open_or_merge_pr"}),
+        low_blast_action_types=frozenset(),
+        loaded=True,
+    )
+    task = records[task_id]["snapshot"]
+    task.pop("confidence", None)
+    task["action_type"] = "open_or_merge_pr"
+    hold = evaluate_gate(
+        confidence=0.9,
+        action_type="open_or_merge_pr",
+        policy=policy,
+        confidence_unscored=True,
+    )
+    assert hold.action.value == "checkpoint_plan_approval"
+    encoded = build_checkpoint_authorization_envelope(
+        task_record=records[task_id],
+        policy=policy,
+        decision=hold,
+        action_type="open_or_merge_pr",
+        user_id=TEST_OWNER,
+        required_approver_jkt=TEST_RESOLVER_JKT,
+    )
+    authority = json.loads(encoded)
+    if not bind_confidence:
+        authority.pop("confidence", None)
+        authority.pop("confidence_unscored", None)
+    brief = records[brief_id]["snapshot"]
+    brief.update(
+        {
+            "status": "approved",
+            "body": encoded,
+            "gate_action": hold.action.value,
+            "blast_radius": hold.blast_radius.value,
+            "policy_entity_id": policy.entity_id,
+        }
+    )
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_authorization",
+        lambda checkpoint_id, record: dict(authority),
+    )
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: policy)
+    dispatches = _spy_dispatch(monkeypatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is expect_release
+    assert (len(dispatches) == 1) is expect_release
+    if not expect_release:
+        assert brief["status"] == "approved_requires_fresh_approval"
+
+
+@pytest.mark.parametrize(
+    "authority, expected",
+    [
+        ({"confidence": 0.76, "confidence_unscored": True}, 0.76),
+        ({"confidence": 0.76}, None),
+        ({"confidence": 0.76, "confidence_unscored": False}, None),
+        ({"confidence": True, "confidence_unscored": True}, None),
+        ({"confidence": "0.9", "confidence_unscored": True}, None),
+        ({"confidence": 1.5, "confidence_unscored": True}, None),
+        ({"confidence": float("nan"), "confidence_unscored": True}, None),
+        (None, None),
+    ],
+)
+def test_bound_hold_confidence_accepts_only_a_well_formed_unscored_estimate(
+    authority, expected
+):
+    assert apis._bound_hold_confidence(authority) == expected

@@ -111,6 +111,7 @@ from enum import Enum
 import functools
 import hashlib
 import logging
+import math
 import os
 import stat
 import sys
@@ -3151,7 +3152,68 @@ def _deny_checkpoint_release(checkpoint_id: str, *, reason: str) -> None:
         )
 
 
-def _task_gate_context(task_snapshot: dict):
+def _bound_hold_confidence(authority: dict | None) -> float | None:
+    """The hold-time confidence a signed checkpoint authorization carries, if any.
+
+    Only a finite number in 0..1 that the hold marked as an UNSCORED estimate
+    counts.  Anything else (an older brief that bound no confidence, a malformed
+    value, a bound score the producer marked explicit) returns None and the
+    caller recomputes the estimate the hold would have made.
+    """
+    if (
+        not isinstance(authority, dict)
+        or authority.get("confidence_unscored") is not True
+    ):
+        return None
+    raw = authority.get("confidence")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    value = float(raw)
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        return None
+    return value
+
+
+def _gate_confidence(
+    task_snapshot: dict,
+    *,
+    skill: str | None,
+    action_type: str,
+    policy,
+    bound_confidence: float | None = None,
+) -> tuple[float, bool]:
+    """The confidence the gate judges a task on, the same way at every site.
+
+    ``dispatch_task`` holds a task on ``_resolve_confidence``: an explicit score
+    verbatim, else the mechanical estimate.  Every later site that re-judges the
+    task (the release of an approved checkpoint, the currentness check, a
+    replacement checkpoint) must read the confidence the same way.  Reading the
+    raw field instead returns 0.0 for an unscored task, so the recomputed
+    decision differs from the one the operator approved and a high-blast
+    approval can never release.
+
+    A task that carries an explicit confidence is always judged on its CURRENT
+    value (a score lowered after approval re-gates).  Only a task nobody scored
+    may use ``bound_confidence``, the estimate the hold signed into the
+    authorization, which also reproduces a producer score the snapshot does not
+    carry.  Without a bound value it falls back to the mechanical estimate,
+    which is a pure function of the snapshot and the policy and so identical
+    for an unchanged task.
+    """
+    if not _confidence_is_explicit(task_snapshot) and bound_confidence is not None:
+        return bound_confidence, True
+    normalized = (action_type or "").strip().lower()
+    return _resolve_confidence(
+        task_snapshot,
+        has_owner=bool(skill),
+        action_type_recognized=bool(normalized)
+        and normalized
+        in (policy.low_blast_action_types | policy.high_blast_action_types),
+        relationship_count=int(task_snapshot.get("relationship_count", 0) or 0),
+    )
+
+
+def _task_gate_context(task_snapshot: dict, *, bound_confidence: float | None = None):
     """The skill, action type, live policy and gate decision for a task as it is."""
     assigned_to = _canonical_assignee(task_snapshot.get("assigned_to"))
     skill = assigned_to
@@ -3167,11 +3229,19 @@ def _task_gate_context(task_snapshot: dict):
         skill = _resolve_skill(tags, assigned_to=assigned_to)
     policy = resolve_policy_for_agent(skill)
     action_type = _resolve_gate_action_type(skill or "", task_snapshot, policy).value
+    confidence, confidence_unscored = _gate_confidence(
+        task_snapshot,
+        skill=skill,
+        action_type=action_type,
+        policy=policy,
+        bound_confidence=bound_confidence,
+    )
     decision = evaluate_gate(
-        confidence=_read_confidence(task_snapshot),
+        confidence=confidence,
         action_type=action_type,
         policy=policy,
         successful_recurrences=_successful_recurrences(task_snapshot),
+        confidence_unscored=confidence_unscored,
     )
     return skill, action_type, policy, decision
 
@@ -3412,7 +3482,8 @@ def _checkpoint_authority_state(checkpoint_id: str, task_record: dict) -> str:
     # The task is as it was.  Whether the brief is still current now depends on
     # the policy and action context release would judge it against.
     _skill, action_type, policy, decision = _task_gate_context(
-        _record_snapshot(task_record) or {}
+        _record_snapshot(task_record) or {},
+        bound_confidence=_bound_hold_confidence(authority),
     )
     if not policy.loaded:
         return "unreadable"
@@ -3961,11 +4032,22 @@ async def handle_checkpoint_brief(
             ),
         )
         return False
+    # Judge the task on the same confidence the hold used (explicit score, else
+    # the estimate the hold signed in), never on the raw field: that reads 0.0
+    # for an unscored task and made every approved high-blast one unreleasable.
+    release_confidence, release_unscored = _gate_confidence(
+        task_snapshot,
+        skill=safety_skill,
+        action_type=current_action_type,
+        policy=current_policy,
+        bound_confidence=_bound_hold_confidence(authorization),
+    )
     current_decision = evaluate_gate(
-        confidence=_read_confidence(task_snapshot),
+        confidence=release_confidence,
         action_type=current_action_type,
         policy=current_policy,
         successful_recurrences=_successful_recurrences(task_snapshot),
+        confidence_unscored=release_unscored,
     )
     exact_authority = (
         authorization.get("task_entity_id") == task_id

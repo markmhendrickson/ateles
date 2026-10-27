@@ -210,6 +210,12 @@ class TestThisRepoDeclaresItsOwnScope:
     def test_the_gate_and_credential_machinery_is_full_panel(self, path):
         assert self._scope().full_panel_trigger([path]) is not None, path
 
+    @pytest.mark.parametrize("lens", ["arch", "security"])
+    def test_foundation_docs_are_in_the_scope_of_the_lenses_that_must_rerun(self, lens):
+        # Carry rule: a lens's approval carries over a delta that misses its scope.
+        # A foundation-only delta must re-run both, so neither approval carries.
+        assert self._scope().touches_lens(lens, ["docs/foundation/work_model.md"]) is not None
+
     def test_an_ordinary_docs_change_is_not(self):
         scope = self._scope()
         assert scope.full_panel_trigger(["docs/guide/how_to.md"]) is None
@@ -335,6 +341,8 @@ class TestThisRepoCoversEveryRiskCategory:
             # rule and policy text
             "CLAUDE.md", "AGENTS.md", "sub/dir/AGENTS.md", "apps/x/CLAUDE.md",
             ".claude/skills/x/SKILL.md", "docs/policies/agent-data-rules.md",
+            "docs/foundation/work_model.md", "docs/foundation/conformance.md",
+            "docs/foundation/decision_state.md", "docs/foundation/principles.md",
             "execution/scripts/render_rule_inventory.py", "lib/daemon_runtime/agent_loader.py",
             "scripts/revert_auto_policy.py", ".claude/hooks/rule_injection_gate.py",
             # dependency manifests and lockfiles

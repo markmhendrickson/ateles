@@ -193,7 +193,7 @@ Companion report (not a foundation design document; not in the review reading li
 - [**PR review routing**](pr_review_routing.md) · [**Swarm trigger layer**](swarm-trigger-layer.md) ·
   [**GitHub interaction design**](swarm_github_interaction_design.md) — issue/PR triage and webhook flow.
 - [**A2A gateway**](a2a.md) — the inbound agent-to-agent task receiver.
-- [**Session integrity**](session_integrity.md) — plan-link / turn-storage / artifact-linkage invariant.
+- [**Session integrity**](session_integrity.md) — plan-link / conversation-capture / artifact-linkage invariant.
 - [**Smoke-test plan**](swarm_smoke_test_plan.md) · [**Smoke-test runbook**](smoke_test_runbook.md) — the
   phased rollout cadence.
 
