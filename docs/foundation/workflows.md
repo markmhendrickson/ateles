@@ -128,7 +128,7 @@ No role is foundational: no implementation needs a particular one, and this docu
 of them (operator ruling, 2026-10-13, register decision 142). A step declaration's `owner_role` names a role,
 which stands for a **slot**: each implementation defines its own role set, declares which roles it uses, and fills each
 slot with a principal through its roster (`swarm_roster`, per declaration scope). The role names that appear in
-the step tables of the sections below (`pm`, `ux`, `arch`, `pr_review`, `qa`, `legal`, implementer,
+the step tables of the sections below (`pm`, `ux`, `arch`, `pr_review`, `qa`, `legal`, `acceptance`, implementer,
 steward, copywriter, content author, lint runner, operator-facing agent, payer, verifier, researcher,
 analyst, planner, and the like) are **example role names** chosen so the reference workflows read
 concretely. An implementation may rename them, merge two into one, or split one into several, and a section
@@ -384,17 +384,18 @@ every review step the change concerns.
 | 1 | `pm` | `pm` step owner | yes | | the scope, the acceptance evidence (the task's `acceptance_criteria[]`), and the design basis are stated on the task (`conformance.md#design-basis`) |
 | 2 | `ux` | `ux` step owner | yes | group `design`, joins `arch` | the change's user-facing behaviour is judged against the stated scope |
 | 3 | `arch` | `arch` step owner | yes | group `design`, joins `ux` | the design basis is checked and the change conforms to the cited section, or the citation is found false |
-| 4 | `impl` | implementer | yes | | a pull request exists as an artifact of the batch, its CI is green at the pinned head, and it is mergeable as read (`github.md#conditions-that-are-not-events`) |
+| 4 | `impl` | implementer | yes | | a pull request exists as an artifact of the batch, its CI is green at the pinned head within the declaration scope's CI time budget for the change's class, and it is mergeable as read (`github.md#conditions-that-are-not-events`) |
 | 5 | `pr_review` | `pr_review` step owner | yes | | the full diff is read and judged for correctness |
 | 6 | `qa` | `qa` step owner | yes | group `verification`, joins `legal` | the tests can fail on the thing they watch (`principles.md`, invariant 4) |
 | 7 | `legal` | `legal` step owner | no | group `verification`, joins `qa` | licensing, data-handling, and disclosure are judged where the change touches them |
-| 8 | `merge` | steward | yes | | the merge action taken through the action gate and the merged pull request read back; the verdict names the successor |
+| 8 | `acceptance` | `acceptance` step owner | no | | the change's behaviour is exercised against the real external systems it touches, in the runtime it will run in, and the result is read back, before `merge` or at the demo deploy and never at `release` |
+| 9 | `merge` | steward | yes | | the merge action taken through the action gate and the merged pull request read back; the verdict names the successor |
 
 <!-- /rendered -->
 
 The two parallel groups exist because their reviewing step owners judge independent things and neither
-needs the other's conclusion; the join is what makes the batch wait for both. `legal` is the one optional
-step, and it carries an `applies_when` condition: it opens where the change touches licensing,
+needs the other's conclusion; the join is what makes the batch wait for both. `legal` and `acceptance` are the
+optional steps, and each carries an `applies_when` condition. `legal`'s: it opens where the change touches licensing,
 data-handling, or disclosure, and is recorded inapplicable where it does not, with the condition that
 ruled it out (`gates_and_workflows.md#declaration-batch-projection`). Every other step here is required
 and opens on every batch. This placement — a review step, seated after `impl`, gated by relevance rather
@@ -405,18 +406,19 @@ exiled to the gates"), because `applies_when` seats it exactly where its relevan
 principle that fails an unclassified action type closed rather than passing it by default. A declaration scope whose
 legal risk must be judged before implementation starts, not after, expresses that by seating `legal` in the
 design stage of its own workflow declaration instead — the design does not preclude it, and does not
-declare it here. `merge` is a step so that the merge
+declare it here. `acceptance` is seated by the same principle and argued under its own heading below. `merge` is a step so that the merge
 action has a step owner to claim it, a taking to record, and a verdict to close the batch with; the
 action itself is governed by action policy, not by the step
 (`gates_and_workflows.md#two-questions-who-may-claim-a-step-and-whether-an-action-may-be-taken`).
 
 **Stages:** scoping (`pm`); design (`ux`, `arch`); implementation (`impl`); review (`pr_review`, `qa`,
-`legal`); integration (`merge`).
+`legal`); acceptance (`acceptance`); integration (`merge`).
 
 **Artifacts:** the issue that carries the specification; the pull request; its CI check runs; the merge
-commit.
+commit; where `acceptance` opens, the record of what it exercised and what it read back.
 
-**Typical action classes:** `build`, `docs`, `git_push`, `open_pr`, `merge_pr`.
+**Typical action classes:** `build`, `docs`, `git_push`, `open_pr`, `merge_pr`; and, where `acceptance` opens, the
+classes of the effects it takes (a canary send is a `send_external_comms` action, taken through the gate like any other).
 
 **Successors:** `release`; or none, where the declaration permits it (`none_permitted`) because the scope
 deploys its default branch on its own cadence and the merge is the last effect the task needs — a
@@ -426,6 +428,132 @@ none under it is refused (`gates_and_workflows.md#sequencing-is-data-successors-
 **Fast paths:** `bug` skips `ux`; `copy` skips `arch`; `security` skips `ux`, `qa`, and `legal`. Each is
 for a declaration scope that declares no dedicated workflow of that type; where the scope does declare one,
 intake routes to it and the fast path is never taken.
+
+### CI at the pinned head is a step resource with a declared time budget, and heavy suites run in a release-candidate run
+
+**Open (decision 163, drafted 2026-10-27 at the operator's direction; ruling at merge).** Registered in
+`conformance.md#the-register-of-open-design-decisions`. **Recommendation:** rule it as stated below.
+
+**The rules in this section.**
+
+- A declaration scope declares a CI time budget per class of change, and `impl` closes on CI green at the pinned
+  head within the budget of the change's class.
+- A run over its budget is a finding on `impl`, standing on the workflow, and not a wait.
+- A suite too heavy for the budget runs in a release-candidate run, and a change is not held for it.
+- The design states no number.
+
+**The gap.** `impl` closes on a pull request existing, its CI green at the pinned head, and it being mergeable as
+read. Green is the only condition on the CI: what it cost to reach is unbounded, so a suite can grow by one test at
+a time until every change waits on it, and no step's closing condition is violated at any point on the way. A
+cost nobody bounds is paid by whoever waits, and the waiting reads as the work being slow rather than as a
+suite outgrowing its purpose.
+
+**Rule 1: the budget is declared per class of change, on the scope's declaration.** A declaration scope names the
+classes of change it ships (a copy edit, a user-interface change, a change to a data write, a change to a
+schema, and the like) and a time budget for CI at the pinned head for each. `impl` closes on green within the
+budget of the class the change belongs to, and the class is read from what the change touches, the way
+`applies_when` reads relevance, and never from what the change says about itself. The budget sits on the
+declaration beside `applies_when` and the other per-scope data, and the design names no field for it.
+
+**Rule 2: over budget is a finding, and a standing one.** A run that exceeds its budget is recorded as a finding
+on `impl` and does not hold the batch in a loop of reruns. It is **standing on the workflow**
+(`gates_and_workflows.md#a-finding-is-one-off-or-standing-and-a-standing-one-obliges-a-change-to-what-produced-it`):
+the next change of that class will exceed it too, so correcting the one run and stopping there is not
+discharging it. What is owed is a change to what produced the cost, which is a suite moved, split, or made
+faster, or a budget revised through the declaration's own amendment path
+(`#who-approves-a-new-or-amended-declaration`).
+
+**Rule 3: heavy suites run in a release-candidate run.** A suite whose cost the budget cannot carry (a full
+end-to-end sweep, a long compatibility matrix) runs against a release candidate, the commit a release is cut
+from, and not at each change. This moves the cost to where the question it answers is asked, which is whether
+this candidate may ship, and keeps it out of the question `impl` asks, which is whether this change is sound.
+The `release` workflow's `criteria` step reads the result as one of its criteria
+(`#release`); a candidate whose heavy suite has not run is `unknown` there, and unknown holds the batch
+(`principles.md`, invariant 7), so moving a suite out of `impl` never lets it go unrun.
+
+**Rule 4: the numbers are scope data.** A budget that suits a scope with a ten-minute suite is wrong for one
+with a two-hour build, and a design that stated either would be edited by every operator who forked it. The design
+states that a budget exists and what follows from exceeding it, and the scope states how many minutes (the fork
+test, as `application.md` applies it).
+
+**What this does not do.** It does not say a faster suite is better, only that the cost is bounded by someone
+who declared it. It does not let a change merge on a CI run that did not finish: a run that timed out is not
+green, and `checks` reads `unknown` for it (`github.md#the-transitions-the-mining-found-unhandled`).
+
+**The rejected alternatives.** A budget stated once in the design was rejected under rule 4. Leaving CI cost to
+review was rejected because no review step's closing condition mentions it, so the finding would have no step
+whose condition it violates, the same shape as the conflict with no step owner. Keeping every suite in the
+per-change run, whatever it costs, was rejected as the present state this ruling is written against.
+
+**Matrix.** No row is added here. The planted refusal this ruling calls for is an `impl` signed on a run over its
+declared budget with no finding recorded; it is added to `conformance_suite.md` in the change that rules the
+decision.
+
+### The acceptance step exercises a change against the real external systems it touches, before merge or at the demo deploy
+
+**Open (decision 164, drafted 2026-10-27 at the operator's direction; ruling at merge).** Registered in
+`conformance.md#the-register-of-open-design-decisions`. **Recommendation:** rule it as stated below.
+
+**The rules in this section.**
+
+- `feature` carries an optional `acceptance` step, seated after `impl` and opened by `applies_when` where the
+  change touches an external system or a staff-facing flow.
+- It closes when the behaviour has been exercised against the real external systems, in the runtime the change
+  will run in, and read back.
+- It runs before `merge`, or at the demo deploy where the intended runtime exists only there, and never at
+  `release`.
+- It is a `work` step, and every effect it takes passes the action gate.
+
+**The gap.** The review steps judge a diff, and CI judges a build. Neither sends a message through the real mail
+system, reaches the real calendar, or opens the screen a client's staff work in. Behaviour that only the real
+system reveals (a send the host rejects, a screen that renders for the author and not for the staff member) is
+found by the first person who uses it, after `release`. `verify_deployed` does not close the gap: it confirms that
+the deployed checkout reports the released version (`#release`), which is a claim about what runs and not about
+whether it works against the systems it was built for.
+
+**Rule 1: it is seated like `legal`.** The step is optional and carries an `applies_when` condition over what the
+change touches: it opens where the change touches an external system or a staff-facing flow, and is recorded
+inapplicable, with the condition that ruled it out, where it does not (`gates_and_workflows.md#declaration-batch-projection`).
+The condition reads the change and never the change's description of itself, for the reason `legal`'s does. The
+placement is the one the design already gives a discipline whose relevance varies by change: after `impl`, gated
+by relevance, and not a gate of last resort at `release`.
+
+**Rule 2: it closes on an exercise read back, not on a judgement.** The step owner runs the changed behaviour
+against the real external systems in the intended runtime (an external-send canary to an address the operator
+named for the purpose is the example) and the step closes on what the exercise produced, read back from the
+system and not from the operation's return (`principles.md`, invariant 2). A step that exercises a screen reads
+what the screen showed, in the form a staff member sees it. The canary's own effects are actions of their usual
+classes, taken through the gate, so a canary send waits on the checkpoint that any send of that class waits on;
+the step adds no permission.
+
+**Rule 3: it runs before `merge`, or at the demo deploy, never at `release`.** Where the intended runtime can be
+reached from the pull request's head, `acceptance` runs there and closes before `merge`. Where it exists only on
+a deployment of the default branch (decision 162 admits no other), the scope declares the step after `merge` and
+before the successor, so it closes at the demo deploy. A scope whose intended runtime exists only after merge
+expresses that in its own `feature` declaration, as one that must judge `legal` earlier seats it in the design
+stage. It is never deferred to `release`, because by then the defect has shipped and the step has become the
+discovery of it.
+
+**Rule 4: it is a `work` step.** Its work is an exercise that takes actions, so it is not a judgement of the
+batch's change (`vocabulary.md#review-step`). Its step owner is not the implementer, since an exercise the
+implementer ran themselves reads the system through the implementer's expectation of it; the constraint is the
+one `gates_and_workflows.md#the-builder-of-a-change-never-signs-its-review` states for a review, applied to this
+step by the same reason and not by the same rule.
+
+**What this does not do.** It does not replace `qa`, whose closing condition is that the tests can fail on what they
+watch. It does not require a real external system where a change touches none, which is what the condition decides.
+And it does not make the reference workflow live anywhere: the `feature` declaration stays a reference design an
+instance seeds a draft from, as `#scope` states for every named workflow.
+
+**The rejected alternatives.** Folding the exercise into `qa` was rejected because `qa` judges tests and an
+exercise takes actions, which are different step classes with different gates. Leaving the exercise to
+`verify_deployed` was rejected under the gap above. Making `acceptance` required was rejected because most changes
+touch no external system, and a required step that is inapplicable most of the time teaches the reader to sign it
+without looking.
+
+**Matrix.** No row is added here. The planted refusal this ruling calls for is an `acceptance` step recorded
+inapplicable on a change that touches an external system; it is added to `conformance_suite.md` in the change that
+rules the decision.
 
 ## bug
 

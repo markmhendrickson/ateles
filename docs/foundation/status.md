@@ -4413,3 +4413,35 @@ Read on 2026-09-26 against `origin/main` at `bb38fb9b`, Codex CLI 0.153.4, Atele
   still review and trust the definition in Codex before it affects ordinary sessions. The larger compaction,
   scenario, daemon, Cursor, and cross-harness evaluation remains task `ent_8ef6743f00b589400259f6b5`; this
   pass does not duplicate it.
+
+## Revision 150 (2026-10-27): decision 148's conformance check — an application's merge and deploy path has no runtime dependency on swarm coordination
+
+Read on 2026-10-27 against `origin/main` at `b7394da1`. This is a conformance row, not a decision: decision 148 is
+ruled (`conformance.md#the-register-of-open-design-decisions`), and the section that rules it
+(`adapters.md#a-client-instance-runs-a-minimal-runtime-of-its-own-and-its-delivery-never-depends-on-swarm-coordination`)
+states what delivery depends on and says the planted refusal for it is "added to `conformance_suite.md` in a later
+change". This row names the check that change must build, and records that nothing runs it. It restates no rule.
+
+- **The check, in two parts.** (1) *Static:* an application repository's merge and deploy path, meaning its CI
+  workflow files, its deploy scripts, and the `deploy_command` of the `deployment_configuration` that names it,
+  contains no reference to an Ateles dispatcher, to the component that assigns work to agents, to a review-lens
+  runner, or to a gate-status endpoint. The reference to look for is a call, an import, a required status check
+  whose producer is one of those, or an environment the path reads from one. (2) *Dynamic:* with the dispatcher,
+  the assigning component, and the gate-status surface stopped, a change in the application repository merges
+  and deploys to its demo instance through the path the repository itself declares, and the deployed commit reads
+  back from the target. Part 2 is the planted refusal in the rule's own words: a delivery that stalls when the
+  swarm's coordination is stopped while the instance's own runtime is up.
+- **Where it stands: no check found.** A name and content search of `execution/scripts`, `scripts/linters`, and
+  `.github/workflows` on this date found no script or step that reads an application repository's merge or deploy
+  path for either part; the nearest, `prepare_instance_auth_deployment.py`, prepares an instance's authentication
+  argv and was not read as such a check. The ruling is
+  therefore a statement the design makes about a repository whose compliance nothing measures. This is the
+  non-binding-control shape `CLAUDE.md` names: the rule is written, and nothing fails when it is violated.
+- **What is not measured here.** Whether any application repository currently depends on swarm coordination in
+  its merge or deploy path was not read in this pass, so this row claims neither a dependency nor its absence. The
+  first run of part 1 against each application repository is the measurement, and its result belongs in this
+  document as a dated entry, not in the register.
+- **What closes the row.** Part 1 as a checker with fail-then-pass coverage, part 2 as a `conformance_suite.md` row
+  with the planted refusal above, and both wired into a lane that binds, which is to say one whose failure blocks
+  a merge in the repository it reads.
+

@@ -149,6 +149,7 @@ ALLOWLIST_WORDS = frozenset(
     fields surface their then half thing later different stays reaches refused refuses stored
     request answer defect confirmed release
     absent accepted added applied classes data entities foundation like place target draft next mark part
+    branch pull suite
     """.split()
 )
 # `fields` tipped the advisory bound on ateles#899 (decision-93 ruling prose merged with main);
@@ -160,6 +161,8 @@ ALLOWLIST_WORDS = frozenset(
 # added a document and sections of the same register), as ordinary English that carries no bound sense.
 # `draft` and `next` crossed it with the review fixes to that pass, on the same ground.
 # `mark` and `part` crossed it with the instance-owner section, on the same ground.
+# `branch`, `pull`, and `suite` crossed it with the trunk, CI-budget, and acceptance proposal (decisions 162 to 164):
+# `branch` and `suite` as the plain nouns they are, and `pull` almost wholly as half of `pull request`.
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z']*")
 _TESTID_ABBREVIATIONS = frozenset(

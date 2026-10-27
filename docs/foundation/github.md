@@ -371,7 +371,8 @@ fifth outcome was invented for it.
 **A conflict has no step owner, and that is the gap.** A pull request becoming unmergeable is a condition
 on the artifact with no step whose closing condition it violates: `impl` may already be signed, and
 `merge`'s owner discovers it only when the merge action fails. The condition belongs to the `impl` step
-owner, whose verdict closes on a pull request existing, its CI green at the pinned head, **and it being
+owner, whose verdict closes on a pull request existing, its CI green at the pinned head within the scope's declared
+time budget (`workflows.md#ci-at-the-pinned-head-is-a-step-resource-with-a-declared-time-budget-and-heavy-suites-run-in-a-release-candidate-run`), **and it being
 mergeable as read** (`workflows.md#feature`), so a conflict opens `impl` again by the step's `on_fail`
 rather than surfacing at the merge. Whether that path is built is a `status.md` row.
 
@@ -469,6 +470,70 @@ recovery is an action a principal takes through the gate
 **Which of these rows a principal's own artifact takes — its own comment, or a merged body several
 principals rewrite — is open (decision 85, 2026-09-07, on the operator's question).** Registered in
 `conformance.md#the-register-of-open-design-decisions`, argued below.
+
+## What is deployed is a commit on the default branch, and a verdict is valid only for a head that is, or becomes, what is deployed
+
+**Open (decision 162, drafted 2026-10-27 at the operator's direction; ruling at merge).** Registered in
+`conformance.md#the-register-of-open-design-decisions`. **Recommendation:** rule it as stated below.
+
+**The rules in this section.**
+
+- What is deployed is a commit that is an ancestor of the default branch, and nothing else.
+- A verdict is valid for a deployment only where the head it pins is, or becomes by a merge the action gate took,
+  what is deployed.
+- A limit on a pull request's size and a sweep of stale pull requests are declaration data of the scope, not rules
+  of the design.
+
+**The gap.** A verdict is pinned to the head it judged, and a force-update or a new commit on the branch leaves it readable as
+stale (`#the-transitions-the-mining-found-unhandled`). A deployment is an observation on the artifact for the
+deployment target (`#repository-level-events-the-swarms-operations-produce-or-depend-on`), and `verify_deployed`
+reads the deployed checkout (`workflows.md#release`). Nothing relates the two. A build can therefore be deployed
+from a branch that no merge has reached, and a verdict on a head can be read as covering a deployed commit it
+never judged: the review and the thing that is live are two facts with no edge between them, and the first is
+presented as evidence about the second.
+
+**Rule 1: what is deployed is on the default branch's history.** The commit a deployment target runs, read from
+the target and not from the operation that deployed it (`#outbound-the-operations-the-code-workflows-take-on-the-host`),
+is an ancestor of the default branch's head. A deployment from any other ref is not a deployment of reviewed
+work, whatever its pull request says, and it reads as such: the observation records the ref, and the
+`verify_deployed` step does not sign on a commit outside the default branch's history. The rule is the pinned-head
+rule applied one hop further. A verdict pins a head so that a conclusion about an old state cannot pass for a
+conclusion about the current one, and a deployment is the point at which the current state starts to matter to a
+person.
+
+**Rule 2: a verdict binds a deployment only through the head that becomes it.** A verdict is valid for a
+deployment when the head it pinned is the deployed commit, or when the merge the gate took turned that head into
+the deployed commit (a merge commit, or a squash of exactly that head). A verdict on a head that was then replaced,
+rebased onto different content, or never merged says nothing about what runs, and a reader asked whether a
+deployed commit was reviewed answers by walking from the deployed commit to the merge that produced it and from
+the merge to the verdicts pinned to the head it merged. The walk is a derived read over observations the record
+already holds, not a stored flag (principle 11): a stored "reviewed" mark needs a process to keep it true, and the
+walk needs none.
+
+**Rule 3: sizes and sweeps are declaration data.** A change too large to review, or a pull request left open
+until its head no longer resembles the default branch, makes a verdict worth less, and that is a reason for a
+scope to bound both. The numbers are not the design's. A limit that suits one scope's changes is wrong for
+another's, and a design that stated one would be edited by every operator who forked it (the fork test, applied
+as `application.md` applies it). So the design states only what a limit and a sweep must do when a scope declares
+them: a change over the limit is returned to its author as a finding on `impl`, and a stale pull request is
+closed with its reason on the record, never deleted (`#the-required-state-per-repository` states the standing
+rule that a superseded effect stays readable).
+
+**What this does not do.** It does not require that a deployment wait for a verdict; which deployments need a
+checkpoint is the action gate's, by the class of the action. It does not say that a deployment from a non-default
+ref is forbidden to a scope that wants one, only that the record does not call it deployed reviewed work. And it
+does not decide how a client instance's runtime is deployed, which decision 148 and the instance's
+`deployment_configuration` own (`adapters.md#a-client-instance-runs-a-minimal-runtime-of-its-own-and-its-delivery-never-depends-on-swarm-coordination`).
+
+**The rejected alternatives.** Stating the size limit and the sweep as invariants was rejected under rule 3. A
+stored flag marking a commit reviewed was rejected under rule 2. Requiring the default branch to be the only ref
+a deploy workflow can run on was rejected as a host configuration the design would then have to hold in the
+required-state table above, when the rule already holds without it: a deploy from another ref simply does not
+read as reviewed.
+
+**Matrix.** No row is added here. The planted refusal this ruling calls for is a `verify_deployed` signed on a
+commit outside the default branch's history; it is added to `conformance_suite.md` in the change that rules the
+decision.
 
 ## Where an agent's artifact about an issue or a pull request lives
 

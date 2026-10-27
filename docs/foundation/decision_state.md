@@ -151,4 +151,7 @@ This document reports only what `origin/main` itself says, so a row ruled on an 
 | 158 | who holds the acts the design reserves to the operator now that … | yes | yes | unknown | nothing in the design beyond the amendment below; the rule that the waiver is … |
 | 159 | who may invoke the operator's halt and who may lift it, now … | yes | yes | unknown | nothing in the design; the halt's read-back is unchanged |
 | 160 | who sets or changes a per-payee payment cap — the cap is … | yes | yes | unknown | nothing in the design; the five conditions of decision 144 and the take-time read … |
+| 162 | what is deployed, and which review applies to it — the design … | no | no | unknown | nothing in the design; the pinned-head rule of `data_model.md#record-conventions`, decision 106, and decision 148 … |
+| 163 | whether continuous integration is a resource a step spends under a declared … | no | no | unknown | nothing in the design; the `impl` closing condition keeps its meaning, and the numbers … |
+| 164 | whether the `feature` workflow has a step that exercises a change's behaviour … | no | no | unknown | nothing in the design; `legal` keeps its seating and `release` its meaning, and the … |
 
