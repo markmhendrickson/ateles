@@ -44,6 +44,7 @@ USAGE
         [--task-entity-id ent_...] \\
         [--github-delivery] \\
         [--github-token-env ATELES_AGENT_PAT] \\
+        [--runner fly --repository owner/name --github-read] \\
         [--json]
 
 ``--provider`` pins the run to one adapter, bypassing weighted selection but
@@ -244,6 +245,14 @@ def available_roles() -> list[str]:
     return sorted(p.name for p in skills_dir.iterdir() if (p / "SKILL.md").is_file())
 
 
+FLY_DELIVERY_REFUSAL = (
+    "--runner fly cannot be combined with --github-delivery: a Fly job that commits, "
+    "pushes or opens a pull request needs a delivery plan and the PR-opener token, "
+    "which only the Apis task path provides. Use the Apis task path, or run this "
+    "delivery locally with --github-token-env"
+)
+
+
 async def dispatch(
     role: str,
     task: str,
@@ -276,7 +285,9 @@ async def dispatch(
     run onto a Fly Machine holding only this job's credentials (refused, with
     the reason, when the role is not eligible); ``"local"`` forces the local
     executor; ``None`` follows ``APIS_FLY_RUNNER_CLASSES``. ``repository``
-    scopes the Fly job's per-job GitHub App token.
+    scopes the Fly job's per-job, read-only GitHub App token. ``runner="fly"``
+    is refused together with ``github_delivery``: a delivering Fly job needs a
+    delivery plan and the PR-opener token, which this entrypoint cannot supply.
 
     ``role`` names both the agent_definition to load AND the SKILL.md to run —
     they are the same string throughout this codebase, which is why run_skill's
@@ -337,6 +348,14 @@ async def dispatch(
     them every class runs on the model path exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    if github_delivery and runner == "fly":
+        # Fail closed. A Fly job that delivers to GitHub is launched only with a
+        # delivery plan (a branch, a receipt and the PR-opener token), which
+        # Apis builds on its task path. This entrypoint has none, and a Fly job
+        # with no plan must never be handed another App's token.
+        return SkillResult(
+            role, False, None, "", "", error=FLY_DELIVERY_REFUSAL, provider=provider or ""
+        )
     run_kwargs = dict(
         role=role,
         task_entity_id=task_entity_id,
@@ -852,6 +871,18 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--github-read",
+        action="store_true",
+        help=(
+            "The job reads GitHub and does not deliver to it. On Fly it gets a "
+            "read-only App token for --repository (contents and pull requests, "
+            "read); it cannot push, comment, approve or open a pull request. A "
+            "run on this machine (--runner local, or a fallback from Fly) uses "
+            "the scoped token named by --github-token-env, which is required "
+            "unless --runner fly. Not combinable with --github-delivery."
+        ),
+    )
+    parser.add_argument(
         "--runner",
         choices=["local", "fly"],
         help=(
@@ -865,8 +896,8 @@ def main(argv: list[str] | None = None) -> int:
         "--repository",
         default="",
         help=(
-            "owner/name the job touches. With --runner fly and "
-            "--github-delivery, the job's GitHub App token is scoped to it."
+            "owner/name the job touches. With --runner fly, the job's "
+            "read-only GitHub App token is scoped to it."
         ),
     )
     parser.add_argument(
@@ -958,24 +989,44 @@ def main(argv: list[str] | None = None) -> int:
             emitter, "--regenerate-cmd requires --cwd (the worktree to regenerate in)"
         )
 
+    if args.github_delivery and args.runner == "fly":
+        return _usage_failure(emitter, FLY_DELIVERY_REFUSAL)
+    if args.github_read:
+        if args.github_delivery:
+            return _usage_failure(
+                emitter, "--github-read cannot be combined with --github-delivery"
+            )
+        if args.runner != "local" and not args.repository:
+            return _usage_failure(
+                emitter, "--github-read requires --repository unless --runner local"
+            )
+        if args.runner != "fly" and not args.github_token_env:
+            # A run that can execute on this machine (--runner local, or a class
+            # that may fall back here) needs a real local credential; an empty
+            # one is never substituted.
+            return _usage_failure(
+                emitter,
+                "--github-read without --runner fly requires --github-token-env "
+                "(the scoped credential a local run uses)",
+            )
+
     github_token: str | None = None
     if args.github_token_env:
-        if not args.github_delivery:
+        if not (args.github_delivery or args.github_read):
             return _usage_failure(
-                emitter, "--github-token-env requires --github-delivery"
+                emitter, "--github-token-env requires --github-delivery or --github-read"
             )
         if not args.github_token_env.isidentifier():
             return _usage_failure(
                 emitter, "--github-token-env must name a valid environment variable"
             )
         github_token = os.environ.get(args.github_token_env, "")
-    elif args.github_delivery and args.runner == "fly":
-        # A Fly job's GitHub credential is a per-job App installation token
-        # minted at launch and scoped to --repository; no token on this side.
-        if not args.repository:
-            return _usage_failure(
-                emitter, "--runner fly with --github-delivery requires --repository"
-            )
+    elif args.github_read:
+        # Forced onto Fly with no local token: the job's read-only credential is
+        # a per-job App installation token minted at launch and scoped to
+        # --repository; nothing on this side. (Without --runner fly the branch
+        # above always ran, so this is never an empty local credential.)
+        github_token = ""
     elif args.github_delivery:
         # Caught here as a fast, structured usage error — same shape as every
         # other CLI misuse below — rather than left to surface deep inside

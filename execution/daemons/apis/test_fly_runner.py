@@ -609,14 +609,19 @@ def test_mint_is_fresh_scoped_and_uncached(fly_env, monkeypatch):
 
     def fake_request(method, path, bearer, body=None):
         calls.append((method, path, bearer, body))
-        return {"token": f"tok{len(calls)}", "expires_at": "2030-01-01T00:00:00Z"}
+        return {"token": f"tok{len(calls)}", "expires_at": "2030-01-01T00:00:00Z",
+                "permissions": {"contents": "read", "pull_requests": "read", "metadata": "read"},
+                "repository_selection": "selected",
+                "repositories": [{"full_name": "owner/repo", "name": "repo"}]}
 
     monkeypatch.setattr(fly_runner, "_github_request", fake_request)
-    a = fly_runner.mint_job_github_token("owner/repo", "P")
-    b = fly_runner.mint_job_github_token("owner/repo", "P")
+    clock = lambda: 1_893_456_000.0 - 3000  # noqa: E731 -- just before the stand-in's expiry
+    a = fly_runner.mint_job_github_token("owner/repo", "P", clock=clock)
+    b = fly_runner.mint_job_github_token("owner/repo", "P", clock=clock)
     assert a != b  # one token per job, never a shared cached one
     assert calls[0][:3] == ("POST", "/app/installations/42/access_tokens", "app-jwt")
-    assert calls[0][3] == {"repositories": ["repo"]}
+    assert calls[0][3] == {"repositories": ["repo"],
+                           "permissions": {"contents": "read", "pull_requests": "read"}}
     fly_runner.revoke_job_github_token(a)
     assert calls[-1][:3] == ("DELETE", "/installation/token", a)
 
@@ -991,7 +996,7 @@ def test_seam_forced_fly_refuses_an_ineligible_role(fly_env, seam, monkeypatch):
     monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         result = _once(runner="fly", repository="owner/repo",
-                       github_token=None, include_github_contract=True)  # fmt: skip
+                       github_token="")  # fmt: skip
     assert not result.ok
     assert result.error.startswith("fly runner refused: not eligible for Fly")
     assert spawned == []
@@ -1003,7 +1008,7 @@ def test_seam_opted_in_class_falls_back_locally_when_ineligible(fly_env, seam, m
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         result = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
-                       github_token="t-local", include_github_contract=True)  # fmt: skip
+                       github_token="t-local")  # fmt: skip
     assert result.ok and result.stdout == "local output"
     assert len(spawned) == 1
     assert fly_runner.get_executor().ledger.snapshot()["local_fallbacks"] == 1
@@ -1018,7 +1023,7 @@ def test_seam_forced_fly_returns_the_machine_result(fly_env, seam, monkeypatch):
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         result = _once(runner="fly", repository="owner/repo",
-                       github_token=None, include_github_contract=True)  # fmt: skip
+                       github_token="")  # fmt: skip
     assert result.ok, result.error
     assert result.stdout == (
         "GATE_INHERITANCE: clear\n" + fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE + "\n"
@@ -1068,7 +1073,7 @@ def test_key_only_neotoma_tool_loss_is_disclosed_in_result_and_log(
     with caplog.at_level(logging.WARNING), \
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         result = _once(runner="fly", repository="owner/repo",
-                       include_github_contract=True, notifier=Notifier())
+                       github_token="", notifier=Notifier())
     note = fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE
     assert result.ok
     assert (note in result.stdout) is disclosed
@@ -1086,7 +1091,7 @@ def test_seam_cap_refusal_returns_cooled_until(fly_env, seam, monkeypatch):
     executor, _, _ = make_executor(FakeFly(), **EXHAUSTING)
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+        result = _once(runner="fly", repository="owner/repo", github_token="")
     assert not result.ok and result.cooled_until
     assert spawned == []
 
@@ -1100,8 +1105,8 @@ def test_seam_definite_launch_failure_falls_back_or_fails(fly_env, seam, monkeyp
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         opted = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
-                      github_token="t-local", include_github_contract=True)  # fmt: skip
-        forced = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+                      github_token="t-local")  # fmt: skip
+        forced = _once(runner="fly", repository="owner/repo", github_token="")
     assert opted.ok and len(spawned) == 1  # logged, counted local fallback
     assert not forced.ok and forced.error.startswith("fly runner refused: Fly launch failed")
 
@@ -1134,7 +1139,6 @@ def test_key_only_local_fallback_reports_the_actual_fly_failure(
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         result = _once(action_class="carry_forward_check", model="m",
                        repository="owner/repo", github_token="t-local",
-                       include_github_contract=True,
                        notifier=Notifier())
 
     assert result.ok and result.stdout == "local output" and len(spawned) == 1
@@ -1166,7 +1170,7 @@ def test_seam_uncertain_launch_is_never_replayed_locally(fly_env, seam, monkeypa
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         result = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
-                       github_token="t-local", include_github_contract=True)  # fmt: skip
+                       github_token="t-local")  # fmt: skip
     assert spawned == []
     assert not result.ok and result.remote_outcome_unknown
     assert result.remote_run_id and "UNKNOWN outcome" in result.error
@@ -1204,15 +1208,20 @@ def test_dispatch_role_runner_flag_reaches_run_skill(monkeypatch, tmp_path):
     monkeypatch.setattr(dispatch_role, "_load_agent_def", lambda role: AgentDefinition(name=role))
     rc = dispatch_role.main([
         "--role", "lanius", "--task", "t", "--runner", "fly",
-        "--github-delivery", "--repository", "owner/repo",
+        "--github-read", "--repository", "owner/repo",
     ])  # fmt: skip
     assert rc == 0
     assert seen["runner"] == "fly" and seen["repository"] == "owner/repo"
-    assert seen["github_token"] is None
+    assert seen["github_token"] == "" and seen["include_github_contract"] is False
 
+    # Read-only GitHub needs a repository; a delivery is not available here.
     rc = dispatch_role.main(["--role", "lanius", "--task", "t", "--runner", "fly",
-                             "--github-delivery"])  # fmt: skip
+                             "--github-read"])  # fmt: skip
     assert rc != 0
+    seen.clear()
+    rc = dispatch_role.main(["--role", "lanius", "--task", "t", "--runner", "fly",
+                             "--github-delivery", "--repository", "owner/repo"])  # fmt: skip
+    assert rc != 0 and seen == {}
 
 
 # ── Lifecycle ownership on every exit path ───────────────────────────────────
@@ -1755,7 +1764,7 @@ def test_seam_surfaces_truncation_on_the_result_and_harness_event(fly_env, seam,
     })  # fmt: skip
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+        result = _once(runner="fly", repository="owner/repo", github_token="")
     assert result.ok and result.output_truncated is True
     assert result.stdout.startswith("[fly runner: output truncated")
     final = [e for e in events if e.get("success") == "true"]
@@ -2067,7 +2076,7 @@ def test_unknown_outcome_never_fails_over_to_another_provider(fly_env, seam, mon
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         result = asyncio.run(skill_runner.run_skill(
             "lanius", "check the gates", role="lanius", runner="fly",
-            repository="owner/repo", include_github_contract=True,
+            repository="owner/repo", github_token="",
         ))  # fmt: skip
     assert len(result.attempted_providers) == 1, result.attempted_providers
     assert result.remote_outcome_unknown and result.remote_run_id
@@ -2093,7 +2102,7 @@ def test_timeout_keeps_the_remote_run_identity_and_state(fly_env, seam, monkeypa
     executor.client.wait = advancing_wait
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        result = _once(runner="fly", repository="owner/repo", include_github_contract=True,
+        result = _once(runner="fly", repository="owner/repo", github_token="",
                        timeout=60)  # fmt: skip
     state = "terminated" if terminates else "unconfirmed"
     assert not result.ok and "timed out" in result.error
@@ -2117,7 +2126,7 @@ def test_a_recorded_result_with_unconfirmed_cleanup_keeps_its_remote_fields(
     executor.client.wait = _async(lambda *a, **k: "reached")
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+        result = _once(runner="fly", repository="owner/repo", github_token="")
     assert result.ok  # the task's result is known
     assert result.remote_outcome_unknown is False
     assert result.remote_run_id and result.remote_machine_state == "unconfirmed"
@@ -2516,7 +2525,7 @@ def test_seam_turns_a_malformed_result_into_an_unknown_outcome(fly_env, seam, mo
     executor._read_result = read
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+        result = _once(runner="fly", repository="owner/repo", github_token="")
     assert not result.ok and result.remote_outcome_unknown is True
     assert result.remote_run_id and spawned == []
 
@@ -2535,12 +2544,12 @@ def test_seam_unexpected_errors_after_a_launch_stay_unknown(fly_env, seam, monke
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         if after_launch:
-            result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+            result = _once(runner="fly", repository="owner/repo", github_token="")
             assert result.remote_outcome_unknown is True and not result.ok
             assert "UNKNOWN outcome" in result.error
         else:
             with pytest.raises(RuntimeError):
-                _once(runner="fly", repository="owner/repo", include_github_contract=True)
+                _once(runner="fly", repository="owner/repo", github_token="")
     assert spawned == []
 
 
@@ -2886,7 +2895,7 @@ def test_the_nonce_never_appears_in_logs_results_events_or_json(
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         result = asyncio.run(skill_runner._run_skill_once(
             "lanius", "check", provider="codex", role="lanius", runner="fly",
-            repository="owner/repo", include_github_contract=True,
+            repository="owner/repo", github_token="",
         ))  # fmt: skip
     nonces = set(fly_runner._LEASE_NONCES)
     assert nonces, "no lease was taken"
@@ -3479,8 +3488,8 @@ def test_an_invalid_limit_is_a_refusal_never_a_local_fallback(fly_env, seam, mon
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         opted = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
-                      github_token="t-local", include_github_contract=True)  # fmt: skip
-        forced = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+                      github_token="t-local")  # fmt: skip
+        forced = _once(runner="fly", repository="owner/repo", github_token="")
     for result in (opted, forced):
         assert not result.ok and "APIS_FLY_MONTHLY_BUDGET_USD" in result.error
     assert spawned == [] and fake.requests == []
@@ -4187,7 +4196,7 @@ def test_an_oversized_argument_never_starts_a_machine_or_falls_back(fly_env, sea
     monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
     monkeypatch.setattr(fly_runner, "MAX_ARGV_ELEMENT_BYTES", 10)  # any real argument exceeds it
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        result = _once(runner="fly", repository="owner/repo", include_github_contract=True)
+        result = _once(runner="fly", repository="owner/repo", github_token="")
     assert not result.ok and "nothing was launched" in result.error
     assert fake.requests == [] and minted == [] and spawned == []
 
@@ -4212,7 +4221,7 @@ def test_a_fly_fallback_to_the_mac_is_gated_locally_again(fly_env, seam, monkeyp
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         result = _once(action_class="carry_forward_check", model="m", repository="owner/repo",
-                       github_token="t-local", include_github_contract=True,
+                       github_token="t-local",
                        local_fallback_check=check)  # fmt: skip
     assert checked == ["claude"]
     if local_reason:
@@ -4239,7 +4248,7 @@ def test_the_fly_budget_still_refuses_a_dispatch_the_mac_gate_would_refuse(
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         result = asyncio.run(skill_runner.run_skill(
             "lanius", "check the gates", role="lanius", provider="claude", runner="fly",
-            repository="owner/repo", include_github_contract=True))  # fmt: skip
+            repository="owner/repo", github_token=""))  # fmt: skip
     assert not result.ok and "budget" in result.error  # the Fly cap, not the Mac's gate
     assert not fake.calls("POST", "/machines") and spawned == []
 
