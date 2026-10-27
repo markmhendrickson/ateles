@@ -558,6 +558,26 @@ def test_repo_scoped_token_forgets_a_rejected_token(configured, monkeypatch):
     assert fake.minted == 2  # re-minted, not served from cache
 
 
+def test_repo_scoped_token_does_not_call_a_transient_error_a_coverage_gap(
+    configured, monkeypatch
+):
+    class Flaky(_Covering):
+        def __call__(self, method, path, bearer):
+            if method == "GET" and path.startswith("/repos/") and path.count("/") == 3:
+                raise gat.AppTokenError(f"{method} {path} -> HTTP 503 Service Unavailable")
+            return super().__call__(method, path, bearer)
+
+    fake = Flaky(visible=True)
+    monkeypatch.setattr(gat, "_request", fake)
+    with pytest.raises(gat.AppTokenError, match="could not verify"):
+        gat.repo_scoped_token("o/r")
+    assert fake.minted == 1
+    # a valid token is kept: GitHub being briefly unreachable did not revoke it
+    with pytest.raises(gat.AppTokenError, match="could not verify"):
+        gat.repo_scoped_token("o/r")
+    assert fake.minted == 1
+
+
 @pytest.mark.parametrize("repo", ["", "no-slash"])
 def test_repo_scoped_token_requires_owner_and_name(configured, repo):
     with pytest.raises(gat.AppTokenError, match="owner/name"):

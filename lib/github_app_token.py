@@ -576,11 +576,17 @@ def repo_scoped_token(
     try:
         _request("GET", f"/repos/{repo}", info.token)
     except AppTokenError as exc:
-        # A rejected token must not stay cached for the next caller.
-        forget_token(info.token)
+        # Only an answer that says the repository is not visible to this token
+        # is a coverage gap; a timeout or 5xx says nothing about coverage.
+        if any(f"HTTP {code}" in str(exc) for code in (401, 403, 404)):
+            # A rejected token must not stay cached for the next caller.
+            forget_token(info.token)
+            raise AppTokenError(
+                f"no installation of the {prefix} App covers {repo} "
+                f"(installation {info.installation_id}): {exc}"
+            ) from None
         raise AppTokenError(
-            f"no installation of the {prefix} App covers {repo} "
-            f"(installation {info.installation_id}): {exc}"
+            f"could not verify that the {prefix} App covers {repo}: {exc}"
         ) from None
     return info
 

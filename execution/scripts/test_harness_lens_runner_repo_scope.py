@@ -15,6 +15,7 @@ helper are replaced by recorders.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -153,7 +154,8 @@ def test_fetch_of_a_private_sibling_uses_the_repo_scoped_token(
     assert fetch["env"]["GH_TOKEN"] == SCOPED
     assert fetch["env"]["GITHUB_TOKEN"] == SCOPED
     # worktree add ran after the fetch succeeded
-    assert any(c[-3:-1] == ["worktree", "add"] or "worktree" in c for c in git.other)
+    assert any(c[3:5] == ["worktree", "add"] for c in git.other)
+    assert git.other[-1][-1] == "a" * 40  # added at the head that was reviewed
 
 
 def test_the_ambient_credential_never_reaches_git_or_gh(monkeypatch, tmp_path, repo_path):
@@ -168,11 +170,15 @@ def test_the_ambient_credential_never_reaches_git_or_gh(monkeypatch, tmp_path, r
     assert "GIT_ASKPASS" not in env
     assert "ATELES_REVIEWER_APP_PRIVATE_KEY" not in env
     assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GIT_CONFIG_COUNT" not in env and "GIT_CONFIG_PARAMETERS" not in env
     # the helper chain is reset before gh's helper is installed, so no keychain
     # or stored helper can answer ahead of the scoped token
     cmd = git.fetches[0]["command"]
     reset = cmd.index("credential.helper=")
     assert cmd.index("credential.https://github.com.helper=!gh auth git-credential") > reset
+    # a stored Authorization header would be sent ahead of any helper
+    assert "http.extraheader=" in cmd
+    assert "http.https://github.com/.extraheader=" in cmd
 
 
 def test_the_token_stays_out_of_the_live_process_environment(
@@ -402,3 +408,107 @@ def test_main_reports_a_repo_access_failure_as_a_clean_refusal(
     assert report["ok"] is False
     assert report["no_model_call_made"] is True
     assert REPO in report["reason"]
+    # same refusal shape as every other run_one refusal a caller parses
+    assert report["refusal_reason"] == report["reason"]
+    assert report["posted"] is False
+    assert (report["repo"], report["pr"], report["lens"]) == (REPO, 7, "pm")
+
+
+# ── operator-facing text -------------------------------------------------------
+
+
+def test_a_fetch_failure_that_is_not_access_keeps_gits_own_detail(
+    monkeypatch, tmp_path, repo_path, capsys
+):
+    """str(CalledProcessError) never prints stderr; the diagnosis must survive."""
+    _mint(monkeypatch, token="ghs_secret_in_detail")
+
+    def offline(command, **kwargs):
+        if command[-3:] == ["fetch", "-q", "origin"]:
+            return subprocess.CompletedProcess(
+                command,
+                128,
+                stdout="",
+                stderr="fatal: unable to resolve host github.com ghs_secret_in_detail",
+            )
+        return FakeGit()(command, **kwargs)
+
+    monkeypatch.setattr(hlr.subprocess, "run", offline)
+    brief = tmp_path / "brief.md"
+    brief.write_text("brief\n", encoding="utf-8")
+
+    async def fetch_then_fail(*args, **kwargs):
+        _worktree(tmp_path, remote_repo=REPO).create(head="a" * 40)
+
+    monkeypatch.setattr(hlr, "run_one", fetch_then_fail)
+    hlr.main(
+        [
+            "--repo", REPO, "--pr", "7", "--head", "a" * 40, "--lens", "pm",
+            "--brief", str(brief), "--provider", "claude", "--json",
+        ]
+    )
+    reason = json.loads(capsys.readouterr().out)["reason"]
+    assert "unable to resolve host" in reason
+    assert "ghs_secret_in_detail" not in reason
+
+
+def test_the_remedy_depends_on_why_there_is_no_credential(monkeypatch):
+    _mint(monkeypatch, error="GitHub App not configured: set ATELES_REVIEWER_APP_ID")
+    monkeypatch.setattr(gat, "app_configured", lambda *a, **k: False)
+    with pytest.raises(hlr.RepoAccessError) as unconfigured:
+        hlr.repo_scoped_env(REPO)
+    assert "this process's own environment" in str(unconfigured.value)
+    assert "install the swarm GitHub App" not in str(unconfigured.value)
+
+    _mint(monkeypatch, error=f"no installation of the App covers {REPO}")
+    monkeypatch.setattr(gat, "app_configured", lambda *a, **k: True)
+    with pytest.raises(hlr.RepoAccessError) as uncovered:
+        hlr.repo_scoped_env(REPO)
+    assert "install the swarm GitHub App" in str(uncovered.value)
+    assert "ATELES_REVIEWER_APP_INSTALLATION_ID" in str(uncovered.value)
+
+
+def test_a_non_https_remote_refusal_says_what_to_set(monkeypatch, tmp_path, repo_path):
+    _mint(monkeypatch)
+    monkeypatch.setattr(
+        hlr.subprocess, "run", FakeGit(remote="git@github.com:someowner/x.git")
+    )
+    with pytest.raises(hlr.RepoAccessError, match=r"https://github.com/<owner>/<name>"):
+        _worktree(tmp_path, remote_repo=REPO).create(head="a" * 40)
+
+
+# ── run_one hands the target slug to the Worktree --------------------------------
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_run_one_gives_the_worktree_the_target_repository(
+    monkeypatch, tmp_path, dry_run
+):
+    """Without this wiring every real run refuses 'no owner/name'; no other test
+    drives run_one with an unstubbed Worktree constructor."""
+    monkeypatch.setenv(
+        "APIS_HARNESS_HEADROOM",
+        json.dumps({"claude": 1.0, "codex": 1.0, "cursor": 1.0}),
+    )
+    monkeypatch.setenv("APIS_HARNESS_HEADROOM_FILE", "/nonexistent/headroom.json")
+    monkeypatch.setenv("APIS_HARNESS_USAGE_FILE", str(tmp_path / "no-usage.json"))
+    seen: list[str] = []
+
+    def record(self, *, head):
+        seen.append(self.remote_repo)
+        raise hlr.RepoAccessError("stop here")
+
+    monkeypatch.setattr(hlr.Worktree, "create", record)
+    brief = tmp_path / "brief.md"
+    brief.write_text("brief\n", encoding="utf-8")
+    target = hlr.LensTarget(repo=REPO, pr=7, head="a" * 40, lens="pm", agent="pavo")
+
+    with pytest.raises(hlr.RepoAccessError, match="stop here"):
+        asyncio.run(
+            hlr.run_one(
+                target, provider="claude", post=False, dry_run=dry_run,
+                repo_worktree_name="private-sibling", scratch_root=tmp_path,
+                brief_path=brief, timeout=None,
+            )
+        )
+    assert seen == [REPO]

@@ -628,6 +628,18 @@ class RepoAccessError(RuntimeError):
     """
 
 
+class _FetchFailed(subprocess.CalledProcessError):
+    """A fetch failure that is not an access refusal (offline, ref lock, corrupt
+    checkout). ``CalledProcessError`` never prints its stderr, and the fetch's
+    output is captured here, so the (token-redacted) detail is part of ``str``.
+    """
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        detail = str(self.stderr or "").strip()
+        return f"{base} {detail[-300:]}" if detail else base
+
+
 # Variables that can hand git or gh a credential other than the one this module
 # mints for the repository. Removed from every environment built below.
 _AMBIENT_CREDENTIAL_VARS = (
@@ -637,16 +649,24 @@ _AMBIENT_CREDENTIAL_VARS = (
     "GITHUB_ENTERPRISE_TOKEN",
     "GIT_ASKPASS",
     "SSH_ASKPASS",
+    # Config injected through the environment can carry a credential header.
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
 )
 
 # git credential helpers are reset and replaced with gh's, which answers from
 # GH_TOKEN. The reset covers the generic key and the github.com-specific key
 # that ``gh auth setup-git`` writes, so no keychain or stored helper can answer
 # before, or instead of, the scoped token.
+#
+# A stored ``Authorization`` header (``http.extraheader``, the checkout-action
+# pattern) is sent ahead of any helper, so it is reset too.
 _SCOPED_GIT_CREDENTIAL_ARGS = (
     "-c", "credential.helper=",
     "-c", "credential.https://github.com.helper=",
     "-c", "credential.https://github.com.helper=!gh auth git-credential",
+    "-c", "http.extraheader=",
+    "-c", "http.https://github.com/.extraheader=",
 )
 
 _HTTPS_GITHUB_REMOTE_RE = re.compile(r"^https://github\.com/[^@\s]+$")
@@ -681,12 +701,22 @@ def repo_scoped_env(repo: str) -> dict[str, str]:
     try:
         info = _github_app_token.repo_scoped_token(repo)
     except _github_app_token.AppTokenError as exc:
+        if _github_app_token.app_configured():
+            remedy = (
+                f"install the swarm GitHub App on {repo} with read access to "
+                "contents, pull requests and issues, or, if "
+                "ATELES_REVIEWER_APP_INSTALLATION_ID is set, correct or unset it "
+                "(it pins another installation)"
+            )
+        else:
+            remedy = (
+                "make ATELES_REVIEWER_APP_ID and its private key available in "
+                "this process's own environment (the daemon's, not only an "
+                "operator shell's)"
+            )
         raise RepoAccessError(
             f"no repository-scoped credential for {repo}: {exc}. The lens runner "
-            "does not fall back to the ambient git or gh credential; install the "
-            "swarm GitHub App on that repository with read access to contents, "
-            "pull requests and issues, and make its App variables "
-            "(ATELES_REVIEWER_APP_ID and key) available to this process."
+            f"does not fall back to the ambient git or gh credential; {remedy}."
         ) from None
     env = _github_app_token.without_app_keys(dict(os.environ))
     for name in _AMBIENT_CREDENTIAL_VARS:
@@ -725,7 +755,9 @@ def _fetch_origin_serialized(repo_path: Path, *, env: dict[str, str]) -> None:
         raise RepoAccessError(
             f"{repo_path.name}: origin is not a plain https://github.com remote, so "
             "the repository-scoped token cannot be the credential that fetches it; "
-            "refusing to fetch with whatever credential the remote would otherwise use"
+            "refusing to fetch with whatever credential the remote would otherwise "
+            "use. Set origin to https://github.com/<owner>/<name> with no login "
+            "embedded in the URL."
         )
     with _shared_fetch_lock(repo_path):
         result = subprocess.run(
@@ -754,7 +786,7 @@ def _fetch_origin_serialized(repo_path: Path, *, env: dict[str, str]) -> None:
             f"token ({detail[-300:]}); the swarm GitHub App installation does not "
             "grant read access to this repository"
         )
-    raise subprocess.CalledProcessError(
+    raise _FetchFailed(
         result.returncode, ["git", "fetch", "-q", "origin"], stderr=detail
     )
 
@@ -3244,7 +3276,16 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
         except RepoAccessError as exc:
-            report = {"ok": False, "reason": str(exc), "no_model_call_made": True}
+            report = {
+                "ok": False,
+                "repo": args.repo,
+                "pr": args.pr,
+                "lens": args.lens,
+                "reason": str(exc),
+                "refusal_reason": str(exc),
+                "no_model_call_made": True,
+                "posted": False,
+            }
         except HeadroomExhausted as exc:
             report = {"ok": False, "reason": str(exc)}
         except (FileNotFoundError, subprocess.CalledProcessError) as exc:
