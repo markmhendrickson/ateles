@@ -123,6 +123,7 @@ class FakeNeotoma:
                 "provenance": provenance,
             }
         )
+        entity["entity_version"] = obs_id
         return entity_id
 
     def touch_task(self, task_id: str, **fields) -> None:
@@ -145,6 +146,7 @@ class FakeNeotoma:
         return {
             "entity_id": entity_id,
             "entity_type": e["type"],
+            "entity_version": e["entity_version"],
             "snapshot": dict(e["fields"]),
             "provenance": dict(e["provenance"]),
             "observation_count": len(e["observations"]),
@@ -313,6 +315,7 @@ class FakeNeotoma:
                     {
                         "entity_id": i,
                         "entity_type": entity_type,
+                        "entity_version": self.entities[i]["entity_version"],
                         "snapshot": dict(self.entities[i]["fields"]),
                     }
                     for i in page
@@ -328,6 +331,13 @@ class FakeNeotoma:
         entity_id = body["entity_id"]
         if entity_id in self.fail_correct_ids or entity_id not in self.entities:
             return self._response(500, {"error_code": "DB_QUERY_FAILED"}, url)
+        if (
+            "expected_version" in body
+            and body["expected_version"] != self.entities[entity_id]["entity_version"]
+        ):
+            return self._response(
+                409, {"error_code": "ERR_FIELD_VERSION_CONFLICT"}, url
+            )
         key = body.get("idempotency_key")
         if key in self.correction_keys:
             # Neotoma's idempotent duplicate path: accepted, nothing written,
