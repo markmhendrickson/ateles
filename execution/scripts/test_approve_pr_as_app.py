@@ -4005,6 +4005,7 @@ def _scope(**over) -> str:
     data = {
         "version": 1,
         "full_panel_paths": ["execution/daemons/**", "payments/**", ".github/**"],
+        "reduced_paths": ["lib/**", "site/**", "docs/**", "README.md", "a_random_file.txt"],
         "ux_paths": ["site/**", "docs/guide/**"],
         "lens_scopes": {"arch": ["execution/**", "lib/**"], "ux": ["site/**"]},
     }
@@ -4362,3 +4363,147 @@ class TestApprovalReviewWording:
         assert await _run_path(monkeypatch, client) == 0
         assert "touched none of its areas" in client.posted[0]["json"]["body"]
         assert "touched none of its areas" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+class TestUnclearClassificationThroughTheTool:
+    async def test_a_file_on_no_list_takes_the_full_panel(self, monkeypatch, capsys):
+        client = _path_client(["unlisted/thing.bin"], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client, apply=False) == 1
+        out = capsys.readouterr().out
+        assert "Panel: full five-lens panel" in out and "unclear" in out
+
+    async def test_the_same_change_approves_with_all_five(self, monkeypatch):
+        client = _path_client(["unlisted/thing.bin"], _all_clear_comments(FIVE), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+
+
+# ── Re-run check-runs on one head (closed and reopened, CI re-triggered) ────
+
+
+def _cr(id_, conclusion="success", *, status="completed", started="2026-10-27T10:00:00Z",
+        completed="2026-10-27T10:05:00Z", name="pytest", app_id=15368):
+    row = {"id": id_, "name": name, "status": status, "conclusion": conclusion,
+           "started_at": started, "completed_at": completed, "app": {"id": app_id}}
+    if started is None:
+        row.pop("started_at")
+    if completed is None or status != "completed":
+        row.pop("completed_at")
+    if status != "completed":
+        row.pop("conclusion")
+    return row
+
+
+async def _evaluate(runs):
+    client = _FakeClient(comments=[], check_runs=runs)
+    return await target.evaluate_checks(client, repo=REPO, head_sha=HEAD)
+
+
+@pytest.mark.asyncio
+class TestReRunCheckRunsAreJudgedByTheNewest:
+    async def test_two_stale_failures_and_a_newer_success_are_green(self):
+        runs = [
+            _cr(10, "failure", started="2026-10-27T09:00:00Z", completed="2026-10-27T09:05:00Z"),
+            _cr(20, "failure", started="2026-10-27T09:30:00Z", completed="2026-10-27T09:35:00Z"),
+            _cr(30, "success", started="2026-10-27T10:00:00Z"),
+        ]
+        outcomes, green = await _evaluate(runs)
+        assert green is True
+        states = {o.state for o in outcomes}
+        assert states == {"superseded by run 30", "success"}
+        assert sum(o.superseded for o in outcomes) == 2  # listed, never dropped
+
+    async def test_an_older_success_never_overrides_a_newer_failure(self):
+        runs = [_cr(10, "success", started="2026-10-27T09:00:00Z"),
+                _cr(20, "failure", started="2026-10-27T10:00:00Z")]
+        outcomes, green = await _evaluate(runs)
+        assert green is False
+        assert [o.state for o in outcomes] == ["superseded by run 20", "failing (failure)"]
+
+    @pytest.mark.parametrize("status", ["queued", "in_progress"])
+    async def test_an_older_success_never_overrides_a_newer_pending_run(self, status):
+        runs = [_cr(10, "success", started="2026-10-27T09:00:00Z"),
+                _cr(20, status=status, started="2026-10-27T10:00:00Z")]
+        _, green = await _evaluate(runs)
+        assert green is False
+
+    async def test_a_newer_pending_run_with_no_start_time_still_wins(self):
+        runs = [_cr(10, "success"), _cr(20, status="queued", started=None)]
+        outcomes, green = await _evaluate(runs)
+        assert green is False
+        assert outcomes[0].superseded
+
+    async def test_an_older_failure_does_not_beat_a_newer_pending_run_to_green(self):
+        runs = [_cr(10, "failure", started="2026-10-27T09:00:00Z"),
+                _cr(20, status="in_progress", started="2026-10-27T10:00:00Z")]
+        outcomes, green = await _evaluate(runs)
+        assert green is False
+        assert outcomes[1].state == "pending (in_progress)"
+
+    async def test_order_is_by_start_time_not_by_id(self):
+        runs = [_cr(99, "failure", started="2026-10-27T08:00:00Z"),
+                _cr(5, "success", started="2026-10-27T10:00:00Z")]
+        _, green = await _evaluate(runs)
+        assert green is True
+
+    async def test_equal_start_times_fall_back_to_completed_then_id(self):
+        runs = [_cr(1, "failure", completed="2026-10-27T10:05:00Z"),
+                _cr(2, "success", completed="2026-10-27T10:09:00Z")]
+        assert (await _evaluate(runs))[1] is True
+        runs = [_cr(1, "success", completed="2026-10-27T10:05:00Z"),
+                _cr(2, "failure", completed="2026-10-27T10:09:00Z")]
+        assert (await _evaluate(runs))[1] is False
+        # completed_at outranks id: the lower id completed later
+        runs = [_cr(9, "success", completed="2026-10-27T10:09:00Z"),
+                _cr(2, "failure", completed="2026-10-27T10:05:00Z")]
+        assert (await _evaluate(runs))[1] is True
+        runs = [_cr(1, "success", completed="2026-10-27T10:05:00Z"),
+                _cr(2, "failure", completed="2026-10-27T10:09:00Z")]
+        assert (await _evaluate(runs))[1] is False
+        runs = [_cr(1, "failure"), _cr(2, "success")]
+        assert (await _evaluate(runs))[1] is True
+
+    async def test_runs_that_cannot_be_ordered_both_count(self):
+        twin = {"name": "pytest", "status": "completed"}
+        runs = [{**twin, "conclusion": "failure"}, {**twin, "conclusion": "success"}]
+        outcomes, green = await _evaluate(runs)
+        assert green is False
+        assert not any(o.superseded for o in outcomes)
+
+    async def test_the_same_name_from_another_app_is_a_different_check(self):
+        runs = [_cr(10, "failure", app_id=1), _cr(20, "success", app_id=2)]
+        _, green = await _evaluate(runs)
+        assert green is False
+
+    async def test_different_checks_are_judged_separately(self):
+        runs = [_cr(10, "failure", name="lint"), _cr(20, "success", name="pytest")]
+        _, green = await _evaluate(runs)
+        assert green is False
+
+    async def test_only_superseded_runs_are_never_a_signal_on_their_own(self):
+        """A lone run is its own newest; nothing is hidden when there is one."""
+        _, green = await _evaluate([_cr(10, "failure")])
+        assert green is False
+
+    async def test_the_table_names_superseded_runs(self, monkeypatch, capsys):
+        runs = [_cr(10, "failure", started="2026-10-27T09:00:00Z"), _cr(30, "success")]
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        client.check_runs = runs
+        assert await _run_path(monkeypatch, client, apply=False) == 0
+        out = capsys.readouterr().out
+        assert "superseded by run 30" in out and "SUPERSEDED" in out
+
+    async def test_a_stale_red_run_no_longer_blocks_an_approval(self, monkeypatch):
+        runs = [_cr(10, "failure", started="2026-10-27T09:00:00Z"),
+                _cr(20, "failure", started="2026-10-27T09:30:00Z"),
+                _cr(30, "success")]
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        client.check_runs = runs
+        assert await _run_path(monkeypatch, client) == 0
+
+    async def test_a_newer_red_run_still_blocks_an_approval(self, monkeypatch):
+        runs = [_cr(10, "success", started="2026-10-27T09:00:00Z"), _cr(30, "failure")]
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        client.check_runs = runs
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []

@@ -19,10 +19,16 @@ Path-selected panel (operator ruling 2026-10-27, agent_policy
 panel is chosen by what the PR changes, from the repo's own
 `.github/review_scope.json` (`review_scope`), read from the PR's BASE branch and
 never its head so a PR cannot downgrade its own panel. Any changed file on a
-`full_panel_paths` glob (external sending, payment, sign-in or authorization,
-data writes, schema, the gate/approval/review machinery) requires the full
-five-lens panel; otherwise exactly one lens is required, `ux` if a changed file
-matches `ux_paths`, else `arch`. A missing, unreadable or invalid scope file, or
+`full_panel_paths` glob requires the full panel: external sending, payment,
+sign-in or authorization; credentials or secrets handling, data writes, schema
+or migrations; deployment or release configuration, publication; CI workflow
+definitions, dependency manifests or lockfiles, hooks; the gate, approval and
+review machinery; rule and policy text (agent_policy, CLAUDE.md, AGENTS.md,
+execution_policy). Security reviews every such change, without exception. The
+reduced route (exactly one lens: `ux` if every changed file is on `ux_paths`,
+else `arch`) applies only to a change confined to application code, tests, copy,
+UI or docs outside those paths, which the scope file names in `reduced_paths`;
+a file on neither list is unclear and takes the full panel. A missing, unreadable or invalid scope file, or
 an empty changed-file list, requires the full panel and says why. Green
 required checks are required in every mode, and a lens outside the required set
 that objects on the current head still blocks (`find_non_required_blocks`), which
@@ -397,9 +403,19 @@ class LensOutcome:
 
 class CheckOutcome:
     def __init__(
-        self, name: str, state: str, passed: bool, *, not_run: bool = False, reason: str = ""
+        self,
+        name: str,
+        state: str,
+        passed: bool,
+        *,
+        not_run: bool = False,
+        reason: str = "",
+        superseded: bool = False,
     ) -> None:
         self.name = name
+        # True for an older run of a check that a newer run on the same head
+        # replaced (a re-run). It is listed, never counted either way.
+        self.superseded = superseded
         self.state = state
         self.passed = passed
         # True only for a non-required check that could not be scheduled (see
@@ -1459,6 +1475,27 @@ async def _unscheduled_non_required_reason(
     return f"{not_required}; no online runner has all of its labels [{label_text}]"
 
 
+def _check_group(run: dict) -> tuple[str, str]:
+    """Which check a run belongs to: its name and the App that posted it, so a
+    re-run of the same check on the same head is the same group."""
+    app = run.get("app") if isinstance(run.get("app"), dict) else {}
+    return (str(run.get("name") or "").strip(), str(app.get("id") or app.get("slug") or ""))
+
+
+def _check_order(run: dict) -> tuple[str, str, int]:
+    """Oldest-to-newest order of runs in one group: `started_at`, then
+    `completed_at`, then id. A run that is not completed and shows no start time
+    sorts NEWEST: an unstarted re-run must never be hidden behind an older success."""
+    started = str(run.get("started_at") or "")
+    if not started and run.get("status") != "completed":
+        started = "\uffff"
+    try:
+        run_id = int(run.get("id") or 0)
+    except (TypeError, ValueError):
+        run_id = 0
+    return (started, str(run.get("completed_at") or ""), run_id)
+
+
 async def evaluate_checks(
     client: httpx.AsyncClient, *, repo: str, head_sha: str, base_ref: str = ""
 ) -> tuple[list[CheckOutcome], bool]:
@@ -1486,6 +1523,10 @@ async def evaluate_checks(
     (see `_unscheduled_non_required_reason` for the fail-closed conditions).
     An empty *base_ref* disables this, so every pending check blocks. If every
     check-run on the head is "not run", that is still no signal: not green.
+
+    Re-runs: several check-runs of the same name (and App) on one head are one
+    check, judged by its newest run (`_check_order`); the older ones are listed as
+    "superseded by run <id>" and decide nothing, in either direction.
     """
     status_resp = await client.get(
         f"{GITHUB_API}/repos/{repo}/commits/{head_sha}/status",
@@ -1507,7 +1548,28 @@ async def evaluate_checks(
     legacy_statuses_green = legacy_status_count == 0 or combined_state in ("success", "")
     all_green = legacy_statuses_green
     sched = _SchedulingContext(client, repo=repo, base_ref=base_ref)
+
+    # A head can carry several runs of the same check (closed and reopened, or CI
+    # re-triggered on the same head). Each group is judged by its NEWEST run only;
+    # an older run, failed or green, never decides it. Ties are not superseded, so
+    # two runs that cannot be ordered both count (fail closed).
+    newest: dict[tuple[str, str], dict] = {}
     for run in runs:
+        key = _check_group(run)
+        if key not in newest or _check_order(run) > _check_order(newest[key]):
+            newest[key] = run
+    for run in runs:
+        winner = newest[_check_group(run)]
+        if run is not winner and _check_order(run) < _check_order(winner):
+            outcomes.append(
+                CheckOutcome(
+                    (run.get("name") or "").strip(),
+                    f"superseded by run {winner.get('id')}",
+                    True,
+                    superseded=True,
+                )
+            )
+            continue
         name = (run.get("name") or "").strip()
         status = run.get("status")
         conclusion = run.get("conclusion")
@@ -1536,7 +1598,7 @@ async def evaluate_checks(
         outcomes.append(CheckOutcome(name, state, passed))
         all_green = all_green and passed
 
-    ran = [o for o in outcomes if not o.not_run]
+    ran = [o for o in outcomes if not o.not_run and not o.superseded]
     if not ran and legacy_status_count == 0:
         # No signal of any kind — nothing has run yet (or every check-run is
         # "not run"). Fail closed rather than approving a head CI has not
@@ -2061,7 +2123,11 @@ def _print_table(lens_outcomes: list[LensOutcome], check_outcomes: list[CheckOut
         print(f"{'check':<40} {'state':<20} pass/fail")
         print("-" * 80)
         for c in check_outcomes:
-            pf = "NOT RUN" if c.not_run else ("PASS" if c.passed else "FAIL")
+            pf = (
+                "SUPERSEDED"
+                if c.superseded
+                else "NOT RUN" if c.not_run else ("PASS" if c.passed else "FAIL")
+            )
             print(f"{c.name:<40} {c.state:<20} {pf}")
         for c in check_outcomes:
             if c.not_run:

@@ -27,6 +27,7 @@ REPO_ROOT = _HERE.parents[2]
 GOOD = {
     "version": 1,
     "full_panel_paths": ["execution/daemons/**", "pay/*.py"],
+    "reduced_paths": ["lib/**", "site/**"],
     "ux_paths": ["site/**"],
     "lens_scopes": {"arch": ["lib/**"]},
 }
@@ -88,6 +89,9 @@ class TestFormat:
             ({**GOOD, "version": "1"}, "version"),
             ({k: v for k, v in GOOD.items() if k != "full_panel_paths"}, "full_panel_paths"),
             ({**GOOD, "full_panel_paths": []}, "empty"),
+            ({k: v for k, v in GOOD.items() if k != "reduced_paths"}, "reduced_paths is missing"),
+            ({**GOOD, "reduced_paths": []}, "reduced_paths is empty"),
+            ({**GOOD, "reduced_paths": "lib/**"}, "list of strings"),
             ({**GOOD, "full_panel_paths": "execution/**"}, "list of strings"),
             ({**GOOD, "full_panel_paths": [1]}, "list of strings"),
             ({**GOOD, "ux_paths": "site"}, "list of strings"),
@@ -290,3 +294,94 @@ class TestThisRepoScopeGaps:
 
     def test_codex_is_in_the_security_scope(self):
         assert self._scope().touches_lens("security", [".codex/hooks.json"]) is not None
+
+
+class TestUnclearClassificationTakesTheFullPanel:
+    """Operator rule update: the reduced route applies only to a change confined
+    to application code, tests, copy, UI or docs outside the risky paths; when
+    the classification is unclear, the full panel applies."""
+
+    def test_a_file_on_no_list_is_unclear_and_full(self):
+        d = rs.select_path_panel(["LICENSE"], _load(GOOD))
+        assert d.full and "unclear" in d.reason and "LICENSE" in d.reason
+
+    def test_one_unclear_file_among_reduced_ones_makes_the_whole_change_full(self):
+        d = rs.select_path_panel(["lib/a.py", "tools/odd.bin", "other/x"], _load(GOOD))
+        assert d.full and "(and 1 more)" in d.reason
+
+    def test_a_ux_only_path_counts_as_classified(self):
+        scope = rs.parse_scope(json.dumps({**GOOD, "reduced_paths": ["lib/**"], "ux_paths": ["site/**"]}))
+        d = rs.select_path_panel(["site/x.html"], rs.ScopeLoad(scope, "s"))
+        assert (d.full, d.lens) == (False, "ux")
+
+    def test_a_scope_whose_lists_match_nothing_never_selects_one_lens(self):
+        scope = rs.parse_scope(json.dumps({**GOOD, "reduced_paths": ["never/**"], "ux_paths": []}))
+        d = rs.select_path_panel(["lib/a.py"], rs.ScopeLoad(scope, "s"))
+        assert d.full
+
+    def test_a_full_panel_path_beats_a_reduced_path(self):
+        scope = rs.parse_scope(json.dumps({**GOOD, "reduced_paths": ["execution/**"]}))
+        d = rs.select_path_panel(["execution/daemons/x.py"], rs.ScopeLoad(scope, "s"))
+        assert d.full and "full_panel_paths" in d.reason
+
+
+class TestThisRepoCoversEveryRiskCategory:
+    def _scope(self):
+        return rs.parse_scope((REPO_ROOT / rs.SCOPE_PATH).read_text())
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # rule and policy text
+            "CLAUDE.md", "AGENTS.md", "sub/dir/AGENTS.md", "apps/x/CLAUDE.md",
+            ".claude/skills/x/SKILL.md", "docs/policies/agent-data-rules.md",
+            "execution/scripts/render_rule_inventory.py", "lib/daemon_runtime/agent_loader.py",
+            "scripts/revert_auto_policy.py", ".claude/hooks/rule_injection_gate.py",
+            # dependency manifests and lockfiles
+            "requirements.txt", "requirements-dev.txt", "execution/daemons/apis/requirements.txt",
+            "apps/x/package.json", "apps/x/package-lock.json", "web/pnpm-lock.yaml",
+            "pyproject.toml", "sub/pyproject.toml", "uv.lock", "sub/uv.lock", "Brewfile", "Brewfile.lock.json",
+            # deployment, release, publication
+            "deploy/fly-runner/fly.toml", "fly.toml", "apps/y/fly.prod.toml", "Dockerfile",
+            "apps/y/Dockerfile.prod", "docker-compose.yml", "deploy/cloud/docker-compose.yml",
+            "execution/scripts/publish_site.py", "scripts/update_readme_release_status.py",
+            "execution/daemons/phoenicurus-release/publish.py", "tools/deploy_it.sh",
+            ".github/workflows/ateles-release.yml", "com.example.job.plist",
+            # hooks
+            ".claude/hooks/x.py", ".codex/hooks.json", "scripts/git-hooks/pre-commit",
+            "sub/hooks/post-merge", ".pre-commit-config.yaml",
+            # data writes, schema, migrations
+            "db/migrations/001_init.sql", "execution/scripts/migrate_agent_policy_edges.py",
+            "tools/run_migration.py", "tools/policy_writer.py",
+            "apps/task-dashboard/src/schemaData.ts", "execution/scripts/register_generation_record_schema.py",
+            # credentials, sign-in, authorization
+            "lib/credential_scrub.py", "apps/task-dashboard/server/auth.ts", "x/oauth_client.py",
+            "tokens.json", ".env", ".env.production",
+            # external sending, payment
+            "execution/daemons/monedula/handlers/wise_transfer.py", "lib/approval/email_channel.py",
+            "x/send_gmail.py", "lib/notify/notifier.py", "x/payment_journal.py",
+        ],
+    )
+    def test_is_full_panel(self, path):
+        assert self._scope().full_panel_trigger([path]) is not None, path
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "docs/guide/how_to.md",
+            "README.md",
+            "apps/task-dashboard/src/Console.tsx",
+            "apps/task-dashboard/src/Console.test.tsx",
+            "execution/scripts/local_whisper.py",
+            "execution/scripts/hallucination_filter.py",
+        ],
+    )
+    def test_ordinary_application_code_docs_and_ui_stay_on_the_reduced_route(self, path):
+        scope = self._scope()
+        assert scope.full_panel_trigger([path]) is None, path
+        assert scope.unclassified([path]) == [], path
+
+    def test_an_unlisted_file_is_unclear_for_this_repo(self):
+        scope = self._scope()
+        assert scope.full_panel_trigger(["LICENSE"]) is None
+        assert scope.unclassified(["LICENSE"]) == ["LICENSE"]

@@ -10,7 +10,8 @@ Covers the session-run path only: select the panel, run the lenses as subagents,
 
 ## The rule
 
-- Lens selection is by changed path. The full five-role panel (pm, arch, ux, qa, security) reviews changes that touch external sending, payment, sign-in or authorization, data writes, schema, or the gate, approval and review machinery itself.
+- Lens selection is by changed path. The full panel (pm, arch, ux, qa, security) reviews any change touching external sending, payment, sign-in or authorization; credentials or secrets handling, data writes, schema or migrations; deployment or release configuration, publication; CI workflow definitions, dependency manifests or lockfiles, hooks; the gate, approval and review machinery; or rule and policy text (agent_policy, CLAUDE.md, AGENTS.md, execution_policy). Security reviews every change that touches any of those paths, without exception.
+- The reduced route (green CI plus one lens) applies only to a change confined to application code, tests, copy, UI or docs outside those paths. When a change's classification is unclear, it takes the full panel.
 - Any other change needs green CI plus the one lens whose scope it touches: ux when every changed file is user-facing copy or UI, arch otherwise. A reviewer may still request another lens with a stated reason: either run the approval tool with `--lenses <lens>` (it adds that lens to the required set), or have that lens post an objection on the current head, which blocks the approval until a clearing verdict retires it.
 - A lens's approval carries to a new head when the diff since its approved head does not touch that lens's scope. It is re-run only when its scope changed.
 
@@ -21,14 +22,16 @@ Each repository declares what is risky for it in `.github/review_scope.json`:
 ```json
 {
   "version": 1,
-  "full_panel_paths": [".github/review_scope.json", "globs of risky paths"],
+  "full_panel_paths": [".github/review_scope.json", "globs of every risky path, per the list above"],
+  "reduced_paths": ["globs of application code, tests, copy, UI and docs outside the risky paths"],
   "ux_paths": ["globs of user-facing copy and UI"],
   "lens_scopes": {"security": ["globs"], "arch": ["globs"], "ux": ["globs"], "qa": ["globs"]}
 }
 ```
 
 - The file is read from the PR's **base branch**, never its head, so a PR cannot downgrade its own panel. The tool re-checks, just before it approves, that the PR still targets the branch the file was read from, and refuses if it was retargeted. A change to the file itself always selects the full panel, whether or not the file lists itself (list it anyway, as above, so the rule is visible).
-- A missing, unreadable, malformed or empty-`full_panel_paths` file, an unrecognised key, and an empty changed-file list all select the **full panel**, and the tool says why. So does a file list the tool cannot trust: the GitHub files API stops at 3000 files, and a list that reaches that cap, or whose length differs from the PR's own `changed_files` count, selects the full panel. A new app repository therefore gets the full panel until it commits a scope file to its default branch.
+- `reduced_paths` is the positive list of what the reduced route may cover. A changed file on `full_panel_paths` takes the full panel; a file on neither `full_panel_paths` nor `reduced_paths` (or `ux_paths`) is unclear and also takes the full panel, so a scope that classifies nothing never selects one lens. List the paths for hooks, dependency manifests and lockfiles, Dockerfiles and `fly.toml`, release and deploy scripts, migrations and schema code, credential and sending code, and rule and policy text (`CLAUDE.md`, `AGENTS.md`, anything that writes `agent_policy` or `execution_policy`) in `full_panel_paths`; the `**/` forms catch them in subdirectories.
+- A missing, unreadable, malformed or empty-`full_panel_paths`/`reduced_paths` file, an unrecognised key, and an empty changed-file list all select the **full panel**, and the tool says why. So does a file list the tool cannot trust: the GitHub files API stops at 3000 files, and a list that reaches that cap, or whose length differs from the PR's own `changed_files` count, selects the full panel. A new app repository therefore gets the full panel until it commits a scope file to its default branch.
 - A rename counts both its new and its old path, so moving a file out of a full-panel path still triggers the full panel. One lens is chosen only when the choice is unambiguous: ux when **every** changed file is on `ux_paths`, arch otherwise.
 - `lens_scopes` is optional per lens. Where a lens has a declared scope, its earlier verdict carries only if no file in the delta since that head matches those globs. A lens with no declared scope keeps the default rule (every file counts as in scope, except a short allowlist of docs and tests). **A declared scope replaces the default rule for its lens, so it can widen what re-runs as well as narrow it.** With Ateles's broad scopes, a test-only delta re-runs arch and security as well as qa, where the default rule would have carried arch and security. List every path a lens should see again, and nothing it should not.
 - Globs match the whole repo-relative path, ignoring case and Unicode composition (the checkouts are case-insensitive, so `Execution/daemons/x.py` is `execution/daemons/x.py`): `*` stays within a directory, `**` crosses directories, a trailing `/` means everything below, and there is no basename-only matching. The format is documented in `execution/daemons/apis/review_scope.py`.
