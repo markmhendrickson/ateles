@@ -4448,3 +4448,38 @@ def test_a_claude_login_run_never_sends_the_token(fly_env, claude_login):
 
 
 CLAUDE_TOKEN_PATH = "/data/claude/oauth_token"
+
+
+# ── with_workspace: the CLI's workspace flags for a delivery ─────────────────
+
+
+def test_codex_delivery_grants_the_checkout_git_dir_and_the_pr_text_dir():
+    argv = fly_runner.with_workspace("codex", ["/x/codex", "exec", "--sandbox", "workspace-write", "-"])
+    assert argv[:4] == ["/x/codex", "exec", "--sandbox", "workspace-write"]
+    assert argv[-1] == "-"
+    tail = argv[4:-1]
+    assert tail[tail.index("--cd") + 1] == fly_runner.WORKSPACE_PLACEHOLDER
+    grants = [tail[i + 1] for i, a in enumerate(tail) if a == "--add-dir"]
+    # Exactly the .git and the PR text's directory: never home or /.
+    assert grants == [fly_runner.GIT_DIR_PLACEHOLDER, fly_runner.PR_DIR_PLACEHOLDER]
+    # The sandbox mode is untouched and no network flag is added.
+    assert argv.count("--sandbox") == 1 and argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert not any("network" in a for a in argv)
+
+
+def test_cursor_and_claude_workspace_flags_are_unchanged():
+    assert fly_runner.with_workspace("cursor", ["agent", "-p"]) == [
+        "agent", "-p", "--workspace", fly_runner.WORKSPACE_PLACEHOLDER]
+    assert fly_runner.with_workspace("claude", ["claude", "--print"]) == ["claude", "--print"]
+
+
+def test_the_runner_defines_the_same_argv_placeholders():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[3] / "deploy" / "fly-runner" / "run_job.py"
+    spec = importlib.util.spec_from_file_location("fly_run_job_placeholders", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["fly_run_job_placeholders"] = module
+    spec.loader.exec_module(module)
+    for name in ("WORKSPACE_PLACEHOLDER", "GIT_DIR_PLACEHOLDER", "PR_DIR_PLACEHOLDER"):
+        assert getattr(module, name) == getattr(fly_runner, name)

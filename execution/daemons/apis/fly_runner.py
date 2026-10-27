@@ -433,6 +433,12 @@ DELIVERY_ONLY_CLASSES: frozenset[str] = frozenset({"open_or_merge_pr"})
 DELIVERY_TOKEN_NAME = "ATELES_DELIVERY_GITHUB_TOKEN"
 WORKSPACE_PLACEHOLDER = "@@ATELES_JOB_WORKSPACE@@"
 PR_FILE_PLACEHOLDER = "@@ATELES_JOB_PR_FILE@@"
+# argv placeholders for the checkout's .git directory and the directory that
+# holds the pull request text: Codex's workspace-write sandbox protects a .git
+# inside the workspace and does not cover the export directory, so a delivery
+# grants exactly these two with --add-dir.
+GIT_DIR_PLACEHOLDER = "@@ATELES_JOB_GIT_DIR@@"
+PR_DIR_PLACEHOLDER = "@@ATELES_JOB_PR_DIR@@"
 DELIVERY_SPEC_KEYS = ("branch", "base_branch", "author_name", "author_email")
 # The fly_runner_result fields a delivering job's record carries.
 DELIVERY_RESULT_FIELDS = ("delivery_status", "delivery_reason", "delivery_branch",
@@ -2060,12 +2066,15 @@ def _check_delivery(delivery: Any, *, repository: str, stdin: bytes, github_requ
 
 def with_workspace(provider: str, argv: list[str]) -> list[str]:
     """The CLI's workspace flag naming the job's checkout (filled in on the
-    machine): Codex ``--cd`` before its prompt-from-stdin marker, Cursor
-    ``--workspace``. Claude takes its working directory, which the runner sets."""
+    machine): Codex ``--cd`` before its prompt-from-stdin marker, plus
+    ``--add-dir`` grants for the checkout's .git and the pull request text's
+    directory so it can commit and write that text; Cursor ``--workspace``.
+    Claude takes its working directory, which the runner sets."""
     if provider == "codex":
         if argv[-1:] != ["-"] or "--cd" in argv:
             raise FlyIneligible("the codex command is not the expected shape for a delivery")
-        return [*argv[:-1], "--cd", WORKSPACE_PLACEHOLDER, "-"]
+        return [*argv[:-1], "--cd", WORKSPACE_PLACEHOLDER, "--add-dir", GIT_DIR_PLACEHOLDER,
+                "--add-dir", PR_DIR_PLACEHOLDER, "-"]  # fmt: skip
     if provider == "cursor":
         if "--workspace" in argv:
             raise FlyIneligible("the cursor command already names a workspace")

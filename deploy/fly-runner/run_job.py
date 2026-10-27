@@ -121,6 +121,10 @@ WORK_ROOT = Path("/work")
 # path of its pull request text file.
 WORKSPACE_PLACEHOLDER = "@@ATELES_JOB_WORKSPACE@@"
 PR_FILE_PLACEHOLDER = b"@@ATELES_JOB_PR_FILE@@"
+# argv placeholders for the checkout's .git directory and the directory that
+# holds the pull request text (Codex's --add-dir grants for a delivery).
+GIT_DIR_PLACEHOLDER = "@@ATELES_JOB_GIT_DIR@@"
+PR_DIR_PLACEHOLDER = "@@ATELES_JOB_PR_DIR@@"
 
 # The whole entrypoint's deadline, set by Apis in the machine environment.
 DEADLINE_ENV = "ATELES_RUN_DEADLINE"
@@ -341,7 +345,8 @@ def load_job(job_dir: Path) -> Job:
         raise JobError("a delivery token was shipped without a delivery")
     # The workspace flag is a delivery's alone (Claude needs none: the runner
     # sets its working directory to the checkout).
-    if WORKSPACE_PLACEHOLDER in argv and delivery is None:
+    if delivery is None and any(p in argv for p in (WORKSPACE_PLACEHOLDER, GIT_DIR_PLACEHOLDER,
+                                                     PR_DIR_PLACEHOLDER)):  # fmt: skip
         raise JobError("the workspace placeholder needs a delivery")
     return Job(
         run_id=run_id,
@@ -1199,7 +1204,10 @@ def _run_delivering_job(job: Job, delivery: DeliveryRun, runner, argv: list[str]
         return EXIT_DELIVERY_FAILED, b"", refused.encode(), False, refused
     checkout = str(delivery.work.checkout)
     pr_file = str(delivery.work.export / rd.PR_TEXT_NAME).encode()
-    run_argv = [checkout if a == WORKSPACE_PLACEHOLDER else a for a in argv]
+    filled = {WORKSPACE_PLACEHOLDER: checkout,
+              GIT_DIR_PLACEHOLDER: str(delivery.work.checkout / ".git"),
+              PR_DIR_PLACEHOLDER: str(delivery.work.export)}  # fmt: skip
+    run_argv = [filled[a] if a in filled else a for a in argv]
     run_stdin = job.stdin.replace(PR_FILE_PLACEHOLDER, pr_file) if job.stdin is not None else None
     budget = min(cli_budget, deadline - time.time() - RECORD_RESERVE_SECONDS
                  - DELIVERY_RESERVE_SECONDS)  # fmt: skip
