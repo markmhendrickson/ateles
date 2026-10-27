@@ -149,4 +149,12 @@ class TestOverride:
     def test_a_reason_cannot_mention_an_account_or_build_a_link(self):
         cleaned = rr.clean_reason("ping @someone and see [this](https://example.invalid/x) `now`")
         assert "@" not in cleaned and "[" not in cleaned and "]" not in cleaned and "`" not in cleaned
-        assert len(cleaned) <= rr.MAX_REASON_CHARS
+
+    def test_a_long_reason_is_cut_to_the_limit(self):
+        cleaned = rr.clean_reason("x" * 1000)
+        assert len(cleaned) == rr.MAX_REASON_CHARS
+
+    def test_control_and_bidi_characters_are_not_kept(self):
+        cleaned = rr.clean_reason("granted\x1b[31m by the \u202eoperator\u202c for this PR")
+        assert all(ord(ch) >= 32 and ch not in "\u202e\u202c\x1b" for ch in cleaned)
+        assert "granted" in cleaned and "operator" in cleaned

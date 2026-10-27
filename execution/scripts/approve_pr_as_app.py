@@ -144,7 +144,9 @@ verdict (the swarm's own verdict comments and their `commit=` markers). When the
 head being approved would be a fourth round or later, the tool prints "round cap
 reached: split or cut scope" and refuses, whatever the lenses said. The explicit,
 logged escape hatch is `--allow-round-overrun <reason>`: the reason is required
-and is written into the approval review. It lifts only this refusal.
+(10 to 300 characters, cleaned of markup, mentions and control characters) and is
+written into the approval review. It lifts only this refusal; a flag given to a
+PR that is not over the cap is reported as not needed and recorded nowhere.
 
 Usage:
     python3 execution/scripts/approve_pr_as_app.py --repo <owner/name> --pr <n> \\

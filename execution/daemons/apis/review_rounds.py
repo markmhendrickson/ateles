@@ -32,6 +32,7 @@ Pure: no network, no daemon, no Neotoma.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 ROUND_CAP = 3
@@ -115,11 +116,15 @@ def clean_reason(raw: str) -> str:
 
     Whitespace is collapsed and angle brackets are dropped so the text cannot
     open an HTML comment (a swarm marker) in the approval body; the length is
-    capped. `@` and square brackets are dropped too, so the logged reason cannot
-    mention an account or build a link. A reason that is empty, or too short to say anything, is refused: an
+    capped. `@`, square brackets and backticks are dropped too, so the logged
+    reason cannot mention an account or build a link, and control or bidi
+    characters are replaced by spaces. A reason that is empty, or too short to say anything, is refused: an
     override with no stated reason is not a logged override.
     """
     text = re.sub(r"[<>@\[\]`]", " ", raw or "")
+    # Control and format characters (escape sequences, bidi overrides) are not text
+    # an operator can read back; they would only change how the log line renders.
+    text = "".join(" " if unicodedata.category(ch)[0] == "C" else ch for ch in text)
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) < MIN_REASON_CHARS:
         raise OverrunReasonError(
