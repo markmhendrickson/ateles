@@ -701,3 +701,289 @@ class TestReadonlyGitEndToEnd:
         code, out = _run_main(monkeypatch, capsys, event, cwd=ateles)
         assert code == 2
         assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+# ---------------------------------------------------------------------------
+# ateles#1265 — subcommand-token-boundary fix (merge-base, checkout-index) and
+# heredoc-body stripping. Cases in this block that assert `code == 0` for a
+# read-only subcommand whose NAME merely contains a mutation word, or for a
+# heredoc-only occurrence of a mutation phrase, are the red-before-fix cases:
+# they fail against the pre-#1265 `_GIT_MUTATION_RE` / unstripped-heredoc
+# behavior and must pass after.
+# ---------------------------------------------------------------------------
+class TestSubcommandTokenBoundaryAndHeredocStripping:
+    def test_merge_base_is_ancestor_allowed(self, tmp_path, monkeypatch, capsys):
+        """Issue's primary repro: `merge-base` is a read-only plumbing command
+        whose name merely CONTAINS the mutation word `merge`."""
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": f"git -C {sibling} merge-base --is-ancestor abc123 HEAD"
+            },
+        }
+        code, _ = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 0
+
+    def test_checkout_index_allowed(self, tmp_path, monkeypatch, capsys):
+        """Same defect class as merge-base: `checkout-index` is real git
+        plumbing, read-only for this guard's purposes."""
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": f"git -C {sibling} checkout-index -a -f --prefix=/tmp/x/"
+            },
+        }
+        code, _ = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 0
+
+    def test_branch_merged_allowed(self, tmp_path, monkeypatch, capsys):
+        """Characterization test: `git branch --merged` was never actually
+        broken (the regex requires `branch\\s+-\\w*[fDdm]`, and `--merged`
+        does not match), but PM's acceptance criteria names it explicitly —
+        this locks in that the token-boundary fix does not accidentally
+        touch this path."""
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {"command": f"git -C {sibling} branch --merged"},
+        }
+        code, _ = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 0
+
+    def test_branch_contains_allowed(self, tmp_path, monkeypatch, capsys):
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {"command": f"git -C {sibling} branch --contains abc123"},
+        }
+        code, _ = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 0
+
+    def test_merge_base_variants_boundary(self):
+        """The negative lookahead must be exact `(?![\\w-])`, not merely
+        'does not match a following dash' — an adversarial token immediately
+        following `merge-base` without a separator must not be misclassified
+        as read-only merely because the lookahead is too permissive. This
+        constructs a case where the fixed subcommand token is followed
+        directly by another word character (no whitespace), which a
+        correctly-scoped negative lookahead still rejects as NOT a bare
+        `merge` match (it's still not literally `merge` alone, so this
+        primarily documents the boundary rather than exercising a plausible
+        real command)."""
+        import sibling_repo_worktree_guard as guard
+
+        # `mergeX` is not `merge-base`, `merge`, or any real subcommand — it
+        # must not match as a mutation (it never did; `\bmerge\b` requires a
+        # boundary at the END too, and `X` is a word char) and it must not be
+        # misread as a read-only merge-base-like exemption either.
+        assert guard._GIT_MUTATION_RE.search(
+            guard._scrub_arg_payloads("git mergeX somebranch")
+        ) is None
+
+    def test_heredoc_body_only_mutation_phrase_allowed(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Issue's third repro: an issue body / agent_policy string quoting a
+        mutation phrase inside a heredoc, with no real invocation outside
+        it."""
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": (
+                    "python3 - <<'PY'\n"
+                    "print('the fix touches git merge origin/main')\n"
+                    "PY"
+                )
+            },
+        }
+        code, _ = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 0
+
+    def test_heredoc_then_real_mutation_still_refused(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Stripping a heredoc body must not blind the guard to a REAL
+        mutation trailing it in the same Bash call — the specific
+        loophole-reopening risk this fix must not introduce."""
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": (
+                    "cat <<'EOF'\n"
+                    "just a note\n"
+                    "EOF\n"
+                    f"git -C {sibling} merge foo"
+                )
+            },
+        }
+        code, out = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 2
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_heredoc_stripping_does_not_over_strip_trailing_segment(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Same shape, mutation BEFORE the heredoc — confirms strip
+        boundaries don't consume adjacent segments in either direction."""
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": (
+                    f"git -C {sibling} merge foo\n"
+                    "cat <<'EOF'\n"
+                    "just a note\n"
+                    "EOF"
+                )
+            },
+        }
+        code, out = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 2
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+# ---------------------------------------------------------------------------
+# Regression / no-change-in-behavior assertions — must stay green throughout,
+# proving the token-boundary + heredoc-stripping fix introduces no collateral
+# damage to real-mutation detection.
+# ---------------------------------------------------------------------------
+class TestRealMutationRegressionAfterFix:
+    def test_real_mutation_bare_still_refused(self, tmp_path, monkeypatch, capsys):
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {"command": f"git -C {sibling} merge some-branch"},
+        }
+        code, out = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 2
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_real_mutation_inside_bash_c_still_refused(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": f'bash -c "git -C {sibling} merge some-branch"'
+            },
+        }
+        code, out = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 2
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_real_mutation_inside_command_substitution_still_refused(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {"command": f"$(git -C {sibling} merge some-branch)"},
+        }
+        code, out = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 2
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_real_mutation_after_and_chain_still_refused(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {"command": f"true && git -C {sibling} merge some-branch"},
+        }
+        code, out = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 2
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_mutation_regex_source_carries_lookahead_on_every_bare_word_alternative(
+        self,
+    ):
+        """Structural guard against the class of bug ateles#1265 fixes: a
+        future contributor who adds a new bare-word mutation alternative (or
+        edits an existing one) and forgets the `(?![\\w-])` lookahead would
+        silently reopen the merge-base/checkout-index false-positive class.
+        This inspects the compiled regex's own source rather than only
+        probing specific known cases, so it fails on ANY bare-word
+        alternative missing the lookahead, not just the ones this PR already
+        thought to test."""
+        import sibling_repo_worktree_guard as guard
+
+        pattern = guard._GIT_MUTATION_RE.pattern
+        # The bare-word alternatives this fix touches — each must be
+        # immediately followed by the lookahead in the source text.
+        bare_words = [
+            "commit", "merge", "rebase", "cherry-pick", "revert",
+            "reset", "apply", "am", "checkout", "switch", "clean",
+            "push", "restore",
+        ]
+        for word in bare_words:
+            needle = f"{word}(?![\\w-])"
+            assert needle in pattern, (
+                f"bare-word alternative {word!r} is missing its "
+                f"(?![\\w-]) lookahead in _GIT_MUTATION_RE — this reopens "
+                f"the merge-base/checkout-index false-positive class"
+            )
+
+    def test_real_mutation_split_by_line_continuation_still_refused(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A real mutation split across a shell line continuation
+        (`git -C <sibling> \\<newline>merge foo`) must still be caught.
+        _GIT_MUTATION_RE's `[^\\n;|&]*?` gap explicitly excludes newlines, so
+        without folding continuations first, a continued command bypasses
+        detection entirely — the same class of bypass gmail_send_gate.py's
+        adversarial pass found, and the reason git_stash_guard.py already
+        folds continuations before matching."""
+        sibling = _init_repo(tmp_path / "sibling")
+        ateles = _init_repo(tmp_path / "ateles")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(ateles))
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {"command": f"git -C {sibling} \\\nmerge some-branch"},
+        }
+        code, out = _run_main(monkeypatch, capsys, event, cwd=ateles)
+        assert code == 2
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_existing_stash_and_other_mutation_alternatives_unaffected(self):
+        """Spot-check the phrase-form alternatives NOT touched by the
+        token-boundary lookahead: `branch -D`, `tag -d`, `worktree remove
+        --force`, `rm --cached`. A regression here means the fix leaked into
+        the wrong alternatives."""
+        import sibling_repo_worktree_guard as guard
+
+        for command in [
+            "git branch -D old-branch",
+            "git tag -d v1.0",
+            "git worktree remove --force /tmp/x",
+            "git rm --cached secret.txt",
+        ]:
+            assert guard._GIT_MUTATION_RE.search(
+                guard._scrub_arg_payloads(command)
+            ), command
