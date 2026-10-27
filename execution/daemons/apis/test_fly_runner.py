@@ -891,7 +891,7 @@ def test_codex_login_machine_is_updated_started_and_scrubbed(fly_env, monkeypatc
     held = []
 
     async def read_and_check(run_id):
-        held.append(fly_runner._login_lock("codex").locked())
+        held.append(fly_runner._login_lock("codex", executor.config.ledger_path.parent).locked())
         return complete_record(run_id, stdout="done")
 
     executor._read_result = read_and_check
@@ -914,7 +914,7 @@ def test_codex_login_machine_is_updated_started_and_scrubbed(fly_env, monkeypatc
     assert fake.lease_log == [("acquire", "m-codex"), ("release", "m-codex")]
     assert fake.leases == {}
     assert revoked == [MINTED]
-    assert not fly_runner._login_lock("codex").locked()
+    assert not fly_runner._login_lock("codex", executor.config.ledger_path.parent).locked()
 
 
 def test_login_queue_wait_limit_returns_cooled_until(fly_env, monkeypatch):
@@ -926,12 +926,76 @@ def test_login_queue_wait_limit_returns_cooled_until(fly_env, monkeypatch):
     )  # fmt: skip
 
     async def go():
-        await fly_runner._login_lock("cursor").acquire()
+        await fly_runner._login_lock("cursor", executor.config.ledger_path.parent).acquire()
         await executor.run(job)
 
     with pytest.raises(fly_runner.FlyRefusal) as exc:
         asyncio.run(go())
     assert exc.value.cooled_until
+
+
+def test_login_lock_queues_across_processes(tmp_path):
+    """Two lock instances on one lock directory model two processes (flock
+    conflicts between separate open file descriptions, even in one process):
+    the second waits for the first instead of reaching the ledger's busy
+    check, and gets the lock once the first releases it."""
+    a = fly_runner._CrossProcessLoginLock("codex", tmp_path / "locks")
+    b = fly_runner._CrossProcessLoginLock("codex", tmp_path / "locks")
+
+    async def go():
+        await a.acquire(timeout=1)
+        with pytest.raises(asyncio.TimeoutError):
+            await b.acquire(timeout=0.5)
+        assert not b.locked()  # a timed-out wait holds nothing
+        a.release()
+        await b.acquire(timeout=1)
+        assert b.locked()
+        b.release()
+
+    asyncio.run(go())
+    assert (tmp_path / "locks").stat().st_mode & 0o777 == 0o700
+
+
+def test_login_lock_file_is_left_unlocked_after_release(tmp_path):
+    first = fly_runner._CrossProcessLoginLock("cursor", tmp_path)
+
+    async def cycle():
+        await first.acquire(timeout=1)
+        first.release()
+
+    asyncio.run(cycle())
+    assert (tmp_path / "fly-login-cursor.lock").exists()
+    fresh = fly_runner._CrossProcessLoginLock("cursor", tmp_path)
+
+    async def immediate():
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await fresh.acquire(timeout=5)
+        assert loop.time() - started < fly_runner.LOGIN_LOCK_POLL_SECONDS
+        fresh.release()
+
+    asyncio.run(immediate())
+
+
+def test_login_launch_waits_for_another_process_then_runs(fly_env, monkeypatch):
+    """A job whose login machine is held by another process's lock queues
+    and runs once that lock is released, instead of failing as busy."""
+    monkeypatch.setattr(fly_runner, "LOGIN_LOCK_POLL_SECONDS", 0.05)
+    fake = _codex_fake(monkeypatch)
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "done"})
+    other = fly_runner._CrossProcessLoginLock("codex", executor.config.ledger_path.parent)
+
+    async def go():
+        await other.acquire(timeout=1)
+        run = asyncio.ensure_future(executor.run(_codex_job()))
+        await asyncio.sleep(0.3)
+        assert not run.done()  # queued behind the other process
+        assert not fake.calls("POST", "/start")
+        other.release()
+        return await run
+
+    assert asyncio.run(go())[0] == 0
+    assert fake.calls("POST", "/start")
 
 
 def test_codex_without_a_login_machine_is_ineligible(fly_env):
@@ -1379,7 +1443,7 @@ def test_login_machine_disconnect_stops_and_unconfirmed_blocks_reuse(fly_env, mo
     assert fake.calls("POST", "/stop")
     entry = executor.ledger.entry(first.run_id)
     assert entry is not None and entry["unconfirmed"] is True
-    assert not fly_runner._login_lock("codex").locked()
+    assert not fly_runner._login_lock("codex", executor.config.ledger_path.parent).locked()
 
     # The next job may not start on it while the stop is unconfirmed; nothing
     # was sent for it, so that is a plain (definite) launch failure.
@@ -1408,7 +1472,7 @@ def test_login_start_response_lost_is_uncertain_and_owned(fly_env, monkeypatch, 
         asyncio.run(executor.run(job))
     assert fake.calls("POST", "/stop")
     assert revoked == [MINTED]
-    assert not fly_runner._login_lock("codex").locked()
+    assert not fly_runner._login_lock("codex", executor.config.ledger_path.parent).locked()
     entry = executor.ledger.entry(job.run_id)
     if stop_effective:
         assert job.remote_state == "terminated"
@@ -1501,7 +1565,7 @@ def test_cancellation_during_login_start_settles_the_machine(fly_env, monkeypatc
     asyncio.run(go())
     assert fake.machines["m-codex"]["state"] == "stopped"
     assert executor.ledger.snapshot()["in_flight"] == {}
-    assert not fly_runner._login_lock("codex").locked()
+    assert not fly_runner._login_lock("codex", executor.config.ledger_path.parent).locked()
     assert revoked == [MINTED]
 
 
@@ -2216,8 +2280,12 @@ def test_old_cleanup_cannot_erase_the_next_dispatchers_login_job(fly_env, monkey
     import time as _time
 
     fake = _codex_fake(monkeypatch)
-    # Separate processes do not share the in-process login lock.
-    monkeypatch.setattr(fly_runner, "_login_lock", lambda provider: asyncio.Lock())
+    # Defence in depth behind the cross-process login lock: give each
+    # dispatcher a lock on its own file, so only the ledger can keep B out.
+    lock_dirs = iter(fly_env / f"lockdir-{i}" for i in range(1000))
+    monkeypatch.setattr(fly_runner, "_login_lock",
+                        lambda provider, lock_dir: fly_runner._CrossProcessLoginLock(
+                            provider, next(lock_dirs)))  # fmt: skip
     a, _, _ = make_executor(fake, clock=_time.time,
                             record={"exit_code": 0, "stdout": "A done"})  # fmt: skip
     b = _second_executor(fake, a)
@@ -2803,9 +2871,11 @@ def test_two_processes_without_a_shared_ledger_only_one_wins_the_machine(fly_env
     procs = []
     try:
         for name in ("run-a", "run-b"):
+            (tmp_path / name).mkdir()
             procs.append(sp.Popen(
                 [sys.executable, str(script), str(_REPO_ROOT), str(_DAEMON_DIR), shared.base,
-                 str(tmp_path / f"ledger-{name}.json"), name],
+                 # Separate directories: no shared login lock file either.
+                 str(tmp_path / name / "ledger.json"), name],
                 stdin=sp.PIPE, stdout=sp.PIPE, text=True,
             ))  # fmt: skip
         for proc in procs:

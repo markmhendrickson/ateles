@@ -2144,13 +2144,86 @@ def per_job_machine_body(job: FlyJob, config: FlyConfig, deadline: float) -> dic
 
 # ── Executor ─────────────────────────────────────────────────────────────────
 
-_LOGIN_LOCKS: dict[str, asyncio.Lock] = {}
+LOGIN_LOCK_POLL_SECONDS = 2.0
 
 
-def _login_lock(provider: str) -> asyncio.Lock:
-    lock = _LOGIN_LOCKS.get(provider)
+class _CrossProcessLoginLock:
+    """The queue for one provider's login machine, across processes.
+
+    Apis and the MCP server's in-process consumer both launch on the same
+    login machine. An ``asyncio.Lock`` alone queues only one process's jobs,
+    so the other process reached the ledger's busy check and failed its task.
+    This holds the in-process lock (FIFO within a process) AND an exclusive
+    ``flock`` on ``<lock_dir>/fly-login-<provider>.lock`` (across processes).
+    """
+
+    def __init__(self, provider: str, lock_dir: Path):
+        self.provider = provider
+        self.lock_dir = Path(lock_dir)
+        self.path = self.lock_dir / f"fly-login-{provider}.lock"
+        self._local = asyncio.Lock()
+        self._fd: int | None = None
+
+    def locked(self) -> bool:
+        """True while a job in THIS process holds the lock."""
+        return self._local.locked()
+
+    async def acquire(self, timeout: float | None = None) -> bool:
+        """Wait for both locks; raise ``asyncio.TimeoutError`` after *timeout*
+        seconds overall, holding neither."""
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+        if deadline is None:
+            await self._local.acquire()
+        else:
+            await asyncio.wait_for(self._local.acquire(), timeout=max(0.0, timeout))
+        try:
+            self.lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        pass
+                    wait = LOGIN_LOCK_POLL_SECONDS
+                    if deadline is not None:
+                        remaining = deadline - loop.time()
+                        if remaining <= 0:
+                            raise asyncio.TimeoutError
+                        wait = min(wait, remaining)
+                    await asyncio.sleep(wait)
+            except BaseException:
+                os.close(fd)
+                raise
+        except BaseException:
+            self._local.release()
+            raise
+        self._fd = fd
+        return True
+
+    def release(self) -> None:
+        fd, self._fd = self._fd, None
+        try:
+            if fd is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
+        finally:
+            self._local.release()
+
+
+_LOGIN_LOCKS: dict[tuple[str, Path], _CrossProcessLoginLock] = {}
+
+
+def _login_lock(provider: str, lock_dir: Path) -> _CrossProcessLoginLock:
+    """One lock per provider (and ledger directory) per process."""
+    key = (provider, Path(lock_dir))
+    lock = _LOGIN_LOCKS.get(key)
     if lock is None:
-        lock = _LOGIN_LOCKS[provider] = asyncio.Lock()
+        lock = _LOGIN_LOCKS[key] = _CrossProcessLoginLock(provider, Path(lock_dir))
     return lock
 
 
@@ -2220,7 +2293,7 @@ class _LaunchState:
     requested: bool = False  # a create/start was sent; its effect is not disproven
     config_written: bool = False  # a login machine's stored config holds job files
     machine_id: str = ""
-    lock: asyncio.Lock | None = None
+    lock: _CrossProcessLoginLock | None = None
     lease_nonce: str = field(default="", repr=False)  # a secret: never logged
 
 
@@ -2424,11 +2497,13 @@ class FlyExecutor:
             # The deadline the token's life was checked against (#1469).
             max_run = int(delivery_run_seconds(job.timeout))
         if job.login:
-            lock = _login_lock(job.provider)
+            lock = _login_lock(job.provider, self.config.ledger_path.parent)
             try:
-                # FIFO: asyncio.Lock wakes waiters in arrival order. Queue time
-                # does not count against the dispatch timeout.
-                await asyncio.wait_for(lock.acquire(), timeout=self.config.queue_max_wait_seconds)
+                # FIFO within this process (asyncio.Lock wakes waiters in
+                # arrival order); another process's job is waited out on the
+                # lock file. Queue time does not count against the dispatch
+                # timeout.
+                await lock.acquire(timeout=self.config.queue_max_wait_seconds)
             except asyncio.TimeoutError:
                 raise FlyRefusal(
                     f"{job.provider} login machine busy for longer than "
@@ -3151,7 +3226,7 @@ class FlyExecutor:
                 continue
             provider = next((p for p, m in self.config.login_machines.items()
                              if m == entry.get("machine_id")), "")  # fmt: skip
-            if provider and _login_lock(provider).locked():
+            if provider and _login_lock(provider, self.config.ledger_path.parent).locked():
                 continue  # a job holds that machine; its launch reconciles first
             if await self._settle_locked(run_id):  # admission is held
                 settled.append(run_id)
