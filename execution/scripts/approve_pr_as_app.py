@@ -142,16 +142,12 @@ not merged after three build, review and correct rounds is split or cut in scope
 before another round runs. A round is a distinct head that received a lens
 verdict (the swarm's own verdict comments and their `commit=` markers). When the
 head being approved would be a fourth round or later, the tool prints "round cap
-reached: split or cut scope" and refuses, whatever the lenses said. The explicit,
-logged escape hatch is `--allow-round-overrun <reason>`: the reason is required
-(10 to 300 characters, cleaned of markup, mentions and control characters) and is
-written into the approval review. It lifts only this refusal; a flag given to a
-PR that is not over the cap is reported as not needed and recorded nowhere.
+reached: split or cut scope" and refuses, whatever the lenses said. There is no
+override: the unit is split or cut in scope and continues in a fresh PR.
 
 Usage:
     python3 execution/scripts/approve_pr_as_app.py --repo <owner/name> --pr <n> \\
-        [--lenses pm,security] [--panel {path,required,all}] [--no-carry] \\
-        [--allow-round-overrun REASON] [--apply]
+        [--lenses pm,security] [--panel {path,required,all}] [--no-carry] [--apply]
 
 `--lenses` ADDS to the derived floor; it can never remove a lens the panel
 logic would itself require for this diff/issue. `--panel all` (formerly the
@@ -2416,7 +2412,6 @@ async def run(
     panel_all: bool = False,
     carry: bool = True,
     panel_mode: str = "",
-    allow_round_overrun: str = "",
 ) -> int:
     async with httpx.AsyncClient(timeout=30) as client:
         pr_data = await _fetch_pr(client, repo, pr)
@@ -2526,20 +2521,12 @@ async def run(
         # The three-round cap (operator ruling 2026-10-27). Counted from the same
         # author-scoped lens records the gate reads, so an outside account's marker
         # is never a round.
-        try:
-            overrun_reason = review_rounds.clean_reason(allow_round_overrun) if allow_round_overrun else ""
-        except review_rounds.OverrunReasonError as exc:
-            print(f"refusing: {exc}")
-            return 1
         rounds = review_rounds.round_status(
             lens_records(lens_authors.scope_lens_comments(comments, authors)),
             head_sha,
-            override_reason=overrun_reason,
         )
         print(rounds.describe())
         print()
-        if rounds.approval_note():
-            panel_note = "\n".join(x for x in (panel_note, rounds.approval_note()) if x)
 
         lens_outcomes: list[LensOutcome] = []
         for lens in lenses:
@@ -2638,7 +2625,7 @@ async def run(
         print(f"checks: {'GREEN' if checks_green else 'NOT GREEN'}")
         print(
             "round cap: "
-            + ("REACHED (split or cut scope)" if rounds.refused else "OVERRUN ALLOWED" if rounds.capped else "OK")
+            + ("REACHED (split or cut scope)" if rounds.refused else "OK")
         )
         print(f"overall: {'PASS' if overall_pass else 'FAIL'}")
 
@@ -2786,27 +2773,7 @@ def main() -> int:
             "as each lens's own App where it has one, else as the swarm App"
         ),
     )
-    parser.add_argument(
-        "--allow-round-overrun",
-        metavar="REASON",
-        default=None,
-        help=(
-            "allow an approval past the three-round cap (a PR whose head is the fourth "
-            "or later to receive lens verdicts is otherwise refused with 'round cap "
-            "reached: split or cut scope'; operator ruling 2026-10-27). Use it only "
-            "once the operator has granted an overrun for this PR. REASON is required "
-            "(10 to 300 characters) and is recorded in the approval review body. "
-            "There is deliberately no environment setting for this."
-        ),
-    )
     args = parser.parse_args()
-
-    overrun = ""
-    if args.allow_round_overrun is not None:
-        try:
-            overrun = review_rounds.clean_reason(args.allow_round_overrun)
-        except review_rounds.OverrunReasonError as exc:
-            parser.error(str(exc))
 
     extra_lenses = [x.strip() for x in args.lenses.split(",") if x.strip()]
 
@@ -2822,8 +2789,6 @@ def main() -> int:
             # Only named for the path-selected panel, so callers and tests of the
             # older modes see the call they always saw.
             **({"panel_mode": "path"} if args.panel == "path" else {}),
-            # Only named when an overrun was granted, for the same reason.
-            **({"allow_round_overrun": overrun} if overrun else {}),
         )
     )
 
