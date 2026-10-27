@@ -115,6 +115,24 @@ config presence alone is not treated as proof. The user-scope path is the measur
 0.153.4. A generated `AGENTS.md` remains a fallback for installations that have not trusted the hook, not a
 second policy source.
 
+**Optional: the turn guard (goal and heartbeat turns).** Codex goal continuation and scheduled heartbeats can
+spend whole turns re-answering a question or confirming nothing changed. The turn guard is a separate,
+reversible install:
+
+```sh
+python3 <ateles-checkout>/execution/scripts/install_codex_turn_guard.py --dry-run --heartbeats   # preview
+python3 <ateles-checkout>/execution/scripts/install_codex_turn_guard.py                           # hooks only
+python3 <ateles-checkout>/execution/scripts/install_codex_turn_guard.py --heartbeats              # also shorten heartbeat prompts
+python3 <ateles-checkout>/execution/scripts/install_codex_turn_guard.py --check --heartbeats
+python3 <ateles-checkout>/execution/scripts/install_codex_turn_guard.py --uninstall               # revert
+```
+
+It changes only `hooks.json` (four `codex_turn_guard.py` entries) and, with `--heartbeats`, the `prompt` line of
+heartbeat `automation.toml` files; the original prompt is kept as a brief file and every edited file is backed up
+under `~/.codex/ateles/turn_guard/backup/`. `config.toml` is never touched. Open `/hooks` afterwards and trust the
+new entries. Set `ATELES_CODEX_TURN_GUARD=shadow` to log decisions without denying or blocking anything, and `off`
+to disable. Design and limits: `.claude/hooks/README.md`, `codex_turn_guard.py`.
+
 ### Cursor — target rung: protocol, beside a generated rules file
 
 **What gets installed:** the Ateles MCP server. Add an `ateles` entry to `mcpServers` in `~/.cursor/mcp.json`

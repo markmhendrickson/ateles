@@ -169,3 +169,26 @@ text-bearing-leader exemptions, override scoping (including that an exported
 value does not approve), and fail-open on malformed input. The suite pipes
 synthetic JSON to the hook's stdin and never runs `git` — writing it does not
 stash anything.
+
+## `codex_turn_guard.py` (Codex only: SessionStart/compact, UserPromptSubmit, PreToolUse, Stop)
+
+Stops three kinds of wasted Codex turns, measured on local rollouts 2026-10-22..27 (Neotoma tasks
+`ent_cb8972677f5fe58c5934e6ed`, `ent_d61c8d051200f3805f61a688`). Installed at user scope by
+`execution/scripts/install_codex_turn_guard.py`; not wired for Claude Code, which has no goals or heartbeats.
+
+| Defect | Mechanism | Binds? |
+|---|---|---|
+| Re-answering the operator's last question after a compaction | `UserPromptSubmit` records the message, `Stop` marks it answered, `SessionStart` (`source=compact`) tells the model it was answered | Context only. Codex has no hook that can veto a reply, and `PostCompact` cannot inject context. The vendor-side fix is the real one. |
+| Status-only goal-continuation turns | At a goal turn's first tool call, one watermark (operator message, local repository state, optional watch commands). A quiet previous turn plus an unchanged watermark inside a back-off window (5 min doubling to 1 h) means every tool call is denied | Yes for tool calls. The first model sampling of the turn is not preventable: Codex does not run `UserPromptSubmit` on goal turns (0 of 349 observed). |
+| Idle scheduled heartbeats | `UserPromptSubmit` on a `<heartbeat>` prompt blocks it before the model runs, by the same watermark and back-off (10 min doubling to 6 h), keyed per automation id | Yes, if Codex honours `decision: block` on this event (schema-verified in 0.157.1; not run-verified end to end) |
+
+Watermark inputs: the hash of the last operator prompt, the repository `HEAD` and status of the turn's working
+directory, and the output of read-only commands listed in `~/.codex/ateles/turn_guard/goal_watch.json` (goal) or
+`.../heartbeats/<automation id>.json` (heartbeat; example in `templates/codex/heartbeat_watch.example.json`).
+A turn is quiet when it wrote nothing (a heuristic over tool names and command text; an unrecognised write
+counts as quiet, which costs at most one back-off window) and, for heartbeats, ended with at most 160 characters.
+
+Modes: `ATELES_CODEX_TURN_GUARD=enforce` (default), `shadow` (decide and log, never deny), `off`. Fail-open: any
+error exits 0. Subagent events are ignored. A Stop gate that demands a report (#1374) must not be applied to a
+turn this guard ended: such a turn is recorded as `skipped` in the per-thread state file
+(`.claude/.session_state/codex_turn_guard.<thread>.json`).
