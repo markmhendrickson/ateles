@@ -424,6 +424,8 @@ def set_task_status(
             task_entity_id, "blocked_reason", reason,
             idempotency_key=f"taskreason-{handler}-{task_entity_id}-{value}{suffix}",
         ) and ok
+    elif value == TaskStatus.DONE.value:
+        _clear_blocked_reason(task_entity_id, handler=handler, suffix=suffix)
     if result is not None:
         ok = _correct(
             task_entity_id, "result", result,
@@ -435,6 +437,21 @@ def set_task_status(
             idempotency_key=f"taskremediation-{handler}-{task_entity_id}{suffix}",
         ) and ok
     return ok
+
+
+def _clear_blocked_reason(task_entity_id: str, *, handler: str, suffix: str) -> None:
+    """Best effort: a done task must not keep a reason from an earlier block.
+
+    A failure is logged and never changes the caller's outcome, since the
+    status and result it reports on landed either way.
+    """
+    if not _correct(
+        task_entity_id, "blocked_reason", "",
+        idempotency_key=f"taskreason-{handler}-{task_entity_id}-done{suffix}",
+    ):
+        log.warning(
+            "[lifecycle] could not clear blocked_reason on done task %s", task_entity_id,
+        )
 
 
 @dataclass(frozen=True)
@@ -535,6 +552,8 @@ def complete_task_with_result(
             False, "result_readback",
             f"result did not read back as written (observed {observed})",
         )
+
+    _clear_blocked_reason(task_entity_id, handler=handler, suffix=f"{suffix}{art}")
 
     if not _correct(
         task_entity_id,
