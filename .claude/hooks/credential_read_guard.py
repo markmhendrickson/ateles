@@ -113,7 +113,15 @@ WHAT IS ALLOWED (mirrors the task spec — none of these print a value):
     redirection and recursive root is still judged, and a pattern that is not
     provably literal (expansion, glob, command substitution) or an option the
     masking does not fully understand leaves the whole command judged as
-    before. See `_mask_search_patterns` (Neotoma task
+    before. Declined, so judged as written: a search with `-o`, one whose
+    output goes to a file, a subshell, a process substitution or any pipe
+    stage that is not a plain line filter (`head`, `wc`, `sort`, `uniq`,
+    `nl`, `column`, `less`, `more`, `grep`, `rg`), because the pattern can be
+    the search's output; any command with a heredoc, a function or alias
+    named like a search tool, or a PATH assignment; and a search reached
+    through a wrapper that takes an option (`env -u NAME`, `sudo -u`,
+    `xargs -I`), because the wrapper's option value may be what looks like
+    the search tool. See `_mask_search_patterns` (Neotoma task
     ent_66d9c92e8343408876e3542b).
 
 Compound commands are split the way gmail_send_gate.py splits them — on
@@ -143,9 +151,18 @@ not possible by parsing shell text. The guard does not handle these CLASSES:
     dotenv glob (`my.env.py`, `.env.md`) is refused whatever its extension,
     because `.env.local` and `.env.production` are real credential files and
     no extension list can tell them apart safely; search programs other than
-    grep/rg/git grep (awk and sed program text, `ag`, `ack`, `git log
-    --grep`) still read a pattern that looks like a credential path as a path;
-    and an attached `--regexp=<pattern>` form is not masked.
+    grep/rg/git grep (`ag`, `ack`, `git log --grep`, and awk or sed program
+    text, which is code rather than data) can still read a pattern that
+    looks like a credential path as a path; an attached `--regexp=<pattern>`
+    form is not masked; and a search the masking cannot parse stays judged
+    as written, namely any with `grep -C`/`--context`/`-<n>` or an option the
+    tables do not list (git grep -A/-B/-C, several rg flags such as `--sort`
+    and `--json`), one behind `timeout`/`time`/other wrappers, one inside
+    `$(...)`, backticks, `sh -c` or `find -exec`, and a double-quoted pattern
+    holding `$HOME` or another expansion. Two shapes are not caught by this
+    guard at all, with or without a pattern naming a credential: a computed
+    recursive root (`grep -r x "$PWD"`) and `git grep --no-index` run from a
+    directory above a credential directory.
 Treat a pass from this hook as "nothing obviously wrong", never as proof that
 no credential was read. Hardening belongs to the sandbox and broker
 (ateles#1340); additions here should be limited to accidents that actually
@@ -351,7 +368,13 @@ def _safe_alternative(path_desc: str, tool: str = "Bash") -> str:
             "  - To check whether a variable EXISTS, count it rather than reading it:\n"
             "      grep -c '^VAR_NAME=' <file>\n"
             "  - To list which variable NAMES a file defines (no values):\n"
-            "      grep -o '^[A-Z_]*=' <file>\n\n"
+            "      grep -o '^[A-Z_]*=' <file>\n"
+            "  - To search SOURCE CODE for the text of a credential path or variable,\n"
+            "    keep the text in a plain quoted pattern and point the search at source\n"
+            "    files: rg 'text' <dir>  or  grep -n 'text' <file>. The exemption is\n"
+            "    declined for -o, -C/--context, output piped to anything but a line\n"
+            "    filter (head, wc, sort), a heredoc, and a wrapper that takes options;\n"
+            "    drop those, or search in two steps.\n\n"
         )
     return header + body + _PROVENANCE_NOTE
 
@@ -2257,11 +2280,49 @@ def _raw_word_is_literal(raw: str) -> bool:
     return True
 
 
+_SEARCH_TOOL_NAMES = r"(?:grep|egrep|fgrep|rg)"
+# Text that can make the word `grep` (or `rg`) run something other than the
+# search program, or change which program it finds: a function, an alias, a
+# PATH assignment, `hash`. Any of it, anywhere in the command, disables the
+# masking for the whole command.
+_SEARCH_SHADOWING_RE = re.compile(
+    rf"\b{_SEARCH_TOOL_NAMES}\s*\(\s*\)"
+    rf"|\bfunction\s+{_SEARCH_TOOL_NAMES}\b"
+    r"|\balias\b|\bunalias\b|\bhash\b|\benable\b|\bPATH\s*="
+)
+# Pipe consumers that only filter or count the lines handed to them. The
+# pattern of a search can reach its output (`grep -o`, or a matching line), so
+# a search piped into anything else (`xargs`, a `while read` loop, a shell,
+# `cat` with arguments) is judged on its original text.
+_SEARCH_OUTPUT_FILTERS = frozenset(
+    {"head", "tail", "wc", "sort", "uniq", "nl", "column", "less", "more",
+     "grep", "egrep", "fgrep", "rg"}
+)  # fmt: skip
+
+
+def _bare_prefixes_only(words: list[str], index: int) -> bool:
+    """True when every word before the command word is a shell keyword, an
+    assignment, or a bare wrapper (`env`, `command`, `nohup`, `exec`, `sudo`,
+    `xargs`) with NO option. `_command_index` skips option words without
+    knowing which take a value, so `env -u grep node ...` lands on `grep`
+    while the program that runs is `node`; any option before the command word
+    means the command word was reached by guessing and nothing may be masked."""
+    for word in words[:index]:
+        if word in _LEADING_KEYWORDS:
+            continue
+        if re.match(r"[A-Za-z_][A-Za-z0-9_]*=", word):
+            continue
+        if _basename(word) in _COMMAND_PREFIXES:
+            continue
+        return False
+    return True
+
+
 def _search_command_kind(words: list[str]) -> tuple[str | None, int]:
     """(kind, index of the first word after the command name) for a simple
     command that is a recognised search program, else (None, 0)."""
     index = _command_index(words)
-    if index is None:
+    if index is None or not _bare_prefixes_only(words, index):
         return None, 0
     name = _basename(words[index])
     if name in ("grep", "egrep", "fgrep"):
@@ -2340,41 +2401,78 @@ def _search_pattern_word_indexes(words: list[str], kind: str, start: int) -> lis
 def _mask_search_patterns(command: str) -> str:
     """*command* with the literal pattern words of every recognised search
     command replaced by an inert placeholder. Returns *command* unchanged when
-    it cannot be lexed or nothing qualifies."""
+    it cannot be lexed, when anything could change what the word `grep` runs or
+    what the lexer sees as a command (heredocs, functions, aliases, PATH), or
+    when nothing qualifies. Never raises: a failure here must leave the
+    command judged as it was written."""
+    try:
+        return _mask_search_patterns_unchecked(command)
+    except Exception:  # noqa: BLE001 — fall back to the unmasked command
+        return command
+
+
+def _mask_search_patterns_unchecked(command: str) -> str:
+    # A heredoc body is text the shell expands (a command substitution runs
+    # even inside single quotes there) but this lexer reads as commands; a
+    # `}` followed by a pipe or redirect sends a brace group's output on.
+    if (
+        _SEARCH_SHADOWING_RE.search(command)
+        or re.search(r"<<(?!<)", command)
+        or re.search(r"\}\s*[|>]", command)
+    ):
+        return command
     spans: list[tuple[int, int]] = []
     try:
         tokens = _lex(command, spans)
     except ValueError:
         return command
-    # Group word tokens into simple commands, as _simple_commands does: a
-    # redirection's operand is not a command word.
-    groups: list[list[int]] = []
-    current: list[int] = []
+    # Group word tokens into simple commands, as _simple_commands does (a
+    # redirection's operand is not a command word), remembering for each group
+    # the operator that opened it, the operator that ended it, and whether it
+    # redirects its output.
+    groups: list[dict] = []
+    current: dict = {"idx": [], "opener": "", "closer": "", "redirects_out": False}
+    opener = ""
     index = 0
     while index < len(tokens):
         kind, text = tokens[index]
         if kind == "word":
-            current.append(index)
+            current["idx"].append(index)
         elif text in _CONTROL_OPERATORS or text in ("<(", ">("):
-            if current:
+            if current["idx"]:
+                current["closer"] = text
                 groups.append(current)
-            current = []
-        elif index + 1 < len(tokens) and tokens[index + 1][0] == "word":
-            index += 1  # skip the redirection operand
+            opener = text
+            current = {"idx": [], "opener": opener, "closer": "", "redirects_out": False}
+        else:
+            if text.startswith((">", "&>")):
+                current["redirects_out"] = True
+            if index + 1 < len(tokens) and tokens[index + 1][0] == "word":
+                index += 1  # skip the redirection operand
         index += 1
-    if current:
+    if current["idx"]:
         groups.append(current)
 
     replacements: list[tuple[int, int]] = []
-    for group in groups:
-        words = [tokens[t][1] for t in group]
+    for position, group in enumerate(groups):
+        words = [tokens[t][1] for t in group["idx"]]
         kind, start = _search_command_kind(words)
         if kind is None:
+            continue
+        # The pattern can be this command's OUTPUT (`grep -o`, a matching
+        # line), so a search whose output feeds a reader is left as written:
+        # opened inside a process substitution, writing to a file, or piped
+        # into anything but a line filter.
+        if group["opener"] in ("<(", ">(") or group["redirects_out"] or group["closer"] == ")":
+            continue
+        if not _pipeline_ends_in_filters(groups, tokens, position):
+            continue
+        if _prints_matched_text(words, kind, start):
             continue
         for word_index in _search_pattern_word_indexes(words, kind, start):
             if words[word_index] in _NAMES_ONLY_PATTERNS:
                 continue  # the safe-mode check must see this pattern verbatim
-            begin, end = spans[group[word_index]]
+            begin, end = spans[group["idx"][word_index]]
             if _raw_word_is_literal(command[begin:end]):
                 replacements.append((begin, end))
     if not replacements:
@@ -2383,6 +2481,44 @@ def _mask_search_patterns(command: str) -> str:
     for begin, end in sorted(set(replacements), reverse=True):
         masked = masked[:begin] + _MASKED_PATTERN + masked[end:]
     return masked
+
+
+def _pipeline_ends_in_filters(groups: list[dict], tokens: list, position: int) -> bool:
+    """True when the group at *position* is the last stage of its pipeline, or
+    every later stage is a plain line filter (`head`, `wc`, `sort`...) that
+    neither redirects its output nor ends in a subshell: the matched text then
+    cannot reach a reader."""
+    while groups[position]["closer"] in ("|", "|&"):
+        if position + 1 >= len(groups):
+            return False
+        position += 1
+        stage = groups[position]
+        words = [tokens[t][1] for t in stage["idx"]]
+        index = _command_index(words) if words else None
+        if (
+            index is None
+            or not _bare_prefixes_only(words, index)
+            or _basename(words[index]) not in _SEARCH_OUTPUT_FILTERS
+            or stage["redirects_out"]
+            or stage["closer"] == ")"
+        ):
+            return False
+    return True
+
+
+def _prints_matched_text(words: list[str], kind: str, start: int) -> bool:
+    """True when the search may print the MATCHED text rather than whole
+    lines or names: `-o`/`--only-matching`, in any short cluster."""
+    for word in words[start:]:
+        if word == "--":
+            break
+        if word == "--only-matching":
+            return True
+        if word.startswith("-") and not word.startswith("--") and "o" in word[1:]:
+            # `-e` and `-f` values may contain an `o`; only the flag letters
+            # before one of them count, and a stray match errs toward declining.
+            return True
+    return False
 
 
 def check_bash(command: str, cwd: str | None = None):
