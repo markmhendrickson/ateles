@@ -45,6 +45,17 @@ from lib.daemon_runtime.agent_loader import AgentDefinition  # noqa: E402
 
 SAMPLE_HEAD = "a" * 40
 
+# Captured before the autouse fixture below replaces it on the module, so the
+# tests that exercise the real credential scoping can restore it.
+_REAL_REPO_SCOPED_ENV = hlr.repo_scoped_env
+_FIXTURE_ENV = {"GH_TOKEN": "fixture-scoped", "GITHUB_TOKEN": "fixture-scoped"}
+
+
+@pytest.fixture(autouse=True)
+def _repo_scoped_env_fixture(monkeypatch):
+    """Unit decisions do not mint a live GitHub App installation token."""
+    monkeypatch.setattr(hlr, "repo_scoped_env", lambda repo: dict(_FIXTURE_ENV))
+
 
 @pytest.fixture(autouse=True)
 def _canonical_fixture_role(monkeypatch):
@@ -213,6 +224,10 @@ def test_parallel_prepare_serializes_only_shared_fetch(monkeypatch, tmp_path):
         nonlocal active_fetches, max_active_fetches
         if command[-2:] == ["rev-parse", "--git-common-dir"]:
             return subprocess.CompletedProcess(command, 0, stdout=".git\n", stderr="")
+        if command[-3:] == ["remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(
+                command, 0, stdout="https://github.com/o/r.git\n", stderr=""
+            )
         if command[-3:] != ["fetch", "-q", "origin"]:
             raise AssertionError(f"unexpected command: {command}")
         with state_lock:
@@ -263,7 +278,7 @@ def test_parallel_prepare_serializes_only_shared_fetch(monkeypatch, tmp_path):
 
     def protected_fetch():
         try:
-            hlr._fetch_origin_serialized(repo)
+            hlr._fetch_origin_serialized(repo, env=_FIXTURE_ENV)
         except Exception as exc:  # pragma: no cover - assertion reports details
             protected_errors.append(exc)
 

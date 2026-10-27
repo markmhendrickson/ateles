@@ -556,6 +556,41 @@ def token_env(
     return {name: tok for name in ("GH_TOKEN", "GITHUB_TOKEN", *extra_names)}
 
 
+def repo_scoped_token(
+    repo: str, *, prefix: str = DEFAULT_APP_ENV_PREFIX
+) -> InstallationToken:
+    """An installation token proven to reach *repo*, or ``AppTokenError``.
+
+    ``installation_token`` resolves the installation from the repository only
+    when ``<PREFIX>_INSTALLATION_ID`` is unset; when it is pinned the token is
+    that installation's whatever the repository, and a private repository the
+    installation does not cover then answers 404 deep inside a clone or gh call
+    with no hint of why. This asks GitHub once, with the minted token, whether
+    the repository is visible to it, and says so by name when it is not. Use it
+    wherever a caller reads a repository it does not own and must fail closed
+    rather than fall back to an ambient credential.
+    """
+    if not repo or "/" not in repo:
+        raise AppTokenError(f"a repository as owner/name is required, got {repo!r}")
+    info = installation_token_info(repo, prefix=prefix)
+    try:
+        _request("GET", f"/repos/{repo}", info.token)
+    except AppTokenError as exc:
+        # Only an answer that says the repository is not visible to this token
+        # is a coverage gap; a timeout or 5xx says nothing about coverage.
+        if any(f"HTTP {code}" in str(exc) for code in (401, 403, 404)):
+            # A rejected token must not stay cached for the next caller.
+            forget_token(info.token)
+            raise AppTokenError(
+                f"no installation of the {prefix} App covers {repo} "
+                f"(installation {info.installation_id}): {exc}"
+            ) from None
+        raise AppTokenError(
+            f"could not verify that the {prefix} App covers {repo}: {exc}"
+        ) from None
+    return info
+
+
 def app_metadata(prefix: str = DEFAULT_APP_ENV_PREFIX) -> dict:
     with _lock:
         cached = _app_meta_cache.get(prefix)

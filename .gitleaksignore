@@ -22,3 +22,6 @@ cfa8234cff32be66f29e04027911674b06fb1e1c:lib/capabilities/credentials.py:protect
 d73b2ce6ddd2d81b1342f28295b63047a88a19ad:execution/evals/fly_delivery_receipt/fly_delivery_receipt_eval.py:protected-patterns:31
 d73b2ce6ddd2d81b1342f28295b63047a88a19ad:execution/evals/fly_delivery_receipt/fly_delivery_receipt_eval.py:github-pat:31
 d73b2ce6ddd2d81b1342f28295b63047a88a19ad:execution/evals/fly_delivery_receipt/fly_delivery_receipt_eval.py:github-tokens:31
+# ateles PR #1538: a fixture remote with an embedded login, flagged in the FIRST commit of the PR.
+# The later commit builds it from fragments; the PR-range scan reads history.
+4ac0c6cb3ace11bdd2ae4b650bf59f602f7a5ad3:execution/scripts/test_harness_lens_runner_repo_scope.py:pii-email:293
