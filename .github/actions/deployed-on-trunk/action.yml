@@ -1,0 +1,50 @@
+name: Deployed commit is on trunk
+description: >-
+  Fails unless the given commit is an ancestor of (or equal to) the tip of the
+  trunk branch. Use it as the first step of a deploy job so production never
+  runs a commit that reviewers have not seen on the default branch.
+inputs:
+  sha:
+    description: Commit to check. Defaults to the commit the workflow runs on.
+    required: false
+    default: ${{ github.sha }}
+  branch:
+    description: Trunk branch to compare against. Defaults to the repository default branch.
+    required: false
+    default: ${{ github.event.repository.default_branch }}
+runs:
+  using: composite
+  steps:
+    - name: Refuse to deploy a commit that is not on trunk
+      shell: bash
+      env:
+        INPUT_SHA: ${{ inputs.sha }}
+        INPUT_BRANCH: ${{ inputs.branch }}
+      run: |
+        set -euo pipefail
+        sha="$INPUT_SHA"
+        branch="$INPUT_BRANCH"
+        if [ -z "$branch" ]; then
+          echo "::error::deployed-on-trunk: no branch given and no default branch in the event payload; pass the 'branch' input."
+          exit 2
+        fi
+        if ! printf '%s' "$sha" | grep -Eq '^[0-9a-fA-F]{7,40}$'; then
+          echo "::error::deployed-on-trunk: 'sha' is not a commit hash."
+          exit 2
+        fi
+        # The ancestry test needs the trunk's history and the commit itself.
+        git fetch --no-tags --prune origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"
+        if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+          git fetch --no-tags --unshallow origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" || true
+        fi
+        git cat-file -e "${sha}^{commit}" 2>/dev/null || git fetch --no-tags origin "$sha" || true
+        if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+          echo "::error::deployed-on-trunk: commit ${sha} is not available in this checkout, so it cannot be on origin/${branch}."
+          exit 1
+        fi
+        if git merge-base --is-ancestor "$sha" "origin/${branch}"; then
+          echo "deployed-on-trunk: ${sha} is on origin/${branch}."
+        else
+          echo "::error::Refusing to deploy ${sha}: it is not an ancestor of origin/${branch}. Merge it to ${branch} first, then deploy from there."
+          exit 1
+        fi

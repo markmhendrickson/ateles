@@ -1,0 +1,67 @@
+# Heavy suites that would push per-PR CI past its 15-minute budget run here
+# instead: performance audits, native or integration suites, evals.
+# Copy to .github/workflows/nightly.yml.
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  push:
+    # A release candidate runs the full set before it can be promoted.
+    tags: ["rc-*"]
+    branches: ["release/*"]
+
+# Never cancel a scheduled or release-candidate run midway.
+concurrency:
+  group: nightly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  heavy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [performance, native-store, evals]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install dependencies as in ci.yml (with caching), then run the suite.
+      # --- Python slot -----------------------------------------------------
+      # - uses: actions/setup-python@v5
+      #   with:
+      #     python-version: "3.12"
+      #     cache: pip
+      # - run: pip install -r requirements-dev.txt
+      # - run: pytest -m "${{ matrix.suite }}"
+
+      # --- Node slot -------------------------------------------------------
+      # - uses: actions/setup-node@v4
+      #   with:
+      #     node-version: 22
+      #     cache: npm
+      # - run: npm ci
+      # - run: npm run test:${{ matrix.suite }}
+
+      - name: Placeholder (delete once a real suite command is added)
+        run: echo "suite ${{ matrix.suite }} - add the command above"
+
+  nightly-summary:
+    if: always()
+    needs: [heavy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Fail unless every needed job succeeded
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS_JSON"
+          if echo "$NEEDS_JSON" | grep -Eq '"result": "(failure|cancelled|skipped)"'; then
+            exit 1
+          fi

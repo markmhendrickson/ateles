@@ -1,0 +1,111 @@
+# App CI template: the per-PR budget is 15 minutes end to end.
+# Copy to .github/workflows/ci.yml and fill in the commented slots.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same PR cancels the superseded run. Push-to-main runs are
+# never cancelled: they gate deploys, so every one must finish.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least privilege by default. Grant more per job only where a step needs it.
+permissions:
+  contents: read
+
+jobs:
+  # Cheap checks first, so a typo fails in minutes instead of after a long
+  # test run.
+  fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Python slot -----------------------------------------------------
+      # - uses: actions/setup-python@v5
+      #   with:
+      #     python-version: "3.12"
+      #     cache: pip
+      # - run: pip install -r requirements-dev.txt
+      # - run: ruff check .
+      # - run: ruff format --check .
+      # - run: mypy .
+
+      # --- Node slot -------------------------------------------------------
+      # - uses: actions/setup-node@v4
+      #   with:
+      #     node-version: 22
+      #     cache: npm
+      # - run: npm ci
+      # - run: npm run lint
+      # - run: npm run format:check
+      # - run: npm run typecheck
+
+      # --- Hygiene (any stack) ---------------------------------------------
+      # Secret scan, generated-file freshness, lockfile consistency, and
+      # similar repo-specific checks belong here.
+      - name: Placeholder (delete once a real check is added)
+        run: echo "add lint, format, typecheck and hygiene checks above"
+
+  test:
+    needs: fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      # One failing shard fails the run early; the rest are cancelled.
+      fail-fast: true
+      matrix:
+        # Split the suite into shards that each finish well inside the
+        # timeout. Add shards rather than raising the timeout.
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Python slot (pytest-split, pytest-xdist, or per-directory) ------
+      # - uses: actions/setup-python@v5
+      #   with:
+      #     python-version: "3.12"
+      #     cache: pip
+      # - run: pip install -r requirements-dev.txt
+      # - run: pytest --splits 3 --group ${{ matrix.shard }} -m "not slow"
+
+      # --- Node slot (vitest/jest shard flags) -----------------------------
+      # - uses: actions/setup-node@v4
+      #   with:
+      #     node-version: 22
+      #     cache: npm
+      # - run: npm ci
+      # - run: npx vitest run --shard=${{ matrix.shard }}/3
+
+      - name: Placeholder (delete once a real test command is added)
+        run: echo "shard ${{ matrix.shard }} of 3 - add the test command above"
+
+  # The ONE aggregate check that branch protection (or the repo's approval
+  # tool) requires. It passes only when every job it needs succeeded, so jobs
+  # can be added, renamed, or split without touching protection.
+  #
+  # NAME: the job id and name below are whatever the repo's protection or
+  # approval tooling ALREADY requires. A repo that already requires a check
+  # called, say, `unit` (in a workflow named `tests`) keeps that exact job name
+  # and workflow name; adopting the template must not force a rename to
+  # `ci-summary`. Use `ci-summary` only in a repo with no existing required name.
+  ci-summary:
+    if: always()
+    needs: [fast, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Fail unless every needed job succeeded
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS_JSON"
+          if echo "$NEEDS_JSON" | grep -Eq '"result": "(failure|cancelled|skipped)"'; then
+            echo "One or more required jobs did not succeed."
+            exit 1
+          fi

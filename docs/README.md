@@ -205,6 +205,8 @@ Companion report (not a foundation design document; not in the review reading li
 - [**Linting guide**](linting-guide.md) · [**Test setup**](test-setup-guide.md) ·
   [**Testing patterns**](testing/) — the 8 linters, git hooks, and test conventions.
 - [**Daemon RC autodeploy**](daemon_rc_autodeploy.md) — rolling-main = release-candidate deployment.
+- [**App CI template**](../templates/app-ci/README.md) — copyable per-PR CI (15-minute budget), nightly, and
+  deploy-on-trunk guard for any application repo (decision 148).
 - [**Credential health**](credential_health.md) · [**Credential management**](credential_management.md) —
   proactive re-auth across the swarm.
 
