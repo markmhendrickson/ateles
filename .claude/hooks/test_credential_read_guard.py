@@ -2174,7 +2174,7 @@ MASKING_ROUND2_BLOCK = [
     # A heredoc body is expanded by the shell but read by the lexer as commands.
     ("command substitution inside a heredoc body", f"cat <<EOF\ngrep '$(cat {ENV})' x\nEOF"),
     ("xargs cat fed a path by a heredoc body", f"xargs cat <<EOF\ngrep {ENV}\nEOF"),
-    ("quoted heredoc delimiter still declines", f"cat <<'EOF'\ngrep 'neotoma/.env' x\nEOF\ncat {ENV}"),
+    ("quoted heredoc delimiter still declines the masking", "cat <<'EOF'\ngrep 'neotoma/.env' x\nEOF"),
     # The pattern is the search's OUTPUT, and the output feeds a reader.
     ("grep -o output piped to xargs cat", f"grep -o '{ENV}' notes.txt | xargs cat"),
     ("rg -o output piped to xargs cat", f"rg -o '{ENV}' docs | xargs cat"),
@@ -2269,3 +2269,201 @@ def test_a_failure_inside_the_masking_leaves_the_command_judged_as_written(monke
     command = f"cat {ENV}"
     assert guard._mask_search_patterns(command) == command
     assert guard.check_bash(command) == ENV
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 of the masking. Masking is now a POSITIVE precondition on the
+# whole command (`_masking_is_safe_for`) with a table of plain pipe filters, so
+# these tests sweep the neighbours of every shape reviewers found, not only
+# the shapes themselves, and pin each tool/flag table and each decline.
+# ---------------------------------------------------------------------------
+
+_P = f"'{ENV}'"  # a pattern that names the credential path
+
+MASKING_ROUND3_BLOCK = [
+    # A pipe consumer that takes the matched text as FILE NAMES.
+    ("xargs head reads the printed paths", f"grep -h {_P} notes.txt | xargs head -n 100"),
+    ("xargs sort reads the printed paths", f"grep -h {_P} notes.txt | xargs sort"),
+    ("xargs grep reads the printed paths", f"grep -h {_P} notes.txt | xargs grep ."),
+    ("xargs wc reads the printed paths", f"grep -h {_P} notes.txt | xargs wc -c"),
+    ("sudo head reads nothing but is not a plain stage", f"grep -h {_P} notes.txt | sudo cat"),
+    ("env cat as a consumer", f"grep -h {_P} notes.txt | env cat"),
+    # A pipe consumer that WRITES or RUNS something.
+    ("sort -o writes the text to a file", f"grep {_P} f | sort -o /tmp/l; xargs cat < /tmp/l"),
+    ("sort --output= writes the text to a file", f"grep {_P} f | sort --output=/tmp/l; xargs cat < /tmp/l"),
+    ("uniq with an output operand", f"grep {_P} f | uniq - out; xargs cat < out"),
+    ("sort runs a compress program", f"grep {_P} f | sort --compress-program=sh"),
+    ("sort temp dir option", f"grep {_P} f | sort -T /tmp"),
+    ("sort reads file names from stdin", f"grep {_P} f | sort --files0-from=-"),
+    ("less with a shell escape", f"grep {_P} f | less +!cat"),
+    ("head with a file operand", f"grep {_P} f | head -n 1 {PLAIN}"),
+    ("grep consumer with two positionals", f"grep {_P} f | grep x {PLAIN}"),
+    ("grep consumer reading patterns from a file", f"grep {_P} f | grep -f {ENV}"),
+    ("cut as a consumer is not on the list", f"grep {_P} f | cut -d: -f1 | xargs cat"),
+    # Output redirection in any spelling.
+    ("&> to a file", f"grep {_P} f &> list; xargs cat < list"),
+    ("&>> to a file", f"grep {_P} f &>> list; xargs cat < list"),
+    (">| to a file", f"grep {_P} f >| list; xargs cat < list"),
+    ("1> to a file", f"grep {_P} f 1> list; xargs cat < list"),
+    ("> to a file", f"grep {_P} f > list; xargs cat < list"),
+    (">> to a file", f"grep {_P} f >> list; xargs cat < list"),
+    ("redirect on a later unrelated command", f"grep -n {_P} {PLAIN}; echo x > list"),
+    ("exec redirect before the search", f"exec > out; grep {_P} f"),
+    ("exec process-substitution redirect", f"exec > >(xargs cat); grep {_P} f"),
+    # Compound commands, groups and functions around the search.
+    ("for loop piped on", f"for f in a; do grep {_P} $f; done | xargs cat"),
+    ("while loop piped on", f"while true; do grep {_P} f; done | xargs cat"),
+    ("if piped on", f"if true; then grep {_P} f; fi | xargs cat"),
+    ("case piped on", f"case x in x) grep {_P} f;; esac | xargs cat"),
+    ("loop redirected", f"for f in a; do grep {_P} $f; done > out; xargs cat < out"),
+    ("brace group with fd redirect and pipe", f"{{ grep {_P} f; }} 2>&1 | xargs cat"),
+    ("brace group with &>", f"{{ grep {_P} f; }} &> out"),
+    ("brace group with 1>", f"{{ grep {_P} f; }} 1> out; xargs cat < out"),
+    ("function then pipe", f"f() {{ grep {_P} x; }}; f | xargs cat"),
+    ("subshell with a trailing command", f"( grep {_P} f; true ) | xargs cat"),
+    ("subshell consumer", f"grep {_P} f | ( sort /dev/null; xargs cat )"),
+    ("background job", f"grep {_P} f & xargs cat < list"),
+    ("coproc", f"coproc grep {_P} f"),
+    ("|& pipe", f"grep {_P} f |& xargs cat"),
+    # Heredoc spelled with a line continuation, and a here-string.
+    ("heredoc split by a line continuation", f"cat <\\\n<EOF\ngrep '$(cat {ENV})' x\nEOF"),
+    ("heredoc with a space", f"cat << EOF\ngrep '$(cat {ENV})' x\nEOF"),
+    ("heredoc with a dash", f"cat <<-EOF\ngrep '$(cat {ENV})' x\nEOF"),
+    ("here-string", f"grep {_P} <<< \"$(cat {ENV})\""),
+    # The search command word is some other program.
+    ("grep in /tmp", f"/tmp/grep {ENV}"),
+    ("grep in the working directory", f"./grep {ENV}"),
+    ("rg in a home directory", f"~/bin/rg {ENV}"),
+    # Shadowing spelled so a text regex would miss it.
+    ("eval defines the function from split quotes", f"eval \"gr\"\"ep() {{ cat \\\"\\$1\\\"; }}\"; grep {ENV}"),
+    ("backslash inside alias", f"al\\ias grep=cat; shopt -s expand_aliases; grep {ENV}"),
+    ("empty quotes inside alias", f"a''lias grep=cat; shopt -s expand_aliases; grep {ENV}"),
+    ("empty quotes inside export PATH", f"export P''ATH=/tmp:$PATH; grep {ENV}"),
+    ("PATH name computed", f"P=PATH; export $P=/tmp; grep {ENV}"),
+    ("source defines the function", f"source defs.sh; grep {ENV}"),
+    ("hash replaces the tool", f"hash -p /tmp/cat grep; grep {ENV}"),
+    ("IFS assigned", f"IFS=/ grep {ENV}"),
+    ("BASH_ENV assigned", f"BASH_ENV=/tmp/x grep {ENV}"),
+    # File operands in every flag-table position (see also the property tests).
+    ("git diff --no-index on the credential", f"git diff --no-index {ENV} /dev/null"),
+    ("input redirect before the pattern", f"grep < {ENV} foo"),
+    ("double-quoted backtick substitution", f"grep \"`cat {ENV}`\" notes"),
+    ("double-quoted dollar substitution", f"grep \"$(cat {ENV})\" notes"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,cmd", MASKING_ROUND3_BLOCK, ids=[label for label, _ in MASKING_ROUND3_BLOCK]
+)
+def test_masking_round3_never_releases_these_shapes(label, cmd):
+    assert run_bash(cmd) == 2, label
+
+
+MASKING_ROUND3_ALLOW = [
+    ("stderr to /dev/null", f"rg -n {_P} {PLAIN} 2>/dev/null"),
+    ("stderr duplicated onto stdout then head", f"rg -n {_P} {PLAIN} 2>&1 | head -5"),
+    ("stderr to /dev/null then head", f"rg -n {_P} {PLAIN} 2>/dev/null | head -5"),
+    ("the word done is only an argument", f"grep -n {_P} {PLAIN}; echo done"),
+    ("and-list", f"grep -n {_P} {PLAIN} && echo found"),
+    ("or-list", f"grep -n {_P} {PLAIN} || echo none"),
+    ("tail filter", f"grep -n {_P} {PLAIN} | tail -n 3"),
+    ("numeric head flag", f"grep -n {_P} {PLAIN} | head -5"),
+    ("sort uniq chain", f"grep -n {_P} {PLAIN} | sort -u | uniq -c"),
+    ("grep -v consumer", f"grep -n {_P} {PLAIN} | grep -v x"),
+    ("rg consumer with one pattern", f"rg -n {_P} {PLAIN} | rg -i todo"),
+    ("canonical absolute path", f"/usr/bin/grep -n {_P} {PLAIN}"),
+    ("search is itself a pipe consumer", f"cat {PLAIN} | grep {_P}"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,cmd", MASKING_ROUND3_ALLOW, ids=[label for label, _ in MASKING_ROUND3_ALLOW]
+)
+def test_masking_round3_keeps_relief_for_plain_commands(label, cmd):
+    assert run_bash(cmd) == 0, label
+
+
+# Each flag in each table, in the file-operand position: a mutation that moves a
+# flag between the neutral and valued sets, or that lets the masking take the
+# credential file for the pattern, turns one of these red.
+@pytest.mark.parametrize("tool", ["grep", "egrep", "fgrep", "rg", "git grep --no-index"])
+def test_every_listed_flag_leaves_the_credential_file_judged_as_an_operand(tool):
+    guard = _guard()
+    key = "grep" if tool in ("grep", "egrep", "fgrep") else ("git grep" if tool.startswith("git") else "rg")
+    neutral, valued, _long_neutral, _long_valued = guard._SEARCH_SPECS[key]
+    safe_modes = set("clL")  # count / files-only modes never print content and stay allowed
+    for flag in sorted(neutral - safe_modes):
+        cmd = f"{tool} -{flag} foo {ENV}"
+        assert guard.check_bash(cmd), cmd
+    for flag in sorted(valued):
+        value = "3" if flag in "ABCmMjdE" else "foo"
+        if flag in ("e",):
+            continue
+        if flag == "f":
+            cmd = f"{tool} -f {ENV} {PLAIN}"
+        else:
+            cmd = f"{tool} -{flag} {value} foo {ENV}"
+        assert guard.check_bash(cmd), cmd
+    for flag in sorted(valued):
+        if flag == "e":
+            assert guard.check_bash(f"{tool} -e foo {ENV}"), tool
+            assert guard.check_bash(f"{tool} -{flag}foo {ENV}"), tool
+
+
+@pytest.mark.parametrize("sub", ["diff", "log", "show", "blame", "cat-file", "status", "stash"])
+def test_a_git_subcommand_other_than_grep_is_never_masked(sub):
+    guard = _guard()
+    cmd = f"git {sub} 'neotoma/.env' {ENV}"
+    assert guard._mask_search_patterns(cmd) == cmd
+    # Judged exactly as the unmasked command is: a subcommand that is not grep
+    # contributes no pattern, so masking cannot change its verdict.
+    assert guard.check_bash(cmd) == guard._check_bash(cmd, None)
+    other = f"git {sub} --no-index {ENV} /dev/null"
+    assert guard.check_bash(other) == guard._check_bash(other, None)
+
+
+def test_masking_precondition_is_positive():
+    """Every decline listed in the hook's docstring, asserted at the masker."""
+    guard = _guard()
+    mask = guard._MASKED_PATTERN
+    unsafe = [
+        "for f in a; do grep 'a' $f; done",
+        "{ grep 'a' f; }",
+        "( grep 'a' f )",
+        "f() { grep 'a' f; }",
+        "grep 'a' f &",
+        "grep 'a' f |& cat",
+        "cat <<EOF\nx\nEOF",
+        "cat <(grep 'a' f)",
+        "grep 'a' f > out",
+        "grep 'a' f 2> out",
+        "grep 'a' f &> out",
+        "coproc grep 'a' f",
+        "exec 3>out",
+        "PATH=/x grep 'a' f",
+        "IFS=/ grep 'a' f",
+        "export X=1; grep 'a' f",
+        "alias grep=cat; grep 'a' f",
+        "eval x; grep 'a' f",
+        "./grep 'a' f",
+        "/tmp/grep 'a' f",
+        "grep 'a' f | xargs head",
+        "grep 'a' f | sort -o x",
+        "grep 'a' f | head f",
+        "grep 'a' f | less",
+        "grep 'a' f | tee x",
+        "env -u grep node -e 'x'",
+        "grep -o 'a' f",
+    ]
+    for cmd in unsafe:
+        assert guard._mask_search_patterns(cmd) == cmd, cmd
+    safe = {
+        "grep 'a' f": f"grep {mask} f",
+        "grep 'a' f 2>/dev/null": f"grep {mask} f 2>/dev/null",
+        "grep 'a' f 2>&1 | head -3": f"grep {mask} f 2>&1 | head -3",
+        "grep 'a' f | sort -u | uniq -c": f"grep {mask} f | sort -u | uniq -c",
+        "/usr/bin/grep 'a' f": f"/usr/bin/grep {mask} f",
+        "cd d && rg 'a' f; echo done": f"cd d && rg {mask} f; echo done",
+    }
+    for cmd, expected in safe.items():
+        assert guard._mask_search_patterns(cmd) == expected, cmd
