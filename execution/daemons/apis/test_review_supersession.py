@@ -23,15 +23,6 @@ def _comment(body: str, *, cid: int = 1, login: str = "github-actions[bot]") -> 
     }
 
 
-def _own_login(dispatcher, monkeypatch, login: str = "github-actions[bot]") -> None:
-    """The dispatcher's own login; supersession touches only these authors."""
-
-    async def own(client, repository):
-        return {login}
-
-    monkeypatch.setattr(dispatcher, "_own_github_logins", own)
-
-
 def _trigger(**over) -> gg.SwarmTrigger:
     values = dict(
         kind="pr_synchronize",
@@ -414,7 +405,6 @@ async def test_supersession_patches_only_bot_verdicts_and_dismisses_stale_block(
             raise AssertionError(url)
 
     d = sd.SwarmDispatcher(notifier=type("N", (), {"send": lambda *a, **k: None})())
-    _own_login(d, monkeypatch)
     monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **kw: Client())
     result = await d._supersede_stale_verdicts("o/r", 7, HEAD_B)
     assert result == {"comments": 2, "reviews": 1, "failures": 0}
@@ -474,7 +464,6 @@ async def test_supersession_continues_after_patch_and_dismiss_failures(monkeypat
             return _Response({})  # first-failure durability marker
 
     d = sd.SwarmDispatcher(notifier=type("N", (), {"send": lambda *a, **k: None})())
-    _own_login(d, monkeypatch)
     monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **kw: Client())
     result = await d._supersede_stale_verdicts("o/r", 7, HEAD_B)
     assert result["comments"] == 1
@@ -608,7 +597,6 @@ async def test_periodic_sweep_paginates_and_supersedes_page_two_stale_verdict(
             return _Response({"state": "DISMISSED"})
 
     d = sd.SwarmDispatcher(notifier=type("N", (), {"send": lambda *a, **k: None})())
-    _own_login(d, monkeypatch)
     monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **kw: Client())
 
     first = await d.supersede_stale_review_verdicts(["o/r"])
@@ -722,7 +710,6 @@ async def test_repeated_supersession_failure_escalates_once(monkeypatch):
             notices.append(message)
 
     d = sd.SwarmDispatcher(notifier=Notifier())
-    _own_login(d, monkeypatch)
 
     async def claim(trigger, kind):
         claimed.append(kind)

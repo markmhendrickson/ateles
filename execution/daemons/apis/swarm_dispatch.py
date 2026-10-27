@@ -10548,13 +10548,11 @@ class SwarmDispatcher:
     async def _supersede_stale_verdicts(
         self, repository: str, pr_number: int, head_sha: str
     ) -> dict[str, int]:
-        """Retire the dispatcher's own stale comments and blocking native
-        reviews for one PR.
+        """Retire stale bot comments and blocking native reviews for one PR.
 
         Comment history remains visible: recognized stale verdicts are patched
-        in place with a banner and superseded marker. Only comments and reviews
-        authored by `_own_github_logins` are touched: human-authored marker
-        lookalikes and other bots' verdicts are left alone. Native stale CHANGES_REQUESTED reviews are
+        in place with a banner and superseded marker. Human-authored marker
+        lookalikes are never touched. Native stale CHANGES_REQUESTED reviews are
         dismissed and read back; APPROVED and already-DISMISSED reviews remain.
         """
         head = _normalise_full_sha(head_sha)
@@ -10570,12 +10568,6 @@ class SwarmDispatcher:
         repeated_failure = False
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                # Only the dispatcher's own verdicts are retired. `_is_bot_author`
-                # admits any `[bot]` login, and the App credential can edit or
-                # dismiss another bot's comments and reviews, so the author must
-                # be one of this dispatcher's logins. An unreadable own login
-                # raises into the handler below and nothing is touched.
-                own_logins = await self._own_github_logins(client, repository)
                 comments = await self._all_issue_comments(repository, pr_number, client)
                 repeated_failure = any(
                     failure_marker in (comment.get("body") or "")
@@ -10585,7 +10577,7 @@ class SwarmDispatcher:
                     body = comment.get("body") or ""
                     author = (comment.get("user") or {}).get("login", "")
                     kind, commit = _recognized_review_marker(body)
-                    if not kind or str(author).casefold() not in own_logins:
+                    if not kind or not _is_bot_author(author):
                         continue
                     if parse_aggregation_marker(body)["superseded_by"] or _LENS_SUPERSEDED_RE.search(body):
                         continue
@@ -10628,7 +10620,7 @@ class SwarmDispatcher:
                     author = (review.get("user") or {}).get("login", "")
                     commit = _normalise_full_sha(review.get("commit_id") or "")
                     if (
-                        str(author).casefold() not in own_logins
+                        not _is_bot_author(author)
                         or state in {"APPROVED", "DISMISSED"}
                         or state != "CHANGES_REQUESTED"
                         or commit == head

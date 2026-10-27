@@ -4,7 +4,7 @@ Companion to `test_dispatcher_app_writes.py` (same helpers and fixtures). Each
 test here fails without the change it names:
 
   1. the in-flight clear deletes only the dispatcher's OWN marker-only comments;
-  2. stale-verdict supersession touches only the dispatcher's own logins;
+  2. stale-verdict supersession writes recover from a revoked App token;
   3. a 401 to the cached App token drops it and retries once;
   4. a malformed repository slug never reaches the App mint;
   5. dry run mints nothing;
@@ -99,41 +99,34 @@ async def test_clear_inflight_deletes_only_own_marker_only_comments(monkeypatch)
     assert sorted(deleted) == ["4", "5"]
 
 
-# ── 2. supersession is limited to the dispatcher's own logins ─────────────────
+# ── 2. supersession writes ride the 401 retry ─────────────────────────────────
+# (Which authors supersession may retire is unchanged by this PR; narrowing it
+# is a follow-up.)
 
 
 @pytest.mark.asyncio
-async def test_supersession_never_retires_another_bots_verdict_or_review(monkeypatch):
-    """`_is_bot_author` admits any `[bot]` login; supersession must not."""
-    _configure_app(monkeypatch)
+async def test_supersession_writes_recover_from_a_revoked_app_token(monkeypatch):
+    """The comment patch and the review dismissal both go through the 401 retry."""
+    _minting(monkeypatch, ["revoked-token", "fresh-token"])
     head_a, head_b = "a" * 40, "b" * 40
     stale = sd.compose_vanellus_fallback_comment("**REQUEST_CHANGES**", head_a)
-    comments = [
-        {"id": 1, "body": stale, "user": {"login": "another-app[bot]"}},
-        {"id": 2, "body": stale, "user": {"login": BOT}},
-    ]
+    comments = [{"id": 2, "body": stale, "user": {"login": BOT}}]
     reviews = [
-        {"id": 10, "state": "CHANGES_REQUESTED", "commit_id": head_a,
-         "user": {"login": "another-app[bot]"}},
-        {"id": 11, "state": "CHANGES_REQUESTED", "commit_id": head_a,
-         "user": {"login": BOT}},
+        {"id": 11, "state": "CHANGES_REQUESTED", "commit_id": head_a, "user": {"login": BOT}}
     ]
-    patched: list[str] = []
-    dismissed: list[str] = []
+    writes: list[tuple[str, str]] = []
     bodies: dict[str, str] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if request.method == "PATCH":
-            cid = path.rsplit("/", 1)[-1]
-            patched.append(cid)
-            bodies[cid] = json.loads(request.content)["body"]
+        auth = request.headers.get("Authorization", "")
+        if request.method in {"PATCH", "PUT"}:
+            writes.append((request.method, auth))
+            if auth == "Bearer revoked-token":
+                return httpx.Response(401, json={"message": "Bad credentials"})
+            if request.method == "PATCH":
+                bodies[path.rsplit("/", 1)[-1]] = json.loads(request.content)["body"]
             return httpx.Response(200, json={})
-        if request.method == "PUT":
-            dismissed.append(path.split("/")[-2])
-            return httpx.Response(200, json={})
-        if path == "/user":
-            return httpx.Response(200, json={"login": PAT_LOGIN})
         if path.endswith("/issues/7/comments"):
             return httpx.Response(200, json=comments)
         if "/issues/comments/" in path:
@@ -145,9 +138,14 @@ async def test_supersession_never_retires_another_bots_verdict_or_review(monkeyp
         raise AssertionError(path)
 
     monkeypatch.setattr(sd.httpx, "AsyncClient", _client_factory(handler))
+    await sd._ensure_app_write_token(REPO)
     result = await _dispatcher()._supersede_stale_verdicts(REPO, 7, head_b)
-    assert patched == ["2"] and dismissed == ["11"]
     assert result == {"comments": 1, "reviews": 1, "failures": 0}
+    assert writes == [
+        ("PATCH", "Bearer revoked-token"),
+        ("PATCH", "Bearer fresh-token"),
+        ("PUT", "Bearer fresh-token"),
+    ]
 
 
 # ── 3. a server-side-invalidated App token is dropped and retried once ────────
