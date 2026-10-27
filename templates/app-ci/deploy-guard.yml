@@ -1,0 +1,104 @@
+# Deploy workflow skeleton. Three rules it enforces:
+#   1. Production only ever runs a commit that is on the default branch (guard).
+#   2. The deployed commit is baked into the image (GIT_SHA build arg) and
+#      served at an unauthenticated /version endpoint as {"commit": "<sha>"}.
+#   3. Each deploy leaves a GitHub Deployment plus a status carrying that sha,
+#      so the commit is auditable after the fact:
+#        check_deployed_on_trunk.py --repo OWNER/NAME --from-deployments production
+# Copy this file and fill in the deploy step, or add the `guard` job and
+# `needs: guard` to an existing deploy workflow. On a private repo without
+# branch protection (GitHub free plan) the guard is the binding check.
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit to deploy (defaults to the commit the workflow runs on)
+        required: false
+  push:
+    branches: [main]
+
+# Serialize deploys; never cancel one midway.
+concurrency:
+  group: deploy-${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DEPLOY_ENV: production
+  DEPLOY_SHA: ${{ inputs.sha || github.sha }}
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Recommended: pin to a full commit SHA instead of @main (see README).
+      - uses: markmhendrickson/ateles/.github/actions/deployed-on-trunk@main
+        with:
+          sha: ${{ env.DEPLOY_SHA }}
+          # branch defaults to the repository default branch
+
+  deploy:
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      deployments: write # create the Deployment and its statuses
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Create GitHub Deployment record
+        id: record
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # required_contexts is empty: this workflow IS the gate, and the sha
+          # may be a manual dispatch with no status checks of its own.
+          id=$(jq -n --arg ref "$DEPLOY_SHA" --arg env "$DEPLOY_ENV" \
+            '{ref: $ref, environment: $env, auto_merge: false, required_contexts: [], description: ("deploy " + $ref)}' \
+            | gh api "repos/${{ github.repository }}/deployments" --input - --jq .id)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          gh api "repos/${{ github.repository }}/deployments/$id/statuses" \
+            -f state=in_progress >/dev/null
+
+      # Build the image with the commit baked in. In the Dockerfile:
+      #   ARG GIT_SHA=unknown
+      #   ENV GIT_SHA=$GIT_SHA
+      #   LABEL org.opencontainers.image.revision=$GIT_SHA
+      # and serve GET /version (no auth) returning {"commit": "<GIT_SHA>"}.
+      - name: Build and deploy (replace with your deploy command)
+        run: |
+          echo "docker build --build-arg GIT_SHA=$DEPLOY_SHA ."
+          echo "deploy $DEPLOY_SHA to $DEPLOY_ENV"
+
+      # Optional but recommended: confirm the live service reports the commit.
+      # - name: Verify /version
+      #   run: |
+      #     live=$(curl -fsS "$APP_URL/version" | jq -r .commit)
+      #     [ "$live" = "$DEPLOY_SHA" ] || { echo "live commit $live != $DEPLOY_SHA"; exit 1; }
+
+      - name: Mark Deployment successful
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/deployments/${{ steps.record.outputs.id }}/statuses" \
+            -f state=success -f description="deployed $DEPLOY_SHA" >/dev/null
+
+      - name: Mark Deployment failed
+        if: failure() && steps.record.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/deployments/${{ steps.record.outputs.id }}/statuses" \
+            -f state=failure >/dev/null
