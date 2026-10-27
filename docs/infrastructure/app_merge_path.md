@@ -15,6 +15,12 @@ Covers the session-run path only: select the panel, run the lenses as subagents,
 - Any other change needs green CI plus the one lens whose scope it touches: ux when every changed file is user-facing copy or UI, arch otherwise. A reviewer may still request another lens with a stated reason: either run the approval tool with `--lenses <lens>` (it adds that lens to the required set), or have that lens post an objection on the current head, which blocks the approval until a clearing verdict retires it.
 - A lens's approval carries to a new head when the diff since its approved head does not touch that lens's scope. It is re-run only when its scope changed.
 
+## Stacked pull requests and non-default bases
+
+Path-selected review (`--panel path`, the bootstrap default in `execution/scripts/approve_pr_as_app.py`) applies only when the PR targets the repository's default branch. A PR based on any other branch, including a stacked PR, gets the full five-lens panel. The same applies when the default branch cannot be read.
+
+To keep a small change on the reduced route, base its PR directly on the default branch; otherwise expect five lenses. When the full panel applies for this reason, the approval tool names the PR's base branch and the repository's default branch (or says it is unreadable).
+
 ## The repo declares its own scope
 
 Each repository declares what is risky for it in `.github/review_scope.json`:
