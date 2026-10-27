@@ -1036,6 +1036,21 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
     return result
 
 
+async def verify_fly_delivery(result, plan) -> str | None:
+    """Read a Fly delivery's pull request back from GitHub and compare it with
+    the runner's report. None when it matches; otherwise the reason, which names
+    the field that failed. A delivery is not verified until this returns None.
+
+    Expected: the dispatched repository and base, and the branch, commit and
+    pull request number the runner's record reported."""
+    from lib.daemon_runtime.artifact_resolver import read_back_delivered_pr
+
+    return await asyncio.to_thread(
+        read_back_delivered_pr, repo=plan.repository, number=result.fly_pr_number,
+        base=plan.base_branch, branch=result.fly_delivery_branch,
+        commit=result.fly_delivery_commit)  # fmt: skip
+
+
 _FLY_STATUS_TEXT = {
     "opened": "opened pull request {pr}",
     "updated": "updated pull request {pr}",

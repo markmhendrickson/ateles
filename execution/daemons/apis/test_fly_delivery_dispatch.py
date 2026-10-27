@@ -19,6 +19,7 @@ import apis
 import build_delivery as delivery
 import fly_runner
 import skill_runner
+from lib.daemon_runtime import artifact_resolver
 from skill_runner import SkillResult
 from test_swarm_dispatch import (
     SwarmDispatcher,
@@ -55,6 +56,32 @@ def isolated_receipt(monkeypatch, tmp_path):
         delivery.FLY_DELIVERY_REGISTRY_ENV, str(tmp_path / "receipts.json")
     )
     monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES", raising=False)
+
+
+def pr_answer(**over):
+    data = {
+        "number": 99,
+        "baseRefName": "main",
+        "headRefName": BRANCH,
+        "headRefOid": COMMIT,
+        "headRepository": {"nameWithOwner": REPO},
+    }
+    data.update(over)
+    return data
+
+
+@pytest.fixture(autouse=True)
+def github_pr(monkeypatch):
+    """The real pull request as GitHub would return it for `gh pr view`. A test
+    changes ``box["answer"]`` to put a different pull request on the remote."""
+    box = {"answer": (0, json.dumps(pr_answer()), "")}
+
+    def view(repo, number):
+        return box["answer"]
+
+    monkeypatch.setattr(artifact_resolver, "_gh_pr_view", view)
+    monkeypatch.setattr(artifact_resolver.time, "sleep", lambda s: None)
+    return box
 
 
 def seed(key, entry):

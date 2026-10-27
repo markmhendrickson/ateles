@@ -958,7 +958,13 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
     if result is not None and result.fly_delivery_status:
         summary = build_delivery.fly_delivery_summary(result, plan.key)
         log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary}")
+        unverified = ""
         if result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
+            # The runner's record is its own report. Read the real PR back and
+            # require it to be exactly what was reported before it counts.
+            unverified = await build_delivery.verify_fly_delivery(result, plan) or ""
+        if (result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url
+                and not unverified):
             # The runner opens the PR after the model exits. Its read-back
             # supplies the artifact header the existing resolving gate verifies.
             result.stdout = (
@@ -968,7 +974,8 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
             result.ok = True
         else:
             result.ok = False
-            result.error = summary
+            result.error = (f"Fly delivery not verified: {unverified}. {summary}"
+                            if unverified else summary)
     return result
 
 
