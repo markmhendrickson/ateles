@@ -28,18 +28,35 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
-import urllib.request
 import urllib.error
+import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - native Windows
+    _fcntl = None
+
+try:
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    _msvcrt = None
 
 DEFAULT_PLAN_ID = "ent_99ace4dd6673aa36ed08b1fe"  # Ateles Agent Swarm Architecture plan
 BOOKKEEPING_TYPES = {"conversation", "conversation_message", "agent_message"}
 # Durable insight artifacts whose presence means the session captured a learning
 # (used by the Stop hook's /end nudge — task #3 of the task-spine plan).
 LEARNING_TYPES = {
-    "learning", "note", "standing_rule", "architectural_decision",
-    "strategy_drift_signal", "lesson", "recap_message",
+    "learning",
+    "note",
+    "standing_rule",
+    "architectural_decision",
+    "strategy_drift_signal",
+    "lesson",
+    "recap_message",
 }
 BEARER_ENV = "NEOTOMA_BEARER_TOKEN"  # gitleaks:allow
 _NEOTOMA_ENV_PATH = Path.home() / ".config" / "neotoma" / ".env"
@@ -251,7 +268,24 @@ def read_hook_input() -> dict:
         return {}
 
 
-def state_dir() -> Path:
+def state_dir(event: dict | None = None) -> Path:
+    override = os.environ.get("ATELES_SESSION_STATE_DIR")
+    if override:
+        d = Path(override).expanduser()
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    # Codex composes user- and project-level hooks.  Both copies must use one
+    # state root or identical handlers installed from different checkouts can
+    # never observe each other's delivery receipts.  ``model`` is a documented
+    # Codex hook-input field and is absent from Claude Code events.
+    if event and event.get("model") and not os.environ.get("CLAUDE_PROJECT_DIR"):
+        codex_home = os.environ.get("CODEX_HOME")
+        root = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
+        d = root / ".ateles" / "session_state"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     # CLAUDE_PROJECT_DIR is set by Claude Code but by no other harness (Codex
     # sets neither it nor an equivalent). Falling back to cwd would key this
     # hook's state on whatever directory a Codex hook happened to run from —
@@ -259,19 +293,24 @@ def state_dir() -> Path:
     # ships in. Resolve from THIS FILE's own location instead, matching
     # session_rule_index.py's "never cwd/CLAUDE_PROJECT_DIR" rule, so a
     # harness that never sets the env var still gets one stable state root.
-    root = os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parent.parent.parent
+    root = (
+        os.environ.get("CLAUDE_PROJECT_DIR")
+        or Path(__file__).resolve().parent.parent.parent
+    )
     d = Path(root) / ".claude" / ".session_state"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def state_path(session_id: str) -> Path:
+def state_path(session_id: str, event: dict | None = None) -> Path:
     safe = "".join(c for c in (session_id or "unknown") if c.isalnum() or c in "-_")
-    return state_dir() / f"{safe or 'unknown'}.json"
+    return state_dir(event) / f"{safe or 'unknown'}.json"
 
 
-def load_state(session_id: str) -> dict:
-    p = state_path(session_id)
+def load_state(session_id: str, event: dict | None = None) -> dict:
+    # Keep the one-argument call for legacy callers/tests that replace
+    # ``state_path`` with a narrow session-id-only fixture.
+    p = state_path(session_id) if event is None else state_path(session_id, event)
     if p.exists():
         try:
             return json.loads(p.read_text())
@@ -280,11 +319,72 @@ def load_state(session_id: str) -> dict:
     return {}
 
 
-def save_state(session_id: str, state: dict) -> None:
+def save_state(session_id: str, state: dict, event: dict | None = None) -> None:
     try:
-        state_path(session_id).write_text(json.dumps(state))
+        path = (
+            state_path(session_id) if event is None else state_path(session_id, event)
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as handle:
+            handle.write(json.dumps(state))
+            temp_path = Path(handle.name)
+        try:
+            os.replace(temp_path, path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
     except Exception as exc:  # noqa: BLE001
         log(f"could not persist state: {exc}")
+
+
+@contextmanager
+def state_lock(session_id: str, event: dict | None = None):
+    """Serialize one per-session state transaction across hook processes.
+
+    Codex launches matching user- and project-level command hooks
+    concurrently.  The lock must therefore cover load, delivery decision,
+    stdout emission, and save; an atomic file replace alone prevents corrupt
+    JSON but cannot prevent two readers from both deciding to emit.
+    """
+    lock_path = state_path(session_id, event).with_suffix(".lock")
+    handle = None
+    try:
+        handle = lock_path.open("a+b")
+        if _fcntl is not None:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+        elif _msvcrt is not None:
+            # ``msvcrt.locking`` locks bytes from the current file position.
+            # Keep one byte in the shared lock file and always lock byte zero.
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            _msvcrt.locking(handle.fileno(), _msvcrt.LK_LOCK, 1)
+        else:
+            raise OSError("no supported inter-process file-lock backend")
+    except OSError as exc:
+        # Delivery is safety-relevant.  Fail open to a possible duplicate,
+        # never fail closed to silence because the receipt lock is unavailable.
+        if handle is not None:
+            handle.close()
+        log(f"could not lock session state: {exc}")
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            if _fcntl is not None:
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+            else:
+                handle.seek(0)
+                _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)
+        except OSError as exc:
+            log(f"could not unlock session state: {exc}")
+        finally:
+            handle.close()
 
 
 # ---------------------------------------------------------------------------
@@ -298,8 +398,12 @@ def scan_transcript(transcript_path: str | None) -> dict:
     (turns=0, wrote_domain=False) so the finalizer does not block on it.
     """
     summary = {
-        "turns": 0, "wrote_domain": False, "bound_plan": False,
-        "bound_task": False, "captured_learning": False, "write_types": set(),
+        "turns": 0,
+        "wrote_domain": False,
+        "bound_plan": False,
+        "bound_task": False,
+        "captured_learning": False,
+        "write_types": set(),
     }
     if not transcript_path or not os.path.exists(transcript_path):
         return summary
@@ -329,8 +433,10 @@ def _inspect_event(ev: dict, summary: dict) -> None:
         if not name:
             continue
         is_neotoma_write = (
-            "store" in name or "correct" in name
-            or "create_relationship" in name or "submit_" in name
+            "store" in name
+            or "correct" in name
+            or "create_relationship" in name
+            or "submit_" in name
         )
         if not is_neotoma_write:
             continue
@@ -348,10 +454,19 @@ def _inspect_event(ev: dict, summary: dict) -> None:
             summary["bound_task"] = True
         if etypes & LEARNING_TYPES:
             summary["captured_learning"] = True
-        if domain_types or "correct" in name or "submit_" in name or "create_relationship" in name:
+        if (
+            domain_types
+            or "correct" in name
+            or "submit_" in name
+            or "create_relationship" in name
+        ):
             # create_relationship between two bookkeeping msgs is itself
             # bookkeeping; only count it as domain if a non-bookkeeping id appears.
-            if "create_relationship" in name and not domain_types and not _mentions_plan(payload):
+            if (
+                "create_relationship" in name
+                and not domain_types
+                and not _mentions_plan(payload)
+            ):
                 continue
             summary["wrote_domain"] = True
             summary["write_types"].update(domain_types)
@@ -439,7 +554,11 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802 - stdlib API
         raise urllib.error.HTTPError(
-            newurl, code, f"refusing to follow redirect ({msg})", headers, fp,
+            newurl,
+            code,
+            f"refusing to follow redirect ({msg})",
+            headers,
+            fp,
         )
 
 
@@ -455,8 +574,11 @@ urllib.request.install_opener(urllib.request.build_opener(_NoRedirectHandler))
 # harness_event audit emission (best-effort, fail-open)
 # ---------------------------------------------------------------------------
 def emit_harness_event_raw(
-    idempotency_slug: str, entity_fields: dict, log_tag: str = "harness-event",
-    session_id: str = "", suppress_stderr_warning: bool = False,
+    idempotency_slug: str,
+    entity_fields: dict,
+    log_tag: str = "harness-event",
+    session_id: str = "",
+    suppress_stderr_warning: bool = False,
 ) -> None:
     """POST one `harness_event` entity to Neotoma. Shared by every Stop hook
     in this checkout that emits an audit row — `emit_harness_event` below
@@ -500,17 +622,22 @@ def emit_harness_event_raw(
     body = {
         "idempotency_key": f"harness-event-{idempotency_slug}-{int(time.time())}",
         "observation_source": "workflow_state",
-        "entities": [{
-            "entity_type": "harness_event",
-            "harness": "claude_code",
-            **entity_fields,
-        }],
+        "entities": [
+            {
+                "entity_type": "harness_event",
+                "harness": "claude_code",
+                **entity_fields,
+            }
+        ],
     }
     try:
         req = urllib.request.Request(
             f"{base_url}/store",
             data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
             method="POST",
         )
         # The module-level opener installed above refuses redirects rather
@@ -531,13 +658,19 @@ def emit_harness_event_raw(
                 "cross-origin\n"
             )
         else:
-            sys.stderr.write(f"[{log_tag}] harness_event emission failed (non-fatal): {exc}\n")
+            sys.stderr.write(
+                f"[{log_tag}] harness_event emission failed (non-fatal): {exc}\n"
+            )
     except Exception as exc:  # noqa: BLE001
-        sys.stderr.write(f"[{log_tag}] harness_event emission failed (non-fatal): {exc}\n")
+        sys.stderr.write(
+            f"[{log_tag}] harness_event emission failed (non-fatal): {exc}\n"
+        )
 
 
 def emit_harness_event(
-    session_id: str, summary: dict, integrity_status: str,
+    session_id: str,
+    summary: dict,
+    integrity_status: str,
     suppress_stderr_warning: bool = False,
 ) -> None:
     """Write one harness_event recording the session integrity outcome.
@@ -548,15 +681,20 @@ def emit_harness_event(
     `emit_harness_event_raw` — see its docstring; used by `stop_finalizer.py`,
     which presents the missing-credentials notice itself via `systemMessage`.
     """
-    emit_harness_event_raw(f"session-integrity-{session_id}", {
-        "event_type": "session_integrity_check",
-        "session_id": session_id,
-        "integrity_status": integrity_status,  # integral | violated | exempt
-        "turns": summary.get("turns", 0),
-        "wrote_domain": summary.get("wrote_domain", False),
-        "bound_plan": summary.get("bound_plan", False),
-        "bound_task": summary.get("bound_task", False),
-        "captured_learning": summary.get("captured_learning", False),
-        "write_types": sorted(summary.get("write_types", []) or []),
-    }, log_tag="session-integrity", session_id=session_id,
-        suppress_stderr_warning=suppress_stderr_warning)
+    emit_harness_event_raw(
+        f"session-integrity-{session_id}",
+        {
+            "event_type": "session_integrity_check",
+            "session_id": session_id,
+            "integrity_status": integrity_status,  # integral | violated | exempt
+            "turns": summary.get("turns", 0),
+            "wrote_domain": summary.get("wrote_domain", False),
+            "bound_plan": summary.get("bound_plan", False),
+            "bound_task": summary.get("bound_task", False),
+            "captured_learning": summary.get("captured_learning", False),
+            "write_types": sorted(summary.get("write_types", []) or []),
+        },
+        log_tag="session-integrity",
+        session_id=session_id,
+        suppress_stderr_warning=suppress_stderr_warning,
+    )
