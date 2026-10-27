@@ -8552,6 +8552,10 @@ def test_mirror_preserves_human_body_and_replaces_only_managed_block(monkeypatch
             return _FakeResp({})
 
     monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", _FakeClient)
+    # A repo-scoped write carries the App token or the per-repo PAT; the
+    # instance token alone is not a credential for it (ateles#1381), so the
+    # test supplies the PAT the dispatcher actually sends.
+    monkeypatch.setenv("ATELES_AGENT_PAT", "tok")
 
     cfg = DispatchConfig(neotoma_token="", github_token="tok")
     dispatcher = SwarmDispatcher(_StubNotifier(), cfg)

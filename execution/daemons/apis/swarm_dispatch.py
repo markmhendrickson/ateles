@@ -3588,6 +3588,13 @@ def _token_for_repo(repo: str) -> str:
     account rather than the ateles-agent identity.  All other repos use
     ATELES_AGENT_PAT.  Both fall back to GITHUB_TOKEN when the per-repo PAT is
     unset, so nothing breaks if only the shared token is configured.
+
+    This is the PAT fallback, not the dispatcher's first choice: for the
+    dispatcher's own repo-scoped writes the swarm GitHub App installation token
+    precedes it wherever the App is installed (`_resolve_github_write_token`,
+    ateles#1381), so those writes — `*/neotoma` included — appear as the App
+    bot, not as the per-repo agent account. The per-repo identity above applies
+    only where the App is unconfigured, not installed, or a mint failed.
     """
     if repo.endswith("/neotoma"):
         return (
@@ -3642,6 +3649,287 @@ _REVIEWER_APP_INSTALLATION_TOKEN_CACHE: tuple[str, datetime] | None = None
 def _clear_reviewer_app_installation_token_cache() -> None:
     global _REVIEWER_APP_INSTALLATION_TOKEN_CACHE
     _REVIEWER_APP_INSTALLATION_TOKEN_CACHE = None
+
+
+# ── dispatcher REST writes as the App installation (ateles#1381) ─────────────
+#
+# The dispatcher's own GitHub REST calls (in-flight markers, spec mirror, comment
+# supersession, review dismissal, ...) used to authenticate with the
+# `ATELES_AGENT_PAT` fine-grained PAT. A fine-grained PAT cannot write to a
+# repository another user owns, so every one of those writes answered 403
+# "Resource not accessible by personal access token". The swarm GitHub App is
+# installed on the repository with issues / pull_requests / contents write, so
+# the dispatcher now authenticates as the App installation and falls back to
+# the PAT only when the App is unconfigured or a token cannot be minted.
+#
+# `lib.github_app_token` already caches one token per installation for about an
+# hour and re-mints it ten minutes before expiry, but a mint is synchronous
+# urllib. `_github_headers` is a plain method called from dozens of async
+# paths, so it only ever READS this module's copy of the token (never touches
+# the network from the event loop). The copy is filled off-loop, by
+# `asyncio.to_thread`, from three places: an explicit `await
+# _ensure_app_write_token(repo)` at the write paths that matter most, the
+# background refresh `_github_headers` schedules when a token is missing or
+# close to expiry, and the dispatcher's keep-warm loop. Code with no running
+# event loop (a script, a plain test) mints inline: there is nothing to block.
+
+# repo (lower-cased) -> (token, expires_at). Process-local, never written out.
+_APP_WRITE_TOKENS: dict[str, tuple[str, datetime]] = {}
+# repo -> do not retry the mint before this instant (a failed mint is retried
+# soon, but not on every request).
+_APP_WRITE_MINT_RETRY_AT: dict[str, datetime] = {}
+_APP_WRITE_MINT_RETRY_AFTER = timedelta(seconds=60)
+# Stop using a token this long before GitHub expires it. A refresh starts once
+# the token has this long left, which is the library's own re-mint margin
+# (`github_app_token.REFRESH_MARGIN`), so the refresh really gets a new token.
+_APP_WRITE_TOKEN_SKEW = timedelta(minutes=2)
+_APP_WRITE_TOKEN_REFRESH_AHEAD = timedelta(minutes=10)
+_APP_WRITE_BACKGROUND_TASKS: set = set()
+_APP_WRITE_REFRESHING: set[str] = set()
+_APP_WRITE_FALLBACK_WARNED: dict[str, datetime] = {}
+_APP_WRITE_FALLBACK_WARN_EVERY = timedelta(minutes=10)
+
+
+def _clear_app_write_token_cache() -> None:
+    """Drop every cached dispatcher App token and retry gate (tests)."""
+    _APP_WRITE_TOKENS.clear()
+    _APP_WRITE_MINT_RETRY_AT.clear()
+    _APP_WRITE_FALLBACK_WARNED.clear()
+    _APP_WRITE_REFRESHING.clear()
+
+
+def _app_write_configured() -> bool:
+    return _github_app_token.app_configured(_REVIEWER_APP_ENV_PREFIX)
+
+
+def _app_write_token_cached(repo: str) -> tuple[str, datetime] | None:
+    """The usable cached App token for *repo*, with its expiry; never networks."""
+    entry = _APP_WRITE_TOKENS.get(repo.lower())
+    if entry is None:
+        return None
+    if datetime.now(timezone.utc) >= entry[1] - _APP_WRITE_TOKEN_SKEW:
+        return None
+    return entry
+
+
+def _warn_app_write_fallback(
+    repo: str, reason: str, *, level: int = logging.WARNING, throttle_key: str = ""
+) -> None:
+    """Log (throttled per repo and key) that GitHub calls are using the PAT.
+
+    A transient condition (a background mint just started) passes its own
+    *throttle_key* and a lower *level*, so it can never occupy the repo's
+    WARNING slot and hide a real mint failure for the throttle window.
+    """
+    now = datetime.now(timezone.utc)
+    key = f"{repo.lower()}|{throttle_key}" if throttle_key else repo.lower()
+    last = _APP_WRITE_FALLBACK_WARNED.get(key)
+    if last is not None and now - last < _APP_WRITE_FALLBACK_WARN_EVERY:
+        return
+    _APP_WRITE_FALLBACK_WARNED[key] = now
+    log.log(
+        level,
+        f"[{DAEMON_NAME}] {repo}: falling back to the agent PAT for GitHub "
+        f"REST calls — {reason}. A fine-grained PAT cannot write to a "
+        "repository another account owns, so writes may answer 403 "
+        "(ateles#1381)."
+    )
+
+
+# `owner/name` exactly: the slug is placed in a URL path that is authenticated
+# with the App's JWT, so nothing outside GitHub's own slug alphabet may reach it.
+# Equivalent to `^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$` (without the trailing-newline
+# quirk of `$`), written as a character-set check rather than a regex so the
+# repository's regex-complexity sweep has nothing to flag.
+_REPO_SLUG_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+)
+
+
+def _is_repo_slug(repo: object) -> bool:
+    """True only for a well-formed ``owner/name`` slug (no traversal segments)."""
+    if not isinstance(repo, str):
+        return False
+    parts = repo.split("/")
+    return len(parts) == 2 and all(
+        part not in {"", ".", ".."} and all(ch in _REPO_SLUG_CHARS for ch in part)
+        for part in parts
+    )
+
+
+def _drop_app_write_token(repo: str, stale_token: str) -> bool:
+    """Forget *stale_token* for *repo* after GitHub answered it 401.
+
+    Drops this module's copy only when it still IS the stale token (a concurrent
+    refresh may already have replaced it), the mint library's copy of the same
+    token (otherwise the next mint would hand the revoked token straight back),
+    and the retry gate (a fresh mint must be allowed now). True when this
+    module's copy was dropped.
+    """
+    if not stale_token:
+        return False
+    key = repo.lower()
+    dropped = False
+    entry = _APP_WRITE_TOKENS.get(key)
+    if entry is not None and entry[0] == stale_token:
+        del _APP_WRITE_TOKENS[key]
+        dropped = True
+    _github_app_token.forget_token(stale_token)
+    _APP_WRITE_MINT_RETRY_AT.pop(key, None)
+    return dropped
+
+
+def _mint_app_write_token_blocking(repo: str) -> str | None:
+    """Mint (or take the library's cached) installation token for *repo*.
+
+    Synchronous and may use the network: call from a thread or with no event
+    loop running. Returns None, and logs a WARNING naming the PAT fallback,
+    when GitHub refuses; the message never carries a token. A *repo* that is
+    not a well-formed ``owner/name`` slug is refused before any request is made
+    (repository-scope hardening for the App write path): the caller falls back
+    to the PAT exactly as for any other mint failure.
+    """
+    if not _app_write_configured():
+        return None
+    if not _is_repo_slug(repo):
+        # A fixed label, never the value: it is attacker-shaped input, and it
+        # would also key the throttle map with unbounded distinct strings.
+        _warn_app_write_fallback(
+            "<malformed repository>",
+            "the repository is not a well-formed owner/name slug, so no App "
+            "installation token was requested for it",
+        )
+        return None
+    now = datetime.now(timezone.utc)
+    retry_at = _APP_WRITE_MINT_RETRY_AT.get(repo.lower())
+    if retry_at is not None and now < retry_at:
+        return None
+    try:
+        info = _github_app_token.installation_token_info(
+            repo, prefix=_REVIEWER_APP_ENV_PREFIX
+        )
+    except Exception as exc:  # noqa: BLE001 — any mint failure falls back to the PAT
+        _APP_WRITE_MINT_RETRY_AT[repo.lower()] = now + _APP_WRITE_MINT_RETRY_AFTER
+        _warn_app_write_fallback(
+            repo, f"minting the GitHub App installation token failed ({exc})"
+        )
+        return None
+    _APP_WRITE_TOKENS[repo.lower()] = (info.token, info.expires_at)
+    _APP_WRITE_MINT_RETRY_AT.pop(repo.lower(), None)
+    return info.token
+
+
+async def _ensure_app_write_token(repo: str) -> str | None:
+    """The App installation token for *repo*, minted off the event loop if needed.
+
+    None means "use the PAT": the App is unconfigured or the mint failed (the
+    failure is already logged). After this returns a token, the synchronous
+    `SwarmDispatcher._github_headers(repo)` serves it from the cache.
+    """
+    if not repo or not _app_write_configured():
+        return None
+    if not _is_repo_slug(repo):
+        _mint_app_write_token_blocking(repo)  # refuses, and logs why (throttled)
+        return None
+    cached = _app_write_token_cached(repo)
+    if cached is not None and (
+        cached[1] - datetime.now(timezone.utc) > _APP_WRITE_TOKEN_REFRESH_AHEAD
+    ):
+        return cached[0]
+    token = await asyncio.to_thread(_mint_app_write_token_blocking, repo)
+    if token is None and cached is not None:
+        return cached[0]  # the old token still has time; keep using it
+    return token
+
+
+def _schedule_app_write_token_refresh(repo: str) -> None:
+    """Fire-and-forget `_ensure_app_write_token` from sync code on a running loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    key = repo.lower()
+    if key in _APP_WRITE_REFRESHING:
+        return
+
+    async def _refresh() -> None:
+        try:
+            await _ensure_app_write_token(repo)
+        finally:
+            _APP_WRITE_REFRESHING.discard(key)
+
+    _APP_WRITE_REFRESHING.add(key)
+    task = loop.create_task(_refresh())
+    _APP_WRITE_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_APP_WRITE_BACKGROUND_TASKS.discard)
+
+
+def _app_write_token_for_sync(repo: str) -> str | None:
+    """The App token for a SYNC caller, or None to fall back to the PAT.
+
+    Never blocks a running event loop: with one running it serves the cache and
+    schedules a background (re)mint. With no loop running it mints inline.
+    """
+    if not repo or not _app_write_configured():
+        return None
+    if not _is_repo_slug(repo):
+        _mint_app_write_token_blocking(repo)  # refuses, and logs why (throttled)
+        return None
+    cached = _app_write_token_cached(repo)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        if cached is not None:
+            return cached[0]
+        return _mint_app_write_token_blocking(repo)
+    if cached is None:
+        retry_at = _APP_WRITE_MINT_RETRY_AT.get(repo.lower())
+        if retry_at is None or datetime.now(timezone.utc) >= retry_at:
+            _schedule_app_write_token_refresh(repo)
+            _warn_app_write_fallback(
+                repo,
+                "the App installation token is not minted yet "
+                "(a background mint was started)",
+                level=logging.INFO,
+                throttle_key="pending-mint",
+            )
+        return None
+    if cached[1] - datetime.now(timezone.utc) <= _APP_WRITE_TOKEN_REFRESH_AHEAD:
+        _schedule_app_write_token_refresh(repo)
+    return cached[0]
+
+
+def _log_github_403_body(resp, what: str) -> None:
+    """Log GitHub's explanation (first 300 chars of the body) on a 403.
+
+    A bare ``403 Forbidden`` hides whether the credential lacks scope, the App
+    lacks a permission, or a rate limit applies. The body is GitHub's JSON
+    message and carries no credential.
+    """
+    if getattr(resp, "status_code", None) != 403:
+        return
+    try:
+        body = (resp.text or "")[:300]
+    except Exception:  # noqa: BLE001
+        body = "<unreadable>"
+    log.warning(f"[{DAEMON_NAME}] {what} answered 403: {body}")
+
+
+def _resolve_github_write_token(repo: str, app_token: str | None) -> str:
+    """THE credential a repo-scoped dispatcher write carries: the App
+    installation token when there is one, else the per-repo agent PAT
+    (`_token_for_repo`), else "". The one function both `_github_headers` (what
+    is sent) and the write guards (whether to send at all) go through, so a
+    guard can never pass for a credential the headers then drop and send the
+    request bare. The instance-level `config.github_token` is not part of it:
+    `_github_headers` has never sent it for a repo-scoped call.
+    """
+    return app_token or _token_for_repo(repo) or ""
+
+
+def _app_bot_login_blocking() -> str:
+    """The login the App's installation token acts as (``<slug>[bot]``), casefolded."""
+    return _github_app_token.bot_login(_REVIEWER_APP_ENV_PREFIX).casefold()
 
 
 def _mint_reviewer_app_jwt() -> str:
@@ -3930,12 +4218,14 @@ class SwarmDispatcher:
         """Entry point handed to the webhook gateway. Never raises."""
         try:
             if self.config.dry_run:
-                # Fully side-effect free: no harness_event store, no dispatch.
+                # Fully side-effect free: no harness_event store, no dispatch,
+                # and no App token mint (that is a network call to GitHub).
                 log.info(
                     f"[{DAEMON_NAME}] DRY RUN — skipping pipeline for "
                     f"{trigger.kind} {trigger.repository}#{trigger.number}"
                 )
                 return
+            await self._await_github_app_ready([trigger.repository])
             await self._log_harness_event(trigger)
             if trigger.kind == "issue_opened":
                 if not await self._label_gate_allows(trigger):
@@ -4241,13 +4531,23 @@ class SwarmDispatcher:
         marker = self._PIPELINE_INFLIGHT_MARKER.format(
             started_at=datetime.now(timezone.utc).isoformat(), stage=stage
         )
+        if not await self._require_github_write_credential(
+            trigger.repository, "in-flight pipeline marker",
+            detail=f"{trigger.repository}#{trigger.number}",
+        ):
+            return
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
+                resp = await self._github_write(
+                    client,
+                    "post",
                     f"https://api.github.com/repos/{trigger.repository}/issues/"
                     f"{trigger.number}/comments",
+                    trigger.repository,
                     json={"body": marker},
-                    headers=self._github_headers(trigger.repository),
+                )
+                _log_github_403_body(
+                    resp, f"{trigger.repository}#{trigger.number}: in-flight marker POST"
                 )
                 resp.raise_for_status()
         except Exception as exc:
@@ -4260,6 +4560,10 @@ class SwarmDispatcher:
     async def _clear_pipeline_inflight(self, trigger: SwarmTrigger) -> None:
         """Delete any in-flight markers on this issue. Best-effort."""
         ref = f"{trigger.repository}#{trigger.number}"
+        if not await self._require_github_write_credential(
+            trigger.repository, "in-flight marker clear", detail=ref
+        ):
+            return
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.get(
@@ -4269,12 +4573,27 @@ class SwarmDispatcher:
                     headers=self._github_headers(trigger.repository),
                 )
                 resp.raise_for_status()
+                # Only the dispatcher's OWN marker-only comments. The App
+                # credential can delete any comment on the repository, so the
+                # match is the same strict one the stale-marker sweep uses
+                # (the whole body is the marker; a comment that merely QUOTES
+                # one carries someone's reasoning) AND the author must be one
+                # of the dispatcher's own logins. An unreadable own login
+                # raises into the handler below: nothing is deleted.
+                own_logins = await self._own_github_logins(client, trigger.repository)
                 for comment in resp.json():
-                    if self._PIPELINE_INFLIGHT_RE.search(comment.get("body", "")):
-                        await client.delete(
+                    author = str((comment.get("user") or {}).get("login") or "").casefold()
+                    if author not in own_logins:
+                        continue
+                    if self._PIPELINE_INFLIGHT_RE.fullmatch(
+                        (comment.get("body") or "").strip()
+                    ):
+                        await self._github_write(
+                            client,
+                            "delete",
                             f"https://api.github.com/repos/{trigger.repository}"
                             f"/issues/comments/{comment.get('id')}",
-                            headers=self._github_headers(trigger.repository),
+                            trigger.repository,
                         )
         except Exception as exc:
             log.warning(
@@ -4319,6 +4638,7 @@ class SwarmDispatcher:
 
         Returns a summary dict for logging/tests.
         """
+        await self._await_github_app_ready(repositories)
         summary = {"scanned": 0, "resumed": 0, "failed": 0, "stalled": 0}
         for repository in repositories:
             try:
@@ -4429,8 +4749,13 @@ class SwarmDispatcher:
         paying at startup. Revisit if closed-issue volume grows enough that
         orphans start surviving repeated boots.
         """
+        await self._await_github_app_ready(repositories)
         cleared = 0
         for repository in repositories:
+            if not await self._require_github_write_credential(
+                repository, "stale-marker sweep"
+            ):
+                continue
             try:
                 async with httpx.AsyncClient(timeout=30) as client:
                     resp = await client.get(
@@ -4467,10 +4792,12 @@ class SwarmDispatcher:
                                 body.strip()
                             ):
                                 continue
-                            await client.delete(
+                            await self._github_write(
+                                client,
+                                "delete",
                                 f"https://api.github.com/repos/{repository}"
                                 f"/issues/comments/{c.get('id')}",
-                                headers=self._github_headers(repository),
+                                repository,
                             )
                             cleared += 1
                             log.info(
@@ -4544,6 +4871,7 @@ class SwarmDispatcher:
             a still-limited PR can't thrash — it just re-defers to the next reset;
           * every failure path logs and continues.
         """
+        await self._await_github_app_ready(repositories)
         summary = {"scanned": 0, "resumed": 0, "not_yet": 0, "failed": 0}
         now = datetime.now(timezone.utc)
         for repository in repositories:
@@ -4632,6 +4960,7 @@ class SwarmDispatcher:
         Fail-open and bounded, same discipline as the sibling sweeps: every
         failure path logs and continues; a broken sweep must never stop the loop.
         """
+        await self._await_github_app_ready(repositories)
         summary = {"scanned": 0, "resumed": 0, "escalated": 0, "failed": 0}
         stall_after = int(os.environ.get("APIS_REVIEW_STALL_SECONDS", "2700"))
         max_retries = int(os.environ.get("APIS_REVIEW_STALL_MAX_RETRIES", "3"))
@@ -4752,6 +5081,7 @@ class SwarmDispatcher:
         attempt, and silent infinite retry is how a real defect stays invisible.
         Fail-open throughout — a broken sweep must never stop the loop.
         """
+        await self._await_github_app_ready(repositories)
         summary = {"scanned": 0, "resumed": 0, "escalated": 0, "failed": 0}
         stale_after = int(os.environ.get("APIS_REVISION_STALE_SECONDS", "2700"))
         max_retries = int(os.environ.get("APIS_REVISION_MAX_RETRIES", "3"))
@@ -4932,6 +5262,7 @@ class SwarmDispatcher:
 
         Fail-open: a broken report must never stop the loop.
         """
+        await self._await_github_app_ready(repositories)
         stale_days = int(os.environ.get("APIS_APPROVED_STALE_DAYS", "3"))
         report: dict = {
             "scanned": 0,
@@ -5265,6 +5596,7 @@ class SwarmDispatcher:
         silent infinite retry is how a real defect stays invisible. Fail-open
         throughout — a broken sweep must never stop the loop.
         """
+        await self._await_github_app_ready(repositories)
         summary = {"scanned": 0, "resumed": 0, "escalated": 0, "failed": 0}
         max_retries = int(os.environ.get("APIS_MISSING_LENS_MAX_RETRIES", "3"))
 
@@ -6624,11 +6956,10 @@ class SwarmDispatcher:
         human-written body above them (never clobbers the reporter's text).
         Re-running replaces only the marked block.  Best-effort, never raises.
         """
-        if not _token_for_repo(trigger.repository) and not self.config.github_token:
-            log.warning(
-                f"[{DAEMON_NAME}] no GitHub token — spec mirror skipped for "
-                f"{trigger.repository}#{trigger.number}"
-            )
+        if not await self._require_github_write_credential(
+            trigger.repository, "spec mirror",
+            detail=f"{trigger.repository}#{trigger.number}",
+        ):
             return
         managed = assemble_spec_markdown(state.sections or {})
         issue_url = (
@@ -6636,6 +6967,7 @@ class SwarmDispatcher:
             f"{trigger.number}"
         )
         try:
+            await _ensure_app_write_token(trigger.repository)
             async with httpx.AsyncClient(timeout=30) as client:
                 # Read the CURRENT body so we splice against live content (the
                 # reporter or another agent may have edited it since open).
@@ -6651,10 +6983,16 @@ class SwarmDispatcher:
                         f"{trigger.repository}#{trigger.number} (unchanged)"
                     )
                     return
-                patch = await client.patch(
+                patch = await self._github_write(
+                    client,
+                    "patch",
                     issue_url,
+                    trigger.repository,
                     json={"body": new_body},
-                    headers=self._github_headers(trigger.repository),
+                )
+                _log_github_403_body(
+                    patch,
+                    f"{trigger.repository}#{trigger.number}: spec mirror PATCH",
                 )
                 patch.raise_for_status()
                 log.info(
@@ -6889,6 +7227,10 @@ class SwarmDispatcher:
             )
         if expected_head and not expected:
             return False, "invalid expected PR head; merge held"
+        if not await self._require_github_write_credential(
+            repo, "merge", detail=f"{repo}#{pr_number}"
+        ):
+            return False, "no usable GitHub write credential; merge held"
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 headers = self._github_headers(repo)
@@ -7923,12 +8265,9 @@ class SwarmDispatcher:
             _REVIEW_EVENT_REQUEST_CHANGES,
         }
         if not binding_event:
-            token = _token_for_repo(t.repository) or self.config.github_token
+            token = await self._github_write_token(t.repository)
             if not token:
-                log.warning(
-                    f"[{DAEMON_NAME}] no GitHub token — formal review skipped "
-                    f"for {ref}"
-                )
+                self._log_write_skipped("formal review", t.repository, ref)
                 return None
             headers = {
                 "Accept": "application/vnd.github+json",
@@ -8360,6 +8699,11 @@ class SwarmDispatcher:
             f"https://api.github.com/repos/{trigger.repository}/issues/"
             f"{trigger.number}/comments"
         )
+        if not await self._require_github_write_credential(
+            trigger.repository, "fix-round marker",
+            detail=f"{trigger.repository}#{trigger.number}",
+        ):
+            return
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
@@ -8400,6 +8744,11 @@ class SwarmDispatcher:
             f"https://api.github.com/repos/{trigger.repository}/issues/"
             f"{trigger.number}/comments"
         )
+        if not await self._require_github_write_credential(
+            trigger.repository, "escalation marker",
+            detail=f"{trigger.repository}#{trigger.number}",
+        ):
+            return True  # fail-open: the operator is still notified
         headers = self._github_headers(trigger.repository)
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -10216,6 +10565,10 @@ class SwarmDispatcher:
         counts = {"comments": 0, "reviews": 0, "failures": 0}
         if not head:
             return counts
+        if not await self._require_github_write_credential(
+            repository, "stale verdict supersession", detail=f"{repository}#{pr_number}"
+        ):
+            return counts
         headers = self._github_headers(repository)
         failure_marker = self._SUPERSEDE_FAILURE_MARKER.format(sha=head)
         repeated_failure = False
@@ -10238,12 +10591,15 @@ class SwarmDispatcher:
                         continue
                     new_body = compose_superseded_verdict(body, head)
                     try:
-                        resp = await client.patch(
+                        resp = await self._github_write(
+                            client,
+                            "patch",
                             f"https://api.github.com/repos/{repository}/issues/"
                             f"comments/{comment.get('id')}",
+                            repository,
                             json={"body": new_body},
-                            headers=headers,
                         )
+                        headers = self._github_headers(repository)  # may be refreshed
                         if resp.status_code >= 400:
                             raise RuntimeError(
                                 f"HTTP {resp.status_code}: {(resp.text or '')[:240]}"
@@ -10278,9 +10634,12 @@ class SwarmDispatcher:
                         continue
                     review_id = review.get("id")
                     try:
-                        resp = await client.put(
+                        resp = await self._github_write(
+                            client,
+                            "put",
                             f"https://api.github.com/repos/{repository}/pulls/"
                             f"{pr_number}/reviews/{review_id}/dismissals",
+                            repository,
                             json={
                                 "message": (
                                     f"Superseded by {head[:7]}: this review was "
@@ -10290,8 +10649,8 @@ class SwarmDispatcher:
                                     "thread for details."
                                 )
                             },
-                            headers=headers,
                         )
+                        headers = self._github_headers(repository)  # may be refreshed
                         if resp.status_code >= 400:
                             raise RuntimeError(
                                 f"HTTP {resp.status_code}: {(resp.text or '')[:240]}"
@@ -10374,6 +10733,7 @@ class SwarmDispatcher:
         Each page is superseded as it arrives so a later-page list failure cannot
         discard already-fetched earlier pages.
         """
+        await self._await_github_app_ready(repositories)
         totals = {"prs": 0, "comments": 0, "reviews": 0, "failures": 0}
         for repository in repositories:
             try:
@@ -11002,12 +11362,9 @@ class SwarmDispatcher:
         self, trigger: SwarmTrigger, body: str
     ) -> None:
         """Post a verdict comment on the PR/issue.  Best-effort, never raises."""
-        repo_token = _token_for_repo(trigger.repository)
-        if not repo_token:
-            log.warning(
-                f"[{DAEMON_NAME}] no GitHub token — verdict comment skipped for "
-                f"{trigger.repository}#{trigger.number}"
-            )
+        if not await self._require_github_write_credential(
+            trigger.repository, "post checkpoint verdict comment", detail=f"{trigger.repository}#{trigger.number}"
+        ):
             return
         url = (
             f"https://api.github.com/repos/{trigger.repository}/issues/"
@@ -11040,12 +11397,9 @@ class SwarmDispatcher:
         If the request fails (permissions, not-a-collaborator, already-requested),
         the checkpoint still blocks and still notifies — this is best-effort.
         """
-        repo_token = _token_for_repo(trigger.repository)
-        if not repo_token:
-            log.warning(
-                f"[{DAEMON_NAME}] no GitHub token — operator reviewer request "
-                f"skipped for {trigger.repository}#{trigger.number}"
-            )
+        if not await self._require_github_write_credential(
+            trigger.repository, "request operator reviewer", detail=f"{trigger.repository}#{trigger.number}"
+        ):
             return
         url = (
             f"https://api.github.com/repos/{trigger.repository}/pulls/"
@@ -11084,12 +11438,9 @@ class SwarmDispatcher:
         endpoint.  Non-fatal: if it fails (already removed, permissions), the
         checkpoint resolution still stands.
         """
-        repo_token = _token_for_repo(trigger.repository)
-        if not repo_token:
-            log.warning(
-                f"[{DAEMON_NAME}] no GitHub token — operator reviewer removal "
-                f"skipped for {trigger.repository}#{trigger.number}"
-            )
+        if not await self._require_github_write_credential(
+            trigger.repository, "remove operator reviewer", detail=f"{trigger.repository}#{trigger.number}"
+        ):
             return
         url = (
             f"https://api.github.com/repos/{trigger.repository}/pulls/"
@@ -11142,12 +11493,9 @@ class SwarmDispatcher:
         # Must NOT contain a command token (that would re-trigger the handler).
         _CONFIRMATION_MARKER = "<!-- swarm-run-confirmation -->"
 
-        repo_token = _token_for_repo(trigger.repository)
-        if not repo_token:
-            log.warning(
-                f"[{DAEMON_NAME}] no GitHub token — swarm-run confirmation "
-                f"comment skipped for {trigger.repository}#{trigger.number}"
-            )
+        if not await self._require_github_write_credential(
+            trigger.repository, "post swarm run comment", detail=f"{trigger.repository}#{trigger.number}"
+        ):
             return
 
         # Fix 1: body text uses "swarm-run" without the leading slash so it
@@ -11236,12 +11584,9 @@ class SwarmDispatcher:
         """
         _BYPASS_MARKER = "<!-- pipeline-bypass-notice -->"
 
-        repo_token = _token_for_repo(trigger.repository)
-        if not repo_token:
-            log.warning(
-                f"[{DAEMON_NAME}] no GitHub token — pipeline-bypass notice "
-                f"skipped for {trigger.repository}#{trigger.number}"
-            )
+        if not await self._require_github_write_credential(
+            trigger.repository, "post pipeline bypass comment", detail=f"{trigger.repository}#{trigger.number}"
+        ):
             return False
 
         # Body deliberately writes "Closes" with a backtick-escaped hash so the
@@ -11653,11 +11998,10 @@ class SwarmDispatcher:
         """
         _WAIVE_MARKER = "<!-- swarm-gate-waive-result -->"
 
-        if not _token_for_repo(trigger.repository):
-            log.warning(
-                f"[{DAEMON_NAME}] no GitHub token — gate-waive result comment "
-                f"skipped for {trigger.repository}#{trigger.number}"
-            )
+        if not await self._require_github_write_credential(
+            trigger.repository, "gate-waive result comment",
+            detail=f"{trigger.repository}#{trigger.number}",
+        ):
             return
 
         body = format_waive_comment_multi(
@@ -12543,19 +12887,210 @@ class SwarmDispatcher:
                 numbers.append(number)
         return numbers
 
-    def _github_headers(self, repo: str = "") -> dict[str, str]:
-        """Return GitHub API request headers with the per-repo token (#95).
+    async def warm_github_app_token(
+        self, repositories: list[str], *, timeout_s: float = 10.0
+    ) -> bool:
+        """Mint the App token for each repository once, bounded by *timeout_s*.
 
-        When `repo` is supplied the per-repo PAT is preferred (see
-        `_token_for_repo`); the instance-level `config.github_token` is used
-        as a final fallback so behaviour is unchanged for callers that do not
-        yet pass a repo.
+        Awaited at startup, before the daemon accepts work, so the first write
+        of a fresh process already carries the App's identity. True when every
+        repository resolved a token (or the App is unconfigured, which is
+        logged by the keep-warm loop); a timeout or failure is logged and the
+        daemon starts anyway, with each entry point awaiting readiness itself.
         """
-        token = _token_for_repo(repo) if repo else self.config.github_token
+        if not _app_write_configured():
+            return False
+        try:
+            await asyncio.wait_for(
+                self._await_github_app_ready(list(repositories)), timeout=timeout_s
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                f"[{DAEMON_NAME}] App token startup warm-up did not finish in "
+                f"{timeout_s:.0f}s; starting anyway, each write path awaits it"
+            )
+            return False
+        return all(
+            _app_write_token_cached(repo) is not None for repo in repositories
+        )
+
+    async def keep_github_app_token_warm(
+        self, repositories: list[str], *, interval_s: float = 300.0
+    ) -> None:
+        """Mint the App installation token for each repository now, then keep
+        it fresh, so `_github_headers` (sync) always finds a token and never
+        has to fall back to the PAT. Runs forever; every mint happens off the
+        event loop and a failure is logged and retried next interval.
+        """
+        if not _app_write_configured():
+            log.warning(
+                f"[{DAEMON_NAME}] the swarm GitHub App is not configured "
+                f"({_REVIEWER_APP_ENV_PREFIX}_ID / "
+                f"{_REVIEWER_APP_ENV_PREFIX}_PRIVATE_KEY[_PATH]); GitHub REST "
+                "calls use the agent PAT, which cannot write to a repository "
+                "another account owns (ateles#1381)"
+            )
+            return
+        while True:
+            for repository in repositories:
+                try:
+                    await _ensure_app_write_token(repository)
+                except Exception as exc:  # noqa: BLE001 — never kill the daemon
+                    log.warning(
+                        f"[{DAEMON_NAME}] App token keep-warm for {repository} "
+                        f"failed: {exc}"
+                    )
+            await asyncio.sleep(interval_s)
+
+    async def _await_github_app_ready(self, repositories) -> None:
+        """Resolve the App installation token for each repository BEFORE any
+        write is attempted, so `_github_headers` serves it from the cache and a
+        cold start never sends a write as the PAT while a healthy App is still
+        initialising (it falls back only after a mint has actually failed).
+        Called at every dispatcher entry point; a no-op once the token is warm.
+        """
+        for repo in dict.fromkeys(repositories or ()):
+            try:
+                await _ensure_app_write_token(repo)
+            except Exception as exc:  # noqa: BLE001 — resolution must not block the work
+                log.warning(
+                    f"[{DAEMON_NAME}] App token readiness for {repo} failed: {exc}"
+                )
+
+    async def _github_write_token(self, repo: str) -> str:
+        """The token a dispatcher write to *repo* will carry: the App
+        installation's (awaited off the event loop), else the per-repo PAT.
+        "" when the dispatcher has no usable write credential. The same
+        `_resolve_github_write_token` that `_github_headers` applies, so a guard
+        built on this never passes for a credential the headers then drop.
+        """
+        return _resolve_github_write_token(repo, await _ensure_app_write_token(repo))
+
+    def _log_write_skipped(self, what: str, repo: str, detail: str = "") -> None:
+        log.warning(
+            f"[{DAEMON_NAME}] {what} skipped for {detail or repo}: no usable "
+            "GitHub write credential (the swarm GitHub App is unconfigured or "
+            "its token could not be minted, and no agent PAT is set)"
+        )
+
+    async def _require_github_write_credential(
+        self, repo: str, what: str, *, quiet: bool = False, detail: str = ""
+    ) -> bool:
+        """True when ANY write credential is usable for *repo*: the App
+        installation (preferred) or a PAT. Resolving the App token here also
+        guarantees `_github_headers(repo)` serves it from the cache for the
+        rest of the call. A write skipped for lack of a credential is logged at
+        WARNING with its reason, unless the caller already logs its own
+        (`quiet`).
+        """
+        if await self._github_write_token(repo):
+            return True
+        if not quiet:
+            self._log_write_skipped(what, repo, detail)
+        return False
+
+    async def _own_github_logins(
+        self, client: httpx.AsyncClient, repository: str
+    ) -> set[str]:
+        """The logins the dispatcher's own comments carry, casefolded.
+
+        With the App installation token that is ``<slug>[bot]`` (``GET /user``
+        answers 403 to an installation token, so it is not asked) PLUS the
+        agent PAT's account, best effort: markers and notices written before
+        the switch to the App are still the dispatcher's own, and a reader that
+        only knew the bot would post them a second time. With the PAT alone it
+        is the login the token resolves to, read live. Raises when no login is
+        readable; callers post nothing in that case.
+        """
+        logins: set[str] = set()
+        await _ensure_app_write_token(repository)
+        using_app = _app_write_token_cached(repository) is not None
+        if using_app:
+            logins.add(await asyncio.to_thread(_app_bot_login_blocking))
+        pat = _token_for_repo(repository)
+        if pat or not using_app:
+            try:
+                me = await client.get(
+                    "https://api.github.com/user",
+                    headers=(
+                        {
+                            "Accept": "application/vnd.github+json",
+                            "Authorization": f"Bearer {pat}",
+                        }
+                        if using_app
+                        else self._github_headers(repository)
+                    ),
+                )
+                me.raise_for_status()
+                login = str((me.json() or {}).get("login") or "").casefold()
+                if login:
+                    logins.add(login)
+            except Exception:  # noqa: BLE001 — the bot login alone is enough
+                if not using_app:
+                    raise
+        return logins
+
+    def _github_headers(self, repo: str = "") -> dict[str, str]:
+        """Return GitHub API request headers for *repo* (ateles#1381, #95).
+
+        When `repo` is supplied and the swarm GitHub App is configured, the
+        header carries the App's installation token (served from a cache, never
+        minted on the event loop; see `_app_write_token_for_sync`). A fine-grained
+        PAT cannot write to a repository another account owns, so the PAT is the
+        fallback only when the App is unconfigured or minting fails (logged at
+        WARNING). The per-repo PAT is `_token_for_repo`; the instance-level
+        `config.github_token` is used only when no repo is given, and is NOT a
+        fallback for a repo-scoped write (the guards share
+        `_resolve_github_write_token`, so they agree).
+        """
+        if repo:
+            token = _resolve_github_write_token(repo, _app_write_token_for_sync(repo))
+        else:
+            token = self.config.github_token
         headers = {"Accept": "application/vnd.github+json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
         return headers
+
+    async def _github_write(
+        self, client: httpx.AsyncClient, method: str, url: str, repo: str, **kwargs
+    ):
+        """Send one repo-scoped GitHub write; on a 401 from a cached App token,
+        drop that token and retry ONCE with a fresh one.
+
+        GitHub can invalidate an installation token before its `expires_at` (a
+        permission change, a key rotation, an uninstall). The cache cannot know,
+        so without this every write for the repo would keep failing 401 until
+        the token aged out. On a 401 answered to the App token this sent: forget
+        it (here and in the mint library), mint a new one off the event loop (or
+        fall to the PAT per `_resolve_github_write_token`), and resend once. A
+        retry that would carry the same credential is not sent, and a second
+        401 is returned to the caller as is. A PAT's 401 is never retried.
+
+        Covers only the call sites that route through here; see the dispatcher's
+        other `client.post/patch/put/delete` calls, which still treat a 401 as a
+        plain failure.
+        """
+        send = getattr(client, method)
+        first = self._github_headers(repo)
+        sent = (first.get("Authorization") or "").removeprefix("Bearer ")
+        resp = await send(url, headers=first, **kwargs)
+        if getattr(resp, "status_code", None) != 401 or not repo or not sent:
+            return resp
+        if sent == _token_for_repo(repo):
+            return resp  # the PAT was refused: a fresh App mint would not help
+        _drop_app_write_token(repo, sent)
+        await _ensure_app_write_token(repo)
+        headers = self._github_headers(repo)
+        renewed = (headers.get("Authorization") or "").removeprefix("Bearer ")
+        if not renewed or renewed == sent:
+            return resp  # nothing new to send; never resend bare
+        log.warning(
+            f"[{DAEMON_NAME}] {repo}: GitHub answered 401 to the cached App "
+            "installation token; dropped it and retrying once with a fresh "
+            "credential"
+        )
+        return await send(url, headers=headers, **kwargs)
 
     async def _changed_files(self, t: SwarmTrigger) -> list[str]:
         url = (
@@ -12752,6 +13287,11 @@ class SwarmDispatcher:
             "an earlier head and the fix since then touched none of their "
             f"areas:\n{rows}"
         )
+        if not await self._require_github_write_credential(
+            trigger.repository, "carry note",
+            detail=f"{trigger.repository}#{trigger.number}",
+        ):
+            return
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
@@ -12949,6 +13489,11 @@ class SwarmDispatcher:
             f"https://api.github.com/repos/{trigger.repository}/issues/"
             f"{trigger.number}/comments"
         )
+        if not await self._require_github_write_credential(
+            trigger.repository, "combined-pass comments",
+            detail=f"{trigger.repository}#{trigger.number}",
+        ):
+            return posted
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 for lens, res in accepted.items():
@@ -13860,12 +14405,9 @@ class SwarmDispatcher:
         so their `gh` comment step often fails silently; Vanellus aggregates
         from the PR comments, so the dispatcher posts the captured review
         itself when the comment is missing. Never raises."""
-        repo_token = _token_for_repo(t.repository)
-        if not repo_token:
-            log.warning(
-                f"[{DAEMON_NAME}] no GitHub token — fallback review comments "
-                f"skipped for {t.repository}#{t.number}"
-            )
+        if not await self._require_github_write_credential(
+            t.repository, "post missing panel comments", detail=f"{t.repository}#{t.number}"
+        ):
             return
         url = (
             f"https://api.github.com/repos/{t.repository}/issues/"
@@ -13974,8 +14516,7 @@ class SwarmDispatcher:
         except Exception as exc:  # notifier must never crash the pipeline
             log.error(f"[{DAEMON_NAME}] denied-writeback notification failed: {exc}")
 
-        repo_token = _token_for_repo(t.repository)
-        if not repo_token:
+        if not await self._require_github_write_credential(t.repository, "surface denied gate writebacks"):
             return
         parent_ref = f" on parent issue #{parent}" if parent else ""
         body = (
@@ -14101,8 +14642,7 @@ class SwarmDispatcher:
         except Exception as exc:  # notifier must never crash the pipeline
             log.error(f"[{DAEMON_NAME}] sign_off-failure notification failed: {exc}")
 
-        repo_token = _token_for_repo(t.repository)
-        if not repo_token:
+        if not await self._require_github_write_credential(t.repository, "surface failed sign offs"):
             return
         parent_ref = f" on parent issue #{parent}" if parent else ""
         blocked_blocks = "\n\n".join(
@@ -14202,8 +14742,7 @@ class SwarmDispatcher:
         gates = {g for g in (gates or set()) if g}
         if not gates:
             return
-        repo_token = _token_for_repo(t.repository)
-        if not repo_token:
+        if not await self._require_github_write_credential(t.repository, "surface unverified signed off gates"):
             return
         url = (
             f"https://api.github.com/repos/{t.repository}/issues/"
@@ -14221,19 +14760,14 @@ class SwarmDispatcher:
                 # posted suppressed the notice. The login is the one the posting
                 # token resolves to, read live; an unreadable login raises into
                 # the handler below, which posts nothing.
-                me = await client.get(
-                    "https://api.github.com/user",
-                    headers=self._github_headers(t.repository),
-                )
-                me.raise_for_status()
-                own_login = str((me.json() or {}).get("login") or "").casefold()
-                if not own_login:
+                own_logins = await self._own_github_logins(client, t.repository)
+                if not own_logins:
                     raise RuntimeError("the dispatcher's own GitHub login is unreadable")
                 comments = await self._all_issue_comments(t.repository, t.number, client)
                 existing = "\n".join(
                     (c.get("body") or "")
                     for c in comments
-                    if str((c.get("user") or {}).get("login") or "").casefold() == own_login
+                    if str((c.get("user") or {}).get("login") or "").casefold() in own_logins
                 )
                 fresh = sorted(
                     g
@@ -14327,8 +14861,7 @@ class SwarmDispatcher:
         entries = [e for e in (entries or []) if e and e[0]]
         if not entries:
             return
-        repo_token = _token_for_repo(t.repository)
-        if not repo_token:
+        if not await self._require_github_write_credential(t.repository, "surface unreadable gate verdicts"):
             return
         url = (
             f"https://api.github.com/repos/{t.repository}/issues/"
@@ -14337,19 +14870,14 @@ class SwarmDispatcher:
         reason = GATE_VERDICT_UNREADABLE_REASON
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                me = await client.get(
-                    "https://api.github.com/user",
-                    headers=self._github_headers(t.repository),
-                )
-                me.raise_for_status()
-                own_login = str((me.json() or {}).get("login") or "").casefold()
-                if not own_login:
+                own_logins = await self._own_github_logins(client, t.repository)
+                if not own_logins:
                     raise RuntimeError("the dispatcher's own GitHub login is unreadable")
                 comments = await self._all_issue_comments(t.repository, t.number, client)
                 existing = "\n".join(
                     (c.get("body") or "")
                     for c in comments
-                    if str((c.get("user") or {}).get("login") or "").casefold() == own_login
+                    if str((c.get("user") or {}).get("login") or "").casefold() in own_logins
                 )
                 fresh = sorted(
                     {
@@ -14465,8 +14993,7 @@ class SwarmDispatcher:
         except Exception as exc:  # notifier must never crash the pipeline
             log.error(f"[{DAEMON_NAME}] gate-launch-refusal notification failed: {exc}")
 
-        repo_token = _token_for_repo(t.repository)
-        if not repo_token:
+        if not await self._require_github_write_credential(t.repository, "surface gate launch refusals"):
             return
         parent_ref = f" on parent issue #{parent}" if parent else ""
         blocked_blocks = "\n\n".join(
@@ -14553,8 +15080,7 @@ class SwarmDispatcher:
         except Exception as exc:  # notifier must never crash the pipeline
             log.error(f"[{DAEMON_NAME}] re-auth notification failed: {exc}")
         # Post the reframed comment (dedup on the marker), best-effort.
-        repo_token = _token_for_repo(t.repository)
-        if not repo_token:
+        if not await self._require_github_write_credential(t.repository, "handle panel auth failure"):
             return
         url = (
             f"https://api.github.com/repos/{t.repository}/issues/"
@@ -14663,8 +15189,7 @@ class SwarmDispatcher:
         except Exception as exc:
             log.error(f"[{DAEMON_NAME}] review-incomplete notice failed: {exc}", exc_info=True)
 
-        repo_token = _token_for_repo(t.repository)
-        if not repo_token:
+        if not await self._require_github_write_credential(t.repository, "handle panel session limit"):
             return
         detail = completed_note + failed_note
         if auto_resume:
@@ -14764,12 +15289,9 @@ class SwarmDispatcher:
             )
             return
 
-        repo_token = _token_for_repo(t.repository)
-        if not repo_token:
-            log.warning(
-                f"[{DAEMON_NAME}] no GitHub token — Vanellus fallback comment "
-                f"skipped for {t.repository}#{t.number}"
-            )
+        if not await self._require_github_write_credential(
+            t.repository, "post missing vanellus comment", detail=f"{t.repository}#{t.number}"
+        ):
             return
 
         url = (

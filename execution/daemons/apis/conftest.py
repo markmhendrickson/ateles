@@ -99,9 +99,42 @@ def _isolate_lens_comment_identities(monkeypatch):
     monkeypatch.setenv(lens_authors.ENV_AUTHORS, "swarm-lens-account")
     for name in lens_authors.PAT_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
+    # Keep the real function reachable: a test of the App-login path restores it
+    # and stubs only the network boundary (`_github_app_token.bot_login`).
+    monkeypatch.setattr(
+        lens_authors, "_REAL_APP_BOT_LOGINS", lens_authors._app_bot_logins, raising=False
+    )
     monkeypatch.setattr(lens_authors, "_app_bot_logins", lambda: (set(), False))
     monkeypatch.setattr(lens_authors, "_login_for_token", lambda token: "")
     lens_authors.clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _default_github_write_credential(monkeypatch):
+    """Give every test the write credential a deployed dispatcher has, with no App.
+
+    The dispatcher's GitHub writes are skipped, with a WARNING, when no write
+    credential is usable (ateles#1381), so a test of what a write DOES needs
+    one. The fallback is applied inside `_resolve_github_write_token` rather than
+    through the environment, so it never changes which agent-token variables the
+    lens-identity lookups see. A fixture value, never a real token; the host's
+    real App is switched off so a test can never mint one. A test of the App
+    path or of the no-credential path restores the real resolver itself
+    (`REAL_RESOLVE_GITHUB_WRITE_TOKEN`).
+    """
+    import swarm_dispatch
+
+    real = swarm_dispatch._resolve_github_write_token
+    monkeypatch.setattr(
+        swarm_dispatch,
+        "_resolve_github_write_token",
+        lambda repo, app_token: real(repo, app_token) or "pat-conftest-fixture",
+    )
+    monkeypatch.setattr(swarm_dispatch, "_REAL_RESOLVE_GITHUB_WRITE_TOKEN", real, raising=False)
+    # Disable only dispatcher token minting. The shared helper also resolves
+    # per-lens Apps; mocking it globally erases those identities in their tests.
+    monkeypatch.setattr(swarm_dispatch, "_app_write_configured", lambda: False)
+    swarm_dispatch._clear_app_write_token_cache()
 
 
 @pytest.fixture(autouse=True)
