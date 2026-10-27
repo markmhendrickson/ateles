@@ -14,7 +14,7 @@ daemon: no dispatcher, Apis or gate process is involved.
 Usage:
     python3 execution/scripts/post_lens_verdict.py --repo <owner/name> --pr <n> \\
         --lens <pm|arch|ux|qa|security|...> --body-file <file> \\
-        [--head <40-hex sha>] [--token-env NAME] [--dry-run]
+        --head <40-hex sha the lens reviewed> [--token-env NAME] [--dry-run]
 
 The body file is the lens's reply: the attribution header line first, the
 verdict line (`**SIGNED_OFF**`, `**BLOCKED**`, ...) second, then the findings.
@@ -22,8 +22,10 @@ The head marker is composed here from the PR's CURRENT head; a body that already
 opens with that exact marker is accepted, one with any other marker is refused.
 
 What it refuses, before posting anything:
-  - `--head` given and different from the PR's current head (the verdict would
-    be pinned to a head the PR is no longer at);
+  - `--head` (required: the commit the lens actually reviewed) different from
+    the PR's current head, so the verdict is never pinned to a head the lens did
+    not review. After posting it re-reads the PR head and, if a push landed in
+    between, exits non-zero and says the comment is pinned to the older head;
   - a closed or merged PR, an unreadable head, a lens it does not know;
   - a body the approval tool's reader cannot read: the verdict must sit at the
     fixed position (`swarm_dispatch.lens_own_verdict`);
@@ -336,7 +338,7 @@ def post_verdict(
     pr: int,
     lens: str,
     body_text: str,
-    expected_head: str | None,
+    expected_head: str,
     identity: Identity,
     dry_run: bool = False,
 ) -> str:
@@ -348,15 +350,14 @@ def post_verdict(
     live = swarm_dispatch._normalise_full_sha(str((pr_data.get("head") or {}).get("sha") or ""))
     if not live:
         raise Refusal("could not read the PR's current head SHA")
-    if expected_head is not None:
-        given = swarm_dispatch._normalise_full_sha(expected_head)
-        if not given:
-            raise Refusal(f"--head {expected_head!r} is not a full 40-hex commit SHA")
-        if given != live:
-            raise Refusal(
-                f"the PR's head is {live[:12]}, not the {given[:12]} the review was run on; "
-                "re-run the lens on the current head (nothing posted)"
-            )
+    given = swarm_dispatch._normalise_full_sha(expected_head or "")
+    if not given:
+        raise Refusal(f"--head {expected_head!r} is not a full 40-hex commit SHA")
+    if given != live:
+        raise Refusal(
+            f"the PR's head is {live[:12]}, not the {given[:12]} the review was run on; "
+            "re-run the lens on the current head (nothing posted)"
+        )
     composed = compose_body(body_text, lens=lens, head=live)
     if len(composed.encode("utf-8")) > 60000:
         raise Refusal("the body is larger than a GitHub comment allows (60000 bytes)")
@@ -397,6 +398,17 @@ def post_verdict(
         or str((row.get("user") or {}).get("login") or "").casefold() != identity.login.casefold()
     ):
         raise Refusal("posted, but the read-back does not match what was sent; verify by hand")
+    # A push between the first read and the post would leave the verdict on a head
+    # the PR has moved past: say so rather than report a clean post.
+    again = _fetch_pr(client, repo, pr, identity)
+    live_after = swarm_dispatch._normalise_full_sha(str((again.get("head") or {}).get("sha") or ""))
+    if live_after != live:
+        raise Refusal(
+            f"the comment landed, but the PR head moved from {live[:12]} to "
+            f"{live_after[:12] or 'an unreadable head'} while it was posted; the verdict is "
+            "pinned to the older head and does not cover the new one. Re-run the lens on the "
+            "new head"
+        )
     return f"{'edited' if existing else 'posted'}: {row.get('html_url') or ''} ({summary})"
 
 
@@ -466,8 +478,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--body-file", required=True, help="the lens's reply (header, verdict, findings)")
     parser.add_argument(
         "--head",
-        default=None,
-        help="the 40-hex head the lens reviewed; refuse if the PR is no longer at it",
+        required=True,
+        help="the 40-hex head the lens reviewed; refuse if the PR is not at it",
     )
     parser.add_argument(
         "--token-env",

@@ -38,7 +38,21 @@ of characters except ``/``, ``?`` one such character, ``**`` any run including
 ``/`` (``a/**`` is everything under ``a/``, ``**/x.py`` is ``x.py`` at any
 depth), and a trailing ``/`` means everything under that directory. There is no
 negation and no basename-only matching: a pattern without ``/`` matches only a
-file at the repo root.
+file at the repo root. Matching ignores case and Unicode composition (casefold
+plus NFC on both the path and the glob), because the checkouts that run this
+tool are on case-insensitive filesystems: ``Execution/daemons/x.py`` is
+``execution/daemons/x.py``.
+
+The scope file's own path is always full-panel: a change to
+``.github/review_scope.json`` selects the full panel whether or not the file
+lists itself. A panel of one lens is chosen only when the choice is
+unambiguous: ``ux`` when EVERY changed file (a rename counts both its old and
+new path) is on ``ux_paths``, ``arch`` otherwise.
+
+``lens_scopes`` REPLACES the default carry rule for the lens it names; it can
+widen what re-runs as well as narrow it. With the broad scopes a repo like
+Ateles declares, a test-only delta re-runs arch and security, which the default
+rule would have carried. The file's author owns completeness in both directions.
 
 Fail closed on every input (docs/foundation/principles.md, "fail closed on the
 field that carries the safety meaning"): a missing, unreadable, oversized,
@@ -54,6 +68,7 @@ import base64
 import binascii
 import json
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -77,9 +92,15 @@ class ScopeError(ValueError):
 # ── globs ───────────────────────────────────────────────────────────────────
 
 
+def _norm(text: str) -> str:
+    """Case- and composition-insensitive form: NFC, casefold, NFC again."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", text).casefold())
+
+
 def _glob_regex(pattern: str) -> re.Pattern[str]:
     if not pattern or pattern.startswith("/") or "\\" in pattern or "\x00" in pattern:
         raise ScopeError(f"unusable glob {pattern!r}")
+    pattern = _norm(pattern)
     if pattern.endswith("/"):
         pattern += "**"
     out: list[str] = []
@@ -111,7 +132,7 @@ def compile_globs(patterns: Iterable[str]) -> tuple[re.Pattern[str], ...]:
 
 def first_match(path: str, globs: Sequence[re.Pattern[str]]) -> int | None:
     """Index of the first glob *path* matches, or None."""
-    norm = path[2:] if path.startswith("./") else path
+    norm = _norm(path[2:] if path.startswith("./") else path)
     for i, g in enumerate(globs):
         if g.match(norm):
             return i
@@ -130,22 +151,34 @@ class ReviewScope:
     def _globs(self, patterns: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
         return compile_globs(patterns)
 
-    def full_panel_trigger(self, files: Iterable[str]) -> tuple[str, str] | None:
-        """(file, matching glob) for the first changed file on a full-panel path."""
+    def full_panel_trigger(self, files: Iterable[str]) -> tuple[str, str, int] | None:
+        """(first file, its matching glob, how many MORE files match) for the
+        changed files on a full-panel path, or None."""
         globs = self._globs(self.full_panel_paths)
+        first: tuple[str, str] | None = None
+        more = 0
         for f in files:
             idx = first_match(f, globs)
-            if idx is not None:
-                return f, self.full_panel_paths[idx]
-        return None
+            if idx is None:
+                continue
+            if first is None:
+                first = (f, self.full_panel_paths[idx])
+            else:
+                more += 1
+        return None if first is None else (first[0], first[1], more)
 
-    def ux_trigger(self, files: Iterable[str]) -> tuple[str, str] | None:
+    def all_on_ux_paths(self, files: Iterable[str]) -> tuple[str, str] | None:
+        """(first file, its matching glob) when EVERY file is on ``ux_paths`` (and
+        there is at least one), else None."""
         globs = self._globs(self.ux_paths)
+        first: tuple[str, str] | None = None
         for f in files:
             idx = first_match(f, globs)
-            if idx is not None:
-                return f, self.ux_paths[idx]
-        return None
+            if idx is None:
+                return None
+            if first is None:
+                first = (f, self.ux_paths[idx])
+        return first
 
     def declares(self, lens: str) -> bool:
         return lens in self.lens_scopes
@@ -249,12 +282,19 @@ class PanelDecision:
     source: str
 
     def describe(self) -> str:
+        """One plain-words line: the panel, why, and where the scope file was read."""
         if self.full:
-            return f"panel mode: path -> FULL five-lens panel. {self.reason} Scope file: {self.source}."
-        return (
-            f"panel mode: path -> one lens ({self.lens}). {self.reason} "
-            f"Scope file: {self.source}."
-        )
+            head = "Panel: full five-lens panel, chosen by changed path."
+        else:
+            head = f"Panel: one lens ({self.lens}), chosen by changed path."
+        text = f"{head} {self.reason} Scope file read from {self.source}."
+        if not self.full:
+            text += (
+                " The other lenses were not required for this change; to require one, pass "
+                "`--lenses <lens>` to the approval tool, or have it post an objection on the "
+                "current head."
+            )
+        return text
 
 
 def select_path_panel(changed_files: Sequence[str], load: ScopeLoad) -> PanelDecision:
@@ -269,16 +309,22 @@ def select_path_panel(changed_files: Sequence[str], load: ScopeLoad) -> PanelDec
         return PanelDecision(
             True, "", "The changed-file list is empty or unreadable, so the full panel applies.", source
         )
+    scope_path = _norm(SCOPE_PATH)
+    if any(_norm(f) == scope_path for f in files):
+        return PanelDecision(
+            True, "", f"The change edits the scope file itself ({SCOPE_PATH}), which always needs the full panel.", source
+        )
     hit = load.scope.full_panel_trigger(files)
     if hit is not None:
+        more = f" (and {hit[2]} more changed file{'s' if hit[2] != 1 else ''} on full-panel paths)" if hit[2] else ""
         return PanelDecision(
-            True, "", f"`{hit[0]}` matches full_panel_paths `{hit[1]}`.", source
+            True, "", f"`{hit[0]}` matches full_panel_paths `{hit[1]}`{more}.", source
         )
-    ux = load.scope.ux_trigger(files)
+    ux = load.scope.all_on_ux_paths(files)
     if ux is not None:
         return PanelDecision(
-            False, "ux", f"`{ux[0]}` matches ux_paths `{ux[1]}`, and no changed file is on a full-panel path.", source
+            False, "ux", f"Every changed file is on ux_paths (for example `{ux[0]}` matches `{ux[1]}`) and none is on a full-panel path.", source
         )
     return PanelDecision(
-        False, "arch", "No changed file is on a full-panel or ux path, so architecture is the one lens.", source
+        False, "arch", "No changed file is on a full-panel path, and not every changed file is on ux_paths, so architecture is the one lens.", source
     )

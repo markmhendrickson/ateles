@@ -121,10 +121,19 @@ class TestPathPanel:
         d = rs.select_path_panel(["lib/a.py"], _load(GOOD))
         assert (d.full, d.lens) == (False, "arch")
 
-    def test_a_ui_change_is_ux(self):
-        d = rs.select_path_panel(["lib/a.py", "site/x.html"], _load(GOOD))
+    def test_a_change_wholly_on_ux_paths_is_ux(self):
+        d = rs.select_path_panel(["site/a.html", "site/x.html"], _load(GOOD))
         assert (d.full, d.lens) == (False, "ux")
-        assert "site/x.html" in d.reason
+        assert "site/a.html" in d.reason
+
+    def test_a_ui_file_beside_a_code_file_is_arch_not_ux(self):
+        """Item 6: ux only when EVERY changed file is on ux_paths."""
+        d = rs.select_path_panel(["lib/a.py", "site/x.html"], _load(GOOD))
+        assert (d.full, d.lens) == (False, "arch")
+
+    def test_a_rename_into_a_ux_path_from_code_is_arch(self):
+        d = rs.select_path_panel(["site/x.html", "lib/old_x.py"], _load(GOOD))
+        assert (d.full, d.lens) == (False, "arch")
 
     def test_a_risky_change_is_the_full_panel_even_with_ui_files(self):
         d = rs.select_path_panel(["site/x.html", "pay/send.py"], _load(GOOD))
@@ -141,8 +150,29 @@ class TestPathPanel:
 
     def test_the_description_names_the_mode_and_the_source(self):
         text = rs.select_path_panel(["lib/a.py"], _load(GOOD)).describe()
-        assert "panel mode: path" in text and "one lens (arch)" in text
+        assert text.startswith("Panel: one lens (arch), chosen by changed path.")
         assert ".github/review_scope.json" in text
+        assert "->" not in text
+        assert "--lenses" in text and "not required" in text
+
+    def test_a_full_panel_description_has_no_skipped_lens_note(self):
+        text = rs.select_path_panel(["pay/send.py"], _load(GOOD)).describe()
+        assert text.startswith("Panel: full five-lens panel, chosen by changed path.")
+        assert "not required" not in text
+
+    def test_the_scope_file_itself_is_always_full_panel(self):
+        d = rs.select_path_panel([".github/review_scope.json"], _load(GOOD))
+        assert d.full and "scope file itself" in d.reason
+        d = rs.select_path_panel([".GitHub/Review_Scope.json"], _load(GOOD))
+        assert d.full
+
+    def test_several_matches_are_counted(self):
+        d = rs.select_path_panel(["pay/a.py", "pay/b.py", "pay/c.py"], _load(GOOD))
+        assert "(and 2 more changed files on full-panel paths)" in d.reason
+        d = rs.select_path_panel(["pay/a.py", "pay/b.py"], _load(GOOD))
+        assert "(and 1 more changed file on full-panel paths)" in d.reason
+        d = rs.select_path_panel(["pay/a.py"], _load(GOOD))
+        assert "more changed" not in d.reason
 
 
 class TestThisRepoDeclaresItsOwnScope:
@@ -182,3 +212,81 @@ class TestThisRepoDeclaresItsOwnScope:
 
     def test_every_declared_lens_scope_is_a_known_lens(self):
         assert set(self._scope().lens_scopes) <= rs.KNOWN_LENSES
+
+
+class TestCaseAndUnicodeInsensitiveMatching:
+    """Item 3: daemons run from case-insensitive macOS checkouts."""
+
+    @pytest.mark.parametrize(
+        "path",
+        ["Execution/Daemons/x.py", "EXECUTION/DAEMONS/X.PY", "execution/daemons/X.py"],
+    )
+    def test_case_variants_match(self, path):
+        globs = rs.compile_globs(["execution/daemons/**"])
+        assert rs.first_match(path, globs) is not None
+
+    def test_a_dot_directory_in_any_case_matches(self):
+        globs = rs.compile_globs([".claude/**"])
+        assert rs.first_match(".Claude/hooks/x.py", globs) is not None
+
+    def test_a_glob_written_in_upper_case_matches_lower_case_paths(self):
+        globs = rs.compile_globs(["Execution/Daemons/**"])
+        assert rs.first_match("execution/daemons/x.py", globs) is not None
+
+    def test_composed_and_decomposed_forms_match(self):
+        composed = "docs/caf\u00e9/a.md"
+        decomposed = "docs/cafe\u0301/a.md"
+        assert rs.first_match(decomposed, rs.compile_globs(["docs/caf\u00e9/**"])) is not None
+        assert rs.first_match(composed, rs.compile_globs(["docs/cafe\u0301/**"])) is not None
+
+    def test_a_different_name_still_does_not_match(self):
+        assert rs.first_match("execution/daemon/x.py", rs.compile_globs(["execution/daemons/**"])) is None
+
+    def test_touches_lens_shares_the_matcher(self):
+        scope = rs.parse_scope(json.dumps({**GOOD, "lens_scopes": {"arch": ["Lib/**"]}}))
+        assert scope.touches_lens("arch", ["LIB/x.py"]) == "LIB/x.py"
+        assert scope.touches_lens("arch", ["libs/x.py"]) is None
+
+    def test_full_panel_trigger_and_ux_use_the_same_matcher(self):
+        scope = rs.parse_scope(json.dumps(GOOD))
+        assert scope.full_panel_trigger(["EXECUTION/DAEMONS/x.py"]) is not None
+        assert scope.all_on_ux_paths(["SITE/x.html"]) is not None
+
+
+class TestThisRepoScopeGaps:
+    """Item 5: paths the first review round found missing from Ateles's file."""
+
+    def _scope(self):
+        return rs.parse_scope((REPO_ROOT / rs.SCOPE_PATH).read_text())
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "scripts/lint.sh",
+            "scripts/anything/new_tool.py",
+            "execution/evals/some_eval/runner.py",
+            ".codex/hooks.json",
+            "execution/scripts/install_codex_hooks.py",
+            "execution/scripts/verify_gh_identity.py",
+            "execution/scripts/trigger_swarm_pr.py",
+            "execution/scripts/render_daemon_plist.py",
+            "execution/scripts/lanius_sweep.py",
+            "execution/scripts/triage_backfill_sweep.py",
+            "execution/scripts/check_foundation_anchors.py",
+            "execution/scripts/security_action_items/render_action_items.py",
+            "execution/local_llm/serve.py",
+            "conftest.py",
+            "execution/scripts/test_approve_pr_as_app.py",
+            "execution/scripts/test_post_lens_verdict.py",
+            "execution/scripts/sub/dir/rotate_key_helper.py",
+            "execution/scripts/sub/dir/my_secret_tool.py",
+            "Execution/Daemons/apis/apis.py",
+            ".Claude/hooks/gmail_send_gate.py",
+            ".CODEX/hooks.json",
+        ],
+    )
+    def test_is_full_panel(self, path):
+        assert self._scope().full_panel_trigger([path]) is not None, path
+
+    def test_codex_is_in_the_security_scope(self):
+        assert self._scope().touches_lens("security", [".codex/hooks.json"]) is not None

@@ -117,7 +117,8 @@ def _run(monkeypatch, tmp_path, client, *, body=GOOD_BODY, lens="arch", extra=()
     f = tmp_path / "body.md"
     f.write_text(body, encoding="utf-8")
     monkeypatch.setattr(target, "_new_client", lambda: client)
-    argv = ["--repo", REPO, "--pr", str(PR), "--lens", lens, "--body-file", str(f), *extra]
+    head_args = [] if "--head" in extra else ["--head", HEAD]
+    argv = ["--repo", REPO, "--pr", str(PR), "--lens", lens, "--body-file", str(f), *head_args, *extra]
     return target.main(argv)
 
 
@@ -366,7 +367,7 @@ def test_a_malformed_repo_is_refused(monkeypatch, tmp_path, bad):
     f = tmp_path / "b.md"
     f.write_text(GOOD_BODY)
     monkeypatch.setattr(target, "_new_client", lambda: _Client())
-    assert target.main(["--repo", bad, "--pr", "1", "--lens", "arch", "--body-file", str(f)]) == 1
+    assert target.main(["--repo", bad, "--pr", "1", "--lens", "arch", "--body-file", str(f), "--head", HEAD]) == 1
 
 
 def test_an_unknown_lens_is_refused(monkeypatch, tmp_path):
@@ -375,5 +376,38 @@ def test_an_unknown_lens_is_refused(monkeypatch, tmp_path):
 
 def test_an_unreadable_body_file_is_refused(monkeypatch, tmp_path):
     monkeypatch.setattr(target, "_new_client", lambda: _Client())
-    argv = ["--repo", REPO, "--pr", "1", "--lens", "arch", "--body-file", str(tmp_path / "missing.md")]
+    argv = ["--repo", REPO, "--pr", "1", "--lens", "arch", "--body-file", str(tmp_path / "missing.md"), "--head", HEAD]
     assert target.main(argv) == 1
+
+
+def test_head_is_required(monkeypatch, tmp_path, capsys):
+    """Item 4: a verdict is never posted without naming the head it reviewed."""
+    f = tmp_path / "b.md"
+    f.write_text(GOOD_BODY)
+    client = _Client()
+    monkeypatch.setattr(target, "_new_client", lambda: client)
+    with pytest.raises(SystemExit) as exc:
+        target.main(["--repo", REPO, "--pr", str(PR), "--lens", "arch", "--body-file", str(f)])
+    assert exc.value.code == 2
+    assert client.writes == []
+    assert "--head" in capsys.readouterr().err
+
+
+def test_a_push_during_the_post_is_reported_not_swallowed(monkeypatch, tmp_path, capsys):
+    """Item 4 (optional re-read): the PR head moved while the comment was posted."""
+    client = _Client()
+    reads = {"n": 0}
+    orig = client.get
+
+    def moving(url, headers=None, params=None):
+        if url.endswith(f"/pulls/{PR}"):
+            reads["n"] += 1
+            if reads["n"] >= 2:
+                client.head = OTHER_HEAD
+        return orig(url, headers=headers, params=params)
+
+    client.get = moving
+    assert _run(monkeypatch, tmp_path, client) == 1
+    out = capsys.readouterr().out
+    assert "head moved" in out and "pinned to the older head" in out
+    assert len(client.writes) == 1  # it did post; the exit code says it does not cover the new head

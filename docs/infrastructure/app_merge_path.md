@@ -11,7 +11,7 @@ Covers the session-run path only: select the panel, run the lenses as subagents,
 ## The rule
 
 - Lens selection is by changed path. The full five-role panel (pm, arch, ux, qa, security) reviews changes that touch external sending, payment, sign-in or authorization, data writes, schema, or the gate, approval and review machinery itself.
-- Any other change needs green CI plus the one lens whose scope it touches: ux for user-facing copy and UI, arch otherwise. A reviewer may still request another lens with a stated reason; a non-required lens that objects on the current head blocks the approval.
+- Any other change needs green CI plus the one lens whose scope it touches: ux when every changed file is user-facing copy or UI, arch otherwise. A reviewer may still request another lens with a stated reason: either run the approval tool with `--lenses <lens>` (it adds that lens to the required set), or have that lens post an objection on the current head, which blocks the approval until a clearing verdict retires it.
 - A lens's approval carries to a new head when the diff since its approved head does not touch that lens's scope. It is re-run only when its scope changed.
 
 ## The repo declares its own scope
@@ -21,29 +21,30 @@ Each repository declares what is risky for it in `.github/review_scope.json`:
 ```json
 {
   "version": 1,
-  "full_panel_paths": ["globs of risky paths"],
+  "full_panel_paths": [".github/review_scope.json", "globs of risky paths"],
   "ux_paths": ["globs of user-facing copy and UI"],
   "lens_scopes": {"security": ["globs"], "arch": ["globs"], "ux": ["globs"], "qa": ["globs"]}
 }
 ```
 
-- The file is read from the PR's **base branch**, never its head, so a PR cannot downgrade its own panel. A change to the file is reviewed under the previous version, and the file lists itself in `full_panel_paths` so that review is the full panel.
-- A missing, unreadable, malformed or empty-`full_panel_paths` file, an unrecognised key, and an empty changed-file list all select the **full panel**, and the tool says why. A new app repository therefore gets the full panel until it commits a scope file to its default branch.
-- `lens_scopes` is optional per lens. Where a lens has a declared scope, its earlier verdict carries only if no file in the delta since that head matches those globs. A lens with no declared scope keeps the default rule (every file counts as in scope, except a short allowlist of docs and tests). A declared scope can only narrow what re-runs, so list every path a lens would want to see again.
-- Globs match the whole repo-relative path: `*` stays within a directory, `**` crosses directories, a trailing `/` means everything below, and there is no basename-only matching. The format is documented in `execution/daemons/apis/review_scope.py`.
+- The file is read from the PR's **base branch**, never its head, so a PR cannot downgrade its own panel. The tool re-checks, just before it approves, that the PR still targets the branch the file was read from, and refuses if it was retargeted. A change to the file itself always selects the full panel, whether or not the file lists itself (list it anyway, as above, so the rule is visible).
+- A missing, unreadable, malformed or empty-`full_panel_paths` file, an unrecognised key, and an empty changed-file list all select the **full panel**, and the tool says why. So does a file list the tool cannot trust: the GitHub files API stops at 3000 files, and a list that reaches that cap, or whose length differs from the PR's own `changed_files` count, selects the full panel. A new app repository therefore gets the full panel until it commits a scope file to its default branch.
+- A rename counts both its new and its old path, so moving a file out of a full-panel path still triggers the full panel. One lens is chosen only when the choice is unambiguous: ux when **every** changed file is on `ux_paths`, arch otherwise.
+- `lens_scopes` is optional per lens. Where a lens has a declared scope, its earlier verdict carries only if no file in the delta since that head matches those globs. A lens with no declared scope keeps the default rule (every file counts as in scope, except a short allowlist of docs and tests). **A declared scope replaces the default rule for its lens, so it can widen what re-runs as well as narrow it.** With Ateles's broad scopes, a test-only delta re-runs arch and security as well as qa, where the default rule would have carried arch and security. List every path a lens should see again, and nothing it should not.
+- Globs match the whole repo-relative path, ignoring case and Unicode composition (the checkouts are case-insensitive, so `Execution/daemons/x.py` is `execution/daemons/x.py`): `*` stays within a directory, `**` crosses directories, a trailing `/` means everything below, and there is no basename-only matching. The format is documented in `execution/daemons/apis/review_scope.py`.
 - Ateles's own file is `.github/review_scope.json`. For an app repository, write one with the same shape; err on the side of putting a path in `full_panel_paths`.
 
 ## Steps
 
-All commands run from an ateles checkout, with the environment the swarm tools use (App id and private key for the swarm GitHub App; see `docs/swarm-trigger-layer.md`). Replace `<repo>` and `<n>`.
+All commands run from an ateles checkout, with the environment the swarm tools use: the swarm GitHub App must be configured through `ATELES_REVIEWER_APP_ID` and `ATELES_REVIEWER_APP_PRIVATE_KEY` (or `ATELES_REVIEWER_APP_PRIVATE_KEY_PATH`), and `ATELES_REVIEWER_APP_INSTALLATION_ID` if you want to skip the lookup; a lens with its own App uses `ATELES_APP_REVIEWER_<LENS>_ID` and `_PRIVATE_KEY(_PATH)`. `python3 lib/github_app_token.py status` lists which are set, by name only. See `docs/swarm-trigger-layer.md`. Replace `<repo>` and `<n>`.
 
 1. **Dry run the gate to see the panel.**
    `python3 execution/scripts/approve_pr_as_app.py --repo <repo> --pr <n>`
    The default is `--panel path`. It prints the mode, the file that triggered the full panel (or the lens chosen and why), and where the scope file was read from. `--panel all` and `--panel required` still exist.
 2. **Load the lens prompts** for the lenses it names from their `agent_definition` entities in Neotoma (Pavo pm, Waxwing arch, Falco security, Phoenicurus qa, Accipiter ux). Do not paraphrase them.
-3. **Run each lens as an independent subagent** on a read-only checkout of the exact head (`git worktree add --detach <path> <head sha>`, no write access, no credentials in its environment). One lens per subagent, no shared context between lenses, and none gets the author's reasoning. Each writes a reply whose first line is its attribution header and second line its verdict (`**SIGNED_OFF**`, `**BLOCKED**`, `**REQUEST_CHANGES**`, `**COMMENT**`).
+3. **Run each lens as an independent subagent** on a read-only checkout of the exact head (run `git worktree add --detach <path> <head sha>` inside the **app repository's own clone**, not the ateles checkout, then give the subagent only that path, read-only, with no credentials in its environment). One lens per subagent, no shared context between lenses, and none gets the author's reasoning. Each writes a reply whose first line is its attribution header and second line its verdict (`**SIGNED_OFF**`, `**BLOCKED**`, `**REQUEST_CHANGES**`, `**COMMENT**`).
 4. **Post each verdict:**
-   `python3 execution/scripts/post_lens_verdict.py --repo <repo> --pr <n> --lens <key> --body-file <reply file> --head <sha the lens reviewed>`
+   `python3 execution/scripts/post_lens_verdict.py --repo <repo> --pr <n> --lens <key> --body-file <reply file> --head <sha the lens reviewed>` (`--head` is required)
    By default it posts as the swarm GitHub App using an installation token minted for that repository, so it works on a private repository the App is installed on. `--token-env NAME` posts with a PAT instead. It refuses a head that moved, a verdict the approval tool cannot read, a sign-off that contains a blocking token, and an identity the approval tool would not admit as a lens author. A second post for the same head edits the first.
 5. **Approve:**
    `python3 execution/scripts/approve_pr_as_app.py --repo <repo> --pr <n> --apply`
@@ -53,6 +54,10 @@ All commands run from an ateles checkout, with the environment the swarm tools u
 ## No daemon is involved
 
 Every step above is a script that reads GitHub and, in steps 4 and 5, writes one comment or one review. The panel is chosen by `approve_pr_as_app.py` from the scope file; the verdicts are posted by the session; the approval is checked by the tool itself. The swarm dispatcher, Apis and the gate daemons are not called, are not consulted, and need not be running.
+
+## A repository with no CI cannot be approved
+
+The tool requires green required checks, and a head with no check runs and no commit statuses reads as not green: nothing has run, so nothing has passed. A repository with no CI therefore never reaches `APPROVED`; add at least one workflow (even a lint or build job) before using this path there.
 
 ## A repository without branch protection
 

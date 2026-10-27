@@ -799,3 +799,33 @@ class TestCombinedPassPartialFailures:
             assert "Combined pm/qa/ux pass" in body
             assert sd.sign_off_is_warranted(body, lens_agent=lens_by_name(lens).agent)
         assert "diff-only" in client.bodies[1]
+
+
+class TestADeclaredScopeCanWidenWhatReruns:
+    """Item 9: `lens_scopes` REPLACES the default rule, so it can widen as well
+    as narrow. The claim that it "can only narrow" was wrong; this pins the
+    accurate one."""
+
+    def test_a_scope_covering_the_tests_directory_reruns_a_lens_the_default_would_carry(self):
+        # Default rule: a test file belongs to qa alone, so arch carries.
+        base = _select_scoped(_round(OLD), _delta(TEST_FILE), None)
+        assert "arch" in base.carried
+        # Declared scope over execution/**: the same delta now re-runs arch.
+        sel = _select_scoped(_round(OLD), _delta(TEST_FILE), _declared(arch=["execution/**"]))
+        assert "arch" in sel.rerun and "arch" not in sel.carried
+
+    def test_with_this_repos_own_scope_a_test_only_delta_reruns_arch_security_and_qa(self):
+        scope = review_scope.parse_scope((REPO_ROOT / review_scope.SCOPE_PATH).read_text())
+        sel = _select_scoped(_round(OLD), _delta(TEST_FILE), scope)
+        assert sel.rerun == {"arch", "security", "qa"}
+        assert set(sel.carried) == {"pm", "ux"}
+
+    def test_with_this_repos_own_scope_a_docs_only_delta_carries_the_code_lenses(self):
+        scope = review_scope.parse_scope((REPO_ROOT / review_scope.SCOPE_PATH).read_text())
+        sel = _select_scoped(_round(OLD), _delta("docs/guide/how_to.md"), scope)
+        assert {"arch", "security", "qa"} <= set(sel.carried)
+        assert "ux" in sel.rerun
+
+    def test_a_case_variant_of_a_scope_path_still_reruns(self):
+        sel = _select_scoped(_round(OLD), _delta("Execution/scripts/x.py"), _declared(arch=["execution/**"]))
+        assert "arch" in sel.rerun

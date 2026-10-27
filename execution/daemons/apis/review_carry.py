@@ -34,7 +34,9 @@ a lens, that lens's verdict carries only if no file in the delta matches its
 globs. A lens with no declared scope keeps the allowlist rule above, and an
 unreadable or invalid scope file declares nothing, which carries LESS. Every
 other condition is unchanged: signed off at that head, never blocked, a
-non-empty readable delta.
+non-empty readable delta. A declared scope REPLACES the default rule for its
+lens, so it can widen what re-runs as well as narrow it (with broad scopes, a
+test-only delta re-runs the lenses whose scope covers the test's directory).
 
 The delta is ``review_delta.interdiff`` (ateles#1365): the fix's OWN change, so
 a merge of the base branch cancels out and never widens the touched areas.
@@ -199,6 +201,7 @@ class Carried:
     verdict: str
     url: str
     untouched: bool = True  # the fix since `head` touched none of its areas
+    basis: str = "areas"  # what it was judged on: "areas" or "declared scope"
 
 
 @dataclass(frozen=True)
@@ -266,7 +269,9 @@ def select_rerun(
                     f"the fix touched its declared scope since {cand.head[:7]} ({hit})"
                 )
                 continue
-            carried[lens] = Carried(lens, cand.head, cand.verdict, cand.url)
+            carried[lens] = Carried(
+                lens, cand.head, cand.verdict, cand.url, basis="declared scope"
+            )
             reasons[lens] = (
                 f"carried from {cand.head[:7]}: the fix touched none of its declared scope"
             )

@@ -30,7 +30,15 @@ is how a reviewer's request for another lens binds. The approval review states
 the mode, the file that triggered the full panel (or the lens chosen and why),
 and where the scope file was read from. Carry is by scope too: where the scope
 file declares `lens_scopes` for a lens, its earlier verdict carries iff no file
-in the delta since that head matches those globs (`review_carry`). The tool
+in the delta since that head matches those globs (`review_carry`). A declared
+scope REPLACES the default carry rule for its lens, so it can widen what re-runs
+as well as narrow it. The panel is chosen from the complete changed-file list
+(a rename counts its old path too); a list at the files API's 3000-file cap, or
+one that disagrees with the PR's own `changed_files`, selects the full panel.
+Matching ignores case (case-insensitive checkouts), a change to the scope file
+itself always needs the full panel, one lens is chosen only when every changed
+file is on `ux_paths` (else `arch`), and the PR's base branch is re-checked
+against the one the scope was read from just before approving. The tool
 needs no running daemon: a session loads the lens prompts, runs the lenses,
 posts each verdict with `post_lens_verdict.py`, and runs this tool
 (docs/infrastructure/app_merge_path.md). `--panel all` and `--panel required`
@@ -370,9 +378,13 @@ class LensOutcome:
         comment_url: str = "",
         reason: str = "",
         carried_from: str = "",
+        carried_basis: str = "areas",
     ) -> None:
         self.lens = lens
         self.agent = agent
+        # What the earlier head's sign-off was carried on: "areas" (the default
+        # allowlist rule) or "declared scope" (the repo's lens_scopes).
+        self.carried_basis = carried_basis
         # Full head SHA of an EARLIER round whose sign-off stands in for this
         # head's; "" when the lens reviewed the current head itself.
         self.carried_from = carried_from
@@ -498,9 +510,22 @@ class NonRequiredBlock:
         self.reason = reason
 
 
-async def _changed_files(client: httpx.AsyncClient, repo: str, pr: int) -> list[str]:
-    """Filenames touched by the PR — same endpoint `swarm_dispatch._changed_files` reads."""
+# GitHub's PR files endpoint returns at most this many files; a list that long
+# may have been cut off, and a cut-off list silently reads as a smaller change.
+PR_FILES_API_CAP = 3000
+
+
+async def _pr_files(
+    client: httpx.AsyncClient, repo: str, pr: int
+) -> tuple[list[str], int]:
+    """(every path the PR touches, how many file ROWS the API returned).
+
+    A rename counts BOTH its new and its old path (`previous_filename`), the same
+    rule `review_delta.interdiff` applies: a rename out of a protected path moves
+    the path a pattern would have matched.
+    """
     out: list[str] = []
+    rows_seen = 0
     page = 1
     while True:
         resp = await client.get(
@@ -510,11 +535,44 @@ async def _changed_files(client: httpx.AsyncClient, repo: str, pr: int) -> list[
         )
         resp.raise_for_status()
         rows = resp.json() or []
-        out.extend(f.get("filename", "") for f in rows)
+        rows_seen += len(rows)
+        for f in rows:
+            name = f.get("filename", "")
+            out.append(name)
+            previous = f.get("previous_filename")
+            if isinstance(previous, str) and previous and previous not in out:
+                out.append(previous)
         if len(rows) < 100:
             break
         page += 1
-    return out
+    return out, rows_seen
+
+
+async def _changed_files(client: httpx.AsyncClient, repo: str, pr: int) -> list[str]:
+    """Paths touched by the PR (renames include the old path) — the endpoint
+    `swarm_dispatch._changed_files` reads."""
+    return (await _pr_files(client, repo, pr))[0]
+
+
+def _file_list_problem(rows_seen: int, expected: object) -> str:
+    """Why the PR's file list cannot be trusted as complete, or "" when it can.
+
+    Fail closed: a list at the API cap may be truncated, and one that does not
+    match the PR's own `changed_files` count, or a PR that reports no count, is
+    not known to be complete.
+    """
+    if rows_seen >= PR_FILES_API_CAP:
+        return (
+            f"the PR lists {rows_seen} changed files, at or over the {PR_FILES_API_CAP}-file "
+            "limit of the GitHub files API, so the list may be truncated"
+        )
+    if isinstance(expected, bool) or not isinstance(expected, int):
+        return "the PR does not report how many files it changes, so the list cannot be checked"
+    if rows_seen != expected:
+        return (
+            f"the file list has {rows_seen} entries but the PR reports {expected} changed files"
+        )
+    return ""
 
 
 async def fetch_review_scope(
@@ -908,10 +966,10 @@ async def carry_earlier_signoffs(
                 comment_url=carried.url,
                 reason=(
                     f"carried from {carried.head[:7]}: the fix since then touched "
-                    "none of its "
-                    + ("declared scope" if scope is not None and scope.declares(outcome.lens) else "areas")
+                    f"none of its {carried.basis}"
                 ),
                 carried_from=carried.head,
+                carried_basis=carried.basis,
             )
         )
     return out
@@ -1502,6 +1560,7 @@ async def submit_app_approval(
     approver_label: str = "the swarm App",
     cleared_phrase: str = "every required review lens cleared",
     panel_note: str = "",
+    expected_base_ref: str = "",
 ) -> dict:
     """Mint an App installation token and submit a formal APPROVE review.
 
@@ -1584,6 +1643,15 @@ async def submit_app_approval(
             f"live={live_head or 'unreadable'}) — refusing to approve a head the panel "
             "did not clear"
         )
+    if expected_base_ref:
+        live_base = str((pr_data.get("base") or {}).get("ref") or "")
+        if live_base != expected_base_ref:
+            raise RuntimeError(
+                f"the PR's base branch moved between verification and submission "
+                f"(the review scope was read from {expected_base_ref!r}, the PR now targets "
+                f"{live_base or 'an unreadable base'!r}) — refusing to approve under a panel "
+                "chosen from another branch's scope file"
+            )
     pr_author = str((pr_data.get("user") or {}).get("login") or "")
     if not pr_author:
         raise RuntimeError("could not resolve PR author from the pre-submit re-fetch — refusing")
@@ -1591,6 +1659,7 @@ async def submit_app_approval(
     body_lines = [
         f"Approved by {approver_label} — {cleared_phrase} the "
         f"PR's current head `{head_sha}`.",
+        *([panel_note] if panel_note else []),
         "",
     ]
     carried_outcomes = [o for o in lens_outcomes if o.carried_from]
@@ -1607,7 +1676,7 @@ async def submit_app_approval(
                 f"- **{outcome.lens}** ({outcome.agent}): CARRIED FORWARD, "
                 f"`{outcome.verdict}` at head `{outcome.carried_from}` — "
                 f"{outcome.comment_url}. The fix since that head touched none of "
-                "this lens's areas, so it was not re-run."
+                f"its {outcome.carried_basis}, so it was not re-run."
             )
             continue
         body_lines.append(
@@ -1618,9 +1687,6 @@ async def submit_app_approval(
         body_lines.append("")
     for c in not_run:
         body_lines.append(f"- check `{c.name}` did not bind — {NOT_RUN_NO_RUNNER}: {c.reason}")
-    if panel_note:
-        body_lines.append("")
-        body_lines.append(panel_note)
     body_lines.append("")
     body_lines.append(f"head_sha={head_sha}")
     body = "\n".join(body_lines)
@@ -1814,6 +1880,7 @@ async def submit_approvals(
     check_outcomes: list[CheckOutcome] | None = None,
     pr_author: str = "",
     panel_note: str = "",
+    expected_base_ref: str = "",
 ) -> list[dict]:
     """Submit the APPROVE review(s), each as the App that matches who reviewed.
 
@@ -1848,6 +1915,7 @@ async def submit_approvals(
                 lens_outcomes=lens_outcomes,
                 check_outcomes=check_outcomes,
                 panel_note=panel_note,
+                expected_base_ref=expected_base_ref,
             )
         ]
 
@@ -1941,6 +2009,7 @@ async def submit_approvals(
                     else "every required review lens cleared"
                 ),
                 panel_note=panel_note,
+                expected_base_ref=expected_base_ref,
             )
             landed.append((", ".join(o.lens for o in lenses), login, review))
     except Exception as exc:
@@ -2137,6 +2206,8 @@ async def run(
             return 1
         pr_body = pr_data.get("body") or ""
         base_ref = str((pr_data.get("base") or {}).get("ref") or "")
+        # The branch the scope file is read from; re-checked at submit.
+        expected_base_ref = base_ref
 
         # The repo's declared review scope, from the BASE branch. Needed for
         # `--panel path` and for scope-based carry; any failure is "no scope".
@@ -2144,11 +2215,20 @@ async def run(
         panel_note = ""
         try:
             if panel_mode == "path":
+                list_problem = ""
                 try:
-                    changed = await _changed_files(client, repo, pr)
+                    changed, rows_seen = await _pr_files(client, repo, pr)
+                    list_problem = _file_list_problem(rows_seen, pr_data.get("changed_files"))
                 except Exception:  # noqa: BLE001 — unreadable list: full panel
                     changed = []
-                decision = review_scope.select_path_panel(changed, scope_load)
+                if list_problem:
+                    # An incomplete list reads as a smaller change: the full panel.
+                    decision = review_scope.PanelDecision(
+                        True, "", f"The changed-file list cannot be trusted ({list_problem}), so the full panel applies.",
+                        scope_load.source,
+                    )
+                else:
+                    decision = review_scope.select_path_panel(changed, scope_load)
                 panel_note = decision.describe()
                 print(panel_note)
                 lenses, required, excluded = await resolve_path_lenses(
@@ -2161,7 +2241,9 @@ async def run(
                 )
             else:
                 panel_note = (
-                    f"panel mode: {'all (the five-lens bootstrap panel)' if panel_all else 'required (diff-derived floor only)'}."
+                    "Panel: all five bootstrap lenses, chosen by --panel all."
+                    if panel_all
+                    else "Panel: the lenses the diff itself requires, chosen by --panel required."
                 )
                 lenses, required, excluded = await resolve_lenses(
                     client,
@@ -2351,6 +2433,7 @@ async def run(
                 check_outcomes=check_outcomes,
                 pr_author=str((pr_data.get("user") or {}).get("login") or ""),
                 panel_note=panel_note,
+                expected_base_ref=expected_base_ref,
             )
         except Exception as exc:
             print()
