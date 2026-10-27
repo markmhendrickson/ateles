@@ -262,3 +262,31 @@ again once the reading is fed.
 `APIS_USAGE_REFRESH_SECONDS` (600) while dispatches are running, and it counts
 toward the window it measures. It is skipped while Claude is cooling and when
 the reading is fresh.
+
+## A stale reading is unknown, and an outage is reported once
+
+**Stale means unknown.** A usage reading older than
+`APIS_HARNESS_USAGE_MAX_AGE_SECONDS` (default 21600, six hours) whose windows
+have not reset says nothing about now. `harness_usage.py show` reports that
+provider's `reading.state` as `unknown`, with `last_observed_at` and
+`age_seconds`, prints `headroom: null` and `headroom_source:
+unknown_stale_reading`, withholds the old `windows` (counted in
+`windows_withheld`) and names the neutral value selection would use in
+`headroom_used_for_selection`. The last values are never shown as current. A
+provider with no reading at all keeps `headroom_source: default`. The frontier
+usage gate has its own, tighter bound (`APIS_USAGE_STALE_SECONDS`, 30 minutes)
+and still refuses a gated provider on a reading older than that.
+
+**When no provider can run.** The dispatch error names every provider and its
+own reason (`claude: usage reading stale ...; codex: headroom=0.000 ...;
+cursor: binary unavailable`), not just the last one tested, and the Apis
+daemon sends one BLOCKER notification for the outage (notifier dedupe key
+`apis:no_provider_usable`). It is sent once; it repeats only after a dispatch
+has found a usable provider and the outage then recurs. A wait that ends by
+itself at a stated time (a cooling window, the weekly pace line) does not page.
+
+**A provider without authentication in the isolated review home** is reported
+as `authentication setup incomplete for provider ...`, naming what is missing
+(a Cursor subscription capability, Codex's login file, or
+`CLAUDE_CODE_OAUTH_TOKEN`). The runner never copies a credential into the home;
+supplying the login is the operator's.

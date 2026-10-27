@@ -46,7 +46,10 @@ without restarting Apis:
     positive availability (headroom ``1.0``), an explicit limit refusal supplies
     exhaustion, and every other result is ``unknown`` rather than exhausted.
     An observation older than ``APIS_HARNESS_USAGE_MAX_AGE_SECONDS`` (default
-    21600) whose windows have not reset carries no opinion.
+    21600) whose windows have not reset carries no opinion: ``usage_reading``
+    reports it as ``unknown`` (never as its last value) and
+    ``headroom_resolution`` labels the provider's headroom source
+    ``unknown_stale_reading`` instead of ``default``.
 
     A provider that refused with a session/usage-limit message is also held out
     by a per-provider ``cooling`` object in the same file, written by
@@ -200,6 +203,136 @@ def _override_layer() -> tuple[Mapping[str, object], float | None, str]:
     return {}, None, "none"
 
 
+def usage_max_age_seconds() -> float:
+    """Longest a usage observation may age before it carries no opinion (6 h).
+
+    One bound for everything that reads the snapshot's value: ``live_headroom``
+    and ``usage_reading`` both use it, so what the headroom ignores is also
+    what an operator-facing view shows as unknown. Configured by
+    ``APIS_HARNESS_USAGE_MAX_AGE_SECONDS``; a value that is not a finite
+    positive number falls back to the default.
+    """
+    try:
+        value = float(os.environ.get("APIS_HARNESS_USAGE_MAX_AGE_SECONDS", "21600"))
+    except ValueError:
+        return 21600.0
+    return value if math.isfinite(value) and value > 0 else 21600.0
+
+
+READING_FRESH = "fresh"
+READING_UNKNOWN = "unknown"
+READING_NONE = "none"
+
+
+@dataclass(frozen=True)
+class UsageReading:
+    """Whether a provider's recorded usage can be read as a current value.
+
+    ``state`` is ``fresh`` (the windows may be read as they stand),
+    ``unknown`` (an observation exists but is older than ``max_age_seconds``
+    and its windows have not reset: it says nothing about now) or ``none``
+    (never observed). ``observed_at`` and ``age_seconds`` describe the last
+    observation for an operator to read; they are never a stand-in value.
+    """
+
+    provider: str
+    state: str
+    observed_at: float | None
+    age_seconds: float | None
+    max_age_seconds: float
+    reason: str
+
+    @property
+    def is_unknown(self) -> bool:
+        return self.state == READING_UNKNOWN
+
+
+def usage_reading(provider: str, *, now_wall: float | None = None) -> UsageReading:
+    """Classify one provider's usage snapshot as fresh, unknown or never seen.
+
+    The age bound is ``usage_max_age_seconds`` (the same one ``live_headroom``
+    applies), so a reading older than it reads as ``unknown`` here exactly where
+    ``live_headroom`` returns ``None``: never as its last value. A recorded
+    exhaustion with a reset still in the future, and a snapshot whose windows
+    have all reset, are current by their own stated times and stay ``fresh``.
+    """
+    moment = time.time() if now_wall is None else now_wall
+    max_age = usage_max_age_seconds()
+    entry = _read_json_object(_usage_path()).get(provider)
+    if not isinstance(entry, dict):
+        return UsageReading(
+            provider, READING_NONE, None, None, max_age, "never observed"
+        )
+    exhausted_until = _wall_from_iso(entry.get("exhausted_until"))
+    if exhausted_until is not None and exhausted_until > moment:
+        return UsageReading(
+            provider, READING_FRESH, _wall_from_iso(entry.get("observed_at")), None,
+            max_age, f"exhaustion recorded until {render_wall(exhausted_until)}",
+        )
+    windows = entry.get("windows")
+    has_windows = isinstance(windows, list) and bool(windows)
+    probe = entry.get("probe") if isinstance(entry.get("probe"), dict) else None
+    entry_observed = _wall_from_iso(entry.get("observed_at"))
+    probe_observed = _wall_from_iso(probe.get("observed_at")) if probe else None
+    # The SAME predicate live_headroom applies. With windows, the windows' own
+    # observation time decides: a refresh probe that FAILED later writes a newer
+    # probe time beside the old windows, and must not make those windows current
+    # (that is the 2026-10-27 shape: stale since the 21st, probe failing since).
+    # Only an entry with no windows is judged by its probe.
+    observed_at = (
+        entry_observed if has_windows or probe_observed is None else probe_observed
+    )
+    if observed_at is None:
+        return UsageReading(
+            provider, READING_NONE, None, None, max_age, "no valid observed_at"
+        )
+    age = max(0.0, moment - observed_at)
+    if not has_windows and provider in WEEKLY_PACED_PROVIDERS:
+        # live_headroom takes no opinion here either: a bare availability
+        # observation is not budget evidence for a provider paced weekly.
+        return UsageReading(
+            provider, READING_UNKNOWN, observed_at, age, max_age,
+            f"no usage windows recorded for {provider}; a capacity observation at "
+            f"{render_wall(observed_at)} does not say how much weekly budget is left",
+        )
+    if not has_windows and probe is not None and probe.get("status") == "unknown":
+        # A current observation that capacity could not be read is not a reading.
+        detail = str(probe.get("detail") or "no detail")
+        return UsageReading(
+            provider, READING_UNKNOWN, observed_at, age, max_age,
+            f"the capacity probe at {render_wall(observed_at)} could not read "
+            f"usage: {detail}",
+        )
+    if age <= max_age:
+        return UsageReading(
+            provider, READING_FRESH, observed_at, age, max_age,
+            f"observed {render_wall(observed_at)}",
+        )
+    resets = (
+        [_wall_from_iso(w.get("resets_at")) for w in windows if isinstance(w, dict)]
+        if has_windows else []
+    )
+    if resets and all(r is not None and r <= moment for r in resets):
+        return UsageReading(
+            provider, READING_FRESH, observed_at, age, max_age,
+            "every recorded window has reset",
+        )
+    return UsageReading(
+        provider, READING_UNKNOWN, observed_at, age, max_age,
+        f"last observed {render_wall(observed_at)} ({_render_age(age)} ago), older "
+        f"than the {_render_age(max_age)} bound (APIS_HARNESS_USAGE_MAX_AGE_SECONDS); "
+        "the last values are not a current reading",
+    )
+
+
+def _render_age(seconds: float) -> str:
+    if seconds >= 86400:
+        return f"{seconds / 86400:.1f} days"
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f} h"
+    return f"{max(1, int(seconds // 60))} min"
+
+
 def live_headroom(provider: str, *, now_wall: float | None = None) -> float | None:
     """Return headroom derived from the live usage snapshot, or ``None``.
 
@@ -222,10 +355,7 @@ def live_headroom(provider: str, *, now_wall: float | None = None) -> float | No
     probe_observed = (
         _wall_from_iso(probe.get("observed_at")) if isinstance(probe, dict) else None
     )
-    try:
-        max_age = float(os.environ.get("APIS_HARNESS_USAGE_MAX_AGE_SECONDS", "21600"))
-    except ValueError:
-        max_age = 21600.0
+    max_age = usage_max_age_seconds()
     probe_fresh = (
         probe_observed is not None and 0 <= moment - probe_observed <= max_age
     )
@@ -333,6 +463,10 @@ HEADROOM_SOURCE_LIVE_USAGE = "live_usage_snapshot"
 HEADROOM_SOURCE_LIVE_PROBE = "live_provider_probe"
 HEADROOM_SOURCE_UNDATED_OVERRIDE = "undated_override"
 HEADROOM_SOURCE_DEFAULT = "default"
+# A usage reading exists but is older than ``usage_max_age_seconds``: headroom
+# is UNKNOWN. The numeric value carried with it is the neutral default, not the
+# reading's last value.
+HEADROOM_SOURCE_UNKNOWN = "unknown_stale_reading"
 
 
 def headroom_resolution(
@@ -421,7 +555,15 @@ def headroom_resolution(
                 result[provider] = (live, source)
                 continue
         if undated is None:
-            result[provider] = (1.0, HEADROOM_SOURCE_DEFAULT)
+            # No override and no current reading. When a reading EXISTS but is
+            # too old to read, say so: the value is still the router's neutral
+            # 1.0 (selection is unchanged; the usage gate separately refuses a
+            # gated provider on a stale reading), but the source is "unknown",
+            # not "default", so no view presents it as a measured full tank.
+            stale = mac_readings and usage_reading(provider, now_wall=moment).is_unknown
+            result[provider] = (
+                1.0, HEADROOM_SOURCE_UNKNOWN if stale else HEADROOM_SOURCE_DEFAULT
+            )
         else:
             result[provider] = (undated, HEADROOM_SOURCE_UNDATED_OVERRIDE)
     return result
@@ -1227,6 +1369,35 @@ def provider_exclusion_reason(
         moment_wall=now_wall,
         fly_bound=fly_bound,
     )
+
+
+def provider_exclusion_reasons(
+    available: Mapping[str, str | None],
+    *,
+    now: float | None = None,
+    now_wall: float | None = None,
+    fly_bound: Collection[str] = (),
+    fly_extra: Collection[str] = (),
+) -> dict[str, str]:
+    """``{provider: why it cannot run}`` for every candidate provider.
+
+    The all-providers form of ``provider_exclusion_reason``: a provider that is
+    eligible is absent, so an empty result means something can run, and a
+    result naming every candidate is an outage with each provider's own reason.
+    A stale usage reading is named as unknown, with the reading's age.
+    """
+    moment = time.monotonic() if now is None else now
+    headroom = _headroom_for(fly_bound, now_wall=now_wall)
+    minimum = minimum_headroom()
+    reasons: dict[str, str] = {}
+    for provider in _candidate_order(fly_extra):
+        reason = _provider_exclusion_reason(
+            provider, available, headroom=headroom, minimum=minimum, moment=moment,
+            moment_wall=now_wall, fly_bound=fly_bound,
+        )
+        if reason is not None:
+            reasons[provider] = reason
+    return reasons
 
 
 def usable_provider_names(
