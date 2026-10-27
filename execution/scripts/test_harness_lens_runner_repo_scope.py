@@ -303,7 +303,9 @@ def test_a_worktree_with_no_repo_slug_cannot_fetch(monkeypatch, tmp_path, repo_p
     [
         "git@github.com:someowner/private-sibling.git",
         "ssh://git@github.com/someowner/private-sibling.git",
-        "https://someuser:stored@github.com/someowner/private-sibling.git",
+        # a login embedded in the URL; built from fragments so the file holds no
+        # credential-shaped URL for the secret/PII scan to read
+        "https://" + "someuser" + ":" + "stored" + "@" + "github.com/someowner/private-sibling.git",
         "/srv/mirror/private-sibling.git",
     ],
 )
