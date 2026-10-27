@@ -958,12 +958,12 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
         return result
     if result is not None and result.fly_delivery_status:
         summary = build_delivery.fly_delivery_summary(result, plan.key)
-        log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary}")
+        # The runner's record is its own report. run_fly_delivery read the real
+        # PR back; it counts only when it is exactly what was reported.
         unverified = ""
         if result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
-            # The runner's record is its own report. Read the real PR back and
-            # require it to be exactly what was reported before it counts.
-            unverified = await build_delivery.verify_fly_delivery(result, plan) or ""
+            unverified = ("" if result.fly_delivery_readback == "passed"
+                          else result.fly_delivery_readback_reason or "the read-back did not run")
         if (result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url
                 and not unverified):
             # The runner opens the PR after the model exits. Its read-back
@@ -977,6 +977,13 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
             result.ok = False
             result.error = (f"Fly delivery not verified: {unverified}. {summary}"
                             if unverified else summary)
+        if result.fly_delivery_readback == "passed":
+            log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary} Read-back: passed.")
+        elif result.fly_delivery_readback == "failed":
+            log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary} "
+                     f"Read-back FAILED: {result.fly_delivery_readback_reason}.")
+        else:
+            log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary}")
     return result
 
 

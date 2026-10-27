@@ -7091,10 +7091,11 @@ class SwarmDispatcher:
             if result is not None:
                 summary = build_delivery.fly_delivery_summary(result, plan.key)
                 if result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
-                    # The runner's record is its own report: read the real PR
-                    # back, and hand on no PR that is not exactly what it reported.
-                    unverified = await build_delivery.verify_fly_delivery(result, plan)
-                    if unverified:
+                    # The runner's record is its own report: run_fly_delivery
+                    # read the real PR back; hand on none that did not match.
+                    if result.fly_delivery_readback != "passed":
+                        unverified = (result.fly_delivery_readback_reason
+                                      or "the read-back did not run")
                         raise build_delivery.FlyDeliveryEnded(
                             f"Fly delivery not verified: {unverified}. {summary}")
                     self.notifier.send(summary, priority=Priority.INFO, handler=DAEMON_NAME)

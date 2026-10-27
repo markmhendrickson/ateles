@@ -1028,12 +1028,24 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
                                "another dispatch; not starting the local path")
             return result
         return None if result.fly_ineligible_before_launch else result
+    if result.fly_delivery_status in {"opened", "updated"} and result.fly_pr_url:
+        # The runner's record is its own report: read the real PR back before
+        # the outcome is recorded or logged, so a receipt says whether it held.
+        try:
+            reason = await verify_fly_delivery(result, plan)
+        except Exception as exc:  # noqa: BLE001 - an unread PR is not verified
+            reason = f"read-back error: {type(exc).__name__}"
+        result.fly_delivery_readback = "failed" if reason else "passed"
+        result.fly_delivery_readback_reason = reason or ""
+    else:
+        result.fly_delivery_readback = "not_applicable"
     try:
         settled = _settle_delivery(plan, token, {
             "status": result.fly_delivery_status or "unknown", "branch": plan.branch,
             "run_id": result.remote_run_id, "commit": result.fly_delivery_commit,
             "reason": result.fly_delivery_reason, "pr_number": result.fly_pr_number,
-            "pr_url": result.fly_pr_url})  # fmt: skip
+            "pr_url": result.fly_pr_url, "readback": result.fly_delivery_readback,
+            "readback_reason": result.fly_delivery_readback_reason})  # fmt: skip
     except (OSError, ValueError):
         settled = True  # unreadable: the reservation stays as it was written
     if not settled:

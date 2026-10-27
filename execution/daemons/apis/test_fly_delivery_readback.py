@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -136,3 +137,79 @@ def test_a_failed_readback_keeps_the_receipt_so_nothing_is_redelivered(
     github_pr["answer"] = (0, json.dumps(MISMATCHES["head commit"]), "")
     assert not asyncio.run(run_task()).ok
     assert delivery.fly_delivery_blocker(KEY)
+
+
+def _plan():
+    return delivery.FlyDeliveryPlan(REPO, base.BRANCH, "main", KEY, 123)
+
+
+def _deliver(monkeypatch, status="opened", verdict=None):
+    calls = []
+
+    async def verify(res, plan):
+        calls.append(res.fly_pr_url)
+        return verdict
+
+    monkeypatch.setattr(delivery, "verify_fly_delivery", verify)
+
+    async def launch():
+        return result(status)
+
+    got = asyncio.run(delivery.run_fly_delivery(_plan(), launch, lambda r: r))
+    return got, delivery._delivery_ledger().delivery_receipts()[KEY], calls
+
+
+def test_a_failed_readback_is_recorded_on_the_receipt(monkeypatch):
+    got, receipt, calls = _deliver(monkeypatch, verdict="commit differs")
+    assert calls and got.fly_delivery_readback == "failed"
+    assert receipt["readback"] == "failed" and receipt["readback_reason"] == "commit differs"
+    # The runner's own status stays as it reported it.
+    assert receipt["status"] == "opened"
+
+
+def test_a_passing_readback_is_recorded_on_the_receipt(monkeypatch):
+    got, receipt, _ = _deliver(monkeypatch)
+    assert got.fly_delivery_readback == "passed"
+    assert receipt["readback"] == "passed" and receipt["readback_reason"] == ""
+
+
+def test_no_pull_request_means_no_readback(monkeypatch):
+    got, receipt, calls = _deliver(monkeypatch, status="no_changes")
+    assert calls == [] and got.fly_delivery_readback == "not_applicable"
+    assert receipt["readback"] == "not_applicable" and receipt["status"] == "no_changes"
+
+
+def test_a_readback_that_raises_is_a_failed_readback(monkeypatch):
+    async def boom(res, plan):
+        raise RuntimeError("gh exploded")
+
+    monkeypatch.setattr(delivery, "verify_fly_delivery", boom)
+
+    async def launch():
+        return result()
+
+    got = asyncio.run(delivery.run_fly_delivery(_plan(), launch, lambda r: r))
+    assert got.fly_delivery_readback == "failed"
+    assert got.fly_delivery_readback_reason == "read-back error: RuntimeError"
+
+
+@pytest.mark.parametrize("verdict", [None, "commit differs"])
+def test_the_task_summary_is_logged_only_after_the_readback(monkeypatch, caplog, verdict):
+    launch(monkeypatch)
+    seen = []
+
+    async def verify(res, plan):
+        seen.append([r.getMessage() for r in caplog.records
+                     if "opened pull request" in r.getMessage()])
+        return verdict
+
+    monkeypatch.setattr(delivery, "verify_fly_delivery", verify)
+    with caplog.at_level(logging.INFO):
+        got = asyncio.run(run_task())
+    assert seen == [[]]  # nothing claimed the PR before it was read back
+    lines = [r.getMessage() for r in caplog.records if "opened pull request" in r.getMessage()]
+    assert len(lines) == 1
+    if verdict:
+        assert not got.ok and "Read-back FAILED: commit differs." in lines[0]
+    else:
+        assert got.ok and lines[0].endswith("Read-back: passed.")
