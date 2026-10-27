@@ -137,6 +137,14 @@ it blocking unless its exact label set is on
 `KNOWN_UNPROVISIONED_RUNNER_LABEL_SETS`; a completed check with a failing
 conclusion always blocks. See `_unscheduled_non_required_reason`.
 
+Three-round cap (operator ruling 2026-10-27, `review_rounds`): a repair unit
+not merged after three build, review and correct rounds is split or cut in scope
+before another round runs. A round is a distinct head that received a lens
+verdict (the swarm's own verdict comments and their `commit=` markers). When the
+head being approved would be a fourth round or later, the tool prints "round cap
+reached: split or cut scope" and refuses, whatever the lenses said. There is no
+override: the unit is split or cut in scope and continues in a fresh PR.
+
 Usage:
     python3 execution/scripts/approve_pr_as_app.py --repo <owner/name> --pr <n> \\
         [--lenses pm,security] [--panel {path,required,all}] [--no-carry] [--apply]
@@ -219,6 +227,7 @@ import httpx  # noqa: E402
 from lib import github_app_token as _github_app_token  # noqa: E402
 
 import review_carry  # noqa: E402
+import review_rounds  # noqa: E402
 import review_scope  # noqa: E402
 import lens_authors  # noqa: E402
 from review_panel import LENSES, Lens, select_panel  # noqa: E402
@@ -2509,6 +2518,16 @@ async def run(
             authors = frozenset()
         _print_ignored(lens_authors.ignored_lens_comments(comments, authors), authors)
 
+        # The three-round cap (operator ruling 2026-10-27). Counted from the same
+        # author-scoped lens records the gate reads, so an outside account's marker
+        # is never a round.
+        rounds = review_rounds.round_status(
+            lens_records(lens_authors.scope_lens_comments(comments, authors)),
+            head_sha,
+        )
+        print(rounds.describe())
+        print()
+
         lens_outcomes: list[LensOutcome] = []
         for lens in lenses:
             outcome = await evaluate_lens(
@@ -2593,6 +2612,7 @@ async def run(
             and no_non_required_blocks
             and not unadmitted
             and checks_green
+            and not rounds.refused
         )
 
         print(f"head_sha={head_sha}")
@@ -2603,6 +2623,10 @@ async def run(
         )
         print(f"non-swarm objections: {'HELD' if unadmitted else 'NONE'}")
         print(f"checks: {'GREEN' if checks_green else 'NOT GREEN'}")
+        print(
+            "round cap: "
+            + ("REACHED (split or cut scope)" if rounds.refused else "OK")
+        )
         print(f"overall: {'PASS' if overall_pass else 'FAIL'}")
 
         # Who would approve, worked out BEFORE the apply branch so that the real
