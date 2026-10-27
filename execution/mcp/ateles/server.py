@@ -938,12 +938,15 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
     if policy:
         result["execution_policy"] = policy
     # Same resolution the dispatcher's gate applies (ateles#682): a declared
-    # action_type is taken as given; otherwise the matched agent's prior, which
-    # the task description can only ESCALATE, and only where that is strictly
-    # stricter under THIS policy. Before this, a caller who omitted
-    # `action_type` got no blast classification at all. `action_type_source` says
-    # which of declared / content / agent_prior the verdict rests on. With no
-    # policy to compare under there is no escalation, only the prior.
+    # action_type is taken as given unless the policy calls it LOW and the
+    # description names an outward action, in which case the text escalates it
+    # (a high, never or unrecognized declaration is never changed); otherwise the
+    # matched agent's prior, which the task description can only ESCALATE, and
+    # only where that is strictly stricter under THIS policy. Before this, a
+    # caller who omitted `action_type` got no blast classification at all.
+    # `action_type_source` says which of declared / declared_escalated / content /
+    # agent_prior the verdict rests on. With no policy to compare under there is
+    # no escalation, only the prior.
     #
     # Limit: the preview reads the description only. The dispatcher reads the
     # task's title, body and description fields, so a phrase in a field this
@@ -962,7 +965,9 @@ def _route_task(task_description: str, action_type: str | None = None) -> dict:
         verdict=verdict,
     )
     if resolved.value:
-        # A declared value is echoed exactly as the caller wrote it, as before.
+        # A declared value is echoed exactly as the caller wrote it, unless the
+        # description's text escalated it (source "declared_escalated"), in which
+        # case the escalated type is reported and action_type_note names the verb.
         result["action_type"] = (
             action_type if action_type and resolved.source == "declared" else resolved.value
         )
@@ -3387,7 +3392,10 @@ TOOLS = [
             "complete dispatch context in one call. Returns the blast radius the "
             "dispatcher's gate would assign: from action_type when passed, else "
             "from the matched agent, which the description can only make "
-            "stricter (action_type_source says which). A preview, not the "
+            "stricter (action_type_source says which). A low declared type "
+            "whose text names an outward action is reported as the escalated "
+            "type, with action_type_source 'declared_escalated' and an "
+            "action_type_note naming the action. A preview, not the "
             "decision: it reads only this description, while the dispatcher "
             "reads the task's title, body and description."
         ),
@@ -3402,7 +3410,9 @@ TOOLS = [
                     "type": "string",
                     "description": (
                         "Optional action type (e.g. 'git_push', 'payment', 'publish') "
-                        "to classify blast radius under the resolved policy."
+                        "to classify blast radius under the resolved policy. "
+                        "A low type is escalated when the description names an "
+                        "outward action; a high type is never lowered."
                     ),
                 },
             },

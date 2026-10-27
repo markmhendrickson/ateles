@@ -350,8 +350,12 @@ _VERBS: list[tuple[str, str, str, str]] = [
     (
         "wire",
         "payment",
-        r"wir(?:e|ing)\s+(?:the\s+|a\s+|an\s+)?(?:money|funds?|payment|transfer|"
-        r"deposit|\d|[\u20ac$\u00a3])",
+        # The object is consumed whole (a named thing, or an amount with an
+        # optional currency symbol and word) because the trailing word-boundary
+        # check in _compile_verbs would otherwise reject "$500" and "200 euros".
+        r"wir(?:e|ing)\s+(?:the\s+|a\s+|an\s+)?(?:(?:money|funds?|payment|transfer|"
+        r"deposit)|[\u20ac$\u00a3]?\s?\d[\d.,]*\s?(?:k|m|eur|euros?|usd|dollars?|"
+        r"gbp|pounds?)?)",
         "",
     ),
     (
