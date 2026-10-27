@@ -4113,6 +4113,13 @@ class TestThisRepoScopeThroughTheApprovalTool:
         assert "Panel: full five-lens panel" in client.posted[0]["json"]["body"]
 
     async def test_an_objection_from_a_non_required_lens_still_refuses(self, monkeypatch):
+        # A tests-only change requires arch alone, and arch has signed off. The
+        # control run proves that is enough to approve; the same comments plus a
+        # security objection (a lens this path did not require) must refuse. The
+        # refusal can only come from the objection, because nothing else differs.
+        reduced = ["execution/scripts/test_hallucination_filter.py"]
+        control = _path_client(reduced, _all_clear_comments(["arch"]), scope=_repo_scope())
+        assert await _run_path(monkeypatch, control) == 0
         objection = _comment(
             9,
             _lens_comment_body(
@@ -4120,8 +4127,7 @@ class TestThisRepoScopeThroughTheApprovalTool:
             ),
             author=SWARM_LOGIN,
         )
-        comments = _all_clear_comments(["arch"]) + [objection]
-        client = _path_client(["docs/guide/how_to.md"], comments, scope=_repo_scope())
+        client = _path_client(reduced, _all_clear_comments(["arch"]) + [objection], scope=_repo_scope())
         assert await _run_path(monkeypatch, client) == 1
         assert client.posted == []
 
