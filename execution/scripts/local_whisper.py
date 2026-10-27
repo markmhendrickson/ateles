@@ -85,6 +85,13 @@ DEFAULT_WHISPER_CLI = "whisper-cli"
 # prose, not an empty string and not "." — the operator must be able to tell
 # "nobody spoke" from "transcription failed" when reading it back months later.
 #
+# Shared prefix a caller can check WITHOUT parsing either template's format
+# fields, so a downstream consumer (live_transcript_tail.py's own,
+# independent hallucination-filter pass) can recognize "this text is already
+# a no-speech marker from the batch path" and treat it as silence rather than
+# re-screening the marker's own prose as if it were a fresh transcript.
+NO_SPEECH_MARKER_PREFIX = "[NO SPEECH DETECTED"
+#
 # Two markers because there are two genuinely different detections, caught by two
 # different instruments:
 NO_SPEECH_MARKER_LEVEL = (
