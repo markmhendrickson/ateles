@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 
@@ -1832,3 +1833,41 @@ def test_server_error_detail_reads_the_code_and_message_wherever_they_sit(
     payload, expected
 ):
     assert gating_module._server_error_detail(_FakeHttpError(payload)) == expected
+
+
+def _envelope_for(confidence_unscored: bool) -> dict:
+    task_record = {
+        "entity_id": "ent_task",
+        "entity_type": "task",
+        "observation_count": 2,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"status": "awaiting_approval", "body": "approved effect"},
+    }
+    policy = _default()
+    decision = evaluate_gate(
+        confidence=0.76,
+        action_type="local_edit",
+        policy=policy,
+        confidence_unscored=confidence_unscored,
+    )
+    return json.loads(
+        gating_module.build_checkpoint_authorization_envelope(
+            task_record=task_record,
+            policy=policy,
+            decision=decision,
+            action_type="local_edit",
+            user_id="tenant-a",
+            required_approver_jkt="A" * 43,
+            producer_jkt="P" * 43,
+        )
+    )
+
+
+def test_envelope_binds_the_estimate_only_for_an_unscored_hold():
+    unscored = _envelope_for(True)
+    assert unscored["confidence"] == 0.76
+    assert unscored["confidence_unscored"] is True
+
+    scored = _envelope_for(False)
+    assert "confidence" not in scored
+    assert "confidence_unscored" not in scored

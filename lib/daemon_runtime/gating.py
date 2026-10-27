@@ -808,6 +808,15 @@ def build_checkpoint_authorization_envelope(
         "gate_action": decision.action.value,
         "blast_radius": decision.blast_radius.value,
     }
+    if decision.confidence_unscored:
+        # The hold judged a task nobody scored on an estimate the task snapshot
+        # does not carry (a mechanical score, or a producer's).  Bind it so the
+        # release re-judges the approval on the same number the operator was
+        # shown.  An explicitly scored task binds nothing: its confidence is in
+        # the task revision, and a lowered score must re-gate on its CURRENT
+        # value.
+        payload["confidence"] = decision.confidence
+        payload["confidence_unscored"] = True
     return _canonical_json(payload)
 
 
