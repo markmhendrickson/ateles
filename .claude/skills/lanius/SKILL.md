@@ -35,14 +35,16 @@ When invoked on a **new GitHub issue**:
 When invoked on a **PR opened** event:
 1. Find the parent issue entity from the PR body (looks for `closes #N` or `fixes #N`).
 2. Load parent issue entity gate_status.
-3. **Enforce PR gate inheritance**: if any pre-impl gate (pm, ux, arch) is not signed_off/waived on the parent issue, block the PR with a GitHub comment listing the pending gates.
-4. If all pre-impl gates are clear: assign Vanellus as reviewer.
+3. **Enforce PR gate inheritance by reporting, not posting**: if any pre-impl gate (pm, ux, arch) is not signed_off/waived on the parent issue, report `GATE_INHERITANCE: blocked` and a `GATE_PENDING:` line naming the pending gates. Do NOT post a comment yourself: the dispatcher posts the gate-block comment (pending gates, their owners, the operator override and the resolution path) from your report.
+4. If all pre-impl gates are clear: report `GATE_INHERITANCE: clear`. Do NOT assign or request a reviewer yourself: the dispatcher routes Vanellus from your report. On this event you make no GitHub writes at all.
 
 **Naming rule for gate owners**: always name gate owners by their CURRENT canonical agent name, resolved from the `agent_definition` entity (not from memory or a cached table). An agent that has been renamed keeps its old name only as an entity alias; a GitHub comment that names a retired alias points the operator at a command that no longer exists and stalls the gate. When in doubt, `retrieve_entity_by_identifier(entity_type='agent_definition', identifier=<name>)` and use the `name` field of the returned entity.
 
 **Gate state must be grounded in an artifact.** Report a gate as `signed_off`/`waived` only when the issue entity's live `gate_status` says so, or a sign-off artifact exists (the owning agent's GitHub comment, its merged `## Swarm specification` body section, or its `plan_contribution` entity). If you cannot point to one, report `pending` — never infer a gate state from context, and never attribute a sign-off, a verdict, or a gate condition to another agent without citing where it came from. Gate deliverables land in three places (GitHub comments, the issue body's `## Swarm specification` sections, and Neotoma entities); check all three before concluding a gate has not been exercised.
 
-**Never write gate state with a plain `store()`.** `gate_status`, `current_owner`, and `owner_history` are `last_write` fields, so a routine `store()` at default priority silently clobbers a higher-authority sign-off written earlier (observed on neotoma#2033, 2026-07-29: a re-triage `store()` reset `gate_status.pm` from `signed_off` back to `pending`). Always use `correct()` for gate transitions, and re-read the live field before writing so you merge rather than replace.
+**Never write gate state with a plain `store()`.** `gate_status`, `current_owner`, and `owner_history` are `last_write` fields, so a routine `store()` at default priority silently clobbers a higher-authority sign-off written earlier (observed on neotoma#2033, 2026-07-29: a re-triage `store()` reset `gate_status.pm` from `signed_off` back to `pending`). Always use `correct()` for gate transitions, and re-read the live `gate_status`/`current_owner` before writing so you merge rather than replace.
+
+**`owner_history` is different: it is an APPENDING field, never a replacing one.** Neotoma's reducer for `owner_history` appends whatever value you send onto the array already stored — it does not replace it. Sending `existing_history + [new_entry]` (reading the field back and re-sending it alongside the new entry) makes the server append the existing entries a second time, so the array roughly doubles on every gate transition. On a live audit, 72 of 136 issue entities had already accumulated 13,810 duplicate entries this way (ateles#617). Always `correct()` `owner_history` with ONLY the new entry (or entries) for this transition — never the existing history plus the new one.
 
 When invoked for **stale sweep**:
 1. `retrieve_entities(entity_type='issue', current_owner=<agent>, status='open')` for each active owner.
@@ -55,7 +57,7 @@ When invoked to **evaluate a waiver request** (`/waive <gate>` in a GitHub comme
 2. Check whether the waiver is consistent with workflow_definition fast_paths.
 3. Post a proposed waiver comment on GitHub explaining the rationale.
 4. Wait for operator to confirm (operator replies `/confirm-waive <gate>` or `/reject-waive <gate>`).
-5. On confirm: `correct()` the issue entity `gate_status.<gate>: waived`, add to owner_history, advance current_owner.
+5. On confirm: `correct()` the issue entity `gate_status.<gate>: waived`, advance current_owner, and write ONLY the new `owner_history` entry for this waiver (`owner_history` appends server-side — never re-send the existing history, see the appending-field rule above).
 6. Record the waiver as a `workflow_state` observation on the issue entity.
 7. Never apply a waiver silently.
 
@@ -76,7 +78,7 @@ When invoked to **evaluate a waiver request** (`/waive <gate>` in a GitHub comme
 
 ## Gate sign-off pattern (for Lanius's own bookkeeping)
 
-When Lanius routes an issue (initialises gates), it writes a `workflow_state` observation on the issue entity:
+When Lanius routes an issue (initialises gates), it writes a `workflow_state` observation on the issue entity. This is the ONE `owner_history` write where the array literally is a single entry — there is no prior history on a freshly-triaged issue. On every LATER gate transition (waiver, sweep, or anything that touches an already-triaged issue), `owner_history` must still carry ONLY the new entry, never this initial one plus the new one — see the appending-field rule above.
 ```python
 correct(entity_id=<issue_entity_id>, fields={
   "workflow_type": <type>,
