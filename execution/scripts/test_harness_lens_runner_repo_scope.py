@@ -55,6 +55,9 @@ def _ambient_credential(monkeypatch):
     monkeypatch.setenv("GH_TOKEN", AMBIENT)
     monkeypatch.setenv("GITHUB_TOKEN", AMBIENT)
     monkeypatch.setenv("GIT_ASKPASS", "/ambient/askpass")
+    # config injected through the environment, applied after file config
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'http.extraheader=Authorization: ambient'")
     monkeypatch.setenv("ATELES_REVIEWER_APP_PRIVATE_KEY", "not-a-real-key")
     monkeypatch.setattr(hlr, "repo_scoped_env", _REAL_REPO_SCOPED_ENV, raising=False)
 

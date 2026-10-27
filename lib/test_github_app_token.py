@@ -532,18 +532,30 @@ def test_repo_scoped_token_returns_a_token_that_can_see_the_repo(configured, mon
     assert ("GET", "/repos/o/r") in fake.calls
 
 
+@pytest.mark.parametrize("code,reason", [(401, "Bad credentials"), (403, "Forbidden"), (404, "Not Found")])
 def test_repo_scoped_token_names_the_repo_when_no_installation_covers_it(
-    configured, monkeypatch
+    configured, monkeypatch, code, reason
 ):
     """A pinned installation id mints for the wrong installation; say so."""
     monkeypatch.setenv(f"{PREFIX}_INSTALLATION_ID", "999")
-    fake = _Covering(visible=False)
+
+    class Refused(_Covering):
+        def __call__(self, method, path, bearer):
+            if method == "GET" and path.startswith("/repos/") and path.count("/") == 3:
+                raise gat.AppTokenError(f"{method} {path} -> HTTP {code} {reason}")
+            return super().__call__(method, path, bearer)
+
+    fake = Refused(visible=True)
     monkeypatch.setattr(gat, "_request", fake)
     with pytest.raises(gat.AppTokenError) as caught:
         gat.repo_scoped_token("o/private")
     message = str(caught.value)
     assert "o/private" in message and "999" in message
     assert "ghs_fake_" not in message  # never the token
+    # the rejected token was forgotten, whichever code rejected it
+    with pytest.raises(gat.AppTokenError):
+        gat.repo_scoped_token("o/private")
+    assert fake.minted == 2
 
 
 def test_repo_scoped_token_forgets_a_rejected_token(configured, monkeypatch):
