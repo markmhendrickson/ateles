@@ -25,6 +25,7 @@ for _p in (str(_HERE), str(_HERE.parents[1]), str(_HERE.parents[2])):
 
 import review_carry  # noqa: E402
 import review_delta  # noqa: E402
+import review_scope  # noqa: E402
 import swarm_dispatch as sd  # noqa: E402
 from review_panel import lens_by_name  # noqa: E402
 from skill_runner import SkillResult  # noqa: E402
@@ -288,6 +289,77 @@ class TestSelection:
 
 
 # ── the combined pm / qa / ux pass ──────────────────────────────────────────
+
+
+# ── scope-based carry (operator ruling 2026-10-27) ──────────────────────────
+
+
+def _declared(**lens_scopes) -> review_scope.ReviewScope:
+    return review_scope.ReviewScope(
+        full_panel_paths=("execution/daemons/**",),
+        lens_scopes={k: tuple(v) for k, v in lens_scopes.items()},
+    )
+
+
+def _select_scoped(comments, delta, scope, *, forced=()):
+    records = sd.lens_records(comments)
+    return review_carry.select_rerun(
+        FIVE, records, NEW, {OLD: delta}, forced=forced, scope=scope
+    )
+
+
+class TestScopeBasedCarry:
+    def test_a_lens_carries_when_the_delta_misses_its_declared_scope(self):
+        # `lib/some_util.py` touches EVERY lens under today's rule; the repo's
+        # declared arch scope says it is not arch's.
+        scope = _declared(arch=["src/**"])
+        sel = _select_scoped(_round(OLD), _delta(UNMAPPED_FILE), scope)
+        assert "arch" in sel.carried and "arch" not in sel.rerun
+        assert sel.carried["arch"].head == OLD
+        assert "declared scope" in sel.reasons["arch"]
+        # the undeclared lenses keep today's behaviour
+        assert sel.rerun == {"pm", "ux", "qa", "security"}
+
+    def test_a_lens_reruns_when_the_delta_hits_its_declared_scope(self):
+        scope = _declared(arch=["lib/**"])
+        sel = _select_scoped(_round(OLD), _delta(UNMAPPED_FILE), scope)
+        assert "arch" in sel.rerun and "arch" not in sel.carried
+        assert UNMAPPED_FILE in sel.reasons["arch"]
+
+    def test_a_declared_scope_replaces_the_default_rule_for_that_lens_only(self):
+        # A test file is allowlisted to qa under the default rule, so qa would
+        # re-run. With qa's scope declared as docs only, qa carries; the other
+        # lenses (undeclared) keep the allowlist and carry as before.
+        sel = _select_scoped(_round(OLD), _delta(TEST_FILE), _declared(qa=["docs/**"]))
+        assert sel.rerun == set() and set(sel.carried) == set(FIVE)
+        base = _select_scoped(_round(OLD), _delta(TEST_FILE), None)
+        assert base.rerun == {"qa"}
+
+    def test_no_scope_object_is_exactly_the_old_behaviour(self):
+        old = _select(_round(OLD, blocked=("security",)), _delta(UNMAPPED_FILE))
+        new = _select_scoped(_round(OLD, blocked=("security",)), _delta(UNMAPPED_FILE), None)
+        assert (old.rerun, set(old.carried)) == (new.rerun, set(new.carried))
+
+    def test_a_declared_scope_never_carries_a_lens_that_blocked(self):
+        scope = _declared(arch=["src/**"])
+        sel = _select_scoped(_round(OLD, blocked=("arch",)), _delta(UNMAPPED_FILE), scope)
+        assert "arch" in sel.rerun and "arch" not in sel.carried
+
+    def test_a_declared_scope_never_carries_on_an_empty_delta(self):
+        scope = _declared(arch=["src/**"])
+        sel = _select_scoped(_round(OLD), _delta(), scope)
+        assert "arch" in sel.rerun and "empty" in sel.reasons["arch"]
+
+    def test_a_declared_scope_never_carries_on_an_unreadable_delta(self):
+        scope = _declared(arch=["src/**"])
+        records = sd.lens_records(_round(OLD))
+        sel = review_carry.select_rerun(FIVE, records, NEW, {OLD: None}, scope=scope)
+        assert "arch" in sel.rerun and "unreadable" in sel.reasons["arch"]
+
+    def test_a_forced_lens_reruns_whatever_its_scope_says(self):
+        scope = _declared(arch=["src/**"])
+        sel = _select_scoped(_round(OLD), _delta(UNMAPPED_FILE), scope, forced=["arch"])
+        assert "arch" in sel.rerun
 
 
 def _combined_reply(verdicts: dict[str, str]) -> str:

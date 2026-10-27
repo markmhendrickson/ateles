@@ -19,6 +19,8 @@ Run: pytest execution/scripts/test_approve_pr_as_app.py -v
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import sys
 from pathlib import Path
@@ -146,7 +148,12 @@ class _FakeClient:
         rules: list | int | None = None,
         jobs: dict[int, dict] | None = None,
         runners: list[dict] | None = None,
+        scope_by_ref: "dict[str, str | int] | None" = None,
     ):
+        # `.github/review_scope.json` as served per git ref: text, or an HTTP
+        # status int for a failing read. A ref with no entry answers 404.
+        self.scope_by_ref = scope_by_ref or {}
+        self.scope_refs: list[str] = []
         self.comments = comments
         self.check_runs = check_runs
         self.combined_state = combined_state
@@ -209,6 +216,22 @@ class _FakeClient:
     async def get(self, url, headers=None, params=None):
         self.get_urls.append(url)
         page = (params or {}).get("page", 1)
+        if "/contents/" in url:
+            assert url.endswith("/contents/.github/review_scope.json"), url
+            ref = (params or {}).get("ref", "")
+            self.scope_refs.append(ref)
+            served = self.scope_by_ref.get(ref)
+            if served is None:
+                return _FakeResponse({"message": "Not Found"}, status_code=404)
+            if isinstance(served, int):
+                return _FakeResponse({"message": "error"}, status_code=served)
+            return _FakeResponse(
+                {
+                    "type": "file",
+                    "encoding": "base64",
+                    "content": base64.b64encode(served.encode()).decode(),
+                }
+            )
         if url.endswith(f"/branches/{BASE_REF}/protection/required_status_checks"):
             if self.protection_rsc is None:
                 return _FakeResponse({"message": "Not Found"}, status_code=404)
@@ -2296,18 +2319,51 @@ class TestPanelAllDefault:
             assert target._panel_all_default() is True
 
     def test_cli_default_reflects_bootstrap_mode(self, monkeypatch):
+        """Operator ruling 2026-10-27: the bootstrap default is the path-selected
+        panel, no longer the five-lens `all`."""
         monkeypatch.delenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", raising=False)
         monkeypatch.setattr(sys, "argv", ["approve_pr_as_app.py", "--repo", REPO, "--pr", str(PR)])
         parser_args = []
 
-        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False):
-            parser_args.append(panel_all)
+        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False, panel_mode=""):
+            parser_args.append((panel_all, panel_mode))
             return 0
 
         monkeypatch.setattr(target, "run", _capture_run)
         target.main()
 
-        assert parser_args == [True]
+        assert parser_args == [(False, "path")]
+
+    def test_cli_panel_all_still_works(self, monkeypatch):
+        monkeypatch.delenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", raising=False)
+        monkeypatch.setattr(
+            sys, "argv",
+            ["approve_pr_as_app.py", "--repo", REPO, "--pr", str(PR), "--panel", "all"],
+        )
+        parser_args = []
+
+        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False, panel_mode=""):
+            parser_args.append((panel_all, panel_mode))
+            return 0
+
+        monkeypatch.setattr(target, "run", _capture_run)
+        target.main()
+
+        assert parser_args == [(True, "")]
+
+    def test_opt_out_env_makes_required_the_cli_default(self, monkeypatch):
+        monkeypatch.setenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", "1")
+        monkeypatch.setattr(sys, "argv", ["approve_pr_as_app.py", "--repo", REPO, "--pr", str(PR)])
+        parser_args = []
+
+        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False, panel_mode=""):
+            parser_args.append((panel_all, panel_mode))
+            return 0
+
+        monkeypatch.setattr(target, "run", _capture_run)
+        target.main()
+
+        assert parser_args == [(False, "")]
 
     def test_cli_panel_required_overrides_bootstrap_default(self, monkeypatch):
         monkeypatch.delenv("ATELES_APPROVE_PANEL_REQUIRED_ONLY", raising=False)
@@ -2318,7 +2374,7 @@ class TestPanelAllDefault:
         )
         parser_args = []
 
-        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False):
+        async def _capture_run(repo, pr, extra_lenses, *, apply, panel_all=False, panel_mode=""):
             parser_args.append(panel_all)
             return 0
 
@@ -3909,3 +3965,231 @@ class TestAnUnusableLensAppIsNeverListedAsAnApprover:
         out = capsys.readouterr().out
         assert "approvers: per-lens (own App: pm, qa, arch, security)" in out
         assert "UNUSABLE" not in out
+
+
+# ── Operator ruling 2026-10-27: the panel is chosen by changed path ─────────
+#
+# Each test below was run red against the pre-change tool (or with the named
+# line reverted) before being relied on; the PR body records what each looked
+# like red.
+
+SCOPE_RISKY_FILE = "execution/daemons/apis/gate.py"
+SCOPE_UI_FILE = "site/pages/index.html"
+SCOPE_PLAIN_FILE = "lib/some_util.py"
+
+
+def _scope(**over) -> str:
+    data = {
+        "version": 1,
+        "full_panel_paths": ["execution/daemons/**", "payments/**", ".github/**"],
+        "ux_paths": ["site/**", "docs/guide/**"],
+        "lens_scopes": {"arch": ["execution/**", "lib/**"], "ux": ["site/**"]},
+    }
+    data.update(over)
+    return json.dumps(data)
+
+
+def _path_client(files, comments, *, scope: "str | int | None" = None, **kw):
+    refs = {} if scope is None else {BASE_REF: scope}
+    return _FakeClient(
+        comments=comments,
+        check_runs=_green_checks(),
+        changed_files=files,
+        scope_by_ref=refs,
+        **kw,
+    )
+
+
+async def _run_path(monkeypatch, client, *, apply=True, extra=()):
+    _install_client(monkeypatch, client)
+    _install_app_mint(monkeypatch)
+    return await target.run(REPO, PR, list(extra), apply=apply, panel_mode="path")
+
+
+@pytest.mark.asyncio
+class TestPathSelectedPanel:
+    async def test_a_plain_change_needs_only_arch(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        code = await _run_path(monkeypatch, client)
+        assert code == 0
+        body = client.posted[0]["json"]["body"]
+        assert "panel mode: path -> one lens (arch)" in body
+        assert "review_scope.json (base branch)" in body
+        assert "**pm**" not in body
+
+    async def test_a_plain_change_without_arch_is_refused(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["pm", "qa"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+
+    async def test_a_ui_change_needs_only_ux(self, monkeypatch):
+        client = _path_client([SCOPE_UI_FILE], _all_clear_comments(["ux"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        body = client.posted[0]["json"]["body"]
+        assert "one lens (ux)" in body and SCOPE_UI_FILE in body and "site/**" in body
+
+    async def test_a_ui_change_with_only_arch_is_refused(self, monkeypatch):
+        client = _path_client([SCOPE_UI_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+
+    async def test_a_risky_change_needs_all_five_and_names_the_file(self, monkeypatch):
+        files = [SCOPE_PLAIN_FILE, SCOPE_RISKY_FILE]
+        client = _path_client(files, _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+        client = _path_client(files, _all_clear_comments(FIVE), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        body = client.posted[0]["json"]["body"]
+        assert "FULL five-lens panel" in body
+        assert f"`{SCOPE_RISKY_FILE}` matches full_panel_paths `execution/daemons/**`" in body
+        for lens in FIVE:
+            assert f"**{lens}**" in body
+
+    async def test_risk_wins_over_ui(self, monkeypatch):
+        client = _path_client(
+            [SCOPE_UI_FILE, SCOPE_RISKY_FILE], _all_clear_comments(["ux"]), scope=_scope()
+        )
+        assert await _run_path(monkeypatch, client) == 1
+
+    @pytest.mark.parametrize(
+        "scope",
+        [
+            None,
+            500,
+            "{not json",
+            json.dumps([1]),
+            json.dumps({"version": 2, "full_panel_paths": ["a"]}),
+            json.dumps({"version": 1, "full_panel_paths": []}),
+            json.dumps({"version": 1, "full_panel_paths": ["a"], "typo_paths": []}),
+        ],
+        ids=["missing", "unreadable", "malformed", "not-object", "bad-version", "empty-full", "unknown-key"],
+    )
+    async def test_a_missing_or_invalid_scope_file_means_the_full_panel(
+        self, monkeypatch, scope, capsys
+    ):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=scope)
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+        out = capsys.readouterr().out
+        assert "FULL five-lens panel" in out and "scope file could not be used" in out
+        # ... and with every lens cleared the full panel approves, saying why.
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(FIVE), scope=scope)
+        assert await _run_path(monkeypatch, client) == 0
+        assert "scope file could not be used" in client.posted[0]["json"]["body"]
+
+    async def test_an_empty_changed_file_list_means_the_full_panel(self, monkeypatch):
+        client = _path_client([], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        client = _path_client([], _all_clear_comments(FIVE), scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        assert "changed-file list is empty" in client.posted[0]["json"]["body"]
+
+    async def test_the_scope_is_read_from_the_base_branch_not_the_pr_head(self, monkeypatch):
+        """The head's copy declares nothing risky; the base's copy does. A PR
+        that edits the file to downgrade its own panel must still get the
+        base's full panel."""
+        permissive = _scope(full_panel_paths=["never/**"])
+        client = _FakeClient(
+            comments=_all_clear_comments(["arch"]),
+            check_runs=_green_checks(),
+            changed_files=[SCOPE_RISKY_FILE],
+            scope_by_ref={BASE_REF: _scope(), HEAD: permissive, "feature-branch": permissive},
+        )
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+        assert client.scope_refs and set(client.scope_refs) == {BASE_REF}
+
+    async def test_a_non_required_lens_that_objects_still_blocks(self, monkeypatch):
+        comments = _all_clear_comments(["arch"]) + [
+            _comment(
+                77,
+                _lens_comment_body(
+                    "security",
+                    "falco",
+                    verdict="REQUEST_CHANGES",
+                    extra="[BLOCKING] token handling needs a second look.",
+                ),
+            )
+        ]
+        client = _path_client([SCOPE_PLAIN_FILE], comments, scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+
+    async def test_a_plain_comment_from_a_non_required_lens_does_not_block(self, monkeypatch):
+        comments = _all_clear_comments(["arch"]) + [
+            _comment(78, _lens_comment_body("security", "falco", verdict="COMMENT"))
+        ]
+        client = _path_client([SCOPE_PLAIN_FILE], comments, scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+
+    async def test_lenses_flag_adds_a_lens_on_top_of_the_one(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client, extra=["security"]) == 1
+        client = _path_client(
+            [SCOPE_PLAIN_FILE], _all_clear_comments(["arch", "security"]), scope=_scope()
+        )
+        assert await _run_path(monkeypatch, client, extra=["security"]) == 0
+
+    async def test_a_red_required_check_still_refuses(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        client.check_runs = [{"name": "ateles-tests", "status": "completed", "conclusion": "failure"}]
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+
+    async def test_dry_run_prints_the_mode_and_submits_nothing(self, monkeypatch, capsys):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["arch"]), scope=_scope())
+        assert await _run_path(monkeypatch, client, apply=False) == 0
+        assert client.posted == []
+        assert "panel mode: path -> one lens (arch)" in capsys.readouterr().out
+
+    async def test_the_older_modes_still_work_and_say_so(self, monkeypatch):
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(FIVE), scope=_scope())
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, [], apply=True, panel_all=True) == 0
+        assert "panel mode: all" in client.posted[0]["json"]["body"]
+        client = _path_client([SCOPE_PLAIN_FILE], _all_clear_comments(["pm", "qa"]), scope=_scope())
+        _install_client(monkeypatch, client)
+        assert await target.run(REPO, PR, [], apply=True) == 0
+        assert "panel mode: required" in client.posted[0]["json"]["body"]
+
+
+@pytest.mark.asyncio
+class TestScopeBasedCarry:
+    def _client(self, delta_files, *, scope, earlier_blocked=False):
+        sides = {
+            OLD_HEAD: [_pr_file(SCOPE_PLAIN_FILE)],
+            HEAD: [_pr_file(SCOPE_PLAIN_FILE)] + [_pr_file(f) for f in delta_files],
+        }
+        old = _round_comments(OLD_HEAD, blocked=("arch",) if earlier_blocked else ())
+        comments = [c for c in old if "review:arch " in c["body"]]
+        return _CompareClient(
+            comments=comments,
+            check_runs=_green_checks(),
+            sides=sides,
+            changed_files=[SCOPE_PLAIN_FILE],
+            scope_by_ref={BASE_REF: scope},
+        )
+
+    async def test_arch_carries_when_the_delta_misses_its_scope(self, monkeypatch):
+        # `README.md` is on no arch glob; under today's rule it would touch arch.
+        client = self._client(["README.md"], scope=_scope())
+        assert await _run_path(monkeypatch, client) == 0
+        body = client.posted[0]["json"]["body"]
+        assert "CARRIED FORWARD" in body and f"at head `{OLD_HEAD}`" in body
+
+    async def test_arch_is_rerun_when_the_delta_hits_its_scope(self, monkeypatch, capsys):
+        client = self._client(["lib/other.py"], scope=_scope())
+        assert await _run_path(monkeypatch, client) == 1
+        assert client.posted == []
+        assert "declared scope" in capsys.readouterr().out
+
+    async def test_without_a_declared_scope_the_old_rule_applies(self, monkeypatch):
+        scope = _scope(lens_scopes={"ux": ["site/**"]})  # arch declares nothing
+        client = self._client(["README.md"], scope=scope)
+        # README.md is in no allowlist: under today's rule it touches every lens.
+        assert await _run_path(monkeypatch, client) == 1
+
+    async def test_a_lens_that_blocked_earlier_is_never_carried(self, monkeypatch):
+        client = self._client(["README.md"], scope=_scope(), earlier_blocked=True)
+        assert await _run_path(monkeypatch, client) == 1

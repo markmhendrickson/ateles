@@ -27,6 +27,15 @@ Fail-closed by construction, on every input:
 * a delta that cannot be read carries nothing;
 * a lens with no earlier clear verdict has nothing to carry.
 
+Scope-based carry (operator ruling 2026-10-27, agent_policy
+``ent_d0f1a840e549b3b299f62397``): when the repo's ``.github/review_scope.json``
+(``review_scope``, read from the PR's base branch) declares ``lens_scopes`` for
+a lens, that lens's verdict carries only if no file in the delta matches its
+globs. A lens with no declared scope keeps the allowlist rule above, and an
+unreadable or invalid scope file declares nothing, which carries LESS. Every
+other condition is unchanged: signed off at that head, never blocked, a
+non-empty readable delta.
+
 The delta is ``review_delta.interdiff`` (ateles#1365): the fix's OWN change, so
 a merge of the base branch cancels out and never widens the touched areas.
 """
@@ -42,6 +51,7 @@ from urllib.parse import quote
 import model_tiering
 import review_delta
 from review_panel import LENSES
+from review_scope import ReviewScope
 
 log = logging.getLogger("apis.review_carry")
 
@@ -205,13 +215,16 @@ def select_rerun(
     deltas: Mapping[str, review_delta.Delta | None],
     *,
     forced: Iterable[str] = (),
+    scope: ReviewScope | None = None,
 ) -> RerunSelection:
     """Split *panel* into lenses to re-run and lenses whose sign-off carries.
 
     ``deltas`` maps an earlier head to the interdiff from it to the current
     head (None: unreadable). ``forced`` are lenses that must run regardless, such
     as the owner of a still-pending gate (the existing Lanius carry-forward:
-    only a pending gate's owner is re-seated).
+    only a pending gate's owner is re-seated). ``scope`` is the repo's declared
+    review scope; a lens it declares ``lens_scopes`` for is judged by those
+    globs alone, every other lens by the default allowlist rule.
     """
     forced_set = {str(f).lower() for f in forced}
     rerun: set[str] = set()
@@ -243,6 +256,19 @@ def select_rerun(
                 f"delta since {cand.head[:7]} is empty although the head moved, so "
                 "the change is unknown; re-run this lens on the current head, then "
                 "run the gate again"
+            )
+            continue
+        if scope is not None and scope.declares(lens):
+            hit = scope.touches_lens(lens, delta.files)
+            if hit is not None:
+                rerun.add(lens)
+                reasons[lens] = (
+                    f"the fix touched its declared scope since {cand.head[:7]} ({hit})"
+                )
+                continue
+            carried[lens] = Carried(lens, cand.head, cand.verdict, cand.url)
+            reasons[lens] = (
+                f"carried from {cand.head[:7]}: the fix touched none of its declared scope"
             )
             continue
         touched = lenses_touched(delta.files)

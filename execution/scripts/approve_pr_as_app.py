@@ -14,6 +14,28 @@ unreadable delta carries nothing). The approval review names every carried lens
 with the head its verdict came from. `--no-carry` requires every lens on the
 current head itself.
 
+Path-selected panel (operator ruling 2026-10-27, agent_policy
+`ent_d0f1a840e549b3b299f62397`; `--panel path`, the bootstrap default): the
+panel is chosen by what the PR changes, from the repo's own
+`.github/review_scope.json` (`review_scope`), read from the PR's BASE branch and
+never its head so a PR cannot downgrade its own panel. Any changed file on a
+`full_panel_paths` glob (external sending, payment, sign-in or authorization,
+data writes, schema, the gate/approval/review machinery) requires the full
+five-lens panel; otherwise exactly one lens is required, `ux` if a changed file
+matches `ux_paths`, else `arch`. A missing, unreadable or invalid scope file, or
+an empty changed-file list, requires the full panel and says why. Green
+required checks are required in every mode, and a lens outside the required set
+that objects on the current head still blocks (`find_non_required_blocks`), which
+is how a reviewer's request for another lens binds. The approval review states
+the mode, the file that triggered the full panel (or the lens chosen and why),
+and where the scope file was read from. Carry is by scope too: where the scope
+file declares `lens_scopes` for a lens, its earlier verdict carries iff no file
+in the delta since that head matches those globs (`review_carry`). The tool
+needs no running daemon: a session loads the lens prompts, runs the lenses,
+posts each verdict with `post_lens_verdict.py`, and runs this tool
+(docs/infrastructure/app_merge_path.md). `--panel all` and `--panel required`
+remain.
+
 Bootstrap mode (agent_policy `ent_d0f1a840e549b3b299f62397`): the operator
 has ruled that sessions, not the operator, approve merges, under the App's
 identity, with the lens panel's verdicts as the gate. This tool is the
@@ -103,11 +125,11 @@ conclusion always blocks. See `_unscheduled_non_required_reason`.
 
 Usage:
     python3 execution/scripts/approve_pr_as_app.py --repo <owner/name> --pr <n> \\
-        [--lenses pm,security] [--panel {required,all}] [--no-carry] [--apply]
+        [--lenses pm,security] [--panel {path,required,all}] [--no-carry] [--apply]
 
 `--lenses` ADDS to the derived floor; it can never remove a lens the panel
-logic would itself require for this diff/issue. `--panel all` (the default
-while bootstrap mode is on — see `_panel_all_default` and
+logic would itself require for this diff/issue. `--panel all` (formerly the
+default while bootstrap mode is on; `--panel path` is now — see `_default_panel`, `_panel_all_default` and
 ATELES_APPROVE_PANEL_REQUIRED_ONLY below) additionally requires the five
 lenses in `BOOTSTRAP_PANEL_LENSES` (pm, arch, ux, qa, security — the
 bootstrap roster; NEITHER `legal` NOR `content`/Corvus is in this set)
@@ -154,7 +176,7 @@ Env:
                                           process missing one of them refuses rather than
                                           approving as the swarm App
     ATELES_APPROVE_PANEL_REQUIRED_ONLY    set to "1" to opt OUT of the bootstrap-
-                                           mode --panel all default (use the
+                                           mode --panel path default (use the
                                            diff-derived floor alone); --panel on
                                            the command line always overrides this
 
@@ -182,6 +204,7 @@ import httpx  # noqa: E402
 from lib import github_app_token as _github_app_token  # noqa: E402
 
 import review_carry  # noqa: E402
+import review_scope  # noqa: E402
 import lens_authors  # noqa: E402
 from review_panel import LENSES, Lens, select_panel  # noqa: E402
 from swarm_dispatch import (  # noqa: E402
@@ -494,6 +517,36 @@ async def _changed_files(client: httpx.AsyncClient, repo: str, pr: int) -> list[
     return out
 
 
+async def fetch_review_scope(
+    client: httpx.AsyncClient, repo: str, base_ref: str
+) -> review_scope.ScopeLoad:
+    """The repo's `.github/review_scope.json` as it stands on the PR's BASE
+    branch (never the PR head: a PR must not be able to downgrade its own
+    panel). Never raises: any failure is a `ScopeLoad` with no scope and the
+    reason, which every caller treats as "no declaration" (full panel for panel
+    selection; no scope-based carry)."""
+    source = f"{repo}@{base_ref or '(unknown base)'}:{review_scope.SCOPE_PATH} (base branch)"
+    if not base_ref:
+        return review_scope.ScopeLoad(None, source, "the PR's base branch is unknown")
+    try:
+        resp = await client.get(
+            f"{GITHUB_API}/repos/{repo}/contents/{review_scope.SCOPE_PATH}",
+            headers=_github_headers(repo),
+            params={"ref": base_ref},
+        )
+    except Exception as exc:  # noqa: BLE001 — unreadable: no declaration
+        return review_scope.ScopeLoad(None, source, f"read failed ({exc.__class__.__name__})")
+    if resp.status_code == 404:
+        return review_scope.ScopeLoad(None, source, "no scope file on the base branch")
+    if resp.status_code >= 400:
+        return review_scope.ScopeLoad(None, source, f"read failed (HTTP {resp.status_code})")
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        return review_scope.ScopeLoad(None, source, "the response was not JSON")
+    return review_scope.load_from_contents_payload(payload, source=source)
+
+
 async def _preregistered_gate_contributors(
     client: httpx.AsyncClient, repo: str, issue_number: int
 ) -> set[str]:
@@ -567,6 +620,16 @@ def _panel_all_default() -> bool:
     way.
     """
     return os.environ.get("ATELES_APPROVE_PANEL_REQUIRED_ONLY", "") != "1"
+
+
+def _default_panel() -> str:
+    """The `--panel` default: `path` while bootstrap mode is on, else `required`.
+
+    Operator ruling 2026-10-27 (agent_policy `ent_d0f1a840e549b3b299f62397`):
+    lens selection is by changed path, so the bootstrap default is no longer
+    `all`. `ATELES_APPROVE_PANEL_REQUIRED_ONLY=1` opts out as before.
+    """
+    return "path" if _panel_all_default() else "required"
 
 
 def _always_required_lenses() -> list[Lens]:
@@ -785,8 +848,13 @@ async def carry_earlier_signoffs(
     comments: list[dict],
     lens_outcomes: list[LensOutcome],
     authors: frozenset[str],
+    scope: review_scope.ReviewScope | None = None,
 ) -> list[LensOutcome]:
     """Replace a failing lens outcome with a carried sign-off where that is safe.
+
+    `scope` is the repo's declared review scope (base branch): a lens it
+    declares `lens_scopes` for is carried iff no delta file matches those
+    globs (operator ruling 2026-10-27); any other lens follows the rule below.
 
     Operator ruling `rereview_only_blockers_and_touched_areas` (2026-09-29). A
     lens with no verdict on the current head clears on an EARLIER head's verdict
@@ -815,7 +883,7 @@ async def carry_earlier_signoffs(
         for old in heads
     }
     selection = review_carry.select_rerun(
-        [o.lens for o in pending], records, head_sha, deltas
+        [o.lens for o in pending], records, head_sha, deltas, scope=scope
     )
     out: list[LensOutcome] = []
     for outcome in lens_outcomes:
@@ -840,7 +908,8 @@ async def carry_earlier_signoffs(
                 comment_url=carried.url,
                 reason=(
                     f"carried from {carried.head[:7]}: the fix since then touched "
-                    "none of its areas"
+                    "none of its "
+                    + ("declared scope" if scope is not None and scope.declares(outcome.lens) else "areas")
                 ),
                 carried_from=carried.head,
             )
@@ -1432,6 +1501,7 @@ async def submit_app_approval(
     forbidden_logins: frozenset[str] = frozenset(),
     approver_label: str = "the swarm App",
     cleared_phrase: str = "every required review lens cleared",
+    panel_note: str = "",
 ) -> dict:
     """Mint an App installation token and submit a formal APPROVE review.
 
@@ -1548,6 +1618,9 @@ async def submit_app_approval(
         body_lines.append("")
     for c in not_run:
         body_lines.append(f"- check `{c.name}` did not bind — {NOT_RUN_NO_RUNNER}: {c.reason}")
+    if panel_note:
+        body_lines.append("")
+        body_lines.append(panel_note)
     body_lines.append("")
     body_lines.append(f"head_sha={head_sha}")
     body = "\n".join(body_lines)
@@ -1740,6 +1813,7 @@ async def submit_approvals(
     lens_outcomes: list[LensOutcome],
     check_outcomes: list[CheckOutcome] | None = None,
     pr_author: str = "",
+    panel_note: str = "",
 ) -> list[dict]:
     """Submit the APPROVE review(s), each as the App that matches who reviewed.
 
@@ -1773,6 +1847,7 @@ async def submit_approvals(
                 head_sha=head_sha,
                 lens_outcomes=lens_outcomes,
                 check_outcomes=check_outcomes,
+                panel_note=panel_note,
             )
         ]
 
@@ -1865,6 +1940,7 @@ async def submit_approvals(
                     if outcome is not None
                     else "every required review lens cleared"
                 ),
+                panel_note=panel_note,
             )
             landed.append((", ".join(o.lens for o in lenses), login, review))
     except Exception as exc:
@@ -2005,6 +2081,44 @@ async def resolve_lenses(
     return floor + deduped_added, required, actually_excluded
 
 
+async def resolve_path_lenses(
+    client: httpx.AsyncClient,
+    *,
+    repo: str,
+    pr: int,
+    pr_body: str,
+    extra_lenses: list[str],
+    decision: review_scope.PanelDecision,
+) -> tuple[list[str], list[RequiredLens], list[str]]:
+    """The lens set for `--panel path` (operator ruling 2026-10-27).
+
+    A full-panel decision is exactly `--panel all`. Otherwise the floor is the
+    ONE lens the decision names (the diff-derived always-on lenses are not
+    added: the ruling asks for green CI plus the one lens whose scope the change
+    touches), plus any `--lenses` additions, which can only add. `content` is
+    stripped as in every bootstrap panel. A lens outside the set that objects on
+    the current head still blocks (`find_non_required_blocks`), which is how a
+    reviewer's request for another lens binds.
+    """
+    if decision.full:
+        return await resolve_lenses(
+            client,
+            repo=repo,
+            pr=pr,
+            pr_body=pr_body,
+            extra_lenses=extra_lenses,
+            panel_all=True,
+        )
+    required = [RequiredLens(decision.lens, decision.reason)]
+    excluded = BOOTSTRAP_EXCLUDED_LENSES
+    lenses = [decision.lens]
+    for lens in extra_lenses:
+        if lens not in lenses and lens not in excluded:
+            lenses.append(lens)
+    actually_excluded = sorted(lens for lens in extra_lenses if lens in excluded)
+    return lenses, required, actually_excluded
+
+
 async def run(
     repo: str,
     pr: int,
@@ -2013,6 +2127,7 @@ async def run(
     apply: bool,
     panel_all: bool = False,
     carry: bool = True,
+    panel_mode: str = "",
 ) -> int:
     async with httpx.AsyncClient(timeout=30) as client:
         pr_data = await _fetch_pr(client, repo, pr)
@@ -2021,16 +2136,41 @@ async def run(
             print(f"refusing: could not resolve a full 40-char head SHA for {repo}#{pr}")
             return 1
         pr_body = pr_data.get("body") or ""
+        base_ref = str((pr_data.get("base") or {}).get("ref") or "")
 
+        # The repo's declared review scope, from the BASE branch. Needed for
+        # `--panel path` and for scope-based carry; any failure is "no scope".
+        scope_load = await fetch_review_scope(client, repo, base_ref)
+        panel_note = ""
         try:
-            lenses, required, excluded = await resolve_lenses(
-                client,
-                repo=repo,
-                pr=pr,
-                pr_body=pr_body,
-                extra_lenses=extra_lenses,
-                panel_all=panel_all,
-            )
+            if panel_mode == "path":
+                try:
+                    changed = await _changed_files(client, repo, pr)
+                except Exception:  # noqa: BLE001 — unreadable list: full panel
+                    changed = []
+                decision = review_scope.select_path_panel(changed, scope_load)
+                panel_note = decision.describe()
+                print(panel_note)
+                lenses, required, excluded = await resolve_path_lenses(
+                    client,
+                    repo=repo,
+                    pr=pr,
+                    pr_body=pr_body,
+                    extra_lenses=extra_lenses,
+                    decision=decision,
+                )
+            else:
+                panel_note = (
+                    f"panel mode: {'all (the five-lens bootstrap panel)' if panel_all else 'required (diff-derived floor only)'}."
+                )
+                lenses, required, excluded = await resolve_lenses(
+                    client,
+                    repo=repo,
+                    pr=pr,
+                    pr_body=pr_body,
+                    extra_lenses=extra_lenses,
+                    panel_all=panel_all,
+                )
         except Exception as exc:
             print(f"refusing: could not derive the required-lens set: {exc}")
             return 1
@@ -2107,7 +2247,6 @@ async def run(
             comments=comments, head_sha=head_sha, authors=authors
         )
 
-        base_ref = str((pr_data.get("base") or {}).get("ref") or "")
         if carry:
             lens_outcomes = await carry_earlier_signoffs(
                 client,
@@ -2117,6 +2256,7 @@ async def run(
                 comments=comments,
                 lens_outcomes=lens_outcomes,
                 authors=authors,
+                scope=scope_load.scope,
             )
         check_outcomes, checks_green = await evaluate_checks(
             client, repo=repo, head_sha=head_sha, base_ref=base_ref
@@ -2210,6 +2350,7 @@ async def run(
                 lens_outcomes=lens_outcomes,
                 check_outcomes=check_outcomes,
                 pr_author=str((pr_data.get("user") or {}).get("login") or ""),
+                panel_note=panel_note,
             )
         except Exception as exc:
             print()
@@ -2229,7 +2370,7 @@ async def run(
 
 
 def main() -> int:
-    panel_all_default = _panel_all_default()
+    default_panel = _default_panel()
     parser = argparse.ArgumentParser(
         description=(
             "Approve a PR as the swarm's GitHub App (each lens that has an App of "
@@ -2247,11 +2388,14 @@ def main() -> int:
             "derives it for the diff; content/Corvus is excluded from "
             "bootstrap mode outright, per operator ruling, and is stripped "
             "from the floor even if select_panel would have derived it for "
-            "this diff) to have signed off — the bootstrap-mode default "
-            "(agent_policy ent_d0f1a840e549b3b299f62397); pass --panel "
-            "required to use the diff-derived floor alone (where content "
-            "can still appear), or set ATELES_APPROVE_PANEL_REQUIRED_ONLY=1 "
-            "to change the default."
+            "this diff) to have signed off. --panel path, the bootstrap-mode "
+            "default (agent_policy ent_d0f1a840e549b3b299f62397, ruling "
+            "2026-10-27), picks the panel by changed path from the repo's "
+            ".github/review_scope.json on the base branch: the full panel for a "
+            "risky path or when the file cannot be used, else one lens. Pass "
+            "--panel required to use the diff-derived floor alone (where "
+            "content can still appear), or set "
+            "ATELES_APPROVE_PANEL_REQUIRED_ONLY=1 to change the default."
         )
     )
     parser.add_argument("--repo", required=True, help="owner/name")
@@ -2266,11 +2410,16 @@ def main() -> int:
     )
     parser.add_argument(
         "--panel",
-        choices=("required", "all"),
-        default="all" if panel_all_default else "required",
+        choices=("required", "all", "path"),
+        default=default_panel,
         help=(
-            "'all' (default while bootstrap mode is on, see "
-            "ATELES_APPROVE_PANEL_REQUIRED_ONLY) requires every one of the "
+            "'path' (default while bootstrap mode is on, see "
+            "ATELES_APPROVE_PANEL_REQUIRED_ONLY; operator ruling 2026-10-27) reads "
+            ".github/review_scope.json from the PR's BASE branch: the full "
+            "five-lens panel if any changed file matches full_panel_paths, "
+            "otherwise exactly one lens (ux if a changed file matches ux_paths, "
+            "else arch). A missing or invalid scope file, or an empty "
+            "changed-file list, means the full panel. 'all' requires every one of the "
             "five bootstrap-roster review lenses to have signed off on the "
             "current head, and excludes content/Corvus outright; 'required' "
             "uses only the diff-derived floor from review_panel.select_panel "
@@ -2313,6 +2462,9 @@ def main() -> int:
             panel_all=(args.panel == "all"),
             # Only named when the operator opts out; carrying is the default.
             **({"carry": False} if args.no_carry else {}),
+            # Only named for the path-selected panel, so callers and tests of the
+            # older modes see the call they always saw.
+            **({"panel_mode": "path"} if args.panel == "path" else {}),
         )
     )
 
