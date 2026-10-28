@@ -376,5 +376,42 @@ class TestProjectionBoundaries(unittest.TestCase):
                 self.assertEqual(real.read_text(), "human notes")
 
 
+class TestRecoveredStandingConstraints(unittest.TestCase):
+    def test_current_source_limits_reach_target_and_mutations_fail(self):
+        clauses = (
+            "ent_30a399394effd7eab935d440",
+            "A display-selected Primary plan creates no authority, binding, ownership or planning level",
+            "Report Working now only from a held lease plus observed activity",
+            "Awaiting your decision only from an open operator checkpoint",
+            "do not create a cached parallel workboard/status store",
+            "ent_82b64b6c4104843e43853666",
+            "merge into the closest existing policy rather than duplicating it",
+            "Never persist enforceable operating rules in harness memory files",
+            "read back the active canonical result",
+            "ent_1c0cbb99d2c8011358ff1dc3",
+            "architecture, security or new functionality alone does not require human consent",
+            "Review cannot expand authority, renew consumed/expired exceptions or holds",
+            "current-bound admission/recovery, review/CI/App/merge/deployment/release/send gates",
+            "ent_00a75e37c4db0cdaa5d90f98",
+            "fully mechanical and live-cross-checked",
+            "unless a governing rule reserves sign-off",
+            "A stored status, self-report or single unchecked measurement is insufficient",
+            "this rule creates no authority, revives no exception and releases no held task",
+        )
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp) / "AGENTS.md"
+            self.assertEqual(run("--out", str(out)).returncode, EXIT_OK)
+            original = out.read_text()
+            for clause in clauses:
+                with self.subTest(clause=clause):
+                    self.assertIn(clause, original)
+                    out.write_text(original.replace(clause, "[removed]"))
+                    self.assertEqual(
+                        run("--out", str(out), "--check").returncode, EXIT_LOST
+                    )
+            out.write_text(original)
+            self.assertEqual(run("--out", str(out), "--check").returncode, EXIT_OK)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

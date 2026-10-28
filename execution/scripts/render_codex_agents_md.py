@@ -101,6 +101,10 @@ their authority. Descriptive implementation evidence is not a new permission.
 # one changes its digest and refuses generation/checking until it is reviewed;
 # a heading-pattern filter could silently drop a future standing instruction.
 SECTION_OMISSIONS: dict[str, tuple[str, str]] = {
+    "Swarm governance layer": (
+        "9ccff58c19aa4c8f3e4c84c6d621da384e701b03e2ad6f637ec62f8d22eb72c7",
+        "Historical schema inventory referencing the omitted orientation table, not standing instructions.",
+    ),
     "Key entity IDs": (
         "0d27085994966edbe4c3787a90c7cec699f7999acaa3ee4507dcb71c4c7bab94",
         "Operator-specific orientation identifiers, not portable standing instructions.",
