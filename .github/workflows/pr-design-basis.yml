@@ -1,0 +1,60 @@
+name: pr design basis
+
+# A PR body must carry a non-empty `Design basis:` line (a cited
+# docs/foundation/ document, or `no design applies -- <why>`). A missing or
+# empty line was ~6% of real blocking lens findings (20 of 24 from the pm lens)
+# and the largest learning-loop proposal cluster, each one found only after a
+# lens had been spent on the PR.
+#
+# The validation grammar is NOT defined here or in the script: the script hands
+# the line's value to execution/daemons/apis/foundation.py::check_design_basis,
+# the same function the pm and arch lens prompts embed, so CI and the lens
+# agree. The exemption rule (generated render targets and docs-only PRs) is
+# documented in the script's docstring and in .github/pull_request_template.md.
+#
+# Binding: no continue-on-error anywhere, and the PR body is read from the
+# event payload (`$GITHUB_EVENT_PATH`), not from a fetched copy -- an `edited`
+# run therefore sees the edit that triggered it. `edited` is in the trigger
+# list because the recovery for a failure is editing the PR body, and a check
+# that only re-ran on a push would stay red after the fix.
+#
+# This workflow is deliberately NOT path-filtered: a required check that is
+# skipped by a path filter never reports and blocks the merge. The exemption is
+# decided inside the script, from the changed-file list.
+#
+# Making this a required check on `main` is a branch-protection setting; it is
+# not done by this file. Until it is added there, a red run does not block the
+# merge button (principles.md#1: a mechanism that does not bind is not a control).
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  design-basis:
+    name: design basis line
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # setup-python for the same reason as foundation-checks.yml: provide an
+      # interpreter on the hosted runner; the script itself is stdlib-only.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Changed files come from the two commits the event payload names, not
+      # from the API: --no-renames lists a renamed file's old AND new path, so
+      # a rename cannot hide a non-exempt path.
+      - name: Changed files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed_files.txt"
+          echo "$(wc -l < "$RUNNER_TEMP/changed_files.txt") changed file(s)"
+      - name: PR body states a design basis
+        run: python3 execution/scripts/check_pr_design_basis.py --event "$GITHUB_EVENT_PATH" --changed-files "$RUNNER_TEMP/changed_files.txt"
