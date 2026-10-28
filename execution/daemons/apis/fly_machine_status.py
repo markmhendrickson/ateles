@@ -35,9 +35,8 @@ import re
 import sys
 from typing import Any
 
-import httpx
-
 import fly_runner
+import httpx
 
 SCHEMA_VERSION = 1
 DEADLINE_SECONDS = 10.0
@@ -105,7 +104,7 @@ def parse_args(argv: list[str]) -> tuple[str, tuple[str, ...]] | None:
     elif len(argv) == 2 and argv[0] == "--provider":
         choice = argv[1]
     elif len(argv) == 1 and argv[0].startswith("--provider="):
-        choice = argv[0][len("--provider="):]
+        choice = argv[0][len("--provider=") :]
     else:
         return None
     if choice == "all":
@@ -132,8 +131,10 @@ def _unknown(provider: str) -> dict:
 
 
 def _envelope(machines: list[dict], errors: list[dict]) -> dict:
-    complete = not errors and len(machines) > 0 and all(
-        m["machine_state"] != "unknown" for m in machines
+    complete = (
+        not errors
+        and len(machines) > 0
+        and all(m["machine_state"] != "unknown" for m in machines)
     )
     return {"schema_version": SCHEMA_VERSION, "complete": complete,
             "machines": machines[:len(PROVIDERS)], "errors": errors[:len(PROVIDERS)]}  # fmt: skip
@@ -147,26 +148,39 @@ _STATES = fly_runner.MACHINE_STATES | {"absent", "unknown"}
 def _check_envelope(envelope: Any) -> None:
     """Refuse anything outside the closed envelope: exact key sets and value
     domains, so a regression upstream cannot pass an API string through."""
+
     def flag(value: Any) -> bool:
         return value is None or isinstance(value, bool)
 
-    ok = (type(envelope) is dict
-          and tuple(envelope) == ("schema_version", "complete", "machines", "errors")
-          and envelope["schema_version"] == SCHEMA_VERSION
-          and isinstance(envelope["complete"], bool)
-          and type(envelope["machines"]) is list and len(envelope["machines"]) <= len(PROVIDERS)
-          and type(envelope["errors"]) is list and len(envelope["errors"]) <= len(PROVIDERS))
+    ok = (
+        type(envelope) is dict
+        and tuple(envelope) == ("schema_version", "complete", "machines", "errors")
+        and envelope["schema_version"] == SCHEMA_VERSION
+        and isinstance(envelope["complete"], bool)
+        and type(envelope["machines"]) is list
+        and len(envelope["machines"]) <= len(PROVIDERS)
+        and type(envelope["errors"]) is list
+        and len(envelope["errors"]) <= len(PROVIDERS)
+    )
     if ok:
         for row in envelope["machines"]:
-            ok = ok and (type(row) is dict and tuple(row) == _ROW_KEYS
-                         and row["provider"] in PROVIDERS and row["machine_state"] in _STATES
-                         and flag(row["run_marker_present"]) and flag(row["job_config_present"]))
+            ok = ok and (
+                type(row) is dict
+                and tuple(row) == _ROW_KEYS
+                and row["provider"] in PROVIDERS
+                and row["machine_state"] in _STATES
+                and flag(row["run_marker_present"])
+                and flag(row["job_config_present"])
+            )
         for err in envelope["errors"]:
             status = err.get("http_status") if type(err) is dict else None
-            ok = ok and (type(err) is dict and tuple(err) == _ERROR_KEYS
-                         and (err["provider"] is None or err["provider"] in PROVIDERS)
-                         and err["code"] in ERROR_CODES
-                         and (status is None or (type(status) is int and 100 <= status <= 599)))
+            ok = ok and (
+                type(err) is dict
+                and tuple(err) == _ERROR_KEYS
+                and (err["provider"] is None or err["provider"] in PROVIDERS)
+                and err["code"] in ERROR_CODES
+                and (status is None or (type(status) is int and 100 <= status <= 599))
+            )
     if not ok:
         raise ValueError("status envelope outside its closed shape")
 
@@ -203,7 +217,11 @@ def _binding_problem(config: fly_runner.FlyConfig, provider: str) -> str:
         return MISSING_BINDING
     if not _MACHINE_ID_RE.fullmatch(machine_id):
         return INVALID_BINDING
-    others = [p for p, mid in config.login_machines.items() if p != provider and mid == machine_id]
+    others = [
+        p
+        for p, mid in config.login_machines.items()
+        if p != provider and mid == machine_id
+    ]
     return DUPLICATE_BINDING if others else ""
 
 
@@ -249,7 +267,7 @@ async def collect(providers: tuple[str, ...], *,
             _read(client, provider, config.login_machines[provider])
         )
     if reads:
-        done, pending = await asyncio.wait(reads.values(), timeout=DEADLINE_SECONDS)
+        _done, pending = await asyncio.wait(reads.values(), timeout=DEADLINE_SECONDS)
         for task in pending:
             task.cancel()
         if pending:
@@ -259,7 +277,7 @@ async def collect(providers: tuple[str, ...], *,
                 rows[provider] = _unknown(provider)
                 errors.append(_error(provider, TIMED_OUT))
                 continue
-            exc = task.exception() if not task.cancelled() else asyncio.TimeoutError()
+            exc = task.exception() if not task.cancelled() else TimeoutError()
             if exc is None:
                 rows[provider] = task.result()
                 if rows[provider]["machine_state"] == "unknown":
@@ -296,7 +314,9 @@ def main(argv: list[str] | None = None, *,
         parsed = parse_args(args)
         if parsed is None:
             sys.stderr.write(INVALID_ARGUMENTS_TEXT)
-            sys.stdout.write(_encode(_envelope([], [_error(None, INVALID_ARGUMENTS)])) + "\n")
+            sys.stdout.write(
+                _encode(_envelope([], [_error(None, INVALID_ARGUMENTS)])) + "\n"
+            )
             return EXIT_INCOMPLETE
         mode, providers = parsed
         if mode == "help":

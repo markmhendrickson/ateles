@@ -16,11 +16,10 @@ import os
 import subprocess
 from pathlib import Path
 
-import httpx
-import pytest
-
 import fly_machine_status
 import fly_runner
+import httpx
+import pytest
 
 TOKEN = "synthetic-deploy-token-canary-7731"
 APP = "synthetic-runner-app"
@@ -182,7 +181,9 @@ def test_single_provider_reads_only_that_machine(env, capsys, caplog):
     code, out, _, _ = run(capsys, caplog, ["--provider=cursor"], fake)
     assert code == 0
     assert [r["provider"] for r in envelope(out)["machines"]] == ["cursor"]
-    assert [r.url.path for r in fake.requests] == [f"/v1/apps/{APP}/machines/{IDS['cursor']}"]
+    assert [r.url.path for r in fake.requests] == [
+        f"/v1/apps/{APP}/machines/{IDS['cursor']}"
+    ]
 
 
 # 2. Sentinels everywhere reach nothing.
@@ -197,8 +198,12 @@ def test_hostile_payloads_and_error_bodies_never_reach_any_output(env, capsys, c
     code, out, err, logs = run(capsys, caplog, [], fake)
     doc = envelope(out)
     assert code == 2 and doc["complete"] is False
-    assert doc["machines"][1] == {"provider": "codex", "machine_state": "unknown",
-                                  "run_marker_present": None, "job_config_present": None}
+    assert doc["machines"][1] == {
+        "provider": "codex",
+        "machine_state": "unknown",
+        "run_marker_present": None,
+        "job_config_present": None,
+    }
     assert doc["errors"] == [
         {"provider": "codex", "code": "malformed_response", "http_status": None},
         {"provider": "cursor", "code": "request_failed", "http_status": 500},
@@ -234,7 +239,9 @@ def test_megabyte_fields_give_a_tiny_bounded_output(env, capsys, caplog):
      "malformed_response", None),
     ([SENTINEL], "unknown", "malformed_response", None),
 ])  # fmt: skip
-def test_each_failure_has_its_own_fixed_meaning(env, capsys, caplog, answer, state, code, status):
+def test_each_failure_has_its_own_fixed_meaning(
+    env, capsys, caplog, answer, state, code, status
+):
     fake = Fake({IDS["claude"]: answer})
     exit_code, out, err, logs = run(capsys, caplog, ["--provider", "claude"], fake)
     doc = envelope(out)
@@ -246,7 +253,9 @@ def test_each_failure_has_its_own_fixed_meaning(env, capsys, caplog, answer, sta
     else:
         assert exit_code == 2 and doc["complete"] is False
         assert row["run_marker_present"] is None and row["job_config_present"] is None
-        assert doc["errors"] == [{"provider": "claude", "code": code, "http_status": status}]
+        assert doc["errors"] == [
+            {"provider": "claude", "code": code, "http_status": status}
+        ]
     assert_no_leak(out, err, logs)
 
 
@@ -301,7 +310,9 @@ def test_bad_bindings_are_errors_not_empty_success(env, capsys, caplog, monkeypa
     ("APIS_FLY_APP", f"app/../{SENTINEL}", "invalid_configuration"),
     ("APIS_FLY_API_TOKEN", f"tok {SENTINEL}\n", "invalid_configuration"),
 ])  # fmt: skip
-def test_configuration_refusals_make_no_call(env, capsys, caplog, monkeypatch, name, value, code):
+def test_configuration_refusals_make_no_call(
+    env, capsys, caplog, monkeypatch, name, value, code
+):
     monkeypatch.setenv(name, value)
     fake = Fake({})
     exit_code, out, err, logs = run(capsys, caplog, [], fake)
@@ -324,7 +335,8 @@ def test_hostile_arguments_get_fixed_text_and_no_call(env, capsys, caplog, argv)
     code, out, err, logs = run(capsys, caplog, argv, fake)
     assert code == 2 and fake.requests == []
     assert envelope(out)["errors"] == [
-        {"provider": None, "code": "invalid_arguments", "http_status": None}]
+        {"provider": None, "code": "invalid_arguments", "http_status": None}
+    ]
     assert err == fly_machine_status.INVALID_ARGUMENTS_TEXT
     assert_no_leak(out, err, logs)
 
@@ -337,7 +349,9 @@ def test_help_is_static_and_reads_nothing(capsys, caplog, monkeypatch):
         assert code == 0 and out == fly_machine_status.HELP and err == ""
 
 
-def test_unexpected_failure_prints_only_the_fixed_envelope(env, capsys, caplog, monkeypatch):
+def test_unexpected_failure_prints_only_the_fixed_envelope(
+    env, capsys, caplog, monkeypatch
+):
     def boom(*a, **k):
         raise RuntimeError(SENTINEL)
 
@@ -362,7 +376,9 @@ def test_interruption_prints_a_fixed_envelope(env, capsys, caplog, monkeypatch):
 # 5. The transport oracle: GET of the exact known paths only, nothing else.
 
 
-def test_only_gets_of_known_machine_paths_and_no_other_effect(env, capsys, caplog, monkeypatch):
+def test_only_gets_of_known_machine_paths_and_no_other_effect(
+    env, capsys, caplog, monkeypatch
+):
     def forbidden(*a, **k):
         raise AssertionError("forbidden side effect")
 
@@ -371,17 +387,28 @@ def test_only_gets_of_known_machine_paths_and_no_other_effect(env, capsys, caplo
     monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
     monkeypatch.setattr(fly_runner, "get_executor", forbidden)
     monkeypatch.setattr(fly_runner.FlyLedger, "__init__", forbidden)
-    for name in ("create", "update", "start", "stop", "destroy", "acquire_lease",
-                 "release_lease", "get_lease", "list", "wait"):
+    for name in (
+        "create",
+        "update",
+        "start",
+        "stop",
+        "destroy",
+        "acquire_lease",
+        "release_lease",
+        "get_lease",
+        "list",
+        "wait",
+    ):
         monkeypatch.setattr(fly_runner.FlyMachinesClient, name, forbidden)
     monkeypatch.setattr(fly_runner, "read_result_record", forbidden)
     fake = Fake({mid: _machine(mid) for mid in IDS.values()})
     code, out, _, _ = run(capsys, caplog, ["--provider", "all"], fake)
-    assert code == 0
+    assert code == 0 and envelope(out)["complete"] is True
     assert len(fake.requests) == 3
     assert {(r.method, str(r.url)) for r in fake.requests} == {
         ("GET", f"{fly_runner.FLY_API_BASE_DEFAULT}/apps/{APP}/machines/{mid}")
-        for mid in IDS.values()}
+        for mid in IDS.values()
+    }
     assert all(r.content == b"" for r in fake.requests)
     assert list(env.iterdir()) == []
 
@@ -391,8 +418,10 @@ def test_only_gets_of_known_machine_paths_and_no_other_effect(env, capsys, caplo
 
 def test_client_get_still_returns_the_full_machine(env):
     machine = _hostile(IDS["claude"])
-    client = fly_runner.FlyMachinesClient(fly_runner.FlyConfig.from_env(),
-                                          transport=Fake({IDS["claude"]: machine}).transport)
+    client = fly_runner.FlyMachinesClient(
+        fly_runner.FlyConfig.from_env(),
+        transport=Fake({IDS["claude"]: machine}).transport,
+    )
     got = asyncio.run(client.get(IDS["claude"]))
     assert got["config"]["files"] == machine["config"]["files"]
     assert got["config"]["metadata"]["ateles_run_id"] == "synthetic-run-77"
@@ -401,31 +430,50 @@ def test_client_get_still_returns_the_full_machine(env):
 def test_projector_builds_fresh_records(env):
     machine = _machine(IDS["claude"], "stopped", {"env": {"A": "1"}})
     row = fly_runner.project_machine_status("claude", machine)
-    assert row == {"provider": "claude", "machine_state": "stopped",
-                   "run_marker_present": False, "job_config_present": True}
+    assert row == {
+        "provider": "claude",
+        "machine_state": "stopped",
+        "run_marker_present": False,
+        "job_config_present": True,
+    }
     assert row is not machine and not set(row) & set(machine)
-    assert fly_runner.project_machine_status("claude", None, absent=True)["machine_state"] == "absent"
-    assert fly_runner.project_machine_status("claude", None)["machine_state"] == "unknown"
+    assert (
+        fly_runner.project_machine_status("claude", None, absent=True)["machine_state"]
+        == "absent"
+    )
+    assert (
+        fly_runner.project_machine_status("claude", None)["machine_state"] == "unknown"
+    )
 
 
 def test_script_entrypoint_as_a_file(tmp_path):
-    tmp_path = tmp_path / "cwd"
-    tmp_path.mkdir()
     # The documented invocation runs the file by path, with no binding: help is
     # static, and a missing configuration is the fixed refusal, not a traceback.
     import sys
 
     script = Path(fly_machine_status.__file__)
+    workdir = tmp_path / "cwd"
+    workdir.mkdir()
     child_env = {k: v for k, v in os.environ.items() if not k.startswith("APIS_FLY_")}
     child_env["ATELES_SKIP_DOTENV"] = "1"
-    run_help = subprocess.run([sys.executable, str(script), "--help"], capture_output=True,
-                              text=True, env=child_env, cwd=tmp_path, timeout=60)  # fmt: skip
+
+    def invoke(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(script), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=child_env,
+            cwd=workdir,
+            timeout=60,
+        )
+
+    run_help = invoke("--help")
     assert run_help.returncode == 0 and run_help.stdout == fly_machine_status.HELP
     assert run_help.stderr == ""
-    run_bare = subprocess.run([sys.executable, str(script), "--provider", "codex"],
-                              capture_output=True, text=True, env=child_env, cwd=tmp_path,
-                              timeout=60)  # fmt: skip
+    run_bare = invoke("--provider", "codex")
     assert run_bare.returncode == 2 and run_bare.stderr == ""
     assert json.loads(run_bare.stdout)["errors"] == [
-        {"provider": None, "code": "missing_configuration", "http_status": None}]
-    assert list(tmp_path.iterdir()) == []
+        {"provider": None, "code": "missing_configuration", "http_status": None}
+    ]
+    assert list(workdir.iterdir()) == []
