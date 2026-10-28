@@ -97,24 +97,24 @@ All source constraints and deliberately unresolved conflict pairs below retain
 their authority. Descriptive implementation evidence is not a new permission.
 """
 
-# Only these exact, reviewed non-policy sections are omitted. A new clause in
+# Only these reviewed non-policy sections are omitted (ignoring edge whitespace). A new clause in
 # one changes its digest and refuses generation/checking until it is reviewed;
 # a heading-pattern filter could silently drop a future standing instruction.
 SECTION_OMISSIONS: dict[str, tuple[str, str]] = {
     "Swarm governance layer": (
-        "9ccff58c19aa4c8f3e4c84c6d621da384e701b03e2ad6f637ec62f8d22eb72c7",
+        "456129cdb024e5701bea731db86ba0d7121c7dd35ce0542d1c69505bb3a2a994",
         "Historical schema inventory referencing the omitted orientation table, not standing instructions.",
     ),
     "Key entity IDs": (
-        "0d27085994966edbe4c3787a90c7cec699f7999acaa3ee4507dcb71c4c7bab94",
+        "83b401d1cb10dbcf373bb0971fda17588566c4ea1d76d5de037978fcd5cc8827",
         "Operator-specific orientation identifiers, not portable standing instructions.",
     ),
     "Current phase blockers (Phase 5–6)": (
-        "2b167a790892b3cb9067d82868aeb4e1d39c2f556da1baea997fd198165f47e9",
+        "2f964d7c942fa90e144f8700dbf5043b25c565052dd376a7633d61a45cdec301",
         "Historical execution/status and credential setup, not standing instructions.",
     ),
     "Recently resolved": (
-        "f0d36db14776dc33a166cae777b72f3afa7997e35095efc941ea9e298996a780",
+        "f1d519df96d07a67a6dd05e2c45d28c6005015d07406945989171490f834faf1",
         "Historical implementation changelog; ongoing constraints are preserved in their canonical sections.",
     ),
 }
@@ -142,7 +142,7 @@ def project_source(source_text: str) -> tuple[str, list[str]]:
         title = section.splitlines()[0][3:] if section.startswith("## ") else None
         if title in SECTION_OMISSIONS:
             digest, reason = SECTION_OMISSIONS[title]
-            if hashlib.sha256(section.encode()).hexdigest() != digest:
+            if hashlib.sha256(section.strip().encode()).hexdigest() != digest:
                 die(
                     f"omitted section {title!r} changed; review its full content before omitting it"
                 )
