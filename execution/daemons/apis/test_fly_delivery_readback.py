@@ -136,3 +136,30 @@ def test_a_failed_readback_keeps_the_receipt_so_nothing_is_redelivered(
     github_pr["answer"] = (0, json.dumps(MISMATCHES["head commit"]), "")
     assert not asyncio.run(run_task()).ok
     assert delivery.fly_delivery_blocker(KEY)
+
+
+def test_the_readback_is_made_with_the_pr_opener_app_for_that_repository(
+    monkeypatch, github_pr
+):
+    launch(monkeypatch)
+    got = asyncio.run(run_task())
+    assert got.ok
+    assert github_pr["mints"] == [("pr_opener", REPO)]
+    assert github_pr["tokens"] and all(
+        t == f"app-token-for-{REPO}" for t in github_pr["tokens"]
+    )
+
+
+def test_no_pr_opener_token_means_the_delivery_is_not_verified(
+    monkeypatch, github_pr
+):
+    from lib import github_app_token
+
+    def refuse(identity, repo=None):
+        raise github_app_token.AppTokenError("GitHub App not configured")
+
+    monkeypatch.setattr(github_app_token, "identity_token", refuse)
+    launch(monkeypatch)
+    got = asyncio.run(run_task())
+    assert not got.ok and "read-back credential is unavailable" in got.error
+    assert github_pr["tokens"] == []

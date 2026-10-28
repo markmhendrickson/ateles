@@ -30,10 +30,11 @@ def pr(**over):
 @pytest.fixture
 def github(monkeypatch):
     """Serve one canned `gh pr view` answer; count the asks."""
-    box = {"answer": (0, json.dumps(pr()), ""), "asks": 0}
+    box = {"answer": (0, json.dumps(pr()), ""), "asks": 0, "tokens": []}
 
-    def view(repo, number):
+    def view(repo, number, token=None):
         box["asks"] += 1
+        box["tokens"].append(token)
         answer = box["answer"]
         if isinstance(answer, Exception):
             raise answer
@@ -123,7 +124,7 @@ def test_a_404_is_not_retried_but_an_outage_is(github):
 
 def test_a_transient_failure_then_a_matching_answer_passes(github, monkeypatch):
     answers = iter([(1, "", "HTTP 503"), (0, json.dumps(pr()), "")])
-    monkeypatch.setattr(resolver, "_gh_pr_view", lambda repo, number: next(answers))
+    monkeypatch.setattr(resolver, "_gh_pr_view", lambda repo, number, token=None: next(answers))
     assert read() is None
 
 
@@ -144,3 +145,75 @@ def test_a_field_the_runner_did_not_report_fails_without_asking(
     reason = read(**{field: missing})
     assert reason and name in reason and "did not report" in reason
     assert github["asks"] == 0
+
+
+# -- read-back credential -----------------------------------------------------
+
+
+def test_every_read_uses_the_token_from_the_provider(github):
+    asked = []
+
+    def provider(repo):
+        asked.append(repo)
+        return "tok-1"
+
+    github["answer"] = (1, "", "HTTP 503: Service Unavailable")
+    read(token_provider=provider)
+    assert github["asks"] == 3
+    assert github["tokens"] == ["tok-1"] * 3
+    # Minted once, for the delivered repository, before the retries.
+    assert asked == [REPO]
+
+
+def test_a_matching_pull_request_read_with_a_token_passes(github):
+    assert read(token_provider=lambda repo: "tok-1") is None
+    assert github["tokens"] == ["tok-1"]
+
+
+def test_without_a_provider_the_ambient_credential_is_used(github):
+    assert read() is None
+    assert github["tokens"] == [None]
+
+
+@pytest.mark.parametrize("outcome", [RuntimeError("no app"), "", None])
+def test_an_unavailable_credential_fails_closed_without_asking(github, outcome):
+    def provider(repo):
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    reason = read(token_provider=provider)
+    assert reason == (
+        f"{REPO}#99: the read-back credential is unavailable; "
+        "the delivery is not verified"
+    )
+    assert github["asks"] == 0
+
+
+def _capture_run(monkeypatch):
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen.update(kwargs)
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(resolver.subprocess, "run", run)
+    return seen
+
+
+def test_gh_pr_view_authenticates_with_the_given_token(monkeypatch):
+    seen = _capture_run(monkeypatch)
+    resolver._gh_pr_view(REPO, 99, token="tok-2")
+    assert seen["env"]["GH_TOKEN"] == "tok-2"
+    assert seen["env"]["GITHUB_TOKEN"] == "tok-2"
+    assert "tok-2" not in seen["argv"]
+
+
+@pytest.mark.parametrize("token", [None, ""])
+def test_gh_pr_view_without_a_token_keeps_the_ambient_environment(
+    monkeypatch, token
+):
+    seen = _capture_run(monkeypatch)
+    resolver._gh_pr_view(REPO, 99, token=token)
+    assert "env" not in seen

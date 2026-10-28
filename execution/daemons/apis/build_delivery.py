@@ -1048,13 +1048,19 @@ async def verify_fly_delivery(result, plan) -> str | None:
     the field that failed. A delivery is not verified until this returns None.
 
     Expected: the dispatched repository and base, and the branch, commit and
-    pull request number the runner's record reported."""
+    pull request number the runner's record reported.
+
+    Read as the PR-opener App, minted for exactly that repository: the App that
+    opened the pull request can always read it, while the ambient credential
+    cannot see private repositories outside the swarm's own."""
+    from lib import github_app_token
     from lib.daemon_runtime.artifact_resolver import read_back_delivered_pr
 
     return await asyncio.to_thread(
         read_back_delivered_pr, repo=plan.repository, number=result.fly_pr_number,
         base=plan.base_branch, branch=result.fly_delivery_branch,
-        commit=result.fly_delivery_commit)  # fmt: skip
+        commit=result.fly_delivery_commit,
+        token_provider=lambda repo: github_app_token.identity_token("pr_opener", repo))  # fmt: skip
 
 
 _FLY_STATUS_TEXT = {
