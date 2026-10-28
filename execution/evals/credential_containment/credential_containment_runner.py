@@ -232,6 +232,16 @@ def run_launch(scenario: dict, tmp_root: Path, monkeypatch) -> LaunchTrace:
 
     monkeypatch.setattr(agent_loader.AgentLoader, "load", canonical_role)
     monkeypatch.setattr(hlr, "check_headroom", lambda provider: 1.0)
+    # The scenario controls credential files in the checkout, not remote CI.
+    # Feed the real seating gate a synthetic green head at its external edge;
+    # no fixture may consult GitHub credentials before the containment probe.
+    monkeypatch.setattr(hlr, "current_pr_base_ref", lambda **kw: "main")
+
+    async def green_checks(repository, head_sha, base_ref):
+        assert repository == "example/repo" and head_sha == "a" * 40
+        return hlr.panel_check_gate.CheckGate(head=head_sha, green=True)
+
+    monkeypatch.setattr(hlr.panel_check_gate, "read_check_gate", green_checks)
     monkeypatch.setattr(
         hlr,
         "capture_stash_ref_state",

@@ -35,6 +35,16 @@ def test_guarded_cli_requires_available_canonical_definition(monkeypatch, tmp_pa
     monkeypatch.setattr(runner.dispatch_role, "ATELES_REPO", ROOT)
     monkeypatch.setenv("ATELES_REPO_PATH", str(ROOT))
     monkeypatch.setattr(runner, "check_headroom", lambda provider: None)
+    # CI readiness is an external input, independent of the role-loading
+    # behavior this offline eval judges. Keep the real seating gate and supply
+    # a known-green head rather than reading GitHub or the host's credentials.
+    monkeypatch.setattr(runner, "current_pr_base_ref", lambda **kw: "main")
+
+    async def green_checks(repository, head_sha, base_ref):
+        assert repository == "example/project" and head_sha == "a" * 40
+        return runner.panel_check_gate.CheckGate(head=head_sha, green=True)
+
+    monkeypatch.setattr(runner.panel_check_gate, "read_check_gate", green_checks)
     monkeypatch.setattr(runner.Worktree, "create", lambda self, **kw: self.path.mkdir(parents=True))
     monkeypatch.setattr(runner.Worktree, "remove", lambda self: None)
     monkeypatch.setattr(runner, "refuse_if_credential_files_in_worktree", lambda path: None)
