@@ -5,7 +5,7 @@
 
 Every rule `github.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`github.md`](../github.md) and are not repeated here (decision 66).
 
-19 rules.
+20 rules.
 
 ## [Reviews, review comments, and threads](../github.md#reviews-review-comments-and-threads)
 
@@ -61,3 +61,7 @@ Every rule `github.md` owns, one entry each: the rule's own statement from `conf
 ## [Everything else the host can deliver](../github.md#everything-else-the-host-can-deliver)
 
 - **GH-18** — every unnamed class is `dropped`, reason `out_of_scope_class`, counted; `installation` and `member` events are observations, the first announced off-record, and none alters a binding *[M]*
+
+## [What is deployed is a commit on the default branch, and a verdict is valid only for a head that is, or becomes, what is deployed](../github.md#what-is-deployed-is-a-commit-on-the-default-branch-and-a-verdict-is-valid-only-for-a-head-that-is-or-becomes-what-is-deployed)
+
+- **GH-19** — (decision 162): what is deployed is a commit that is an ancestor of the default branch's head, judged on the commit with the ref as provenance, at the time the deployment is observed; a verdict binds a deployment only through the head that is or becomes it by a merge the gate took, with the verdict and the merge both recorded before the deployment; an unreadable walk reads `unknown` *[M]*

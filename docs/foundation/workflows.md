@@ -508,8 +508,8 @@ test, as `application.md` applies it).
 **What this does not do.** It does not say a faster suite is better, only that the cost is bounded by someone
 who declared it. It does not let a change merge on a CI run that did not finish. How `checks` reads a run that did
 not finish is the adapter's existing mapping of `check_run.completed` (`github.md#checks-and-statuses`), which this
-ruling does not change. The change that records it edits `feature`'s `impl` row only; `bug` and `security` are to
-carry the same clause in a follow-up change.
+ruling does not change. `feature`'s, `bug`'s, and `security`'s `impl` rows carry the same finding clause; `copy`'s does not, and
+the ruling is not read to reach it.
 
 **The rejected alternatives.** A budget stated once in the design was rejected under rule 4. Leaving CI cost to
 review was rejected because no review step's closing condition mentions it, so the finding would have no step
@@ -518,10 +518,9 @@ so that an over-budget green run does not close `impl`, was rejected under rule 
 is the loop of reruns the rule exists to avoid. Keeping every suite in the per-change run, whatever it costs, was
 rejected as the present state this ruling is written against.
 
-**Matrix.** No row is added here. The planted refusals this ruling calls for are an `impl` signed on a green run over
-its declared budget with no finding recorded, and a heavy suite moved out of the per-change run with no criterion
-naming it; they are added to `conformance_suite.md` in a later change, which also reads again the row (X-12) that
-describes `impl` closing on CI green.
+**Matrix.** The planted refusals this ruling calls for are an `impl` signed on a green run over its declared budget
+with no finding recorded, and a heavy suite moved out of the per-change run with no criterion naming it; they are
+row WF-27 of `conformance_suite.md`, which also reads again the row (X-12) that describes `impl` closing on CI green.
 
 ### The acceptance step exercises a change against the real external systems it touches, before merge
 
@@ -621,9 +620,9 @@ above. Seating the step after `merge` inside `feature` was rejected under rule 1
 rejected because most changes touch no external system, and a required step that is inapplicable most of the time
 teaches the reader to sign it without looking.
 
-**Matrix.** No row is added here. The planted refusals this ruling calls for are an `acceptance` step recorded
-inapplicable on a change that touches an external system, and an `acceptance` verdict signed by an author of the
-batch's artifacts; they are added to `conformance_suite.md` in a later change.
+**Matrix.** The planted refusals this ruling calls for are an `acceptance` step recorded inapplicable on a change
+that touches an external system, and an `acceptance` verdict signed by an author of the batch's artifacts; they are
+row WF-28 of `conformance_suite.md`.
 
 ## bug
 
@@ -640,7 +639,7 @@ is wrong, ideally as a failing test.
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
 | 1 | `pm` | `pm` step owner | yes | | the defect is reproduced or the reproduction's absence is stated; the acceptance evidence is the test that goes red without the fix |
-| 2 | `impl` | implementer | yes | | a pull request exists with the fix, mergeable as read, and the red-then-green result recorded in its body |
+| 2 | `impl` | implementer | yes | | a pull request exists with the fix, mergeable as read, and the red-then-green result recorded in its body; a green run over the declaration scope's CI time budget for the change's class is a standing finding recorded beside the verdict and does not hold the step (decision 163, ruled 2026-10-28) |
 | 3 | `pr_review` | `pr_review` step owner | yes | | the full diff is read; the fix addresses the cause, not the symptom |
 | 4 | `qa` | `qa` step owner | yes | | the test fails on the reverted fix (`principles.md`, invariant 4) |
 | 5 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the verdict names the successor |
@@ -680,7 +679,7 @@ is deployed.
 | # | Step | Step owner (role) | Required | Parallel / join | Closes on |
 |---|---|---|---|---|---|
 | 1 | `pm` | `pm` step owner | yes | | the affected surface and the fix's scope are stated in the record; the public artifacts carry no exploit detail |
-| 2 | `impl` | implementer | yes | | a pull request exists with the fix, mergeable as read; its body describes the change, not the exploit |
+| 2 | `impl` | implementer | yes | | a pull request exists with the fix, mergeable as read; its body describes the change, not the exploit; a green run over the declaration scope's CI time budget for the change's class is a standing finding recorded beside the verdict and does not hold the step (decision 163, ruled 2026-10-28) |
 | 3 | `pr_review` | `pr_review` step owner | yes | | the full diff is read and the fix is judged complete for the stated surface |
 | 4 | `merge` | steward | yes | | the merge action taken through the action gate and read back; the verdict names `release` |
 
@@ -803,7 +802,7 @@ workflow together, as one batch (`work_model.md#what-goes-through-a-workflow-is-
 |---|---|---|---|---|---|
 | 1 | `criteria` | release steward | yes | | every criterion in the `release_criteria` entity, retrieved by type, is read and holds; a criterion that cannot be read is `unknown`, and unknown holds the batch (`principles.md`, invariant 7) |
 | 2 | `release` | release steward | yes | on fail: `criteria` | the `release` action taken through the action gate; the tag, package, or deployment is read back at its terminal status (`principles.md`, invariant 2) |
-| 3 | `verify_deployed` | deployment verifier | yes | on fail: `release` | the deployed checkout reports the released version; the verdict closes the batch |
+| 3 | `verify_deployed` | deployment verifier | yes | on fail: `release` | the deployed checkout reports the released version, and the deployed commit is an ancestor of the default branch's head as recorded when the deployment was observed, judged on the commit and not the ref (decision 162, ruled 2026-10-28); the verdict closes the batch |
 
 <!-- /rendered -->
 
