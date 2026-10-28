@@ -101,6 +101,7 @@ from review_panel import (
 import build_delivery
 import fly_runner
 import lens_authors
+import lens_receipts
 import model_tiering
 import review_carry
 import review_delta
@@ -10841,10 +10842,10 @@ class SwarmDispatcher:
                 continue
         return totals
 
-    async def _all_issue_comments(
+    async def _issue_comments_scan(
         self, repository: str, number: int, client: httpx.AsyncClient
-    ) -> list[dict]:
-        """Every comment on an issue/PR, following pagination to the last page.
+    ) -> tuple[list[dict], bool]:
+        """Scan comments and report whether the last page was reached.
 
         ateles#430. Paging is not optional here: the newest aggregation is what
         both callers need, and on a PR with >100 comments it sits on a later
@@ -10861,6 +10862,7 @@ class SwarmDispatcher:
             f"https://api.github.com/repos/{repository}/issues/{number}/comments"
         )
         out: list[dict] = []
+        complete = True
         page = 1
         while page <= _MAX_COMMENT_PAGES:
             resp = await client.get(
@@ -10877,6 +10879,7 @@ class SwarmDispatcher:
                 break
             page += 1
         else:
+            complete = False
             # Ran the page cap without a short page. Log rather than silently
             # truncating: a bounded scan that hides its own bound is how the
             # >100-comment gap stayed invisible in the first place.
@@ -10885,7 +10888,78 @@ class SwarmDispatcher:
                 f"{_MAX_COMMENT_PAGES}-page cap ({len(out)} comments) — the "
                 "newest aggregation may lie beyond it"
             )
-        return out
+        return out, complete
+
+    async def _all_issue_comments(
+        self, repository: str, number: int, client: httpx.AsyncClient
+    ) -> list[dict]:
+        """Return the comments found by the bounded issue comment scan."""
+        return (await self._issue_comments_scan(repository, number, client))[0]
+
+    async def _lens_verdict_state(
+        self, repository: str, number: int, lens: str, head: str
+    ) -> str:
+        """Confirm a current-head lens marker from an admitted author."""
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments, complete = await self._issue_comments_scan(
+                    repository, number, client
+                )
+            comments = lens_authors.scope_lens_comments(
+                comments, await asyncio.to_thread(lens_comment_authors)
+            )
+            bodies = [comment.get("body", "") for comment in comments]
+            if lens not in lenses_missing_comments(bodies, [lens], head_sha=head):
+                return "confirmed"
+            return "absent" if complete else "unknown"
+        except Exception:
+            return "unknown"
+
+    async def _notify_lens_receipt(self, key: str) -> bool:
+        """Claim the durable notice before sending it, including across restarts."""
+        entry = await asyncio.to_thread(lens_receipts.claim_notification, key)
+        if entry is None:
+            return False
+        command = f"{build_delivery.FLY_RECEIPT_COMMAND} clear {key}"
+        delivered = self.notifier.send(
+            f"Lens receipt {key} is held (status: {entry.get('status', 'unknown')}; "
+            f"run id: {entry.get('run_id') or 'not reported'}). The lens will not "
+            "be re-dispatched at this head until the receipt is cleared, and "
+            "merge is held on it. Run a dry run first, then clear with "
+            f"`{command}`.",
+            priority=Priority.BLOCKER,
+            handler=DAEMON_NAME,
+        )
+        if not delivered:
+            log.error(f"[{DAEMON_NAME}] lens receipt {key}: BLOCKER notice was not delivered")
+        return True
+
+    async def _settle_lens_receipts(
+        self,
+        repository: str,
+        number: int,
+        head: str,
+        pending: list[tuple[str, lens_receipts.Reservation]],
+        *,
+        persisted: bool,
+    ) -> set[str]:
+        """Release only receipts with a persisted, read-back verdict."""
+        held: set[str] = set()
+        for lens, reservation in pending:
+            if (
+                persisted
+                and await self._lens_verdict_state(repository, number, lens, head)
+                == "confirmed"
+                and await asyncio.to_thread(
+                    lens_receipts.release,
+                    reservation,
+                    statuses=(lens_receipts.AWAITING,),
+                )
+            ):
+                continue
+            held.add(lens)
+            await self._notify_lens_receipt(reservation.key)
+        return held
 
     async def _swarm_comment_authors(self, repository: str, number: int) -> frozenset[str]:
         """The admitted swarm identities; empty (fail closed, logged) when
