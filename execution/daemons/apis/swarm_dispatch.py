@@ -99,10 +99,12 @@ from review_panel import (
     select_panel,
 )
 import build_delivery
-import model_tiering
+import fly_runner
 import lens_authors
+import model_tiering
 import review_carry
 import review_delta
+import skill_runner
 from skill_runner import (
     ATELES_REPO,
     GATE_OWNER_TOOL_DENY_UNAVAILABLE,
@@ -122,6 +124,19 @@ from lib.notify import Notifier, Priority
 from lib import github_app_token as _github_app_token
 
 log = logging.getLogger("apis.swarm_dispatch")
+
+
+def _lens_return_only_on_fly(lens: Lens) -> bool:
+    """Use the return-only prompt only once dispatcher publication is live.
+
+    Until then Fly refuses the lens and the local prompt keeps its existing
+    publication contract. The later publication slice enables both together.
+    """
+    return (
+        skill_runner.DISPATCHER_LENS_PUBLICATION_READY
+        and fly_runner.wants_fly(None, model_tiering.lens_review_class(lens.lens))
+    )
+
 
 DAEMON_NAME = "apis"
 
@@ -7683,6 +7698,7 @@ class SwarmDispatcher:
                         owns_pending_gate=lens.lens in pending_gates,
                         changed_files=changed_files,
                         reviewed_head=review_head,
+                        read_only=_lens_return_only_on_fly(lens),
                     ),
                     github_token=_token_for_agent_on_repo(
                         lens.agent, trigger.repository
@@ -12555,6 +12571,7 @@ class SwarmDispatcher:
         parent: int | None,
         has_worktree: bool,
         changed_files: list[str] | None,
+        read_only: bool = False,
     ) -> tuple[str, str, str, str, str]:
         """The duties every lens prompt carries, built in one place.
 
@@ -12608,6 +12625,10 @@ class SwarmDispatcher:
             "<summary>`. Cite the standing rule or guardrail doc when one "
             "applies — that marks the finding as systemic.\n\n" + evidence_bar
         )
+        if read_only and lens.forward_looking:
+            blocking_rules = blocking_rules.replace(
+                "say so in the comment", "say so in your final message"
+            )
         # Build the check-off instruction only when there is a parent issue AND
         # this panelist pre-registered expectations (so there is a comment to edit).
         checkoff_block = ""
@@ -12630,6 +12651,18 @@ class SwarmDispatcher:
                 f"(`**{EXPECTATION_MARKER} ({lens.lens})**`) and all item text "
                 f"exactly; only toggle the checkboxes from `[ ]` to `[x]`."
             )
+            if read_only:
+                checkoff_block = (
+                    "\n\nIn your final message, include a "
+                    "`<<<DISPATCHER_EXPECTATION_UPDATE>>>` section with the "
+                    f"complete updated text of YOUR `{EXPECTATION_MARKER} "
+                    f"({lens.lens})` checklist for parent issue #{parent}. "
+                    "Preserve its header and item text exactly; mark only "
+                    "items verified by this PR as `- [x]`, leaving the others "
+                    "as `- [ ]`. End with "
+                    "`<<<END_DISPATCHER_EXPECTATION_UPDATE>>>`. The dispatcher "
+                    "publishes the returned checklist."
+                )
         # Gate-writeback (ateles#795 amended ADR). A lens seated because it OWNS
         # a pending pre-impl gate (arch/ux/pm) used to be INSTRUCTED to
         # transcribe its own verdict into the parent issue's `gate_status` via
@@ -12688,6 +12721,7 @@ class SwarmDispatcher:
         owns_pending_gate: bool = False,
         changed_files: list[str] | None = None,
         reviewed_head: str | None = None,
+        read_only: bool = False,
     ) -> str:
         """Build a lens panelist's prompt.
 
@@ -12712,7 +12746,7 @@ class SwarmDispatcher:
             gate_writeback_block,
             foundation_block,
         ) = SwarmDispatcher._lens_duty_blocks(
-            t, lens, expectation, parent, has_worktree, changed_files
+            t, lens, expectation, parent, has_worktree, changed_files, read_only
         )
         _panelist_role = f"{lens.lens} lens panelist"
         marker_head = _normalise_full_sha(
@@ -12769,6 +12803,23 @@ class SwarmDispatcher:
             "lines (the dispatcher parses the reply and posts the comment for "
             "you if your gh call fails)."
         )
+        if read_only:
+            _position = _position.replace(
+                "in the comment and in your reply", "in the returned review"
+            )
+            comment_identity_block = (
+                "Return your complete review in your final message between "
+                "`<<<DISPATCHER_REVIEW>>>` and `<<<END_DISPATCHER_REVIEW>>>`. "
+                "The dispatcher publishes it. Start the review with these "
+                "lines, and nothing before them inside the section:\n\n"
+                f"```\n{_start_lines}\n```\n\n"
+                "Replace `**<VERDICT>**` with your bold verdict token. "
+                + _position
+                + " If the SHA is not supplied above, fetch the PR's current "
+                "`headRefOid` and substitute the full 40-hex SHA in the marker. "
+                "Write the rest of your review after the verdict line. "
+                "Make no GitHub write; return all publication content here."
+            )
         return (
             f"Invoke the {lens.agent} agent per your appended system prompt.\n\n"
             f"You are a review panelist on PR {t.repository}#{t.number}: "
@@ -13357,6 +13408,7 @@ class SwarmDispatcher:
         head: str,
         parent: int | None = None,
         changed_files: list[str] | None = None,
+        read_only: bool = False,
     ) -> str:
         """One prompt that has the pm, qa and ux lenses review together.
 
@@ -13377,7 +13429,8 @@ class SwarmDispatcher:
                 gate_block,
                 foundation_block,
             ) = self._lens_duty_blocks(
-                t, lens, expectations.get(lens.agent, ""), parent, False, changed_files
+                t, lens, expectations.get(lens.agent, ""), parent, False,
+                changed_files, read_only,
             )
             if readings and readings in foundation_block:
                 # The reading list is the same for every lens: state it once
@@ -13399,6 +13452,14 @@ class SwarmDispatcher:
                 f"<<<AGENT_PROMPT {lens.agent}\n{self._lens_agent_prompt(lens.agent)}"
                 "\nAGENT_PROMPT>>>\n\n"
             )
+            if read_only:
+                # Role definitions can contain their own publication duties.
+                # Do not carry those into a read-class job; the lens criteria
+                # and all review duties are supplied explicitly below.
+                own_prompt = (
+                    f"Apply the `{lens.lens}` lens criteria below. Return all "
+                    "publication content in this lens's final block.\n\n"
+                )
             sections.append(
                 f"######## LENS `{lens.lens}` (agent `{lens.agent}`) ########\n"
                 f"{own_prompt}"
@@ -13420,10 +13481,17 @@ class SwarmDispatcher:
             f"Review PR {t.repository}#{t.number} ({t.title}) at head `{head}` "
             "as the following lenses IN ONE PASS. You run diff-only: read the PR "
             "diff. Do not post PR comments yourself: the dispatcher posts each "
-            "block as that lens's own comment. Editing your pre-registered "
-            "expectation checklist on the parent issue, where a lens below asks "
-            "for it, is the only write you make.\n\n"
-            "Return ONE reply made of one block per lens, in this order. Each "
+            "block as that lens's own comment. "
+            + (
+                "Make no GitHub write. Return any expectation checklist "
+                "updates in the delimited sections requested below; the "
+                "dispatcher publishes them.\n\n"
+                if read_only
+                else "Editing your pre-registered expectation checklist on the "
+                "parent issue, where a lens below asks for it, is the only "
+                "write you make.\n\n"
+            )
+            + "Return ONE reply made of one block per lens, in this order. Each "
             "block starts with its own delimiter line, then that lens's header "
             "line EXACTLY as shown, then its verdict line (replace `**<VERDICT>**` "
             "with your bold verdict token), then its findings. Never write one "
@@ -13473,6 +13541,7 @@ class SwarmDispatcher:
                 self._combined_prompt(
                     trigger, combinable, expectations, review_head, parent,
                     changed_files,
+                    read_only=_lens_return_only_on_fly(first),
                 ),
                 github_token=_token_for_agent_on_repo(first.agent, trigger.repository),
                 include_github_contract=True,

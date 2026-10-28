@@ -2866,6 +2866,11 @@ def _dispatch_succeeded(
 
 # ── Single-provider runner ─────────────────────────────────────────────────────
 
+# The dispatcher must publish both the verdict and parent-issue checklist as
+# the lens App before a read-only lens may run remotely. Flip this only when
+# that dispatcher-owned path exists and is covered by an end-to-end test.
+DISPATCHER_LENS_PUBLICATION_READY = False
+
 
 async def _run_skill_once(
     skill: str,
@@ -3870,6 +3875,16 @@ async def _run_skill_once(
     _fly_disabled = False
     if fly_runner.wants_fly(runner, action_class):
         try:
+            if (
+                github_read_only
+                and action_class is not None
+                and action_class.startswith(model_tiering.LENS_REVIEW_PREFIX)
+                and not DISPATCHER_LENS_PUBLICATION_READY
+            ):
+                raise fly_runner.FlyIneligible(
+                    "read-only lens review needs dispatcher-owned verdict and "
+                    "expectation publication before Fly dispatch"
+                )
             _fly_job = fly_runner.build_job(
                 provider=provider,
                 role=_role,
