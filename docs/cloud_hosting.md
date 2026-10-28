@@ -77,6 +77,21 @@ API executor. The exact instance command and build arguments come from its
 binding. Keep the dispatcher and runner implementation compatible; inspect the
 actual machine image digest rather than inferring it from a tag or local HEAD.
 
+### When a runner file changes
+
+Files under `deploy/fly-runner/`, such as `run_job.py` and `repo_delivery.py`,
+run inside the job image, not in the dispatcher. Merging a change to these
+files does not change what jobs run. After the merge, use the build-only command
+above to build and push a new image labelled with the merged commit's short SHA.
+Update the dispatcher's configured image reference (`APIS_FLY_IMAGE` in the
+instance binding), restart the dispatcher, and confirm that the running process
+loaded the new reference. On the first job after the switch, verify that the
+machine's image digest matches the pushed image and that the job's signed result
+reflects the change.
+
+Changes only to the dispatcher under `execution/daemons/apis/` need a dispatcher
+restart, not an image rebuild.
+
 For an already admitted read-only pilot task, the existing dispatcher command
 is:
 
