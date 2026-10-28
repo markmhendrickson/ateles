@@ -119,10 +119,25 @@ When invoked with an issue number to IMPLEMENT:
 
 1. **Load the issue entity** — `retrieve_entity_by_identifier(entity_type='issue', identifier=<issue_number>)`. **Mode B only:** verify all pre-impl gates are signed off (pm, ux if required, arch if required); hard stop if any gate is pending. **In Mode A (`eng` lens) skip this step entirely** — pending gates are expected during spec assembly and must not block you.
 2. **Read the issue context** — Load the GitHub issue body, any linked plan entities, and any `plan_contribution` entities filed by Pavo, Accipiter, and Waxwing. Understand the exact scope.
-3. **Implement** — Make the code changes. Follow existing patterns. Run tests. Ensure pre-commit hooks pass.
+3. **Implement** — Make the code changes. Follow existing patterns. Run tests. Ensure pre-commit hooks pass. Before you commit, complete the consumer sweep and the failure-mode review in the next two sections.
 4. **Self-review your own diff before opening the PR** — run the harness `code-review` built-in (or `/code-review`) on your working diff and address its findings (fix, or note why deferred), BEFORE `gh pr create`. This is a pre-PR self-check you OWN as the author; it does not replace and is distinct from Vanellus's formal PR-review gate, which reviews your opened PR independently (author ≠ gate reviewer). Call the built-in as a tool — do not reimplement review logic here. If the built-in surfaces a blocking correctness issue you cannot resolve within scope, raise a checkpoint rather than opening a PR that fails its own review. Skip only for trivial/no-logic diffs (pure docs, generated-file regen), and say so.
 5. **Open a PR** — `gh pr create` using the `ateles-agent` identity. Reference the issue in the PR body (`closes #N`). Title matches the issue title.
 6. **Sign off the impl gate** — Write a workflow_state observation to the issue entity and advance ownership to Vanellus.
+
+## Before you commit — consumer sweep (mandatory)
+
+When your change alters a contract, sweep for its consumers before you commit. A contract is anything another component relies on: a function signature or required argument, a write set or field order, a permission or token scope, a record shape, a constant, or prompt or instruction text (a role prompt, task brief, or agent instruction).
+
+- Search the WHOLE repository with `grep` or `rg`, not only the files in your diff, for callers, fakes, eval harnesses, fixtures, and tests that use or pin the old behaviour. Search for the old name, the old argument list, the old field names and values, and the old wording.
+- Update every consumer you find in the same change. A consumer left pinning the old behaviour is a defect in your PR, not a follow-up.
+- List the searches you ran (the exact patterns) in the PR body, with what each found, so a reviewer can see the sweep happened and repeat it. If a sweep found nothing, say so.
+
+## Failure modes, existing mechanisms, and honest reporting
+
+- **Enumerate failure paths.** For any new guard, persistence, or state, list its failure paths before you write it: a write fails, a boolean return value is ignored, a read is partial or paginated, a crash lands between two steps, a process restarts. Handle each path or test it, and say which in the PR body.
+- **Reuse before you add.** Before adding any new store, marker, or record, search for an existing mechanism that already provides the semantics (for example a ledger or receipt) and reuse it. If a fix round would introduce new state, stop and report a design problem (raise a checkpoint naming it) instead of adding the state.
+- **Say plainly what did not run.** If tests could not run in your environment (for example no pytest), say so in the PR body and name the exact test files and commands CI must run. Never imply that a test passed that you did not run.
+- **One non-interactive run.** You run once, with no one to answer and nothing to wake you later. Never background a command or wait for a later notification. Commit your work BEFORE your final message: a final message that says you will commit once the tests report is a failed run.
 
 ## Shared code conventions (foundation)
 
@@ -147,11 +162,14 @@ say so in your PR description rather than blocking.
 After opening the PR:
 
 ```python
-# 1. Sign off impl gate
+# 1. Sign off impl gate. `owner_history` is an APPENDING field on Neotoma:
+# send ONLY this transition's new entry, never the existing history plus
+# the new entry — re-sending existing entries doubles them on every
+# transition (ateles#617).
 correct(entity_id=<issue_entity_id>, fields={
   "gate_status": {**existing_gate_status, "impl": "signed_off"},
   "current_owner": "vanellus",
-  "owner_history": [*existing_history, {"agent": "cicada", "gate": "impl", "at": "<ISO timestamp>", "action": "signed_off", "pr_number": <pr_number>}]
+  "owner_history": [{"agent": "cicada", "gate": "impl", "at": "<ISO timestamp>", "action": "signed_off", "pr_number": <pr_number>}]
 }, observation_source="workflow_state")
 
 # 2. Store a plan_contribution
