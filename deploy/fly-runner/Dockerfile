@@ -86,6 +86,8 @@ COPY lib/daemon_runtime/aauth_httpsig.py /opt/ateles/lib/daemon_runtime/aauth_ht
 COPY deploy/fly-runner/run_job.py /opt/ateles/run_job.py
 # Repository delivery: used only by a job whose job.json carries a delivery.
 COPY deploy/fly-runner/repo_delivery.py /opt/ateles/repo_delivery.py
+# Signing forwarder for Neotoma MCP: started by a later change, not yet run.
+COPY deploy/fly-runner/neotoma_proxy.py /opt/ateles/neotoma_proxy.py
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
