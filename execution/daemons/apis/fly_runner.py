@@ -3383,6 +3383,59 @@ def _has_job_config(config: dict) -> bool:
     )
 
 
+# ── Bounded public status of a login machine ──────────────────────────────────
+#
+# Lifecycle code keeps the rich machine objects. Anything printed for an
+# operator or agent goes through ``project_machine_status`` instead: a FRESH
+# record built from a closed vocabulary, never a copied machine dict with
+# fields removed afterwards, so no API string (job files, env, metadata,
+# names, ids, run ids, versions) can reach the output.
+
+MACHINE_STATES: frozenset[str] = frozenset({
+    "started", "stopped", "created", "starting", "stopping", "suspended", "suspending",
+    "destroying", "destroyed", "replacing", "updating", "failed",
+})  # fmt: skip
+# Provider literals: the record carries the constant, never the caller's string.
+_STATUS_PROVIDERS: dict[str, str] = {"claude": "claude", "codex": "codex", "cursor": "cursor"}
+
+
+def status_row(provider: str, machine_state: str, run_marker: bool | None,
+               job_config: bool | None) -> dict:  # fmt: skip
+    """One closed status record. Every value is checked against its domain."""
+    literal = _STATUS_PROVIDERS[provider]
+    if machine_state not in MACHINE_STATES and machine_state not in ("absent", "unknown"):
+        raise ValueError("machine_state outside the status vocabulary")
+    for flag in (run_marker, job_config):
+        if flag is not None and not isinstance(flag, bool):
+            raise ValueError("job predicate is not a boolean or null")
+    return {"provider": literal, "machine_state": machine_state,
+            "run_marker_present": run_marker, "job_config_present": job_config}  # fmt: skip
+
+
+def project_machine_status(provider: str, machine: Any, *, absent: bool = False) -> dict:
+    """The bounded status of *provider*'s login machine.
+
+    ``absent=True`` is an explicit 404: ``absent`` with null job predicates.
+    Otherwise *machine* must pass the ``machine`` validator with a recognized
+    state; anything else (malformed, unknown state, non-object config) is
+    ``unknown`` with null predicates, never a false "nothing there". The job
+    predicates are derived from presence only (``_config_run_id`` and
+    ``_has_job_config``); no value from *machine* is copied into the record.
+    """
+    if absent:
+        return status_row(provider, "absent", None, None)
+    try:
+        machine = validate("machine", machine)
+    except FlyInvalid:
+        return status_row(provider, "unknown", None, None)
+    state = machine["state"]
+    if state not in MACHINE_STATES:
+        return status_row(provider, "unknown", None, None)
+    config = machine["config"]
+    return status_row(provider, state, bool(_config_run_id(config)),
+                      bool(_has_job_config(config)))  # fmt: skip
+
+
 DISPATCH_TIMEOUT_DEFAULT = 1800
 
 
