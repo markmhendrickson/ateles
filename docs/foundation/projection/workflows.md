@@ -5,7 +5,7 @@
 
 Every rule `workflows.md` owns, one entry each: the rule's own statement from `conformance_suite.md`'s matrix, and a link to the heading that argues it. The argument, the cost, the prior art, and the walkthrough are in [`workflows.md`](../workflows.md) and are not repeated here (decision 66).
 
-26 rules.
+28 rules.
 
 ## [How to read a workflow section](../workflows.md#how-to-read-a-workflow-section)
 
@@ -92,3 +92,11 @@ Every rule `workflows.md` owns, one entry each: the rule's own statement from `c
 ## [planning](../workflows.md#planning)
 
 - **WF-26** — entry by the record's one live instance; `survey` names its reads; `judge` writes only findings; `amend` writes through `amend_<level>` actions, creates tasks under the record and the parent, creates the next instance before its verdict, and names no successor; optional review steps by `applies_when` carry a role's findings *[M for structure; R for judgements]*
+
+## [CI at the pinned head is a step resource with a declared time budget, and heavy suites run in a release-candidate run](../workflows.md#ci-at-the-pinned-head-is-a-step-resource-with-a-declared-time-budget-and-heavy-suites-run-in-a-release-candidate-run)
+
+- **WF-27** — (decision 163): `impl` still closes on CI green; a green run over its class's declared budget closes it with a standing finding recorded beside the verdict and holds nothing; a run that did not finish is not green; a scope declaring no budget for a class has no finding to record; a suite moved out of the per-change run needs a `release_criteria` criterion naming it, and one guarding an external send, a payment, sign-in or authorization, or the gate is never moved; the same finding clause is on `feature`, `bug`, and `security` *[M (WF-9's refusals on CI that is not green are unchanged)]*
+
+## [The acceptance step exercises a change against the real external systems it touches, before merge](../workflows.md#the-acceptance-step-exercises-a-change-against-the-real-external-systems-it-touches-before-merge)
+
+- **WF-28** — (decision 164): `feature`'s optional `acceptance` step is seated after the review steps and before `merge`, opened by `applies_when` over what the change touches, recorded inapplicable with the condition where it does not apply, and opened where the condition cannot be evaluated; it closes on the pull request's head exercised and read back, never on the operation's return, and its verdict pins that head; its owner is not an author of the batch's artifacts; its effects pass the action gate; a scope whose runtime exists only after merge declares a successor workflow whose first step is the exercise *[M]*

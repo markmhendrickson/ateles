@@ -552,8 +552,8 @@ section's sense: that exercise is not deployed reviewed work, its verdict pins t
 about that head only (`workflows.md#the-acceptance-step-exercises-a-change-against-the-real-external-systems-it-touches-before-merge`).
 And it does not decide how a client instance's runtime is deployed, which decision 148 and the instance's
 `deployment_configuration` own (`adapters.md#a-client-instance-runs-a-minimal-runtime-of-its-own-and-its-delivery-never-depends-on-swarm-coordination`).
-The `release` workflow's `verify_deployed` row is to gain the ancestry condition in a follow-up change; the
-change that records this ruling edits no closing condition outside `feature`.
+The `release` workflow's `verify_deployed` row carries the ancestry condition
+(`workflows.md#release`).
 
 **The rejected alternatives.** Stating the size limit and the sweep as invariants was rejected under rule 3. A
 stored flag marking a commit reviewed was rejected under rule 2. Testing the ref and not the commit was rejected
@@ -562,9 +562,9 @@ to be the only ref a deploy workflow can run on was rejected as a host configura
 hold in the required-state table above, when the rule already holds without it: a deploy from another ref whose
 commit is not on the history simply does not read as reviewed.
 
-**Matrix.** No row is added here. The planted refusals this ruling calls for are a `verify_deployed` signed on a
-commit outside the default branch's history, and a deployed commit read as reviewed on a merge and a verdict recorded
-after the deployment; they are added to `conformance_suite.md` in a later change.
+**Matrix.** The planted refusals this ruling calls for are a `verify_deployed` signed on a commit outside the default
+branch's history, and a deployed commit read as reviewed on a merge and a verdict recorded after the deployment; they
+are row GH-19 of `conformance_suite.md`.
 
 ## Where an agent's artifact about an issue or a pull request lives
 
