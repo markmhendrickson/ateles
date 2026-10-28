@@ -1,9 +1,10 @@
 """Tests for execution/scripts/render_codex_agents_md.py.
 
-The script exists to make the operator's standing rules bind in Codex, and its
-`--check` mode is the control that keeps the rendered copy from going stale. A
-control that cannot fail is decoration (`CLAUDE.md`: "A mechanism that does not
-bind is not a control"), so the tests here are the failure modes themselves:
+The renderer supplies the Codex fallback instructions. Its `--check` command
+reports full-text drift for the target explicitly supplied by its caller.
+CI runs this suite against temporary targets; it neither checks nor regenerates
+the installed Codex-home file. Installed-target freshness requires a separate
+invocation against that target. These tests exercise the command's failure modes:
 
 * the literal state found on 2026-09-13 — an `AGENTS.md` that exists and is
   empty, which is how a Codex session came to run with no rules at all;
@@ -11,7 +12,7 @@ bind is not a control"), so the tests here are the failure modes themselves:
   what a hand-maintained copy does over time;
 * `CLAUDE.md` GAINING a rule the rendered copy lacks, which is the realistic
   drift direction — the source moves and the copy does not;
-* a stale omission record, so a suppression cannot quietly widen the gate.
+* changed content in an explicitly omitted section, which requires review before generation.
 
 Every test writes to a temporary `--out`, never the operator's real Codex home.
 
@@ -46,8 +47,9 @@ class TestRender(unittest.TestCase):
     def test_render_then_check_passes(self) -> None:
         """The rendered file carries every standing rule in the real CLAUDE.md.
 
-        This is the gate lint.sh runs, against the repo's actual rule set, so a
-        rule added to CLAUDE.md without being carried here fails in CI.
+        CI exercises this round-trip with the actual repository source and a
+        temporary output. Mutation tests separately prove drift is rejected;
+        this test does not establish an installed-target freshness gate.
         """
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "AGENTS.md"
@@ -206,17 +208,17 @@ class TestOmissions(unittest.TestCase):
         for key, reason in mod.DELIBERATE_OMISSIONS.items():
             self.assertTrue(reason.strip(), f"{key} has no stated reason")
 
-    def test_omitted_rules_still_exist_in_claude_md(self) -> None:
-        """A stale omission fails the gate rather than widening it.
+    def test_current_source_omission_digests_are_accepted(self) -> None:
+        """The current source is a positive witness for reviewed omissions.
 
-        An entry naming a rule CLAUDE.md no longer has is a suppression with
-        nothing behind it, and would mask a future rule of the same name.
+        The changed-omission-section test separately exercises refusal; this
+        positive round-trip uses a temporary target and proves no live freshness.
         """
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "AGENTS.md"
             run("--out", str(out))
             result = run("--check", "--out", str(out))
-            self.assertNotIn("stale omission record", result.stdout)
+            self.assertEqual(result.returncode, EXIT_OK, result.stderr)
 
 
 class TestManagedRegionContract(unittest.TestCase):
