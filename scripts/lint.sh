@@ -85,6 +85,13 @@ python3 scripts/linters/check_neotoma_rest_paths.py || ERRORS=$((ERRORS + 1))
 echo "  - Checking agent roster (no retired agent names)..."
 python3 scripts/linters/check_agent_roster.py || ERRORS=$((ERRORS + 1))
 
+# agent_policy rule_kind contradictions (ateles#1114/#1115). Two active rows
+# stating the same rule at the same scope, one `mandatory` and one
+# `recommended`, let an agent truthfully conclude a safety constraint is
+# optional. Ruled 2026-09-18: mandatory survives, the twin is retired.
+echo "  - Checking agent_policy rule_kind (no mandatory/recommended split)..."
+python3 scripts/linters/check_policy_rule_kind.py || ERRORS=$((ERRORS + 1))
+
 # CLAUDE.md rule parity (ateles#973). A standing rule that vanishes from this
 # file stops binding, and a small diff can hide the loss — the six deletions in
 # the merge that motivated this were all same-rule replacements. Every side
