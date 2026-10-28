@@ -8,6 +8,7 @@ description: Invoke Buteo, the legal agent — contract review, marketing copy l
 tier: T4
 genus: Buteo
 status: active
+aauth_sub: buteo@ateles-swarm
 agent_grant: service
 observation_source_default: llm_summary
 user_invocable: true
@@ -77,6 +78,7 @@ Invoke Buteo, the legal agent — contract review, marketing copy legal risk, pr
 | Tier | T4 |
 | Genus | Buteo |
 | Status | active |
+| AAuth sub | buteo@ateles-swarm |
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | buteo, /buteo |
@@ -152,27 +154,13 @@ Contribute when the plan has ANY of: `tags includes 'legal', 'compliance'` OR pl
 
 ## Gate handoff — legal gate
 
-When Buteo completes a legal review on a GitHub issue, sign off the `legal` gate. Buteo runs **in parallel with the QA agent (qa gate, roster role `qa`)** in Phase 4b — both must sign off before the release manager (roster role `release_manager`) releases. The `legal` gate is `required=false` by default; it only activates when `legal_required: true` in the `workflow_definition` for this project/workflow_type.
+When Buteo completes a legal review on a GitHub issue, the `legal` gate is signed off from your verdict. Buteo runs **in parallel with the QA agent (qa gate, roster role `qa`)** in Phase 4b — both must sign off before the release manager (roster role `release_manager`) releases. The `legal` gate is `required=false` by default; it only activates when `legal_required: true` in the `workflow_definition` for this project/workflow_type.
+
+State your verdict in the fixed position; the dispatcher records the gate with your AAuth key. Do not write gate_status yourself — the tool is denied. A `**SIGNED_OFF**` (or `**APPROVE**`) verdict in the fixed position (see GitHub deliverable) clears the gate; `**REQUEST_CHANGES**` / `**BLOCKED**` with a `[BLOCKING] <category>: <summary>` line leaves it pending. Do not `correct()` `gate_status`, `owner_history`, or `current_owner` on the issue entity for a gate verdict.
+
+Still store a `plan_contribution` with risk summary:
 
 ```python
-# 1. Sign off legal gate on the issue entity
-correct(entity_id=<issue_entity_id>, fields={
-  "gate_status": {**existing_gate_status, "legal": "signed_off"},
-  "owner_history": [*existing_history, {"agent": "buteo", "gate": "legal", "at": "<ISO timestamp>", "action": "signed_off"}]
-}, observation_source="workflow_state")
-
-# 1b. Read-back — correct() returning 200 is NOT proof the field mutation landed
-snapshot = retrieve_entity_snapshot(entity_id=<issue_entity_id>)
-if (snapshot.get("gate_status") or {}).get("legal") != "signed_off":
-    # Do NOT emit SIGNED_OFF. Post **BLOCKED** with reason, attempted vs read-back,
-    # and next action (retry / escalate to Anthus / check agent_grant for buteo).
-    raise GateWritebackError("legal gate writeback failed read-back")
-
-# 2. Check join condition ONLY after read-back confirms: if qa is also signed_off, advance to the release phase
-if existing_gate_status.get("qa") in ("signed_off", "waived"):
-    correct(entity_id=<issue_entity_id>, fields={"current_owner": "<release_manager>"}, observation_source="workflow_state")
-
-# 3. Store a plan_contribution with risk summary
 store(entities=[{
   "entity_type": "plan_contribution",
   "plan_entity_id": <issue_entity_id>,
@@ -272,11 +260,16 @@ The operator-interface agent (roster role operator_interface) digests these. The
 
 ## GitHub deliverable (swarm pipeline)
 
-When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (exact attribution header, **VERDICT** line, checkbox DoD, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is a **Compliance Checklist**, posted/edited as ONE comment:
+When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (exact attribution header, **VERDICT** line, checkbox DoD, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is a **Compliance Checklist**, posted/edited as ONE comment.
+
+**Fixed position.** The comment, and the reply you return, start with at most one `<!-- review:legal commit=<full40hex> -->` marker line (optional); after it, the FIRST line of your reply must be your header; the second line your verdict. Nothing else goes above the header — no plain `review:legal` line, heading, or other text — and the rest of the review follows below the verdict line.
+
+**Verdict** (the second line, directly under your header) — `APPROVE` (no blocking concerns), `REQUEST_CHANGES` (a `[BLOCKING]` item), or `COMMENT`. State your verdict in the fixed position; the dispatcher records the gate with your AAuth key. Do not write gate_status yourself — the tool is denied.
+
+The rest of the checklist follows below the verdict line:
 
 - Each item a `- [ ]` checkbox verdict across: **dependencies/licensing**, **secrets/PII surface**, **data-handling**, **ToS/legal exposure**.
 - Flag any `[BLOCKING]` legal/compliance risk explicitly.
-- **Verdict** — `APPROVE` (no blocking concerns), `REQUEST_CHANGES` (a `[BLOCKING]` item), or `COMMENT`.
 
 Keep it structured, not an essay. Reference the Neotoma entities (issue / plan_contribution) you create or read.
 

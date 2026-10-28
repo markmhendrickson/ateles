@@ -440,19 +440,20 @@ def test_gate_owning_lenses_can_write_the_issue_entity():
         )
 
 
-def test_gate_owning_lens_skills_document_the_issue_writeback():
-    """The other half of the invariant: the instruction actually exists.
+def test_gate_owning_lens_skills_document_the_gate_handoff():
+    """Every gate-owning lens is told how its verdict becomes the gate record.
 
-    The test above proves a gate owner *may* write the issue. This one proves
-    it is *told* to — so that if a skill ever drops the writeback recipe, the
-    grant assertion above does not silently pass over a lens whose sign-off no
-    longer reaches the entity at all.
+    ateles#795 amended the ateles#762 / #769 recipe: a gate-owning lens no
+    longer writes `gate_status` itself and reads it back. It states its
+    verdict in the fixed position and the DISPATCHER records the gate via the
+    lens-AAuth-signed `IssueGateStore.sign_off` (see `_run_pr_review_panel`
+    and the pm gate block in `swarm_dispatch.py`). A lens told to `correct()`
+    `gate_status` over the shared daemon bearer would reopen the
+    unattributed-write sink Falco found on PR #1181.
 
-    Cause #2 (ateles#762 / #769): a write without read-back is still a silent
-    failure. The Gate handoff recipe must (a) call retrieve_entity_snapshot or
-    retrieve_entity_by_identifier after correct(), (b) branch on mismatch to
-    **BLOCKED** (never SIGNED_OFF), and (c) show a conditional — not only the
-    happy-path correct() → store() sequence.
+    So the Gate handoff section must (a) exist, (b) still reference the issue
+    entity it contributes to, (c) forbid the lens's own `gate_status` write,
+    and (d) name the **BLOCKED** verdict that leaves the gate pending.
     """
     from pathlib import Path
     import re
@@ -465,10 +466,10 @@ def test_gate_owning_lens_skills_document_the_issue_writeback():
         assert "issue_entity_id" in skill, (
             f"{lens.agent} owns the {lens.gate!r} gate but its SKILL.md no "
             f"longer references <issue_entity_id> — either restore the gate "
-            f"writeback recipe or remove the gate from its lens."
+            f"handoff or remove the gate from its lens."
         )
-        # Isolate the Gate handoff section (first match) so consultation-protocol
-        # retrieve calls elsewhere in the skill cannot satisfy this check.
+        # Isolate the Gate handoff section (first match) so text elsewhere in
+        # the skill cannot satisfy this check.
         m = re.search(
             r"## Gate handoff.*?(?=\n## |\Z)", skill, flags=re.S | re.I
         )
@@ -477,20 +478,17 @@ def test_gate_owning_lens_skills_document_the_issue_writeback():
             f"'## Gate handoff' section in SKILL.md"
         )
         handoff = m.group(0)
-        assert (
-            "retrieve_entity_snapshot" in handoff
-            or "retrieve_entity_by_identifier" in handoff
-        ), (
-            f"{lens.agent} Gate handoff must read-back the issue entity after "
-            f"correct() (retrieve_entity_snapshot / retrieve_entity_by_identifier)"
+        assert "the dispatcher records the gate" in handoff, (
+            f"{lens.agent} Gate handoff must say the dispatcher, not the lens, "
+            f"records the gate (ateles#795)"
+        )
+        assert re.search(r"Do not `correct\(\)` `gate_status`", handoff), (
+            f"{lens.agent} Gate handoff must forbid the lens's own "
+            f"correct() of gate_status (ateles#795)"
         )
         assert "**BLOCKED**" in handoff, (
-            f"{lens.agent} Gate handoff must route read-back failure to "
-            f"**BLOCKED**, never to SIGNED_OFF"
-        )
-        assert re.search(r"\bif\b", handoff), (
-            f"{lens.agent} Gate handoff must branch on read-back result "
-            f"(conditional), not only sequential correct() → store()"
+            f"{lens.agent} Gate handoff must name **BLOCKED** as a verdict "
+            f"that leaves the gate pending"
         )
 
 
