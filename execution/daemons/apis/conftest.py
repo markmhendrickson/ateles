@@ -212,6 +212,14 @@ def _isolate_codex_login(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEX_HOME", str(home))
 
 
+try:  # the class object test modules imported by name, before any reload
+    import swarm_dispatch as _swarm_dispatch_at_collection
+
+    _FIRST_DISPATCHER_CLASS = _swarm_dispatch_at_collection.SwarmDispatcher
+except Exception:  # pragma: no cover — a broken import fails the tests that need it
+    _FIRST_DISPATCHER_CLASS = None
+
+
 @pytest.fixture(autouse=True)
 def _panel_check_hold_off_by_default(monkeypatch):
     """The review panel's check-state hold reads GitHub; no unrelated test may.
@@ -223,10 +231,17 @@ def _panel_check_hold_off_by_default(monkeypatch):
     of the hold itself (`test_panel_check_hold.py`) restore the real method from
     `swarm_dispatch._REAL_HOLD_PANEL_UNTIL_CHECKS_GREEN` and stub only the
     check-state reader.
+
+    Patched on every `SwarmDispatcher` class a test can reach: the one the
+    module holds now, the one test modules imported at collection (a reload in
+    `test_swarm_dispatch.py` leaves its `from swarm_dispatch import
+    SwarmDispatcher` naming an older class), and the copy some tests import
+    under the package path (`execution.daemons.apis.swarm_dispatch`).
     """
     import swarm_dispatch
 
-    real = swarm_dispatch.SwarmDispatcher._hold_panel_until_checks_green
+    current = swarm_dispatch.SwarmDispatcher
+    real = current._hold_panel_until_checks_green
 
     async def _not_held(self, trigger, *, source):
         return False
@@ -234,6 +249,9 @@ def _panel_check_hold_off_by_default(monkeypatch):
     monkeypatch.setattr(
         swarm_dispatch, "_REAL_HOLD_PANEL_UNTIL_CHECKS_GREEN", real, raising=False
     )
-    monkeypatch.setattr(
-        swarm_dispatch.SwarmDispatcher, "_hold_panel_until_checks_green", _not_held
-    )
+    classes = {current, _FIRST_DISPATCHER_CLASS}
+    package_copy = sys.modules.get("execution.daemons.apis.swarm_dispatch")
+    if package_copy is not None:
+        classes.add(package_copy.SwarmDispatcher)
+    for cls in classes - {None}:
+        monkeypatch.setattr(cls, "_hold_panel_until_checks_green", _not_held)

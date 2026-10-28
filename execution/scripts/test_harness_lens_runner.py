@@ -1662,6 +1662,11 @@ def test_reader_preflight_cli_before_inference(
     monkeypatch.setattr(module.Worktree, "remove", lambda self: None)
     monkeypatch.setattr(module.HarnessSandbox, "build", classmethod(ready))
     monkeypatch.setattr(module, "check_headroom", lambda provider: None)
+
+    async def not_held(target):
+        return None
+
+    monkeypatch.setattr(module, "head_checks_hold", not_held)
     monkeypatch.setattr(module, "current_pr_head", lambda **kwargs: SAMPLE_HEAD)
     monkeypatch.setattr(module, "capture_stash_ref_state", lambda path: None)
     monkeypatch.setattr(module, "verify_stash_ref_unchanged_after_dispatch", lambda *args: None)
