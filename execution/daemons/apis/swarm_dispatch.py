@@ -5556,6 +5556,10 @@ class SwarmDispatcher:
             base_ref=(pr.get("base") or {}).get("ref", ""),
             head_sha=(pr.get("head") or {}).get("sha", ""),
         )
+        if await self._hold_panel_until_checks_green(
+            trigger, source="redispatch_missing_lens"
+        ):
+            return
         reviewed_head = _normalise_full_sha(trigger.head_sha or "")
         if not reviewed_head:
             raise RuntimeError(
@@ -7425,20 +7429,25 @@ class SwarmDispatcher:
         (`_handle_ci_status_for_current_head`), and the 10-minute review sweeps
         re-drive it on the next poll if that event is lost.
 
-        A closed or merged PR is not held (nothing to review). Returns False,
-        and clears any hold, when the head's checks are green.
+        A closed or merged PR is skipped without retaining a hold (nothing to
+        review). Returns False only when this exact head's checks are green.
         """
         ref = f"{trigger.repository}#{trigger.number}"
         key = (trigger.repository.casefold(), trigger.number)
         pr = await self._fetch_pr(trigger.repository, trigger.number)
         if pr is not None and pr.get("state") not in (None, "open"):
             self._panel_ci_holds.pop(key, None)
-            return False
+            return True
         live_head = _normalise_full_sha(((pr or {}).get("head") or {}).get("sha", ""))
-        head = live_head or _normalise_full_sha(trigger.head_sha or "")
+        expected_head = _normalise_full_sha(trigger.head_sha or "")
+        head = live_head or expected_head
         if pr is None:
             gate = panel_check_gate.unreadable_gate(
                 head, "the PR could not be fetched"
+            )
+        elif not live_head or not expected_head or live_head != expected_head:
+            gate = panel_check_gate.unreadable_gate(
+                head, "the live PR head is missing or differs from the requested review head"
             )
         else:
             gate = await self._read_head_check_gate(
@@ -7777,6 +7786,10 @@ class SwarmDispatcher:
         # runs alone below, so the combined pass can only save work.
         combined_results: dict[str, SkillResult] = {}
         if self.config.combined_review_pass:
+            if await self._hold_panel_until_checks_green(
+                trigger, source="combined_review_pass"
+            ):
+                return
             combined_results = await self._run_combined_pass(
                 trigger,
                 panel,
@@ -7789,6 +7802,10 @@ class SwarmDispatcher:
                 signals=panel_signals,
             )
         for lens in panel:
+            if lens.lens not in combined_results and await self._hold_panel_until_checks_green(
+                trigger, source=f"panel_lens:{lens.lens}"
+            ):
+                return
             # Whether this seat's clean verdict is signed for its gate, decided
             # from the LIVE record (and the pre-panel re-proof), never from
             # Lanius's report: Lanius reports the pre-impl gates only, so qa

@@ -199,9 +199,41 @@ def test_a_closed_pr_is_not_held(world):
     d, state = world
     state["pr"] = _pr(state="closed")
     state["gate"] = RED
-    with pytest.raises(_Seated):
-        _run(d._handle_pr(_trigger()))
+    _run(d._handle_pr(_trigger()))
+    assert state["seated"] == []
     assert state["gate_reads"] == 0
+
+
+@pytest.mark.parametrize("live_head", [OTHER_HEAD, ""], ids=["changed", "missing"])
+def test_green_checks_for_another_or_unknown_live_head_cannot_release_review(world, live_head):
+    d, state = world
+    state["pr"] = _pr(head=live_head)
+    state["gate"] = GREEN
+    _run(d._handle_pr(_trigger()))
+    assert state["seated"] == []
+    assert state["gate_reads"] == 0
+    assert KEY in d._panel_ci_holds
+
+
+def test_direct_missing_lens_entry_holds_before_preparing_or_seating(world, monkeypatch):
+    d, state = world
+    state["gate"] = RED
+
+    async def no_files(*args, **kwargs):
+        return []
+
+    async def no_gates(*args, **kwargs):
+        return {}
+
+    async def providers(*args, **kwargs):
+        return ["codex"]
+
+    monkeypatch.setattr(d, "_changed_files", no_files)
+    monkeypatch.setattr(d, "_live_gate_status", no_gates)
+    monkeypatch.setattr(sd, "usable_providers_async", providers)
+    _run(d._redispatch_missing_lens(REPO, _pr(), "security"))
+    assert state["seated"] == []
+    assert KEY in d._panel_ci_holds
 
 
 # ── the head going green re-dispatches the held panel, exactly once ──────────
