@@ -213,5 +213,8 @@ It never prints machine or app names, machine or run IDs, versions, files, env,
 metadata, error text, URLs or argument values. A complete status is an
 observation, not a release: `stopped` with no job config does not mean the
 machine is free or may be reused, `absent` does not mean capacity is available,
-and nothing in the output authorizes a release or clears a receipt. The command
+and nothing in the output authorizes a release or clears a receipt. `absent` is
+read from the Machines API's 404, as the lifecycle client reads it; a misnamed
+app binding could also answer 404, so an unexpected `absent` means checking
+the binding, not concluding the machine is gone. The command
 offers a safe path; it does not stop other tools from reading a machine.
