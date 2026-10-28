@@ -101,29 +101,11 @@ You are subscribed to all `plan` entity events. When Apis invokes you for a new 
 
 ## Gate handoff — pm gate
 
-When Pavo completes PM scoping on a GitHub issue, sign off the `pm` gate and hand to the next phase:
+When Pavo completes PM scoping on a GitHub issue, the `pm` gate is signed off from your verdict. State your verdict in the fixed position; the dispatcher records the gate with your AAuth key. Do not write gate_status yourself — the tool is denied. A `**SIGNED_OFF**` (or `**APPROVE**`) verdict in the fixed position (see GitHub deliverable) clears the gate; `**BLOCKED**` / `**REQUEST_CHANGES**` with a `[BLOCKING] <category>: <summary>` line leaves it pending. Do not `correct()` `gate_status`, `owner_history`, or `current_owner` on the issue entity for a gate verdict.
+
+Still store a `plan_contribution` entity for the audit trail:
 
 ```python
-# 1. Sign off pm gate on the issue entity (gate_status only — owner advances after read-back)
-correct(entity_id=<issue_entity_id>, fields={
-  "gate_status": {**existing_gate_status, "pm": "signed_off"},
-  "owner_history": [*existing_history, {"agent": "pavo", "gate": "pm", "at": "<ISO timestamp>", "action": "signed_off"}]
-}, observation_source="workflow_state")
-
-# 1b. Read-back — correct() returning 200 is NOT proof the field mutation landed
-snapshot = retrieve_entity_snapshot(entity_id=<issue_entity_id>)
-if (snapshot.get("gate_status") or {}).get("pm") != "signed_off":
-    # Do NOT emit SIGNED_OFF. Post **BLOCKED** with reason, attempted vs read-back,
-    # and next action (retry / escalate to Anthus / check agent_grant for pavo).
-    # Do NOT advance current_owner on a failed writeback.
-    raise GateWritebackError("pm gate writeback failed read-back")
-
-# 2. Advance current_owner ONLY after read-back confirms
-correct(entity_id=<issue_entity_id>, fields={
-  "current_owner": "accipiter",   # next phase owner (or "cicada" for bug/security fast paths)
-}, observation_source="workflow_state")
-
-# 3. Store a plan_contribution entity for audit trail (only after read-back confirms)
 store(entities=[{
   "entity_type": "plan_contribution",
   "plan_entity_id": <issue_entity_id>,
@@ -238,16 +220,32 @@ Evaluate whether the answer generalises:
 - "Pavo, what's the contribution status on plan X — who has signed off, who has concerns?"
 ## GitHub deliverable (swarm pipeline)
 
-When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (exact attribution header, **VERDICT** line, checkbox DoD, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is a **Scope & Acceptance Spec**, posted/edited as ONE comment:
+When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (exact attribution header, **VERDICT** line, checkbox DoD, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is a **Scope & Acceptance Spec**, posted/edited as ONE comment.
+
+**Fixed position.** The comment, and the reply you return, start with at most one `<!-- review:pm commit=<full40hex> -->` marker line (optional); after it, the FIRST line of your reply must be your header; the second line your verdict. Nothing else goes above the header — no plain `review:pm` line, heading, or other text — and the rest of the review follows below the verdict line.
+
+**Verdict** (the second line, directly under your header) — `SIGNED_OFF` when scope+acceptance are adequate, `BLOCKED` (with the gap) when not, or `COMMENT` for scoping-in-progress. State your verdict in the fixed position; the dispatcher records the gate with your AAuth key. Do not write gate_status yourself — the tool is denied.
+
+The rest of the spec follows below the verdict line:
 
 - **Problem** — one sentence: what need this issue addresses.
 - **In scope / Out of scope** — bullets bounding the work.
 - **Acceptance criteria** — `- [ ]` checkboxes; each concrete + verifiable (these become the definition-of-done the implementer and reviewers check against).
 - **Priority & sequencing** — where this sits and what it unblocks.
-- **Verdict** — `SIGNED_OFF` when scope+acceptance are adequate (you MUST then advance the pm gate per your gate-handoff protocol), `BLOCKED` (with the gap) when not, or `COMMENT` for scoping-in-progress.
 
 Keep it a spec, not an essay. Reference the Neotoma issue/plan_contribution entities you create or read.
 
+
+## Severity rubric (shared by all review lenses)
+
+Every review lens grades findings the same way. It is the CONFIRMED-versus-PLAUSIBLE practice of the security lens applied to all lenses: block only on what you have shown, and mark the rest advisory. The bracketed markers are unchanged, so the verdict parser reads them as before.
+
+- **`[BLOCKING]` only for a demonstrated defect on the PR's current head, or a missing requirement of the PR's stated scope.** A demonstrated defect is one you ran, or can trace to an exact code path and inputs with the reasoning closed. A missing requirement is something the issue's acceptance criteria or the PR description promises and the diff does not deliver. Everything else is advisory: mark it `[NON-BLOCKING]` and say what would confirm or refute it. Never inflate a suspicion into a block, and never demote a demonstrated defect to avoid one.
+- **Ask for evidence that can exist before merge, from whoever can produce it.** Do not demand evidence that exists only after merge or deploy, and do not demand that you run something yourself that your sandbox cannot run. An acceptance check that the issue or PR states as a pre-merge requirement stays required: results from CI, a qualified runner, or an authorized validator on the PR's current head satisfy it and you accept them. If none is supplied, that is a missing requirement: name the check and who can run it. A post-merge verification plan (what will be run, where, what result counts as passing, and what happens if it fails) is acceptable only for the part of a check that genuinely depends on the merged or deployed result, and only where the acceptance contract allows that deferral; say that you accept it, and do not ask again for that part. Deferred verification is never verified completion: report it as deferred, not as passed.
+- **Keep your own verdict when another lens raised the same finding.** Read the existing review comments on the current head first. If the concern belongs to your lens, report it at the same severity and cross-reference the other lens ("also raised by <lens>") to keep your prose short; your verdict stays blocking until the concern is discharged, because re-review is decided from each lens's own history. If the concern is wholly outside your lens, leave it to the owning lens.
+- **Repeated findings on one mechanism trigger a reassessment, not an automatic redesign.** If successive findings keep landing on the same mechanism (each fix opens new failure paths or adds new state), step back and reassess whether it fits instead of listing another point fix. Recommend a replacement only after naming a concrete existing mechanism and checking its semantic fit, ownership and recovery boundaries against the problem. A block on design grounds needs a concrete invariant violation or a demonstrated redundant mechanism; the number of rounds alone is not a defect.
+
+**Your lens on a PR.** You judge whether the PR solves the problem the issue states, stays inside its scope, and meets the acceptance criteria as written. You are not an evidence gatekeeper: test results, eval output and runtime proof are judged by the qa lens, which also decides whether a pre-merge acceptance check has evidence on the current head, so do not block on a lack of that evidence. The effect-test and parity requirements in the quality gate below govern what the acceptance criteria must contain when you scope an issue; whether the evidence for them exists on a given head is the qa lens's call.
 
 ## Quality gate — effect-verified fixed + cross-surface parity
 

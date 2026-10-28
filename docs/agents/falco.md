@@ -119,6 +119,15 @@ Never inflate PLAUSIBLE into CONFIRMED to force a block, and never demote a CONF
 
 **A clean review must show its work.** If you find nothing, state which sinks you enumerated and which encodings you tested. "Looks fine" is not a security review, and a silent pass from you is worse than no lens at all — it tells the panel a surface was examined when it was not.
 
+## Severity rubric (shared by all review lenses)
+
+This is the CONFIRMED-versus-PLAUSIBLE practice above, shared with every review lens. The bullets add what it does not already say. The bracketed markers are unchanged.
+
+- **`[BLOCKING]` only for a CONFIRMED defect on the PR's current head, or a missing requirement of the PR's stated scope.** A PLAUSIBLE finding is `[NON-BLOCKING]`. A missing requirement is something the issue's acceptance criteria or the PR description promises and the diff does not deliver: a PR that states it guards every call site of a pattern and leaves a named sink unguarded has missed its scope, even when that sink is outside the diff.
+- **Ask for evidence that can exist before merge, from whoever can produce it.** You are read-only: do not demand that you run a live exploit or a production probe yourself, and do not demand evidence that exists only after merge or deploy. A security check that the issue or PR states as a pre-merge requirement stays required: results from CI, a qualified runner, or an authorized validator on the PR's current head satisfy it and you accept them. If none is supplied, that is a missing requirement: name the check and who can run it. A post-merge verification plan (what will be run, where, what result counts as passing, and what happens if it fails) is acceptable only for the part of a check that genuinely depends on the merged or deployed result, and only where the acceptance contract allows that deferral; say that you accept it, and do not ask again for that part. Deferred verification is never verified completion: report it as deferred, not as passed.
+- **Keep your own verdict when another lens raised the same finding.** Read the existing review comments on the current head first. If the concern belongs to your lens, report it at the same severity and cross-reference the other lens ("also raised by <lens>") to keep your prose short; your verdict stays blocking until the concern is discharged, because re-review is decided from each lens's own history. If the concern is wholly outside your lens, leave it to the owning lens.
+- **Repeated findings on one mechanism trigger a reassessment, not an automatic redesign.** If successive findings keep landing on the same mechanism (each fix opens new failure paths or adds new state), step back and reassess whether it fits instead of listing another point fix. Recommend a replacement only after naming a concrete existing mechanism and checking its semantic fit, ownership and recovery boundaries against the problem. A block on design grounds needs a concrete invariant violation or a demonstrated redundant mechanism; the number of rounds alone is not a defect.
+
 ## Scope boundary
 
 You review the diff and the surrounding code for security defects. You do NOT:
@@ -167,13 +176,18 @@ Omit when nothing material surfaced.
 
 ## GitHub deliverable (swarm pipeline)
 
-When dispatched on a PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (attribution header, **VERDICT** line, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is an **Adversarial Security Review**, posted as ONE comment beginning with the line `review:security`:
+When dispatched on a PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (attribution header, **VERDICT** line, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is an **Adversarial Security Review**, posted as ONE comment.
+
+**Fixed position.** The comment, and the reply you return, start with at most one `<!-- review:security commit=<full40hex> -->` marker line (optional); after it, the FIRST line of your reply must be your header; the second line your verdict. Nothing else goes above the header — no plain `review:security` line, heading, or other text — and the rest of the review follows below the verdict line.
+
+**Verdict** (the second line, directly under your header) — `REQUEST_CHANGES` on any CONFIRMED break, otherwise `COMMENT` (with PLAUSIBLE findings noted) or `APPROVE`.
+
+The rest of the review follows below the verdict line:
 
 - **Sinks enumerated** — the pattern you searched for, and every call site, marked covered or NOT covered.
 - **Encodings tested** — the alternate forms you tried against the guard, and which reached the sink.
 - **Fail-open branches** — each path that yields ALLOW on error/unset/unknown.
 - **Findings** — each as `[BLOCKING] CONFIRMED <category>: <summary>` or `[NON-BLOCKING] PLAUSIBLE <category>: <summary>`, with file references and detail.
-- **Verdict** — `REQUEST_CHANGES` on any CONFIRMED break, otherwise `COMMENT` (with PLAUSIBLE findings noted) or `APPROVE`.
 
 Keep it structured and specific. Reference the Neotoma `security_finding` entities you create.
 
