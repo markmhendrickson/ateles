@@ -7,6 +7,11 @@ falls back to the local path. After inspecting the remote branch and the run
 record and reconciling what happened, the operator clears the receipt here.
 Nothing clears a receipt automatically.
 
+The same ledger holds lens-review entries (``lens_receipts``), keyed
+``lens:OWNER/REPO#PR@HEAD:LENS``, each recording one lens run on one pull
+request head. They are listed and cleared here the same way; their
+description adds the lens, pull request, head and when the notice was claimed.
+
     python3 execution/daemons/apis/fly_delivery_receipt.py list
     python3 execution/daemons/apis/fly_delivery_receipt.py clear OWNER/REPO#NUMBER
     python3 execution/daemons/apis/fly_delivery_receipt.py clear OWNER/REPO#NUMBER \\
@@ -67,7 +72,7 @@ def _iso(epoch: object) -> str:
 
 
 def describe(key: str, entry: dict) -> str:
-    return (
+    text = (
         f"key:       {key}\n"
         f"status:    {entry.get('status') or 'not reported'}\n"
         f"run id:    {entry.get('run_id') or 'not reported'}\n"
@@ -75,6 +80,14 @@ def describe(key: str, entry: dict) -> str:
         f"commit:    {entry.get('commit') or 'not reported'}\n"
         f"recorded:  {_iso(entry.get('recorded_at'))}"
     )
+    if entry.get("kind") == "lens":
+        text += (
+            f"\nlens:      {entry.get('lens') or 'not reported'}\n"
+            f"pull:      {entry.get('pr') or 'not reported'}\n"
+            f"head:      {entry.get('head') or 'not reported'}\n"
+            f"notified:  {_iso(entry.get('notified_at'))}"
+        )
+    return text
 
 
 def audit_path(ledger: "fly_runner.FlyLedger") -> Path:
@@ -120,7 +133,8 @@ def main(argv: list[str] | None = None, *, ledger=None, out=None, err=None) -> i
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="print every delivery receipt")
     clear = sub.add_parser("clear", help="dry run; with --confirm, remove one receipt")
-    clear.add_argument("key", help="the issue key, OWNER/REPO#NUMBER (or OWNER/REPO#task:ID)")
+    clear.add_argument("key", help="the issue key, OWNER/REPO#NUMBER (or OWNER/REPO#task:ID, "
+                       "or lens:OWNER/REPO#PR@HEAD:LENS)")
     clear.add_argument("--confirm", metavar="KEY", help="the same key, to actually remove it")
     args = parser.parse_args(argv)
 
@@ -162,6 +176,9 @@ def main(argv: list[str] | None = None, *, ledger=None, out=None, err=None) -> i
         "commit": entry.get("commit"),
         "recorded_at": entry.get("recorded_at"),
     }
+    if entry.get("kind") == "lens":
+        identity.update({"kind": "lens", "lens": entry.get("lens"), "pr": entry.get("pr"),
+                         "head": entry.get("head"), "notified_at": entry.get("notified_at")})
     audit_file = audit_path(ledger)
     announced, attempted = [], []
 

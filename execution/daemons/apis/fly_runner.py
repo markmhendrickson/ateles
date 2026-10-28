@@ -960,15 +960,36 @@ class FlyLedger:
 
         return self._write_delivery(key, write)
 
-    def release_delivery(self, key: str, token: str) -> bool:
+    def replace_delivery(self, key: str, expected: dict, entry: dict) -> bool:
+        """Replace the receipt for *key* with *entry* only if it still equals
+        *expected* in full (compare-and-set on the whole receipt); otherwise
+        leave it untouched and return False. Two callers that read the same
+        receipt cannot both succeed, which a token-only compare allows."""
+        if not isinstance(entry.get("status"), str):
+            raise FlyLedgerError("delivery receipt has no status")
+
+        def write(receipts: dict) -> bool:
+            if receipts.get(key) != expected:
+                return False
+            receipts[key] = entry
+            return True
+
+        return self._write_delivery(key, write)
+
+    def release_delivery(self, key: str, token: str,
+                         statuses: tuple[str, ...] = ("launching",)) -> bool:
         """Remove the receipt for *key* only if it is still the reservation
-        *token* made and still ``launching`` (compare-and-remove); otherwise
-        leave it untouched and return False. For a dispatch that provably
-        launched nothing."""
+        *token* made and its status is one of *statuses* (compare-and-remove);
+        otherwise leave it untouched and return False. With the default, only
+        a ``launching`` receipt goes: for a dispatch that provably launched
+        nothing. Lens receipts (``lens_receipts``) pass their own statuses."""
+        if isinstance(statuses, str):
+            # A bare string would match by substring; refuse the misuse.
+            raise FlyLedgerError("release_delivery statuses must be a tuple of strings")
 
         def write(receipts: dict) -> bool:
             held = receipts.get(key)
-            if held is None or held.get("token") != token or held.get("status") != "launching":
+            if held is None or held.get("token") != token or held.get("status") not in statuses:
                 return False
             receipts.pop(key)
             return True
