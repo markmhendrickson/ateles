@@ -173,3 +173,48 @@ that only the declared provider login persists. Preserve any live review,
 credential, schema, grant or activation gate. These checks establish an
 instance's behavior; this document and its build template do not assert that
 any instance has been deployed.
+
+## Login-machine status for supervision
+
+Supervise from the canonical records first: the task, its `fly_runner_result`
+and the dispatcher's ledger. When the live state of a provider's login machine
+is needed, use the bounded status command rather than printing a machine
+response. A full response carries the job's mounted files and environment, so
+serializing it can put job credentials into a transcript or log.
+
+```bash
+ATELES_SKIP_DOTENV=1 .venv/bin/python execution/daemons/apis/fly_machine_status.py --provider all
+```
+
+Run it from the dispatcher's dedicated checkout with that process's existing
+`APIS_FLY_APP`, `APIS_FLY_API_TOKEN` and `APIS_FLY_<PROVIDER>_MACHINE_ID`
+bindings. It loads no env or key file. `--provider` takes `all`, `claude`,
+`codex` or `cursor`; `--help` is static. There are no other options.
+
+It makes one `GET` per requested login machine through the existing Machines
+client, under one 10-second deadline. It takes no lease, starts, stops, updates
+or destroys nothing, and touches no ledger, executor or Neotoma record. It only
+calls the official Machines API base, so a configured override is refused.
+
+The output is always one JSON object of at most 4 KiB:
+
+- `machines`: per provider, `machine_state` (a Fly machine state, `absent` for
+  an explicit 404, or `unknown`) and whether a run marker or any job config is
+  present (`true`/`false`, or `null` when it could not be read).
+- `errors`: per provider (or `null` for the whole command), a fixed `code` and,
+  for an HTTP failure, its numeric status. The codes are `missing_configuration`,
+  `invalid_configuration`, `missing_binding`, `invalid_binding`,
+  `duplicate_binding`, `request_failed`, `malformed_response`, `timed_out`,
+  `invalid_arguments`, `interrupted` and `unexpected_error`.
+- `complete`: every requested machine was read. Exit 0 only when complete;
+  otherwise exit 2.
+
+It never prints machine or app names, machine or run IDs, versions, files, env,
+metadata, error text, URLs or argument values. A complete status is an
+observation, not a release: `stopped` with no job config does not mean the
+machine is free or may be reused, `absent` does not mean capacity is available,
+and nothing in the output authorizes a release or clears a receipt. `absent` is
+read from the Machines API's 404, as the lifecycle client reads it; a misnamed
+app binding could also answer 404, so an unexpected `absent` means checking
+the binding, not concluding the machine is gone. The command
+offers a safe path; it does not stop other tools from reading a machine.
