@@ -15,89 +15,93 @@ This script covers the two shared secrets named in Neotoma task
 ent_52d71d10709080d847d07ab1 as first users of that ruling:
 
     github_webhook_secret   APIS_GITHUB_WEBHOOK_SECRET
-                             issuer: GitHub webhook config (markmhendrickson/ateles,
-                             markmhendrickson/neotoma); consumer: apis (github_gateway.py)
+                             issuer: GitHub webhook config (one hook per repo,
+                             passed as --github-hook owner/repo:id);
+                             consumer: apis (github_gateway.py)
     approve_email_secret    APIS_APPROVE_EMAIL_SECRET
                              issuer: none (internal-only); consumers: apis
                              (github_gateway.py /approve-email + /approve-release)
                              and turdus (presents the header)
 
-Agent AAuth signing keys are registered in the `credential` entity type this
-same task adds, but are NOT rotated by this script — see the registry row's
-`notes` field. That is future work; the manual procedure proven 2026-09-25
-for apus/formica is the current path.
+WHERE THE VALUES LIVE. Both secrets are ordinary members of the Design B
+secrets pipeline (docs/secrets_management.md): canonical in 1Password, mapped
+by the private manifest (`secrets/manifest.env-map.json`) block named in
+`RotationTarget.manifest_file`, snapshotted to `secrets/<block>.sops.enc`, and
+materialized into the block's `target` dotenv — the file apis and turdus load
+at startup. The block holds only these swarm-issued secrets, so a rotation
+never decrypts or re-encrypts a snapshot that carries a provider key or a
+root secret. The canonical 1Password reference is read from the manifest at
+run time, never hardcoded here.
 
-SEQUENCE (per `--dry-run`, and per the docstrings on each step function):
-  1. generate           — a new random secret value, held only in memory.
-  2. stage (dual-admit)  — write the new value to the consumer's ``_NEXT``
-     slot (APIS_GITHUB_WEBHOOK_SECRET_NEXT / APIS_APPROVE_EMAIL_SECRET_NEXT)
-     via the SOPS snapshot + materialize, so apis accepts EITHER value.
-  3. restart the ONE consuming daemon (apis; turdus only for
-     approve_email_secret, once switched — see step 6) so the staged
-     ``_NEXT`` value takes effect.
-  4. live-verify UNDER DUAL-ADMIT — send a real signed probe (a signed
-     /github/webhook ping the script itself signs, or a signed
-     /approve-email ping) and confirm the daemon accepts it under the NEW
-     value specifically, while GitHub (for the webhook target) has not yet
-     been told about that value at all. This is the ordering fix from a
-     2026-09-26 review (Falco/security, Pavo/pm, Phoenicurus/qa all
-     independently traced the same defect in an earlier revision that
-     updated the issuer BEFORE verifying): the daemon-side half of the
-     rotation is proven safe entirely with a probe the script signs itself,
-     with zero GitHub involvement, so a failure here can NEVER leave GitHub
-     and the daemon disagreeing — GitHub was never touched.
-  5. update issuer (webhook secret only, and ONLY if step 4 passed) — PATCH
-     the GitHub webhook config to the (now proven-working) new value (this
-     script never calls that API for real; see HARD RULE below). If this
-     step itself fails or cannot be confirmed, dual-admit is left ON
-     (neither promoted nor rolled back) and a checkpoint is raised rather
-     than guessing which side to trust — see `roll_back`'s docstring and
-     `RotationReport.checkpoint_raised`.
-  6. only once every prior step for the target succeeded: promote NEW to
-     primary, retire OLD, clear ``_NEXT``, publish + materialize + restart
-     again. On a step-4 verification failure: roll back — leave the OLD
-     value as primary, clear the staged NEW value, publish + materialize +
-     restart so the daemon returns to exactly its pre-rotation state (this
-     is now always safe to do unconditionally, because step 5 — the only
-     step with no local undo — never runs before step 4 passes). Neither
-     outcome is silent; both are printed and returned as the process exit
-     code (0 rolled-forward, 1 rolled-back, 2 checkpoint raised).
+SEQUENCE (a real run; `--dry-run` prints the same plan with no side effects):
+  0. preflight — refuse before touching anything unless: daemon restarts are
+     allowed (`ATELES_ALLOW_DAEMON_RESTART=1`), the manifest maps the target,
+     the snapshot, the dotenv, and 1Password all agree on the current value,
+     no ``_NEXT`` slot is left over from an earlier run, and (webhook only)
+     the GitHub tripwire, a token, and at least one hook are supplied.
+  1. generate — a new random value, held only in memory.
+  2. stage (dual-admit) — write the new value to the ``_NEXT`` slot in the
+     snapshot AND materialize it into the dotenv the daemon reads.
+  3. restart apis, reading back a NEW pid that is still alive after a settle
+     delay — a restart is not reported until the new process is seen.
+  4. live check under dual-admit — a probe the script signs itself (a signed
+     /github/webhook ping, or an /approve-email call) must be accepted under
+     the NEW value. GitHub has not been told anything yet. Failure: roll back.
+  5. write the canonical store — `op item edit` via a mode-600 template file
+     (the same helper rotate_provider_key.py uses), then read it back and
+     compare in memory. Failure: restore the old value there and roll back.
+     This is what stops the next `secrets_publish.py` from resurrecting the
+     retired value.
+  6. update the issuer (webhook only) — PATCH every named GitHub hook. A
+     failure here is a CHECKPOINT, not a rollback: dual-admit stays on, so no
+     delivery is rejected whichever value GitHub actually holds.
+  7. promote — the new value becomes primary and ``_NEXT`` is removed, in the
+     snapshot and in the dotenv. Restart every daemon that PRESENTS the
+     secret first (turdus, for approve_email_secret), then apis, each with a
+     pid read-back. Presenters go first so there is no window in which apis
+     admits only the new value while a presenter still sends the old one.
+  8. post-promotion checks — apis accepts the new value, REJECTS the old one
+     (401: the old value is genuinely retired), every presenter's own loaded
+     configuration is accepted (turdus: its module, loading its dotenv the way
+     the daemon does, from the daemon's checkout), and (webhook only) a ping
+     GitHub itself signs is delivered with HTTP 200. Any failure re-opens
+     dual-admit with the old value in ``_NEXT`` and raises a CHECKPOINT, so a
+     consumer still on the old value keeps working while a human looks.
+
+Outcomes, printed and returned as the exit code: 0 rolled forward (or
+dry-run), 1 rolled back, 2 checkpoint, 3 refused at preflight (nothing
+changed).
 
 HARD RULES enforced by this script itself, not just by policy:
-  - Never prints a secret value. `--dry-run` prints the plan (steps, which
-    files/vars/daemons are touched, what the live check will POST to) with
-    every value redacted as `<redacted>` or a fixed-width hash-of-nothing
-    placeholder — never a length-revealing partial value.
-  - Never calls the real GitHub webhook-config write API. `update_github_webhook_secret`
-    is written and unit-tested against a MOCKED GitHub API only; this module's
-    own `main()` never calls it unless `--i-know-this-calls-real-github` is
-    also passed (absent from every doc example and from CI), which is the
-    explicit tripwire the task's "never run a real rotation" instruction asks
-    for — the flag existing at all is the seam a future real run would use,
-    not an invitation to use it now.
-  - Never restarts a real daemon. `restart_daemon` shells out to `launchctl`
-    only when `ATELES_ALLOW_DAEMON_RESTART=1` is set in ITS OWN process
-    environment (never read from argv), and this script's tests never set it.
-    Without it, the function prints the exact command and returns.
-  - Every subprocess call (`op`, `sops`, `launchctl`, `curl`-equivalent probe)
-    passes the secret value via a piped stdin template or an HTTP header —
-    never as a CLI argument — mirroring the contract `rotate_provider_key.py`
-    (PR #1297) already states and this module re-derives via `secrets_lib`.
+  - Never prints a secret value. Status lines name variables, files, pids and
+    HTTP statuses only.
+  - Never calls the real GitHub webhook-config write API unless
+    `--i-know-this-calls-real-github` is passed.
+  - Never restarts a real daemon unless `ATELES_ALLOW_DAEMON_RESTART=1` is in
+    this process's own environment (never read from argv).
+  - A secret value never appears on a subprocess argv: `sops` gets a mode-600
+    temp file, `op` gets a mode-600 template file, the probes send it in an
+    HTTP header or use it only as an HMAC key, and GitHub gets it in a JSON
+    request body.
 
 Usage:
-    python execution/scripts/rotate_swarm_secret.py github_webhook_secret --dry-run
     python execution/scripts/rotate_swarm_secret.py approve_email_secret --dry-run
-
-Real execution is gated behind the two tripwires above and is not exercised
-by this PR (bootstrap mode — branch and review only, never run against the
-real daemons, 1Password, or GitHub).
+    ATELES_ALLOW_DAEMON_RESTART=1 \\
+        python execution/scripts/rotate_swarm_secret.py approve_email_secret
+    ATELES_ALLOW_DAEMON_RESTART=1 \\
+        python execution/scripts/rotate_swarm_secret.py github_webhook_secret \\
+        --github-hook <owner>/<repo>:<hook_id> [--github-hook ...] \\
+        --github-token-gh-user <login> --i-know-this-calls-real-github
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -109,9 +113,29 @@ from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rotate_provider_key as rpk  # noqa: E402
 import secrets_lib as sl  # noqa: E402
 
 REDACTED = "<redacted>"
+DEFAULT_BASE_URL = "http://127.0.0.1:8742"
+# The checkout the daemons run from (CLAUDE.md, "Which checkout a daemon runs
+# from"). The presenter check imports the daemon's code from HERE, not from
+# the worktree this script happens to live in.
+DEFAULT_DAEMON_CHECKOUT = Path.home() / "ateles-rc-src"
+
+# Reused, not re-implemented: the 1Password write helper (template file, never
+# argv) and its redaction registry belong to rotate_provider_key.py.
+op_write_password_field = rpk.op_write_password_field
+
+
+def _register_secret(value: str | None) -> None:
+    """Teach the shared redactor a value so no op/HTTP error text can echo it."""
+    rpk._known_secrets.register(value)
+
+
+def _safe(text: str) -> str:
+    return rpk._safe_excerpt(str(text))
+
 
 # ---------------------------------------------------------------------------
 # Rotation targets
@@ -129,19 +153,28 @@ class RotationTarget:
     name: str
     env_var: str
     next_env_var: str
-    manifest_file: str  # which secrets/<name>.sops.env block carries it
-    daemon_plist: str  # launchctl label of the ONE consuming daemon to restart
+    manifest_file: str  # manifest block (and secrets/<block>.sops.enc) carrying it
+    daemon_plist: str  # launchctl label of the daemon that VERIFIES the secret
     has_external_issuer: bool  # True only for github_webhook_secret
     consumers: tuple[str, ...]
     verify_path: str  # HTTP path on the daemon to probe for live verification
+    # launchctl labels of daemons that PRESENT the secret to `daemon_plist`.
+    # Restarted after promotion (before the verifier) and checked from their
+    # own side; each needs an entry in PRESENTER_VERIFIERS.
+    presenter_plists: tuple[str, ...] = ()
 
+
+# Both live in their own manifest block. Keeping them out of the `neotoma`
+# block means a rotation never decrypts or rewrites the snapshot that also
+# carries provider keys and the Neotoma mnemonic (a root secret).
+SWARM_SHARED_SECRETS_BLOCK = "apis"
 
 TARGETS: dict[str, RotationTarget] = {
     "github_webhook_secret": RotationTarget(
         name="github_webhook_secret",
         env_var="APIS_GITHUB_WEBHOOK_SECRET",
         next_env_var="APIS_GITHUB_WEBHOOK_SECRET_NEXT",
-        manifest_file="neotoma",
+        manifest_file=SWARM_SHARED_SECRETS_BLOCK,
         daemon_plist="com.ateles.apis",
         has_external_issuer=True,
         consumers=("apis (github_gateway.py — verify_github_signature_any)",),
@@ -151,7 +184,7 @@ TARGETS: dict[str, RotationTarget] = {
         name="approve_email_secret",
         env_var="APIS_APPROVE_EMAIL_SECRET",
         next_env_var="APIS_APPROVE_EMAIL_SECRET_NEXT",
-        manifest_file="neotoma",
+        manifest_file=SWARM_SHARED_SECRETS_BLOCK,
         daemon_plist="com.ateles.apis",
         has_external_issuer=False,
         consumers=(
@@ -159,6 +192,7 @@ TARGETS: dict[str, RotationTarget] = {
             "turdus (turdus.py — presents the header)",
         ),
         verify_path="/approve-email",
+        presenter_plists=("com.ateles.turdus",),
     ),
 }
 
@@ -175,109 +209,123 @@ def generate_new_value() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 / 6: stage and retire — write the _NEXT / primary slot via SOPS
+# Snapshot + dotenv writes (steps 2, 7, rollback, re-open)
 # ---------------------------------------------------------------------------
 
 
-def stage_next_value(target: RotationTarget, new_value: str, *, dry_run: bool) -> str:
-    """Write `new_value` into the target's `_NEXT` env var and re-encrypt the
-    manifest file block. Returns a status line (never the value).
+def _materialize(target: RotationTarget, *, remove: tuple[str, ...] = ()) -> str:
+    """Push the target's snapshot into the dotenv its daemons read.
 
-    Real write: decrypt the current snapshot (offline, local age key), set
-    the `_NEXT` key, re-encrypt. No `op` call is needed for this step — the
-    primary value is untouched, so 1Password is not written to until
-    promotion (step 6).
-    """
+    Without this a snapshot write never reaches a running daemon: apis and
+    turdus load the materialized dotenv, not the snapshot. Names only."""
+    dest, n_values, changed = sl.materialize_block(target.manifest_file, remove=remove)
+    detail = ", ".join(changed) if changed else "none"
+    return (
+        f"materialized secrets/{target.manifest_file} -> {dest} "
+        f"({n_values} var(s); changed: {detail})"
+    )
+
+
+def _read_snapshot(target: RotationTarget) -> dict[str, str]:
+    enc = sl.enc_file(target.manifest_file)
+    return sl.sops_decrypt_dotenv(enc) if enc.exists() else {}
+
+
+def _write_snapshot(target: RotationTarget, values: dict[str, str]) -> None:
+    sl.sops_encrypt_dotenv(sl.to_dotenv(values), sl.enc_file(target.manifest_file))
+
+
+def stage_next_value(target: RotationTarget, new_value: str, *, dry_run: bool) -> str:
+    """Write `new_value` into the target's `_NEXT` slot — snapshot first, then
+    the materialized dotenv — so the next daemon restart admits both values.
+    Returns a status line (never the value)."""
     if dry_run:
         return (
             f"[dry-run] would set {target.next_env_var}={REDACTED} in "
-            f"secrets/{target.manifest_file}.sops.env, then materialize"
+            f"secrets/{target.manifest_file}.sops.enc, then materialize it into "
+            "the block's dotenv"
         )
-    enc = sl.enc_file(target.manifest_file)
-    current = sl.sops_decrypt_dotenv(enc) if enc.exists() else {}
+    current = _read_snapshot(target)
     current[target.next_env_var] = new_value
-    sl.sops_encrypt_dotenv(sl.to_dotenv(current), enc)
-    return f"staged {target.next_env_var} in secrets/{target.manifest_file}.sops.env"
+    _write_snapshot(target, current)
+    return (
+        f"staged {target.next_env_var} in secrets/{target.manifest_file}.sops.enc; "
+        + _materialize(target)
+    )
 
 
 def promote_and_retire(target: RotationTarget, new_value: str, *, dry_run: bool) -> str:
-    """On successful verification: NEW becomes primary, old is dropped, the
-    `_NEXT` slot is cleared. Returns a status line (never the value)."""
+    """NEW becomes primary, the `_NEXT` slot is removed — in the snapshot and
+    in the dotenv. Returns a status line (never the value)."""
     if dry_run:
         return (
-            f"[dry-run] would set {target.env_var}={REDACTED}, clear "
-            f"{target.next_env_var}, in secrets/{target.manifest_file}.sops.env, "
-            "then materialize + publish to 1Password"
+            f"[dry-run] would set {target.env_var}={REDACTED} and remove "
+            f"{target.next_env_var} in secrets/{target.manifest_file}.sops.enc "
+            "and in the materialized dotenv"
         )
-    enc = sl.enc_file(target.manifest_file)
-    current = sl.sops_decrypt_dotenv(enc) if enc.exists() else {}
+    current = _read_snapshot(target)
     current[target.env_var] = new_value
     current.pop(target.next_env_var, None)
-    sl.sops_encrypt_dotenv(sl.to_dotenv(current), enc)
-    return f"promoted {target.env_var}, cleared {target.next_env_var}"
+    _write_snapshot(target, current)
+    return (
+        f"promoted {target.env_var}, removed {target.next_env_var}; "
+        + _materialize(target, remove=(target.next_env_var,))
+    )
 
 
 def roll_back(target: RotationTarget, *, dry_run: bool) -> str:
-    """On a FAILED (or unrunnable) dual-admit verification (step 4): clear the
-    staged `_NEXT` value and leave the primary untouched. Returns a status
-    line (never a value).
+    """Clear the staged `_NEXT` value, leave the primary untouched, and remove
+    `_NEXT` from the dotenv too. Returns a status line (never a value).
 
-    This is the rollback the operator ruling requires: "a check that fails,
-    or that cannot be run, is not a hold... the rotation rolls back, restoring
-    the old credential's standing rather than leaving both in an ambiguous
-    state." Clearing `_NEXT` (rather than merely not promoting it) is what
-    makes the daemon's post-rollback state identical to its pre-rotation
-    state once restarted — a leftover `_NEXT` would keep the overlap window
-    open indefinitely, which is not standing restored, only standing
-    unresolved.
+    The rollback the operator ruling requires: "a check that fails, or that
+    cannot be run, is not a hold... the rotation rolls back, restoring the old
+    credential's standing". Removing `_NEXT` from the dotenv — not only from
+    the snapshot — is what makes the daemon's post-restart state identical to
+    its pre-rotation state: materializing alone only adds and updates, so a
+    `_NEXT` line left in the dotenv would keep the overlap window open.
 
-    SAFE-BY-CONSTRUCTION for `has_external_issuer` targets: this function is
-    only ever called from `run_rotation` when step 4's dual-admit probe
-    failed, which is BEFORE step 5 (the GitHub issuer update) ever runs — so
-    there is nothing on the GitHub side to revert. This is the ordering fix
-    from the 2026-09-26 review: an earlier revision updated the issuer before
-    verifying, which meant a failed verification left GitHub signing with a
-    value the post-rollback daemon no longer admitted. Reordering makes THIS
-    function correct for every target without needing an issuer-revert path
-    at all. See `run_rotation` and `raise_issuer_checkpoint` for the
-    DIFFERENT failure this does not cover — the issuer update itself failing
-    AFTER step 4 already passed, which is not a rollback case (the daemon-side
-    change is proven good) but a checkpoint case (the issuer-side change is
-    unconfirmed).
+    Only ever called before the GitHub issuer is touched (see `run_rotation`),
+    so there is nothing on the GitHub side to revert.
     """
     if dry_run:
         return (
-            f"[dry-run] would clear {target.next_env_var} (rollback), then materialize"
+            f"[dry-run] would remove {target.next_env_var} from the snapshot and "
+            "the dotenv (rollback)"
         )
     enc = sl.enc_file(target.manifest_file)
     if not enc.exists():
         return f"nothing to roll back — no snapshot for {target.manifest_file}"
     current = sl.sops_decrypt_dotenv(enc)
-    if target.next_env_var not in current:
-        return f"{target.next_env_var} already clear — nothing to roll back"
-    current.pop(target.next_env_var, None)
-    sl.sops_encrypt_dotenv(sl.to_dotenv(current), enc)
-    return f"rolled back — cleared {target.next_env_var}"
+    if target.next_env_var in current:
+        current.pop(target.next_env_var, None)
+        _write_snapshot(target, current)
+        head = f"rolled back — cleared {target.next_env_var} in the snapshot; "
+    else:
+        head = f"{target.next_env_var} already clear in the snapshot; "
+    return head + _materialize(target, remove=(target.next_env_var,))
+
+
+def reopen_dual_admit(target: RotationTarget, old_value: str) -> str:
+    """After a failed post-promotion check: put the RETIRED value back in the
+    `_NEXT` slot so apis admits both while a human looks. The new value stays
+    primary (it is what 1Password and, for the webhook, GitHub now hold)."""
+    current = _read_snapshot(target)
+    current[target.next_env_var] = old_value
+    _write_snapshot(target, current)
+    return (
+        f"re-opened dual-admit: retired value restored to {target.next_env_var}; "
+        + _materialize(target)
+    )
 
 
 def raise_issuer_checkpoint(target: RotationTarget, *, reason: str) -> str:
-    """The one case that is neither a promotion nor a rollback: step 4's
-    dual-admit probe already proved the daemon accepts the new value, but
-    step 5's GitHub issuer update itself failed or could not be confirmed.
+    """The issuer update failed after the dual-admit probe already passed.
 
-    Per the operator's instruction (2026-09-26 review): "if the issuer's
-    restore also fails, keep dual-admit ON, surface a checkpoint and stop."
-    Generalized here to the actual failure mode this ordering produces —
-    the issuer update was never attempted successfully in the first place,
-    so there is nothing to "restore"; the safe move is to leave dual-admit
-    exactly as it is (the daemon already admits both old and new — no
-    delivery signed under EITHER value is rejected) rather than guess
-    whether to promote (GitHub might not actually be on the new value yet)
-    or roll back (GitHub might already be, if the failure was on the
-    response read rather than the write itself, e.g. a timeout after
-    GitHub already applied it). Both `_NEXT` and the primary are left
-    untouched by this function — it only reports; `run_rotation` is what
-    stops (never calling promote_and_retire or roll_back) once this fires.
+    Neither a promotion (GitHub might not hold the new value) nor a rollback
+    (GitHub might already hold it, e.g. a timeout after the write applied).
+    Dual-admit stays on — the daemon admits both values, so no delivery is
+    rejected either way — and a human resolves it. This function only
+    reports; `run_rotation` is what stops.
     """
     return (
         f"CHECKPOINT: {target.name} issuer update failed ({reason}) after "
@@ -292,13 +340,82 @@ def raise_issuer_checkpoint(target: RotationTarget, *, reason: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Step 5: update the issuer (GitHub webhook config) — webhook secret only,
-# and only once step 4's dual-admit verification has already passed
+# Step 5: the canonical store (1Password)
+# ---------------------------------------------------------------------------
+
+
+class CanonicalStoreError(RuntimeError):
+    """The canonical store could not be written or read back. Never a value."""
+
+
+def canonical_ref(target: RotationTarget, manifest: dict | None = None) -> str | None:
+    """The op:// reference the manifest maps the target's env var to, with the
+    same ENVIRONMENT overlay secrets_publish.py applies."""
+    manifest = manifest if manifest is not None else sl.load_manifest()
+    try:
+        refs = sl.resolve_refs(manifest, target.manifest_file, os.environ.get("ENVIRONMENT"))
+    except KeyError:
+        return None
+    return refs.get(target.env_var)
+
+
+def read_canonical(ref: str) -> str:
+    return sl.op_read(ref)
+
+
+def write_canonical_store(ref: str, value: str, *, what: str) -> str:
+    """Write `value` to the 1Password field `ref` names, then read it back and
+    compare in memory. Raises CanonicalStoreError on any failure."""
+    try:
+        op_write_password_field(ref, rpk._field_label_from_ref(ref), value)
+    except Exception as exc:  # noqa: BLE001 — surfaced, never a value
+        raise CanonicalStoreError(f"write failed: {_safe(exc)}") from None
+    try:
+        readback = read_canonical(ref)
+    except Exception as exc:  # noqa: BLE001
+        raise CanonicalStoreError(f"read-back failed: {_safe(exc)}") from None
+    if not hmac.compare_digest(readback.encode(), value.encode()):
+        raise CanonicalStoreError("read-back does not match the value written")
+    return f"wrote the {what} value to 1Password ({ref}) and read it back: match"
+
+
+def _restore_canonical(ref: str, old_value: str) -> str:
+    try:
+        return write_canonical_store(ref, old_value, what="retired (restored)")
+    except CanonicalStoreError as exc:
+        return f"WARNING: could not restore the old value in 1Password ({exc})"
+
+
+# ---------------------------------------------------------------------------
+# Step 6: the issuer (GitHub webhook config) — webhook secret only
 # ---------------------------------------------------------------------------
 
 
 class GitHubAPIError(RuntimeError):
     """Raised on a non-2xx GitHub response. Message never includes the secret."""
+
+
+def _github_http(
+    method: str, url: str, headers: dict, body: bytes | None
+) -> tuple[int, str]:
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+    except urllib.error.URLError as exc:
+        # Network failure / timeout: status 0 is never a valid HTTP status,
+        # so callers treat it as "could not be confirmed".
+        return 0, str(exc)
+
+
+def _github_headers(token: str) -> dict:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "ateles-rotate-swarm-secret",
+    }
 
 
 def update_github_webhook_secret(
@@ -309,88 +426,204 @@ def update_github_webhook_secret(
     new_secret: str,
     http_request: Callable[..., tuple[int, str]] | None = None,
 ) -> None:
-    """PATCH the GitHub webhook config to `new_secret`.
+    """PATCH one GitHub webhook's config to `new_secret`.
 
-    `http_request(method, url, headers, body_json) -> (status, text)` is
-    injectable so tests never make a real network call; the default performs
-    a real request and exists only so the function is genuinely callable in
-    production, per the task's requirement that the *design* be complete even
-    though a real run is never exercised in this PR. The secret is sent only
-    in the JSON body (GitHub's own PATCH /repos/{owner}/{repo}/hooks/{id}
-    contract: {"config": {"secret": "..."}}), never in a header, URL, or log.
+    The secret travels only in the JSON body (GitHub's PATCH
+    /repos/{owner}/{repo}/hooks/{id}/config contract), never in a header,
+    URL, or log. `http_request(method, url, headers, body)` is injectable so
+    tests never make a real network call.
     """
     url = f"https://api.github.com/repos/{repo}/hooks/{hook_id}/config"
-    headers = {
-        "Authorization": f"Bearer {github_token}",
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "ateles-rotate-swarm-secret",
-    }
     body = json.dumps({"secret": new_secret}).encode("utf-8")
-
-    def _default_request(
-        method: str, url: str, headers: dict, body: bytes
-    ) -> tuple[int, str]:
-        req = urllib.request.Request(url, data=body, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
-                return resp.status, resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode("utf-8", "replace")
-        except urllib.error.URLError as exc:
-            # Network failure / timeout / connection refused — distinct from
-            # an HTTP error status, and specifically the "cannot even be
-            # confirmed" case the checkpoint path exists for: we genuinely do
-            # not know whether GitHub received and applied the write before
-            # the connection dropped. status=0 is never a valid HTTP status,
-            # so the `not (200 <= status < 300)` check below always raises
-            # for it, which is what routes this into raise_issuer_checkpoint
-            # in run_rotation rather than silently treated as success.
-            return 0, str(exc)
-
-    request = http_request or _default_request
-    status, text = request("PATCH", url, headers, body)
+    request = http_request or _github_http
+    status, text = request("PATCH", url, _github_headers(github_token), body)
     if not (200 <= status < 300):
-        # text may echo the request back in some GitHub error shapes; strip
-        # anything that looks like our own secret before it can be logged.
         safe_text = text.replace(new_secret, REDACTED) if new_secret in text else text
         raise GitHubAPIError(
-            f"PATCH hooks/{hook_id}/config -> HTTP {status}: {safe_text[:300]}"
+            f"PATCH {repo} hooks/{hook_id}/config -> HTTP {status}: {_safe(safe_text)[:300]}"
         )
 
 
+def github_ping_check(
+    *,
+    github_token: str,
+    repo: str,
+    hook_id: str,
+    http_request: Callable[..., tuple[int, str]] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    attempts: int = 12,
+    interval: float = 5.0,
+) -> "VerificationResult":
+    """Ask GitHub to send its own signed `ping` to the hook, then read the
+    delivery's HTTP status back from the deliveries API.
+
+    Run after promotion (apis admits only the new value), a 200 proves GitHub
+    signs with the new value — the one check no self-signed probe can make.
+    """
+    request = http_request or _github_http
+    headers = _github_headers(github_token)
+    base = f"https://api.github.com/repos/{repo}/hooks/{hook_id}"
+
+    def _deliveries() -> list[dict] | None:
+        status, text = request("GET", f"{base}/deliveries?per_page=30", headers, None)
+        if not (200 <= status < 300):
+            return None
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return None
+        return data if isinstance(data, list) else None
+
+    before = _deliveries()
+    if before is None:
+        return VerificationResult(False, f"{repo} hook {hook_id}: deliveries unreadable")
+    high_water = max((int(d.get("id", 0)) for d in before), default=0)
+    status, _text = request("POST", f"{base}/pings", headers, b"")
+    if status != 204:
+        return VerificationResult(False, f"{repo} hook {hook_id}: ping request -> HTTP {status}")
+    for _ in range(attempts):
+        sleep(interval)
+        after = _deliveries() or []
+        pings = [
+            d for d in after
+            if d.get("event") == "ping" and int(d.get("id", 0)) > high_water
+        ]
+        if pings:
+            code = pings[0].get("status_code")
+            if code == 200:
+                return VerificationResult(
+                    True, f"{repo} hook {hook_id}: GitHub-signed ping delivered (200)", 200
+                )
+            return VerificationResult(
+                False, f"{repo} hook {hook_id}: GitHub-signed ping -> {code}", code
+            )
+    return VerificationResult(False, f"{repo} hook {hook_id}: ping delivery never appeared")
+
+
+def github_token_from_gh(login: str) -> str:
+    """The keyring token `gh` holds for `login`, verified to resolve to that
+    login before use (an empty or wrong-account token is refused). Ambient
+    GH_TOKEN/GITHUB_TOKEN are ignored so the keyring entry is what is read."""
+    env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
+    result = subprocess.run(
+        ["gh", "auth", "token", "--user", login],
+        capture_output=True, text=True, timeout=20, env=env,
+    )
+    token = result.stdout.strip()
+    if result.returncode != 0 or len(token) < 20:
+        raise RuntimeError(f"no usable gh keyring token for {login!r}")
+    _register_secret(token)
+    status, text = _github_http("GET", "https://api.github.com/user", _github_headers(token), None)
+    found = json.loads(text).get("login") if status == 200 else None
+    if found != login:
+        raise RuntimeError(f"gh token for {login!r} resolves to {found!r} (HTTP {status})")
+    return token
+
+
 # ---------------------------------------------------------------------------
-# Step 4: restart the ONE consuming daemon
+# Daemon restart with pid read-back (steps 3 and 7)
 # ---------------------------------------------------------------------------
+
+RESTART_TIMEOUT_S = 30.0
+RESTART_SETTLE_S = 3.0
+
+
+@dataclass
+class RestartResult:
+    ok: bool
+    line: str
+    old_pid: int | None = None
+    new_pid: int | None = None
+
+    def __str__(self) -> str:
+        return self.line
+
+
+def read_launchd_pid(
+    label: str, *, runner: Callable[..., subprocess.CompletedProcess] | None = None
+) -> int | None:
+    """The running pid launchd reports for `label`, or None when it has no
+    process. Parses `launchctl list`'s PID/Status/Label table — never `print`,
+    which would dump the job's environment."""
+    run = runner or subprocess.run
+    result = run(["launchctl", "list"], capture_output=True, text=True, timeout=15)
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[2] == label:
+            return int(parts[0]) if parts[0].isdigit() else None
+    return None
 
 
 def restart_daemon(
     plist_label: str,
     *,
     dry_run: bool,
-    runner: Callable[[list[str]], subprocess.CompletedProcess] | None = None,
-) -> str:
-    """Restart exactly one daemon via `launchctl kickstart -k`.
+    runner: Callable[..., subprocess.CompletedProcess] | None = None,
+    pid_reader: Callable[[str], int | None] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    timeout: float | None = None,
+    settle: float | None = None,
+) -> RestartResult:
+    """Restart one daemon via `launchctl kickstart -k` and read back its pid.
 
-    Real execution requires BOTH `not dry_run` AND
-    `ATELES_ALLOW_DAEMON_RESTART=1` in this process's own environment (never
-    read from argv, so it cannot be smuggled through a logged command line).
-    Absent that, the exact command is printed and nothing runs — this task's
-    hard rule is "never restart a daemon", so the default path for every
-    caller in this PR (dry-run or not) is print-only.
+    Reports success only when launchd shows a NEW pid that is still the same
+    process after a settle delay (a crash-looping daemon changes pid again or
+    shows none). Runs only with `ATELES_ALLOW_DAEMON_RESTART=1` in this
+    process's own environment; otherwise prints the command and returns.
     """
     uid = os.environ.get("UID") or str(os.getuid())
     cmd = ["launchctl", "kickstart", "-k", f"gui/{uid}/{plist_label}"]
     if dry_run or os.environ.get("ATELES_ALLOW_DAEMON_RESTART") != "1":
-        return f"[not run] {' '.join(cmd)}"
+        return RestartResult(dry_run, f"[not run] {' '.join(cmd)} (then read back a new pid)")
+    timeout = RESTART_TIMEOUT_S if timeout is None else timeout
+    settle = RESTART_SETTLE_S if settle is None else settle
+    read_pid = pid_reader or (lambda label: read_launchd_pid(label))
     run = runner or subprocess.run
+
+    old_pid = read_pid(plist_label)
     result = run(cmd, capture_output=True, text=True, timeout=30)  # type: ignore[call-arg]
     if result.returncode != 0:
-        return f"restart FAILED: {cmd!r} -> {result.stderr.strip()}"
-    return f"restarted {plist_label}"
+        return RestartResult(
+            False, f"restart FAILED: {' '.join(cmd)} -> {_safe(result.stderr)}", old_pid
+        )
+    new_pid: int | None = None
+    waited = 0.0
+    step = 0.5
+    while waited <= timeout:
+        pid = read_pid(plist_label)
+        if pid is not None and pid != old_pid:
+            new_pid = pid
+            break
+        sleep(step)
+        waited += step
+    if new_pid is None:
+        return RestartResult(
+            False,
+            f"restart NOT CONFIRMED: {plist_label} pid still {old_pid} after {timeout:.0f}s",
+            old_pid,
+        )
+    sleep(settle)
+    settled = read_pid(plist_label)
+    if settled != new_pid:
+        return RestartResult(
+            False,
+            f"restart UNSTABLE: {plist_label} pid {old_pid} -> {new_pid} -> {settled} "
+            f"within {settle:.0f}s",
+            old_pid,
+            new_pid,
+        )
+    return RestartResult(
+        True,
+        f"restarted {plist_label}: pid {old_pid} -> {new_pid} (read back after {settle:.0f}s)",
+        old_pid,
+        new_pid,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Step 5: live verification — a real signed probe against the daemon
+# Live verification — real probes against the daemon
 # ---------------------------------------------------------------------------
 
 
@@ -398,99 +631,234 @@ def restart_daemon(
 class VerificationResult:
     ok: bool
     detail: str  # human-readable, never the secret value
+    status: int | None = None  # HTTP status, when there was one
+
+
+def _default_post(url: str, headers: dict, body: bytes) -> tuple[int, str]:
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+    except urllib.error.URLError as exc:
+        return 0, str(exc)
 
 
 def verify_github_webhook_secret(
     new_secret: str,
     *,
-    base_url: str = "http://127.0.0.1:8742",
+    base_url: str = DEFAULT_BASE_URL,
     http_post: Callable[..., tuple[int, str]] | None = None,
 ) -> VerificationResult:
-    """Send a real signed `ping` delivery, HMAC-signed with `new_secret`.
-
-    Mirrors exactly what GitHub's webhook "Redeliver" does for a ping event,
-    so a pass here is not merely "the record admits the value" but "a real
-    signed delivery under the new value is accepted" — the operator ruling's
-    distinction between dual-admit's record-side fact and a live check.
-    """
-    import hashlib
-    import hmac as hmac_mod
-
+    """Send a signed `ping` delivery, HMAC-signed with `new_secret` — what
+    GitHub's own redelivery of a ping looks like to the daemon."""
     body = b'{"zen":"rotation-verify"}'
-    sig = (
-        "sha256=" + hmac_mod.new(new_secret.encode(), body, hashlib.sha256).hexdigest()
-    )
+    sig = "sha256=" + hmac.new(new_secret.encode(), body, hashlib.sha256).hexdigest()
     headers = {
         "X-GitHub-Event": "ping",
         "X-GitHub-Delivery": f"rotation-verify-{int(time.time())}",
         "X-Hub-Signature-256": sig,
         "Content-Type": "application/json",
     }
-
-    def _default_post(url: str, headers: dict, body: bytes) -> tuple[int, str]:
-        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
-                return resp.status, resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode("utf-8", "replace")
-        except urllib.error.URLError as exc:
-            return 0, str(exc)
-
     post = http_post or _default_post
-    status, text = post(f"{base_url}/github/webhook", headers, body)
+    status, _text = post(f"{base_url}/github/webhook", headers, body)
     if status == 200:
-        return VerificationResult(True, "signed ping accepted (200)")
-    return VerificationResult(False, f"signed ping rejected (status={status})")
+        return VerificationResult(True, "signed ping accepted (200)", status)
+    return VerificationResult(False, f"signed ping rejected (status={status})", status)
 
 
 def verify_approve_email_secret(
     new_secret: str,
     *,
-    base_url: str = "http://127.0.0.1:8742",
+    base_url: str = DEFAULT_BASE_URL,
     http_post: Callable[..., tuple[int, str]] | None = None,
 ) -> VerificationResult:
-    """Send a real /approve-email probe carrying `new_secret` in the header.
-
-    Uses an out-of-range pr_number (0) so the probe can never itself trigger
-    a real merge-approval trigger even if it lands on a live daemon: the
-    route's own validation (`pr_number <= 0` -> 400) rejects it AFTER the
-    secret check, so a 400 (not 401/503) is what "the secret was accepted"
-    looks like for this route — verification cares about the secret gate,
-    not about a body forged for the actual dispatch.
-    """
+    """POST /approve-email carrying `new_secret` with an out-of-range
+    pr_number (0): the route checks the secret first and then rejects the
+    body with 400, so 400 means "secret accepted" and no merge can follow."""
     body = json.dumps({"repository": "rotation-verify/none", "pr_number": 0}).encode()
     headers = {"X-Approve-Secret": new_secret, "Content-Type": "application/json"}
-
-    def _default_post(url: str, headers: dict, body: bytes) -> tuple[int, str]:
-        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
-                return resp.status, resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode("utf-8", "replace")
-        except urllib.error.URLError as exc:
-            return 0, str(exc)
-
     post = http_post or _default_post
     status, _text = post(f"{base_url}/approve-email", headers, body)
     if status == 400:
-        return VerificationResult(
-            True, "secret accepted (400 on deliberately invalid body)"
-        )
+        return VerificationResult(True, "secret accepted (400 on deliberately invalid body)", 400)
     if status == 401:
-        return VerificationResult(False, "secret rejected (401)")
+        return VerificationResult(False, "secret rejected (401)", 401)
     if status == 503:
-        return VerificationResult(
-            False, "route not configured (503) — secret never reached"
-        )
-    return VerificationResult(False, f"unexpected status={status}")
+        return VerificationResult(False, "route not configured (503) — secret never reached", 503)
+    return VerificationResult(False, f"unexpected status={status}", status)
 
 
 VERIFIERS: dict[str, Callable[..., VerificationResult]] = {
     "github_webhook_secret": verify_github_webhook_secret,
     "approve_email_secret": verify_approve_email_secret,
 }
+
+
+# The presenter check runs in a child process so the daemon's module loads
+# its configuration exactly as the daemon does (lib.daemon_runtime reading
+# the dotenv at import). It prints only the HTTP status apis returned.
+_TURDUS_PROBE = r"""
+import json, sys, urllib.error, urllib.request
+root = sys.argv[1]
+sys.path.insert(0, root)
+sys.path.insert(0, root + "/execution/daemons/turdus")
+import turdus
+if not turdus.APIS_APPROVE_EMAIL_SECRET:
+    print("status=unset")
+    raise SystemExit(0)
+req = urllib.request.Request(
+    turdus.APIS_APPROVE_URL,
+    data=json.dumps({"repository": "rotation-verify/none", "pr_number": 0,
+                     "sender": "rotation-verify"}).encode(),
+    headers={"X-Approve-Secret": turdus.APIS_APPROVE_EMAIL_SECRET,
+             "Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        print(f"status={resp.status}")
+except urllib.error.HTTPError as exc:
+    print(f"status={exc.code}")
+except Exception:
+    print("status=0")
+"""
+
+# Variables that would make the child load something other than the daemon's
+# own configuration (or skip loading it).
+_PRESENTER_ENV_STRIP = (
+    "APIS_APPROVE_EMAIL_SECRET",
+    "APIS_APPROVE_EMAIL_SECRET_NEXT",
+    "APIS_APPROVE_EMAIL_URL",
+    "ATELES_SKIP_DOTENV",
+    "ATELES_DOTENV_FILE",
+    "PYTEST_CURRENT_TEST",
+    "TURDUS_DRY_RUN",
+)
+
+
+def verify_turdus_presents_accepted_secret(
+    *, daemon_checkout: Path, runner: Callable[..., subprocess.CompletedProcess] | None = None
+) -> VerificationResult:
+    """From turdus's side: import turdus from the daemon's checkout, let it
+    load its configuration the way the daemon does, and POST the secret IT
+    holds to apis. 400 = apis accepted turdus's secret. Run after apis has
+    retired the old value, so a pass proves turdus holds the new one."""
+    env = {k: v for k, v in os.environ.items() if k not in _PRESENTER_ENV_STRIP}
+    run = runner or subprocess.run
+    result = run(
+        [sys.executable, "-c", _TURDUS_PROBE, str(daemon_checkout)],
+        capture_output=True, text=True, timeout=60, env=env, cwd=str(daemon_checkout),
+    )
+    match = re.search(r"status=(\w+)", result.stdout or "")
+    if result.returncode != 0 or not match:
+        return VerificationResult(
+            False, f"turdus-side probe did not run (exit {result.returncode})"
+        )
+    code = match.group(1)
+    if code == "400":
+        return VerificationResult(True, "turdus's loaded secret accepted by apis (400)", 400)
+    if code == "unset":
+        return VerificationResult(False, "turdus loads no approve secret")
+    return VerificationResult(False, f"turdus's loaded secret -> status={code}")
+
+
+PRESENTER_VERIFIERS: dict[str, Callable[..., VerificationResult]] = {
+    "com.ateles.turdus": verify_turdus_presents_accepted_secret,
+}
+
+PROBE_READY_TIMEOUT_S = 30.0
+
+
+def _probe(
+    verifier: Callable[..., VerificationResult],
+    value: str,
+    base_url: str,
+    sleep: Callable[[float], None] = time.sleep,
+) -> VerificationResult:
+    """Run a probe, retrying only while the daemon is not yet listening
+    (status 0) after a restart. Any HTTP answer is final."""
+    waited = 0.0
+    while True:
+        result = verifier(value, base_url=base_url)
+        if result.status != 0 or waited >= PROBE_READY_TIMEOUT_S:
+            return result
+        sleep(1.0)
+        waited += 1.0
+
+
+# ---------------------------------------------------------------------------
+# Preflight (step 0)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Preflight:
+    ok: bool
+    reason: str = ""
+    ref: str = ""
+    old_value: str = field(default="", repr=False)
+
+
+def preflight(
+    target: RotationTarget,
+    *,
+    hooks: list[tuple[str, str]],
+    github_token: str | None,
+    allow_real_github_write: bool,
+) -> Preflight:
+    """Everything a real run needs, checked before anything is written."""
+    if os.environ.get("ATELES_ALLOW_DAEMON_RESTART") != "1":
+        return Preflight(False, "ATELES_ALLOW_DAEMON_RESTART=1 is not set — a real "
+                         "rotation cannot take effect without restarting the daemons")
+    if target.has_external_issuer:
+        if not allow_real_github_write:
+            return Preflight(False, "--i-know-this-calls-real-github not passed — a real "
+                             "rotation of an externally-issued secret cannot complete "
+                             "without updating the issuer")
+        if not hooks:
+            return Preflight(False, "no --github-hook given — the issuer cannot be updated")
+        if not github_token:
+            return Preflight(False, "no GitHub token — the issuer cannot be updated")
+    for label in target.presenter_plists:
+        if label not in PRESENTER_VERIFIERS:
+            return Preflight(False, f"no presenter check for {label}")
+    try:
+        manifest = sl.load_manifest()
+    except (OSError, ValueError) as exc:
+        return Preflight(False, f"secrets manifest unreadable ({type(exc).__name__})")
+    ref = canonical_ref(target, manifest)
+    if not ref:
+        return Preflight(False, f"manifest block {target.manifest_file!r} does not map "
+                         f"{target.env_var} to a 1Password reference")
+    if not sl.enc_file(target.manifest_file).exists():
+        return Preflight(False, f"no snapshot secrets/{target.manifest_file}.sops.enc — "
+                         "run secrets_publish.py for the block first")
+    snapshot = _read_snapshot(target)
+    old_value = snapshot.get(target.env_var, "")
+    if not old_value:
+        return Preflight(False, f"snapshot carries no {target.env_var}")
+    _register_secret(old_value)
+    if target.next_env_var in snapshot:
+        return Preflight(False, f"{target.next_env_var} is already staged in the snapshot — "
+                         "an earlier rotation left dual-admit open; resolve it first")
+    env_file = sl.block_env_file(manifest, target.manifest_file)
+    dotenv = sl.parse_dotenv(env_file.read_text()) if env_file.exists() else {}
+    if target.next_env_var in dotenv:
+        return Preflight(False, f"{target.next_env_var} is present in {env_file} — an earlier "
+                         "rotation left dual-admit open; resolve it first")
+    if not hmac.compare_digest(dotenv.get(target.env_var, "").encode(), old_value.encode()):
+        return Preflight(False, f"{env_file} and the snapshot disagree on {target.env_var} — "
+                         "run secrets_materialize.py for the block first")
+    try:
+        canonical = read_canonical(ref)
+    except Exception as exc:  # noqa: BLE001
+        return Preflight(False, f"1Password unreadable ({_safe(exc)})")
+    if not hmac.compare_digest(canonical.encode(), old_value.encode()):
+        return Preflight(False, f"1Password ({ref}) and the snapshot disagree on "
+                         f"{target.env_var} — republish the block first")
+    return Preflight(True, ref=ref, old_value=old_value)
 
 
 # ---------------------------------------------------------------------------
@@ -506,29 +874,115 @@ class RotationReport:
     rolled_forward: bool = False
     rolled_back: bool = False
     checkpoint_raised: bool = False
+    refused: bool = False
     verification: VerificationResult | None = None
+    snapshot_changed: bool = False
 
-    def add(self, line: str) -> None:
-        self.steps.append(line)
+    def add(self, line) -> None:
+        self.steps.append(str(line))
+
+    def outcome(self) -> str:
+        if self.refused:
+            return "refused at preflight (nothing staged, nothing restarted)"
+        if self.checkpoint_raised:
+            return "CHECKPOINT — dual-admit left ON, manual resolution required"
+        if self.rolled_forward:
+            return "rolled forward (new value promoted, old retired)"
+        if self.rolled_back:
+            return "rolled back (old value retained, new value discarded)"
+        return "dry-run (no state changed)"
 
     def as_neotoma_notes(self) -> str:
-        """A record-safe summary for the checkpoint the operator reads — the
-        outcome and what the check found, per the operator ruling. Never a
-        secret value; `steps` entries are themselves value-free by
-        construction (every step function above redacts or omits values)."""
-        if self.checkpoint_raised:
-            outcome = "CHECKPOINT — dual-admit left ON, manual resolution required"
-        elif self.rolled_forward:
-            outcome = "rolled forward (new value promoted, old retired)"
-        elif self.rolled_back:
-            outcome = "rolled back (old value retained, new value discarded)"
-        else:
-            outcome = "dry-run (no state changed)"
-        lines = [f"rotate_swarm_secret {self.target_name}: {outcome}"]
+        """A record-safe summary for the operator: outcome, live check, steps.
+        Never a secret value — every step line is value-free by construction."""
+        lines = [f"rotate_swarm_secret {self.target_name}: {self.outcome()}"]
         if self.verification is not None:
             lines.append(f"live check: {self.verification.detail}")
         lines.extend(self.steps)
         return "\n".join(lines)
+
+
+def _dry_run_plan(
+    report: RotationReport, target: RotationTarget, base_url: str, hooks: list
+) -> RotationReport:
+    report.add("[dry-run] preflight: restart flag, manifest mapping, snapshot = dotenv = "
+               "1Password on the current value, no leftover _NEXT")
+    report.add("generated new value in memory (never logged)")
+    report.add(stage_next_value(target, "", dry_run=True))
+    report.add(restart_daemon(target.daemon_plist, dry_run=True))
+    report.add(
+        f"[dry-run] would POST a signed probe to {base_url}{target.verify_path} "
+        "under the NEW value (dual-admit; GitHub not yet touched)"
+    )
+    report.add("[dry-run] would write the new value to the manifest's 1Password "
+               "reference and read it back")
+    if target.has_external_issuer:
+        named = ", ".join(f"{r}#{h}" for r, h in hooks) or "<--github-hook ...>"
+        report.add(
+            f"[dry-run] would PATCH GitHub webhook config ({named}) to the new value "
+            "ONLY IF that probe passes (requires --i-know-this-calls-real-github)"
+        )
+    report.add(promote_and_retire(target, "", dry_run=True))
+    for label in target.presenter_plists:
+        report.add(restart_daemon(label, dry_run=True))
+    report.add(restart_daemon(target.daemon_plist, dry_run=True))
+    checks = ["apis accepts the new value", "apis rejects the old value (401)"]
+    checks += [f"{label} presents an accepted value" for label in target.presenter_plists]
+    if target.has_external_issuer:
+        checks.append("a GitHub-signed ping is delivered with 200")
+    report.add("[dry-run] post-promotion checks: " + "; ".join(checks))
+    return report
+
+
+def _rollback(report: RotationReport, target: RotationTarget) -> RotationReport:
+    try:
+        report.add(roll_back(target, dry_run=False))
+        report.snapshot_changed = True
+    except Exception as exc:  # noqa: BLE001
+        report.add(f"CHECKPOINT: rollback itself failed ({_safe(exc)}) — "
+                   f"{target.next_env_var} may still be staged")
+        report.checkpoint_raised = True
+        return report
+    restart = restart_daemon(target.daemon_plist, dry_run=False)
+    report.add(restart)
+    if not restart.ok:
+        report.add(f"CHECKPOINT: {target.daemon_plist} did not confirm a restart after "
+                   "rollback — it may still be running with the staged value admitted")
+        report.checkpoint_raised = True
+        return report
+    report.rolled_back = True
+    return report
+
+
+def _post_promotion_checks(
+    target: RotationTarget,
+    *,
+    new_value: str,
+    old_value: str,
+    base_url: str,
+    daemon_checkout: Path,
+    hooks: list[tuple[str, str]],
+    github_token: str | None,
+) -> list[VerificationResult]:
+    results: list[VerificationResult] = []
+    verifier = VERIFIERS[target.name]
+    new_check = _probe(verifier, new_value, base_url)
+    results.append(VerificationResult(new_check.ok, f"new value: {new_check.detail}",
+                                      new_check.status))
+    old_check = _probe(verifier, old_value, base_url)
+    results.append(VerificationResult(
+        old_check.status == 401,
+        f"old value retired: {old_check.detail}",
+        old_check.status,
+    ))
+    for label in target.presenter_plists:
+        results.append(PRESENTER_VERIFIERS[label](daemon_checkout=daemon_checkout))
+    if target.has_external_issuer:
+        for repo, hook_id in hooks:
+            results.append(github_ping_check(
+                github_token=github_token or "", repo=repo, hook_id=hook_id
+            ))
+    return results
 
 
 def run_rotation(
@@ -538,116 +992,131 @@ def run_rotation(
     github_token: str | None = None,
     github_repo: str | None = None,
     github_hook_id: str | None = None,
+    github_hooks: list[tuple[str, str]] | tuple = (),
     allow_real_github_write: bool = False,
-    base_url: str = "http://127.0.0.1:8742",
+    base_url: str = DEFAULT_BASE_URL,
+    daemon_checkout: Path = DEFAULT_DAEMON_CHECKOUT,
 ) -> RotationReport:
     """Run the full staged sequence for one target and return a report.
-
-    Every branch is reachable in `--dry-run` (the default, and the only mode
-    exercised by this PR): step functions early-return a printed plan instead
-    of touching disk/network/subprocess when `dry_run=True`, so the sequence
-    and its rollback path are both exercised without side effects.
-
-    ORDERING (fixed 2026-09-26 review — see the module docstring's SEQUENCE
-    section): the GitHub issuer update for `has_external_issuer` targets runs
-    ONLY AFTER the dual-admit verification (step 4) has already passed, never
-    before. This closes the inconsistency window an earlier revision had:
-    updating the issuer first meant a failed verification rolled the daemon
-    back to admitting only the old value while GitHub was already signing
-    with the new one. Verifying first means the probe that proves the new
-    value works is signed by THIS SCRIPT, not by GitHub, so it never needs
-    GitHub to know about the new value at all — the daemon's dual-admit
-    already accepts it.
-    """
+    The module docstring's SEQUENCE section is the specification."""
     report = RotationReport(target_name=target.name, dry_run=dry_run)
-
-    new_value = generate_new_value()
-    report.add("generated new value in memory (never logged)")
-
-    report.add(stage_next_value(target, new_value, dry_run=dry_run))
-    report.add(restart_daemon(target.daemon_plist, dry_run=dry_run))
+    hooks = list(github_hooks)
+    if github_repo and github_hook_id:
+        hooks.append((github_repo, str(github_hook_id)))
 
     if dry_run:
-        report.add(
-            f"[dry-run] would POST a signed probe to {base_url}{target.verify_path} "
-            "under the NEW value (dual-admit; GitHub not yet touched)"
-        )
-        if target.has_external_issuer:
-            report.add(
-                "[dry-run] would PATCH GitHub webhook config to the new value "
-                "ONLY IF that probe passes (requires --i-know-this-calls-real-github; "
-                "never passed by this PR)"
-            )
-        return report
+        return _dry_run_plan(report, target, base_url, hooks)
 
-    verifier = VERIFIERS[target.name]
-    result = verifier(new_value, base_url=base_url)
+    # 0. preflight
+    pre = preflight(target, hooks=hooks, github_token=github_token,
+                    allow_real_github_write=allow_real_github_write)
+    if not pre.ok:
+        report.add(f"REFUSED: {pre.reason}")
+        report.refused = True
+        return report
+    report.add(f"preflight passed: snapshot, dotenv and 1Password ({pre.ref}) agree "
+               f"on {target.env_var}; no leftover {target.next_env_var}")
+    old_value, ref = pre.old_value, pre.ref
+
+    # 1. generate
+    new_value = generate_new_value()
+    _register_secret(new_value)
+    report.add("generated new value in memory (never logged)")
+
+    # 2-3. stage, restart the verifier
+    try:
+        report.add(stage_next_value(target, new_value, dry_run=False))
+        report.snapshot_changed = True
+    except Exception as exc:  # noqa: BLE001
+        report.add(f"stage FAILED ({_safe(exc)})")
+        return _rollback(report, target)
+    restart = restart_daemon(target.daemon_plist, dry_run=False)
+    report.add(restart)
+    if not restart.ok:
+        return _rollback(report, target)
+
+    # 4. live check under dual-admit
+    result = _probe(VERIFIERS[target.name], new_value, base_url)
     report.verification = result
-
+    report.add(f"dual-admit check: {result.detail}")
     if not result.ok:
-        # Safe unconditionally: the issuer (if any) was never touched, so
-        # there is nothing on the GitHub side to reconcile.
-        report.add(roll_back(target, dry_run=dry_run))
-        report.add(restart_daemon(target.daemon_plist, dry_run=dry_run))
-        report.rolled_back = True
+        return _rollback(report, target)
+
+    # 5. canonical store
+    try:
+        report.add(write_canonical_store(ref, new_value, what="new"))
+    except CanonicalStoreError as exc:
+        report.add(f"1Password write FAILED ({exc}) — rolling back")
+        report.add(_restore_canonical(ref, old_value))
+        return _rollback(report, target)
+
+    # 6. issuer
+    if target.has_external_issuer:
+        for repo, hook_id in hooks:
+            try:
+                update_github_webhook_secret(
+                    github_token=github_token or "", repo=repo, hook_id=hook_id,
+                    new_secret=new_value,
+                )
+                report.add(f"updated GitHub webhook config for {repo}#{hook_id}")
+            except GitHubAPIError as exc:
+                report.add(raise_issuer_checkpoint(target, reason=str(exc)))
+                report.add(_restore_canonical(ref, old_value))
+                report.checkpoint_raised = True
+                return report
+
+    # 7. promote, restart presenters then the verifier
+    try:
+        report.add(promote_and_retire(target, new_value, dry_run=False))
+    except Exception as exc:  # noqa: BLE001
+        report.add(f"CHECKPOINT: promotion write failed ({_safe(exc)}); 1Password holds "
+                   f"the new value and {target.next_env_var} is still staged")
+        report.checkpoint_raised = True
+        return report
+    failures: list[str] = []
+    for label in (*target.presenter_plists, target.daemon_plist):
+        restart = restart_daemon(label, dry_run=False)
+        report.add(restart)
+        if not restart.ok:
+            failures.append(f"{label} restart not confirmed")
+
+    # 8. post-promotion checks
+    if not failures:
+        for check in _post_promotion_checks(
+            target, new_value=new_value, old_value=old_value, base_url=base_url,
+            daemon_checkout=daemon_checkout, hooks=hooks, github_token=github_token,
+        ):
+            report.add(f"post-promotion check: {check.detail} -> "
+                       f"{'ok' if check.ok else 'FAILED'}")
+            if not check.ok:
+                failures.append(check.detail)
+    if failures:
+        try:
+            report.add(reopen_dual_admit(target, old_value))
+            report.add(restart_daemon(target.daemon_plist, dry_run=False))
+        except Exception as exc:  # noqa: BLE001
+            report.add(f"re-opening dual-admit FAILED ({_safe(exc)})")
+        report.add(f"CHECKPOINT: post-promotion check failed ({'; '.join(failures)}). "
+                   "The new value is primary everywhere; the retired value is back in "
+                   f"{target.next_env_var} so a consumer still holding it keeps working. "
+                   "Manual resolution required.")
+        report.checkpoint_raised = True
         return report
 
-    if target.has_external_issuer:
-        if not allow_real_github_write:
-            # The probe already passed, but a REAL (non-dry-run) rotation of
-            # an externally-issued secret CANNOT complete without writing
-            # the issuer — there is no such thing as promoting the daemon's
-            # primary while GitHub is left on the old value; that is exactly
-            # the inconsistency this whole reorder exists to prevent. This
-            # is not the checkpoint case either (nothing was attempted that
-            # could have partially succeeded) — it is simply impossible to
-            # finish, so refuse up front and roll back, restoring the old
-            # value's standing rather than reporting success it never
-            # reached. The tripwire's ABSENCE is deliberate in every one of
-            # this PR's own doc examples and tests, so this path is the one
-            # this PR's own test suite exercises, never the try/except below.
-            report.add(
-                "REFUSED: --i-know-this-calls-real-github not passed — a real "
-                "rotation of an externally-issued secret cannot complete "
-                "without updating the issuer, so promotion is refused and "
-                "the rotation rolls back rather than reporting success it "
-                "never reached"
-            )
-            report.add(roll_back(target, dry_run=dry_run))
-            report.add(restart_daemon(target.daemon_plist, dry_run=dry_run))
-            report.rolled_back = True
-            return report
-
-        # Tripwire per the module docstring — never reached by this PR's own
-        # tests or examples, and absent from every doc command.
-        try:
-            update_github_webhook_secret(
-                github_token=github_token or "",
-                repo=github_repo or "",
-                hook_id=github_hook_id or "",
-                new_secret=new_value,
-            )
-            report.add(
-                f"updated GitHub webhook config for {github_repo}#{github_hook_id}"
-            )
-        except GitHubAPIError as exc:
-            # Step 4 already proved the daemon accepts the new value — this
-            # is NOT a rollback case. Leave dual-admit ON and stop; a human
-            # resolves whether GitHub actually applied the write.
-            report.add(raise_issuer_checkpoint(target, reason=str(exc)))
-            report.checkpoint_raised = True
-            return report
-
-    report.add(promote_and_retire(target, new_value, dry_run=dry_run))
-    report.add(restart_daemon(target.daemon_plist, dry_run=dry_run))
     report.rolled_forward = True
-
     return report
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+
+def _parse_hook(spec: str) -> tuple[str, str]:
+    repo, sep, hook_id = spec.rpartition(":")
+    if not sep or "/" not in repo or not hook_id.isdigit():
+        raise argparse.ArgumentTypeError(f"expected owner/repo:hook_id, got {spec!r}")
+    return repo, hook_id
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -657,42 +1126,38 @@ def build_parser() -> argparse.ArgumentParser:
             "(authority_model.md#grants; conformance.md row 118)."
         ),
     )
+    parser.add_argument("target", choices=sorted(TARGETS), help="Which secret to rotate.")
     parser.add_argument(
-        "target", choices=sorted(TARGETS), help="Which secret to rotate."
+        "--dry-run", action="store_true",
+        help="Print the plan with no values and no side effects.",
     )
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print the plan with no values and no side effects. Recommended default.",
-    )
-    parser.add_argument(
-        "--base-url",
-        default="http://127.0.0.1:8742",
+        "--base-url", default=DEFAULT_BASE_URL,
         help="Apis gateway base URL for the live-verification probe.",
     )
     parser.add_argument(
-        "--github-repo",
-        default=None,
-        help="owner/repo whose webhook config to update (github_webhook_secret only).",
+        "--daemon-checkout", type=Path, default=DEFAULT_DAEMON_CHECKOUT,
+        help="Checkout the daemons run from (the presenter check imports from it).",
     )
     parser.add_argument(
-        "--github-hook-id",
-        default=None,
-        help="Numeric webhook id (github_webhook_secret only).",
+        "--github-hook", action="append", default=[], type=_parse_hook,
+        metavar="OWNER/REPO:HOOK_ID",
+        help="A webhook whose secret to update (repeatable; github_webhook_secret only).",
+    )
+    parser.add_argument("--github-repo", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--github-hook-id", default=None, help=argparse.SUPPRESS)
+    token = parser.add_mutually_exclusive_group()
+    token.add_argument(
+        "--github-token-ref", default=None,
+        help="op:// reference to a GitHub token that can edit repository webhooks.",
+    )
+    token.add_argument(
+        "--github-token-gh-user", default=None, metavar="LOGIN",
+        help="Use the gh keyring token for LOGIN (verified to resolve to LOGIN).",
     )
     parser.add_argument(
-        "--github-token-ref",
-        default=None,
-        help="op:// reference to a GitHub token with admin:repo_hook scope "
-        "(github_webhook_secret only; never a literal token).",
-    )
-    parser.add_argument(
-        "--i-know-this-calls-real-github",
-        action="store_true",
-        help=(
-            "Tripwire: without this flag the GitHub webhook-config write is "
-            "always skipped and only printed. This PR never passes it."
-        ),
+        "--i-know-this-calls-real-github", action="store_true",
+        help="Tripwire: without it the GitHub webhook-config write never runs.",
     )
     return parser
 
@@ -702,7 +1167,13 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     target = TARGETS[args.target]
 
-    github_token = sl.op_read(args.github_token_ref) if args.github_token_ref else None
+    github_token = None
+    if not args.dry_run and target.has_external_issuer:
+        if args.github_token_ref:
+            github_token = sl.op_read(args.github_token_ref)
+        elif args.github_token_gh_user:
+            github_token = github_token_from_gh(args.github_token_gh_user)
+        _register_secret(github_token)
 
     report = run_rotation(
         target,
@@ -710,25 +1181,27 @@ def main(argv: list[str]) -> int:
         github_token=github_token,
         github_repo=args.github_repo,
         github_hook_id=args.github_hook_id,
+        github_hooks=args.github_hook,
         allow_real_github_write=args.i_know_this_calls_real_github,
         base_url=args.base_url,
+        daemon_checkout=args.daemon_checkout,
     )
 
     print(f"\n=== rotate_swarm_secret: {target.name} ===")
     for line in report.steps:
         print(f"  {line}")
-    if report.verification is not None:
-        print(f"  live check: {report.verification.detail}")
-    if report.dry_run:
-        print("  outcome: dry-run — no state changed")
-    elif report.checkpoint_raised:
-        print("  outcome: CHECKPOINT — dual-admit left ON, manual resolution required")
-    elif report.rolled_forward:
-        print("  outcome: rolled forward (new value promoted, old retired)")
-    elif report.rolled_back:
-        print("  outcome: rolled back (old value retained)")
+    print(f"  outcome: {report.outcome()}")
+    if report.snapshot_changed:
+        print(
+            f"  REQUIRED: commit the snapshot in the private secrets repo so other "
+            f"machines materialize the same value:\n    cd {sl.SECRETS_BASE} && git add "
+            f"secrets/{target.manifest_file}.sops.enc && git commit -m "
+            f"\"chore(secrets): rotate {target.env_var}\" && git push"
+        )
     print("No secret value is printed above or anywhere in this run's output.")
 
+    if report.refused:
+        return 3
     if report.checkpoint_raised:
         return 2
     if report.rolled_back:

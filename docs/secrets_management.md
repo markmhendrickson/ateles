@@ -318,73 +318,104 @@ written for the operator to read rather than approved in advance.
 
 `execution/scripts/rotate_swarm_secret.py` covers the two shared secrets named
 as first users of that ruling — `APIS_GITHUB_WEBHOOK_SECRET` (issuer: the
-GitHub webhook config on `markmhendrickson/ateles` and
-`markmhendrickson/neotoma`) and `APIS_APPROVE_EMAIL_SECRET` (internal-only,
-between `apis` and `turdus`) — both consumed by `apis`'s
-`execution/daemons/apis/github_gateway.py`. Sequence: generate a new value in
-memory → stage it in the consumer's `_NEXT` slot (`APIS_GITHUB_WEBHOOK_SECRET_NEXT`
-/ `APIS_APPROVE_EMAIL_SECRET_NEXT`), which `github_gateway.make_app` accepts
-alongside the current value during the overlap window → restart the one
-consuming daemon → send a real signed probe under the NEW value, which the
-script signs **itself** (no GitHub involvement at all — dual-admit already
-lets the daemon accept it) → **only if that probe passes**, and for the
-webhook secret only, update the GitHub issuer to the new value → on success,
-promote the new value to primary, retire the old one, clear `_NEXT`, restart
-again; on a failed probe, clear `_NEXT` and leave the old value as primary
-(rollback), restart again so the daemon returns to exactly its pre-rotation
-state.
+GitHub webhook on each pipeline repo) and `APIS_APPROVE_EMAIL_SECRET`
+(internal-only: `apis` checks it, `turdus` presents it) — both checked by
+`apis`'s `execution/daemons/apis/github_gateway.py`.
 
-**Ordering fix (2026-09-26 review of PR #1306):** an earlier revision updated
-the GitHub issuer *before* verifying, so a failed verification rolled the
-daemon back to the old value while GitHub was left signing with the new
-one — every real delivery would then fail signature verification (401) until
-someone noticed and fixed GitHub's config by hand. Verifying first, with a
-probe the script signs itself, means the daemon-side half of the rotation is
-proven safe with zero GitHub involvement, so a failed probe can never leave
-GitHub and the daemon disagreeing — GitHub was simply never told about the
-new value. The one case this does not eliminate — the issuer update itself
-failing (or timing out) *after* the probe already passed — is not a rollback
-(the daemon-side change is proven good) and not a promotion (GitHub's actual
-state is now unconfirmed): `run_rotation` raises a **checkpoint** instead,
-leaving dual-admit ON (so no delivery is ever rejected either way) and
-stopping rather than guessing. `RotationReport.checkpoint_raised` and the
-CLI's exit code `2` both surface this distinctly from a rollback (exit `1`)
-or a successful rotation (exit `0`).
+### Where these two secrets live
+
+They are ordinary members of this pipeline, in their **own manifest block,
+`apis`**: canonical in 1Password, mapped by `manifest.env-map.json`'s `apis`
+block (target `~/.config/neotoma/.env`), snapshotted to `secrets/apis.sops.enc`,
+and materialized into the dotenv `apis` and `turdus` load at startup. They are
+not hand-maintained lines in that dotenv: materialize rewrites those lines in
+place, so each is defined once. A block of their own keeps a rotation from ever
+decrypting or re-encrypting the `neotoma` snapshot, which also carries provider
+keys and a root secret (the Neotoma mnemonic). The script reads the 1Password
+reference from the manifest at run time; nothing in this repo names the item.
+
+One-time onboarding (already done on the operator's machine — repeat only for a
+fork): create a 1Password item with one field per secret holding the current
+value, add the `apis` block to the manifest, then `secrets_publish.py apis` and
+`secrets_materialize.py apis` (0 changed means the dotenv already agreed).
+
+### Sequence
+
+`--dry-run` prints the same plan with every value shown as `<redacted>` and no
+write, HTTP call, or `launchctl` call.
+
+0. **Preflight** — refuse (exit `3`, nothing changed) unless
+   `ATELES_ALLOW_DAEMON_RESTART=1` is set in the process's own environment, the
+   manifest maps the target, the snapshot, the dotenv, and 1Password all hold
+   the same current value, no `_NEXT` slot is left over from an earlier run,
+   and — webhook only — `--i-know-this-calls-real-github`, a token, and at
+   least one `--github-hook` are given.
+1. **Generate** a new value in memory.
+2. **Stage** it in the `_NEXT` slot (`APIS_GITHUB_WEBHOOK_SECRET_NEXT` /
+   `APIS_APPROVE_EMAIL_SECRET_NEXT`) in the snapshot **and materialize it**, so
+   the dotenv the daemon reads carries it. `github_gateway.make_app` admits
+   both values during this overlap window.
+3. **Restart `apis`** and read back a new pid that is still the same process
+   after a settle delay. A restart is never reported from the `kickstart`
+   exit code alone.
+4. **Live check under dual-admit** — a probe the script signs itself (a signed
+   `/github/webhook` ping, or an `/approve-email` call with a deliberately
+   invalid body, where 400 means the secret passed). GitHub is not involved.
+   Failure: **roll back** (exit `1`) — `_NEXT` removed from the snapshot and the
+   dotenv (materializing alone only adds, so the line is removed explicitly),
+   `apis` restarted.
+5. **Write the canonical store** — 1Password, through the same template-file
+   helper `rotate_provider_key.py` uses, then read back and compared in memory.
+   Without this the next `secrets_publish.py` would restore the retired value.
+   Failure: the old value is written back and the rotation rolls back.
+6. **Update the issuer** (webhook only) — PATCH every `--github-hook`. Failure
+   is a **checkpoint** (exit `2`), not a rollback: dual-admit stays on so no
+   delivery is rejected whichever value GitHub holds, and 1Password is restored
+   to the old value.
+7. **Promote** — the new value becomes primary and `_NEXT` is removed, in the
+   snapshot and the dotenv. Daemons that **present** the secret restart first
+   (`turdus`, for the approve secret), then `apis`, each with a pid read-back,
+   so there is no window in which `apis` admits only the new value while
+   `turdus` still sends the old one.
+8. **Post-promotion checks** — `apis` accepts the new value and **rejects the
+   old one with 401** (it is genuinely retired); `turdus`, imported from the
+   daemon checkout (`~/ateles-rc-src`) so it loads its configuration exactly as
+   the daemon does, presents a value `apis` accepts; and, webhook only, a ping
+   GitHub itself signs is delivered with 200 (read back from the hook's
+   deliveries). Any failure puts the retired value back in `_NEXT`, restarts
+   `apis`, and raises a checkpoint, so a consumer still on the old value keeps
+   working while someone looks.
 
 ```bash
-python execution/scripts/rotate_swarm_secret.py github_webhook_secret --dry-run
 python execution/scripts/rotate_swarm_secret.py approve_email_secret --dry-run
+ATELES_ALLOW_DAEMON_RESTART=1 \
+  python execution/scripts/rotate_swarm_secret.py approve_email_secret
+ATELES_ALLOW_DAEMON_RESTART=1 \
+  python execution/scripts/rotate_swarm_secret.py github_webhook_secret \
+  --github-hook <owner>/<repo>:<hook_id> --github-hook <owner>/<repo>:<hook_id> \
+  --github-token-gh-user <login> --i-know-this-calls-real-github
 ```
 
-`--dry-run` is the only mode this repo's tests and examples exercise: it
-prints the full plan — which files, vars, and daemon get touched, and what the
-live probe will POST — with every value shown as `<redacted>`, and makes no
-write, no HTTP call, no `launchctl` call. A real run additionally requires
-`--i-know-this-calls-real-github` (webhook secret only, tripwire for the
-GitHub write) and `ATELES_ALLOW_DAEMON_RESTART=1` in the *process's own*
-environment (never accepted as a CLI value) before it restarts anything; the
-agent AAuth signing keys named in the same ruling are **not** covered by this
-script yet — the credential registry entry for
-`AAUTH_SIGNING_KEY_APUS`/`AAUTH_SIGNING_KEY_FORMICA` records the current path
-as the manual dual-admit procedure proven 2026-09-25, pending a follow-up
-task to script it.
+`--github-token-gh-user` reads that login's `gh` keyring token in-process and
+refuses it unless `GET /user` resolves to the same login; `--github-token-ref`
+takes an `op://` reference instead. Hook ids come from
+`gh api repos/<owner>/<repo>/hooks` (GitHub never returns the secret itself).
 
-Verify it worked: the printed outcome line reads `rolled forward (new value
-promoted, old retired)`, `rolled back (old value retained)`, or `CHECKPOINT —
-dual-admit left ON, manual resolution required` — never silent, and the exit
-code (`0` / `1` / `2` respectively) distinguishes the same three outcomes for
-scripting. Independently, `secrets_keys.py`-style verification applies:
-decrypt `secrets/neotoma.sops.env` and confirm the `_NEXT` slot is absent
-after a rolled-forward or rolled-back outcome (present only mid-rotation, or
-deliberately still present after a checkpoint), and that `apis`'s live
-process picked up the change (`launchctl print gui/$(id -u)/com.ateles.apis |
-grep -A2 EnvironmentVariables`, or simply that a subsequent live probe
-against the daemon still returns 200/400 as expected). A checkpoint outcome
-means GitHub's actual webhook secret is unconfirmed — resolve it by hand
-(check the webhook config in GitHub's UI or via `gh api
-repos/<owner>/<repo>/hooks/<id>`, no `--reveal` of a secret involved since
-GitHub never returns the secret value itself) before running the script
-again. Nothing this script does prints a secret value at any point.
+**Verify it worked.** The outcome line reads `rolled forward`, `rolled back`,
+`CHECKPOINT`, or `refused at preflight`, matching exit codes `0`/`1`/`2`/`3`.
+After any run that changed the snapshot, commit `secrets/apis.sops.enc` in the
+private repo (the script prints the command). Then record the rotation on the
+`credential` registry row (`last_rotated_at`). Nothing this script does prints
+a secret value.
+
+**Ordering, kept from the 2026-09-26 review of PR #1306:** the issuer is
+updated only after the self-signed dual-admit probe passes, so a failed probe
+can never leave GitHub and the daemon disagreeing — GitHub was never told.
+
+The agent AAuth signing keys named in the same ruling are **not** covered by
+this script; the credential registry entry for
+`AAUTH_SIGNING_KEY_APUS`/`AAUTH_SIGNING_KEY_FORMICA` records the manual
+dual-admit procedure proven 2026-09-25.
 
 ## Credential registry (Neotoma)
 
