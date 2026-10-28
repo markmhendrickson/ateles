@@ -37,6 +37,13 @@ Each repository declares what is risky for it in `.github/review_scope.json`:
 - Globs match the whole repo-relative path, ignoring case and Unicode composition (the checkouts are case-insensitive, so `Execution/daemons/x.py` is `execution/daemons/x.py`): `*` stays within a directory, `**` crosses directories, a trailing `/` means everything below, and there is no basename-only matching. The format is documented in `execution/daemons/apis/review_scope.py`.
 - Ateles's own file is `.github/review_scope.json`. For an app repository, write one with the same shape; err on the side of putting a path in `full_panel_paths`.
 
+## Stacked pull requests and non-default bases
+
+- Path-selected review (`--panel path`, the bootstrap default in `execution/scripts/approve_pr_as_app.py`) applies only to a PR whose base is the repository's default branch.
+- A PR based on any other branch, including a stacked PR, always gets the full five-lens panel. So does any PR when the default branch cannot be read.
+- To keep a small change on the reduced route, base it directly on the default branch; otherwise expect five lenses.
+- When this applies, the tool's output names both branches: the PR's base and the repository's default.
+
 ## Steps
 
 All commands run from an ateles checkout, with the environment the swarm tools use: the swarm GitHub App must be configured through `ATELES_REVIEWER_APP_ID` and `ATELES_REVIEWER_APP_PRIVATE_KEY` (or `ATELES_REVIEWER_APP_PRIVATE_KEY_PATH`), and `ATELES_REVIEWER_APP_INSTALLATION_ID` if you want to skip the lookup; a lens with its own App uses `ATELES_APP_REVIEWER_<LENS>_ID` and `_PRIVATE_KEY(_PATH)`. `python3 lib/github_app_token.py status` lists which are set, by name only. See `docs/swarm-trigger-layer.md`. Replace `<repo>` and `<n>`.
