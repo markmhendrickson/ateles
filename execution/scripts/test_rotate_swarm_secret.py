@@ -45,6 +45,7 @@ FAKE_GITHUB_TOKEN = "ghp_fake_token_do_not_leak_44kd"
 # `new_secret="..."` source shape entirely without renaming the real
 # parameter (which is correctly named).
 FAKE_NEW_VALUE = "brand-new-value-xyz"
+BLOCK = r.TARGETS["approve_email_secret"].manifest_file
 
 
 # ---------------------------------------------------------------------------
@@ -93,11 +94,17 @@ def fake_store(monkeypatch, tmp_path):
     real_exists = Path.exists
 
     def fake_exists(self):
-        if self.parent == tmp_path:
+        if self.parent == tmp_path and self.name.endswith(".sops.env"):
             return self.name.removesuffix(".sops.env") in store.files
         return real_exists(self)
 
     monkeypatch.setattr(Path, "exists", fake_exists)
+    # materialize reads the manifest for the block's target dotenv
+    store.dotenv = tmp_path / "dotenv"
+    monkeypatch.setattr(
+        sl, "load_manifest",
+        lambda: {"files": {BLOCK: {"target": str(store.dotenv), "default": {}}}},
+    )
     return store
 
 
@@ -144,11 +151,14 @@ def test_dry_run_never_touches_the_store(fake_store, no_real_op):
 
 def test_stage_next_value_writes_next_slot_only(fake_store, no_real_op):
     target = r.TARGETS["github_webhook_secret"]
-    fake_store.files["neotoma"] = {target.env_var: FAKE_OLD_VALUE}
+    fake_store.files[BLOCK] = {target.env_var: FAKE_OLD_VALUE}
     r.stage_next_value(target, "new-value-abc", dry_run=False)
-    written = fake_store.files["neotoma"]
+    written = fake_store.files[BLOCK]
     assert written[target.env_var] == FAKE_OLD_VALUE  # primary untouched
     assert written[target.next_env_var] == "new-value-abc"  # staged alongside
+    # ...and materialized into the dotenv the daemon actually reads
+    dotenv = sl.parse_dotenv(fake_store.dotenv.read_text())
+    assert dotenv[target.next_env_var] == "new-value-abc"
 
 
 def test_promote_retires_old_and_clears_next(fake_store, no_real_op):
@@ -156,29 +166,37 @@ def test_promote_retires_old_and_clears_next(fake_store, no_real_op):
     old value is not merely superseded but the _NEXT slot carrying it is
     gone — a leftover _NEXT would leave the overlap window open forever."""
     target = r.TARGETS["github_webhook_secret"]
-    fake_store.files["neotoma"] = {
+    fake_store.files[BLOCK] = {
         target.env_var: FAKE_OLD_VALUE,
         target.next_env_var: "new-value-abc",
     }
     r.promote_and_retire(target, "new-value-abc", dry_run=False)
-    written = fake_store.files["neotoma"]
+    written = fake_store.files[BLOCK]
     assert written[target.env_var] == "new-value-abc"
     assert target.next_env_var not in written
     assert FAKE_OLD_VALUE not in written.values()
+    dotenv = sl.parse_dotenv(fake_store.dotenv.read_text())
+    assert dotenv[target.env_var] == "new-value-abc"
+    assert target.next_env_var not in dotenv
 
 
 def test_rollback_clears_next_and_leaves_primary(fake_store, no_real_op):
     """Rollback must restore the OLD credential's standing exactly — primary
     untouched, staged NEW value discarded — not merely 'not promote'."""
     target = r.TARGETS["approve_email_secret"]
-    fake_store.files["neotoma"] = {
+    fake_store.files[BLOCK] = {
         target.env_var: FAKE_OLD_VALUE,
         target.next_env_var: "attempted-new-value",
     }
+    fake_store.dotenv.write_text(sl.to_dotenv(fake_store.files[BLOCK]))
     r.roll_back(target, dry_run=False)
-    written = fake_store.files["neotoma"]
+    written = fake_store.files[BLOCK]
     assert written[target.env_var] == FAKE_OLD_VALUE
     assert target.next_env_var not in written
+    # merging alone never deletes: the dotenv line must be removed explicitly
+    dotenv = sl.parse_dotenv(fake_store.dotenv.read_text())
+    assert target.next_env_var not in dotenv
+    assert dotenv[target.env_var] == FAKE_OLD_VALUE
 
 
 def test_rollback_on_empty_store_is_a_noop_not_a_crash(fake_store, no_real_op):
@@ -264,7 +282,7 @@ def test_restart_daemon_dry_run_never_calls_runner():
         calls.append(cmd)
         raise AssertionError("runner must not be called in dry-run")
 
-    line = r.restart_daemon("com.ateles.apis", dry_run=True, runner=fake_runner)
+    line = r.restart_daemon("com.ateles.apis", dry_run=True, runner=fake_runner).line
     assert calls == []
     assert "launchctl" in line
     assert "[not run]" in line
@@ -280,9 +298,10 @@ def test_restart_daemon_without_env_flag_never_calls_runner_even_outside_dry_run
         calls.append(cmd)
         raise AssertionError("runner must not be called without the env flag")
 
-    line = r.restart_daemon("com.ateles.apis", dry_run=False, runner=fake_runner)
+    res = r.restart_daemon("com.ateles.apis", dry_run=False, runner=fake_runner)
     assert calls == []
-    assert "[not run]" in line
+    assert "[not run]" in res.line
+    assert not res.ok  # not restarted is not success outside dry-run
 
 
 def test_restart_daemon_runs_only_with_explicit_env_flag(monkeypatch):
@@ -295,9 +314,13 @@ def test_restart_daemon_runs_only_with_explicit_env_flag(monkeypatch):
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    line = r.restart_daemon("com.ateles.apis", dry_run=False, runner=fake_runner)
+    pids = iter([10, 11, 11])
+    res = r.restart_daemon(
+        "com.ateles.apis", dry_run=False, runner=fake_runner,
+        pid_reader=lambda label: next(pids), sleep=lambda s: None,
+    )
     assert len(calls) == 1
-    assert "restarted" in line
+    assert res.ok and "restarted" in res.line
 
 
 # ---------------------------------------------------------------------------
@@ -378,171 +401,9 @@ def test_run_rotation_dry_run_touches_nothing_and_leaks_nothing(
     assert "<redacted>" in out or "not run" in out
 
 
-def test_run_rotation_success_path_promotes_and_restarts(
-    fake_store, no_real_op, monkeypatch
-):
-    target = r.TARGETS["approve_email_secret"]
-    fake_store.files["neotoma"] = {target.env_var: FAKE_OLD_VALUE}
-
-    def fake_verifier(new_value, base_url="http://127.0.0.1:8742", http_post=None):
-        assert new_value != FAKE_OLD_VALUE
-        return r.VerificationResult(True, "signed probe accepted")
-
-    monkeypatch.setitem(r.VERIFIERS, target.name, fake_verifier)
-
-    report = r.run_rotation(target, dry_run=False)
-    assert report.rolled_forward
-    assert not report.rolled_back
-    written = fake_store.files["neotoma"]
-    assert written[target.env_var] != FAKE_OLD_VALUE
-    assert target.next_env_var not in written
-
-
-def test_run_rotation_failure_path_rolls_back_and_leaves_old_primary(
-    fake_store, no_real_op, monkeypatch
-):
-    target = r.TARGETS["approve_email_secret"]
-    fake_store.files["neotoma"] = {target.env_var: FAKE_OLD_VALUE}
-
-    def failing_verifier(new_value, base_url="http://127.0.0.1:8742", http_post=None):
-        return r.VerificationResult(False, "signed probe rejected (401)")
-
-    monkeypatch.setitem(r.VERIFIERS, target.name, failing_verifier)
-
-    report = r.run_rotation(target, dry_run=False)
-    assert report.rolled_back
-    assert not report.rolled_forward
-    written = fake_store.files["neotoma"]
-    assert written[target.env_var] == FAKE_OLD_VALUE  # unchanged
-    assert target.next_env_var not in written  # rollback cleared it
-
-
-def test_run_rotation_never_calls_github_write_without_the_tripwire(
-    fake_store, no_real_op, monkeypatch
-):
-    """github_webhook_secret's issuer update must be a no-op unless BOTH
-    dry_run=False AND allow_real_github_write=True — this PR's own CLI never
-    passes the tripwire, and this test proves the function-level default
-    matches that, independent of argparse."""
-    target = r.TARGETS["github_webhook_secret"]
-    fake_store.files["neotoma"] = {target.env_var: FAKE_OLD_VALUE}
-
-    calls = []
-    monkeypatch.setattr(
-        r, "update_github_webhook_secret", lambda **kw: calls.append(kw)
-    )
-
-    def fake_verifier(new_value, base_url="http://127.0.0.1:8742", http_post=None):
-        return r.VerificationResult(True, "ok")
-
-    monkeypatch.setitem(r.VERIFIERS, target.name, fake_verifier)
-
-    # dry_run=True, allow_real_github_write=True: still must not call it.
-    r.run_rotation(target, dry_run=True, allow_real_github_write=True)
-    assert calls == []
-
-    # dry_run=False, allow_real_github_write left at its default (False):
-    # still must not call it.
-    r.run_rotation(target, dry_run=False, allow_real_github_write=False)
-    assert calls == []
-
-
-def test_real_run_without_tripwire_refuses_promotion_and_rolls_back_to_old_value(
-    fake_store, no_real_op, monkeypatch
-):
-    """The exact defect a 2026-09-26 reviewer verified: a REAL (non-dry-run)
-    rotation of github_webhook_secret, with the probe passing but the
-    --i-know-this-calls-real-github tripwire NOT set, must not silently
-    promote — it must refuse and roll back, because promotion here would
-    leave GitHub on the old secret and the daemon admitting only the new
-    one. Asserts the FINAL STORE STATE, not just that the issuer function
-    was never called — that assertion alone passed even on the buggy
-    revision, since the bug was never calling the issuer AND STILL
-    promoting anyway."""
-    target = r.TARGETS["github_webhook_secret"]
-    fake_store.files["neotoma"] = {target.env_var: FAKE_OLD_VALUE}
-
-    issuer_calls = []
-    monkeypatch.setattr(
-        r, "update_github_webhook_secret", lambda **kw: issuer_calls.append(kw)
-    )
-
-    def passing_verifier(new_value, base_url="http://127.0.0.1:8742", http_post=None):
-        return r.VerificationResult(True, "signed ping accepted (200)")
-
-    monkeypatch.setitem(r.VERIFIERS, target.name, passing_verifier)
-
-    report = r.run_rotation(target, dry_run=False, allow_real_github_write=False)
-
-    assert issuer_calls == []  # necessary but NOT sufficient on its own
-    assert report.rolled_back, (
-        "a real run without the tripwire must roll back, not silently "
-        "succeed with the issuer never updated"
-    )
-    assert not report.rolled_forward
-    assert not report.checkpoint_raised
-
-    # The property the previous test suite never checked: the FINAL STORE
-    # STATE must show the daemon still on the OLD value, matching what
-    # GitHub (never touched) still has. A revision that skips the issuer
-    # write but promotes anyway passes `issuer_calls == []` while FAILING
-    # this assertion — which is exactly what happened before this fix.
-    written = fake_store.files["neotoma"]
-    assert written[target.env_var] == FAKE_OLD_VALUE
-    assert target.next_env_var not in written
-
-
-def test_run_rotation_calls_github_write_only_with_both_flags_set(
-    fake_store, no_real_op, monkeypatch
-):
-    target = r.TARGETS["github_webhook_secret"]
-    fake_store.files["neotoma"] = {target.env_var: FAKE_OLD_VALUE}
-
-    calls = []
-    monkeypatch.setattr(
-        r, "update_github_webhook_secret", lambda **kw: calls.append(kw)
-    )
-
-    def fake_verifier(new_value, base_url="http://127.0.0.1:8742", http_post=None):
-        return r.VerificationResult(True, "ok")
-
-    monkeypatch.setitem(r.VERIFIERS, target.name, fake_verifier)
-
-    r.run_rotation(
-        target,
-        dry_run=False,
-        allow_real_github_write=True,
-        github_token="tok",
-        github_repo="o/r",
-        github_hook_id="1",
-    )
-    assert len(calls) == 1
-    assert FAKE_OLD_VALUE not in str(calls)
-
-
 # ---------------------------------------------------------------------------
 # No-value-leak assertions — the report and CLI output never carry a value
 # ---------------------------------------------------------------------------
-
-
-def test_report_notes_never_contain_a_planted_secret(
-    fake_store, no_real_op, monkeypatch
-):
-    target = r.TARGETS["github_webhook_secret"]
-    fake_store.files["neotoma"] = {target.env_var: FAKE_OLD_VALUE}
-
-    seen_new_values = []
-
-    def spying_verifier(new_value, base_url="http://127.0.0.1:8742", http_post=None):
-        seen_new_values.append(new_value)
-        return r.VerificationResult(True, "ok")
-
-    monkeypatch.setitem(r.VERIFIERS, target.name, spying_verifier)
-
-    report = r.run_rotation(target, dry_run=False)
-    notes = report.as_neotoma_notes()
-    assert FAKE_OLD_VALUE not in notes
-    assert seen_new_values[0] not in notes
 
 
 def test_cli_main_dry_run_prints_no_secret_and_exits_zero(
@@ -560,221 +421,13 @@ def test_cli_main_dry_run_prints_no_secret_and_exits_zero(
     assert not re.search(r"[A-Za-z0-9_-]{40,}", captured.out)
 
 
-def test_cli_main_success_path_prints_no_secret_and_exits_zero(
-    fake_store, no_real_op, monkeypatch, capsys
-):
-    target = r.TARGETS["approve_email_secret"]
-    fake_store.files["neotoma"] = {target.env_var: FAKE_OLD_VALUE}
-
-    def fake_verifier(new_value, base_url="http://127.0.0.1:8742", http_post=None):
-        return r.VerificationResult(True, "ok")
-
-    monkeypatch.setitem(r.VERIFIERS, target.name, fake_verifier)
-
-    rc = r.main(["approve_email_secret"])
-    captured = capsys.readouterr()
-    assert rc == 0
-    assert FAKE_OLD_VALUE not in captured.out
-    assert FAKE_OLD_VALUE not in captured.err
-    import re
-
-    assert not re.search(r"[A-Za-z0-9_-]{40,}", captured.out)
-
-
-def test_cli_main_rollback_path_prints_no_secret_and_exits_nonzero(
-    fake_store, no_real_op, monkeypatch, capsys
-):
-    target = r.TARGETS["approve_email_secret"]
-    fake_store.files["neotoma"] = {target.env_var: FAKE_OLD_VALUE}
-
-    def failing_verifier(new_value, base_url="http://127.0.0.1:8742", http_post=None):
-        return r.VerificationResult(False, "rejected")
-
-    monkeypatch.setitem(r.VERIFIERS, target.name, failing_verifier)
-
-    rc = r.main(["approve_email_secret"])
-    captured = capsys.readouterr()
-    assert rc == 1  # rollback is a non-zero exit, distinct from dry-run/success
-    assert FAKE_OLD_VALUE not in captured.out
-    assert FAKE_OLD_VALUE not in captured.err
-
-
 def test_cli_rejects_unknown_target():
     with pytest.raises(SystemExit):
         r.main(["not-a-real-target", "--dry-run"])
 
 
 # ---------------------------------------------------------------------------
-# github_webhook_secret specifically: issuer/daemon consistency
-# (2026-09-26 review — Falco/security, Pavo/pm, Phoenicurus/qa all
-# independently traced the same defect: an earlier revision updated the
-# GitHub issuer BEFORE verifying, so a failed verification rolled the daemon
-# back to the OLD value while GitHub was left signing with the NEW one —
-# every real delivery would then fail signature verification until someone
-# noticed and fixed GitHub's config by hand. The fix reorders run_rotation so
-# the issuer update runs ONLY AFTER the dual-admit verification has already
-# passed, using a probe this script signs itself (no GitHub involvement at
-# all) to prove the daemon accepts the new value first.)
+# Real-run orchestration (staging that reaches the daemon, the canonical
+# store, presenter restarts, issuer ordering, checkpoints, refusals) is in
+# test_rotate_swarm_secret_real_run.py, against a simulated host.
 # ---------------------------------------------------------------------------
-
-
-def test_probe_fails_after_would_be_issuer_update_both_sides_end_on_old_value(
-    fake_store, no_real_op, monkeypatch
-):
-    """The scenario the review named: verification fails for github_webhook_secret.
-    Both the daemon-side store AND the GitHub issuer must end up agreeing on
-    the OLD value — the issuer must never have been touched in the first
-    place, because the fix's ordering runs verification before the issuer
-    update, not after."""
-    target = r.TARGETS["github_webhook_secret"]
-    fake_store.files["neotoma"] = {target.env_var: FAKE_OLD_VALUE}
-
-    issuer_calls = []
-    monkeypatch.setattr(
-        r, "update_github_webhook_secret", lambda **kw: issuer_calls.append(kw)
-    )
-
-    def failing_verifier(new_value, base_url="http://127.0.0.1:8742", http_post=None):
-        return r.VerificationResult(False, "signed ping rejected (status=401)")
-
-    monkeypatch.setitem(r.VERIFIERS, target.name, failing_verifier)
-
-    report = r.run_rotation(
-        target,
-        dry_run=False,
-        allow_real_github_write=True,  # tripwire set, but must still not fire
-        github_token="tok",
-        github_repo="markmhendrickson/ateles",
-        github_hook_id="1",
-    )
-
-    # The issuer was NEVER called — this is the property that makes the
-    # rollback safe unconditionally for this target. If verification failed,
-    # the sequence must never have reached the issuer-update step at all.
-    assert issuer_calls == [], (
-        "GitHub issuer update must not run when the dual-admit probe fails — "
-        "the whole point of verify-before-issuer-update is that a failed "
-        "probe means GitHub was never told about the new value"
-    )
-    assert report.rolled_back
-    assert not report.rolled_forward
-    assert not report.checkpoint_raised
-
-    # Daemon side: primary is still the old value, _NEXT is cleared.
-    written = fake_store.files["neotoma"]
-    assert written[target.env_var] == FAKE_OLD_VALUE
-    assert target.next_env_var not in written
-    # Both sides agree on OLD — this is the assertion the review asked for.
-
-
-def test_issuer_update_failure_after_probe_passes_raises_checkpoint_dual_admit_stays_on(
-    fake_store, no_real_op, monkeypatch
-):
-    """The other scenario the review named: the dual-admit probe PASSES (the
-    daemon proves it accepts the new value), but the subsequent GitHub issuer
-    update itself fails. This must NOT be treated as a rollback (the daemon
-    change is proven good) and must NOT be treated as a promotion (GitHub's
-    state is now unconfirmed) — it must raise a checkpoint and leave
-    dual-admit ON so no real delivery is ever rejected while a human sorts
-    out what GitHub actually has."""
-    target = r.TARGETS["github_webhook_secret"]
-    fake_store.files["neotoma"] = {target.env_var: FAKE_OLD_VALUE}
-
-    def passing_verifier(new_value, base_url="http://127.0.0.1:8742", http_post=None):
-        return r.VerificationResult(True, "signed ping accepted (200)")
-
-    monkeypatch.setitem(r.VERIFIERS, target.name, passing_verifier)
-
-    def failing_issuer_update(**kw):
-        raise r.GitHubAPIError("PATCH hooks/1/config -> HTTP 500: internal error")
-
-    monkeypatch.setattr(r, "update_github_webhook_secret", failing_issuer_update)
-
-    report = r.run_rotation(
-        target,
-        dry_run=False,
-        allow_real_github_write=True,
-        github_token="tok",
-        github_repo="markmhendrickson/ateles",
-        github_hook_id="1",
-    )
-
-    assert report.checkpoint_raised
-    assert not report.rolled_forward
-    assert not report.rolled_back
-
-    # Dual-admit must stay ON: primary untouched, _NEXT still staged.
-    written = fake_store.files["neotoma"]
-    assert written[target.env_var] == FAKE_OLD_VALUE
-    assert written[target.next_env_var] is not None
-    assert written[target.next_env_var] != FAKE_OLD_VALUE
-
-    notes = report.as_neotoma_notes()
-    assert "CHECKPOINT" in notes
-    assert FAKE_OLD_VALUE not in notes
-
-
-def test_issuer_update_network_failure_after_probe_passes_also_raises_checkpoint(
-    fake_store, no_real_op, monkeypatch
-):
-    """A network failure (not just an HTTP error status) while updating the
-    issuer must be treated the same as any other issuer-update failure —
-    raise a checkpoint, never guess. This is the 'cannot even be confirmed'
-    case the review named explicitly."""
-    target = r.TARGETS["github_webhook_secret"]
-    fake_store.files["neotoma"] = {target.env_var: FAKE_OLD_VALUE}
-
-    def passing_verifier(new_value, base_url="http://127.0.0.1:8742", http_post=None):
-        return r.VerificationResult(True, "signed ping accepted (200)")
-
-    monkeypatch.setitem(r.VERIFIERS, target.name, passing_verifier)
-
-    def timeout_request(method, url, headers, body):
-        return 0, "<urlopen error timed out>"
-
-    # Exercise the REAL update_github_webhook_secret (status=0 -> raises
-    # GitHubAPIError per its own body), with only the HTTP transport it
-    # accepts as a parameter swapped out. Capture the original function
-    # BEFORE patching, so the wrapper calls the real logic rather than
-    # itself (run_rotation calls this without threading http_request
-    # through, so the wrapper binds it here instead).
-    original_update = r.update_github_webhook_secret
-
-    def real_with_timeout_transport(**kw):
-        kw.pop("http_request", None)
-        return original_update(**kw, http_request=timeout_request)
-
-    monkeypatch.setattr(r, "update_github_webhook_secret", real_with_timeout_transport)
-
-    report = r.run_rotation(
-        target,
-        dry_run=False,
-        allow_real_github_write=True,
-        github_token="tok",
-        github_repo="markmhendrickson/ateles",
-        github_hook_id="1",
-    )
-
-    assert report.checkpoint_raised
-    written = fake_store.files["neotoma"]
-    assert written[target.env_var] == FAKE_OLD_VALUE
-    assert target.next_env_var in written
-
-
-def test_approve_email_secret_never_touches_issuer_path_on_failure(
-    fake_store, no_real_op, monkeypatch
-):
-    """Sanity check that the internal-only target (no external issuer) is
-    unaffected by this reordering — it should behave exactly as before."""
-    target = r.TARGETS["approve_email_secret"]
-    assert not target.has_external_issuer
-    fake_store.files["neotoma"] = {target.env_var: FAKE_OLD_VALUE}
-
-    def failing_verifier(new_value, base_url="http://127.0.0.1:8742", http_post=None):
-        return r.VerificationResult(False, "rejected")
-
-    monkeypatch.setitem(r.VERIFIERS, target.name, failing_verifier)
-
-    report = r.run_rotation(target, dry_run=False)
-    assert report.rolled_back
-    assert not report.checkpoint_raised

@@ -129,12 +129,24 @@ def parse_dotenv(text: str) -> dict[str, str]:
     return out
 
 
-def merge_into_env_file(env_file: Path, updates: dict[str, str]) -> list[str]:
+def merge_into_env_file(
+    env_file: Path, updates: dict[str, str], remove: tuple[str, ...] | list[str] = ()
+) -> list[str]:
     """Merge `updates` into a dotenv file, preserving unmanaged keys.
 
-    Returns the list of var NAMES changed (never values). Creates parent dirs
-    and the file if missing.
+    `remove` names keys to delete from the file (every line defining them).
+    A key in both `updates` and `remove` is a caller error. Merging alone can
+    never delete: a key dropped from a snapshot would otherwise survive in the
+    dotenv indefinitely, which for a rotation's ``_NEXT`` slot means the
+    dual-admit window never closes.
+
+    Returns the list of var NAMES changed or removed (never values). Creates
+    parent dirs and the file if missing.
     """
+    remove_set = set(remove)
+    overlap = remove_set & set(updates)
+    if overlap:
+        raise ValueError(f"keys both updated and removed: {sorted(overlap)}")
     env_file.parent.mkdir(parents=True, exist_ok=True)
     existing_lines = env_file.read_text().splitlines() if env_file.exists() else []
     seen: set[str] = set()
@@ -145,6 +157,10 @@ def merge_into_env_file(env_file: Path, updates: dict[str, str]) -> list[str]:
         stripped = line.strip()
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.partition("=")[0].strip()
+            if key in remove_set:
+                if key not in changed:
+                    changed.append(key)
+                continue
             if key in updates:
                 new_line = f'{key}="{updates[key]}"'
                 if new_line != line:
@@ -159,8 +175,59 @@ def merge_into_env_file(env_file: Path, updates: dict[str, str]) -> list[str]:
             out_lines.append(f'{key}="{val}"')
             changed.append(key)
 
-    env_file.write_text("\n".join(out_lines).rstrip("\n") + "\n")
+    # Atomic replace, keeping the file's mode (0600 by default for a new one):
+    # daemons read this file at startup, and a rotation rewrites it several
+    # times, so a reader must never see a half-written file.
+    mode = env_file.stat().st_mode & 0o777 if env_file.exists() else 0o600
+    tmp = env_file.with_name(f".{env_file.name}.tmp-{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(out_lines).rstrip("\n") + "\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, env_file)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
     return changed
+
+
+# Where a block materializes when neither --env-file nor the block's `target`
+# says otherwise.
+DEFAULT_MATERIALIZE_TARGET = Path.home() / ".config" / "neotoma" / ".env"
+
+
+def block_env_file(manifest: dict, name: str, override: Path | None = None) -> Path:
+    """The dotenv a manifest block materializes into.
+
+    Precedence: explicit override > the block's `target` > the default.
+    """
+    if override is not None:
+        return override
+    target = manifest.get("files", {}).get(name, {}).get("target")
+    return Path(target).expanduser() if target else DEFAULT_MATERIALIZE_TARGET
+
+
+def materialize_block(
+    name: str,
+    *,
+    manifest: dict | None = None,
+    env_file: Path | None = None,
+    remove: tuple[str, ...] | list[str] = (),
+) -> tuple[Path, int, list[str]]:
+    """Decrypt one snapshot and merge it into its dotenv. OFFLINE.
+
+    Returns ``(env_file, n_values, changed_names)``. Raises FileNotFoundError
+    when the block has no snapshot. Never returns or prints a value.
+    """
+    manifest = manifest if manifest is not None else load_manifest()
+    dest = block_env_file(manifest, name, env_file)
+    src = enc_file(name)
+    if not src.exists():
+        raise FileNotFoundError(f"no snapshot for block {name!r}")
+    values = sops_decrypt_dotenv(src)
+    changed = merge_into_env_file(dest, values, remove=remove)
+    return dest, len(values), changed
 
 
 # ---------------------------------------------------------------------------
