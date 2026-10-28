@@ -175,7 +175,20 @@ def merge_into_env_file(
             out_lines.append(f'{key}="{val}"')
             changed.append(key)
 
-    env_file.write_text("\n".join(out_lines).rstrip("\n") + "\n")
+    # Atomic replace, keeping the file's mode (0600 by default for a new one):
+    # daemons read this file at startup, and a rotation rewrites it several
+    # times, so a reader must never see a half-written file.
+    mode = env_file.stat().st_mode & 0o777 if env_file.exists() else 0o600
+    tmp = env_file.with_name(f".{env_file.name}.tmp-{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(out_lines).rstrip("\n") + "\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, env_file)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
     return changed
 
 

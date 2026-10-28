@@ -70,7 +70,10 @@ SEQUENCE (a real run; `--dry-run` prints the same plan with no side effects):
 
 Outcomes, printed and returned as the exit code: 0 rolled forward (or
 dry-run), 1 rolled back, 2 checkpoint, 3 refused at preflight (nothing
-changed).
+changed), 4 internal error (state unknown), 64 bad arguments. Every failure
+inside steps 2-8 — a check that fails, one that cannot run, or an unexpected
+exception — takes the rollback (before promotion) or re-open (after) path;
+none escapes as a traceback.
 
 HARD RULES enforced by this script itself, not just by policy:
   - Never prints a secret value. Status lines name variables, files, pids and
@@ -226,6 +229,32 @@ def _materialize(target: RotationTarget, *, remove: tuple[str, ...] = ()) -> str
     )
 
 
+def _base_url_is_safe(base_url: str) -> bool:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    if parsed.scheme == "https":
+        return True
+    return parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1")
+
+
+def _other_blocks_mapping(target: RotationTarget, manifest: dict) -> list[str]:
+    """Manifest blocks OTHER than the target's that map its variable or its
+    _NEXT slot (same ENVIRONMENT overlay as secrets_publish.py)."""
+    names = (target.env_var, target.next_env_var)
+    found = []
+    for block in manifest.get("files", {}):
+        if block == target.manifest_file:
+            continue
+        try:
+            refs = sl.resolve_refs(manifest, block, os.environ.get("ENVIRONMENT"))
+        except (KeyError, AttributeError, TypeError):
+            continue
+        if any(n in refs for n in names):
+            found.append(block)
+    return found
+
+
 def _read_snapshot(target: RotationTarget) -> dict[str, str]:
     enc = sl.enc_file(target.manifest_file)
     return sl.sops_decrypt_dotenv(enc) if enc.exists() else {}
@@ -334,8 +363,10 @@ def raise_issuer_checkpoint(target: RotationTarget, *, reason: str) -> str:
         "values, so no delivery is rejected either way. Manual resolution "
         "required: confirm GitHub's actual webhook secret, then either "
         "retry the issuer update (promoting on success) or roll back "
-        "manually if GitHub is confirmed still on the old value. This "
-        "script will not guess."
+        "manually if GitHub is confirmed still on the old value. 1Password "
+        "is restored to the OLD value; do not run secrets_publish.py for this "
+        "block until resolved (it would drop the staged value). This script "
+        "will not guess. See docs/secrets_management.md, 'Resolving a checkpoint'."
     )
 
 
@@ -404,10 +435,10 @@ def _github_http(
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
-    except urllib.error.URLError as exc:
-        # Network failure / timeout: status 0 is never a valid HTTP status,
-        # so callers treat it as "could not be confirmed".
-        return 0, str(exc)
+    except Exception as exc:  # noqa: BLE001
+        # Network failure, reset or timeout: status 0 is never a valid HTTP
+        # status, so callers treat it as "could not be confirmed".
+        return 0, f"{type(exc).__name__}: {exc}"
 
 
 def _github_headers(token: str) -> dict:
@@ -581,7 +612,15 @@ def restart_daemon(
     settle = RESTART_SETTLE_S if settle is None else settle
     read_pid = pid_reader or (lambda label: read_launchd_pid(label))
     run = runner or subprocess.run
+    try:
+        return _kickstart_and_read_back(plist_label, cmd, run, read_pid, sleep, timeout, settle)
+    except Exception as exc:  # noqa: BLE001 — a restart that cannot be confirmed is a failure
+        return RestartResult(
+            False, f"restart FAILED: {plist_label} ({type(exc).__name__}: {_safe(exc)})"
+        )
 
+
+def _kickstart_and_read_back(plist_label, cmd, run, read_pid, sleep, timeout, settle):
     old_pid = read_pid(plist_label)
     result = run(cmd, capture_output=True, text=True, timeout=30)  # type: ignore[call-arg]
     if result.returncode != 0:
@@ -641,8 +680,8 @@ def _default_post(url: str, headers: dict, body: bytes) -> tuple[int, str]:
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
-    except urllib.error.URLError as exc:
-        return 0, str(exc)
+    except Exception as exc:  # noqa: BLE001 — URLError, reset, read timeout: no answer
+        return 0, f"{type(exc).__name__}: {exc}"
 
 
 def verify_github_webhook_secret(
@@ -747,10 +786,13 @@ def verify_turdus_presents_accepted_secret(
     retired the old value, so a pass proves turdus holds the new one."""
     env = {k: v for k, v in os.environ.items() if k not in _PRESENTER_ENV_STRIP}
     run = runner or subprocess.run
-    result = run(
-        [sys.executable, "-c", _TURDUS_PROBE, str(daemon_checkout)],
-        capture_output=True, text=True, timeout=60, env=env, cwd=str(daemon_checkout),
-    )
+    try:
+        result = run(
+            [sys.executable, "-c", _TURDUS_PROBE, str(daemon_checkout)],
+            capture_output=True, text=True, timeout=60, env=env, cwd=str(daemon_checkout),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return VerificationResult(False, f"turdus-side probe did not run ({type(exc).__name__})")
     match = re.search(r"status=(\w+)", result.stdout or "")
     if result.returncode != 0 or not match:
         return VerificationResult(
@@ -807,8 +849,12 @@ def preflight(
     hooks: list[tuple[str, str]],
     github_token: str | None,
     allow_real_github_write: bool,
+    base_url: str = DEFAULT_BASE_URL,
 ) -> Preflight:
     """Everything a real run needs, checked before anything is written."""
+    if not _base_url_is_safe(base_url):
+        return Preflight(False, f"--base-url {base_url!r} would send the secret off this "
+                         "machine in clear text — use a loopback http URL or https")
     if os.environ.get("ATELES_ALLOW_DAEMON_RESTART") != "1":
         return Preflight(False, "ATELES_ALLOW_DAEMON_RESTART=1 is not set — a real "
                          "rotation cannot take effect without restarting the daemons")
@@ -820,7 +866,8 @@ def preflight(
         if not hooks:
             return Preflight(False, "no --github-hook given — the issuer cannot be updated")
         if not github_token:
-            return Preflight(False, "no GitHub token — the issuer cannot be updated")
+            return Preflight(False, "no GitHub token — pass --github-token-gh-user LOGIN "
+                             "or --github-token-ref op://...; the issuer cannot be updated")
     for label in target.presenter_plists:
         if label not in PRESENTER_VERIFIERS:
             return Preflight(False, f"no presenter check for {label}")
@@ -831,10 +878,16 @@ def preflight(
     ref = canonical_ref(target, manifest)
     if not ref:
         return Preflight(False, f"manifest block {target.manifest_file!r} does not map "
-                         f"{target.env_var} to a 1Password reference")
+                         f"{target.env_var} to a 1Password reference — onboard the block "
+                         "first (see docs/secrets_management.md, 'Where these two secrets live')")
+    others = _other_blocks_mapping(target, manifest)
+    if others:
+        return Preflight(False, f"{target.env_var} is also mapped by manifest block(s) "
+                         f"{', '.join(others)}; a later publish or materialize of those "
+                         "would bring the retired value back — remove the duplicate first")
     if not sl.enc_file(target.manifest_file).exists():
         return Preflight(False, f"no snapshot secrets/{target.manifest_file}.sops.enc — "
-                         "run secrets_publish.py for the block first")
+                         "onboard the block first (see docs/secrets_management.md, 'Where these two secrets live')")
     snapshot = _read_snapshot(target)
     old_value = snapshot.get(target.env_var, "")
     if not old_value:
@@ -877,6 +930,7 @@ class RotationReport:
     refused: bool = False
     verification: VerificationResult | None = None
     snapshot_changed: bool = False
+    canonical_touched: bool = False
 
     def add(self, line) -> None:
         self.steps.append(str(line))
@@ -907,7 +961,7 @@ def _dry_run_plan(
 ) -> RotationReport:
     report.add("[dry-run] preflight: restart flag, manifest mapping, snapshot = dotenv = "
                "1Password on the current value, no leftover _NEXT")
-    report.add("generated new value in memory (never logged)")
+    report.add("[dry-run] would generate a new value in memory (never logged)")
     report.add(stage_next_value(target, "", dry_run=True))
     report.add(restart_daemon(target.daemon_plist, dry_run=True))
     report.add(
@@ -917,7 +971,7 @@ def _dry_run_plan(
     report.add("[dry-run] would write the new value to the manifest's 1Password "
                "reference and read it back")
     if target.has_external_issuer:
-        named = ", ".join(f"{r}#{h}" for r, h in hooks) or "<--github-hook ...>"
+        named = ", ".join(f"{r}:{h}" for r, h in hooks) or "<--github-hook OWNER/REPO:ID>"
         report.add(
             f"[dry-run] would PATCH GitHub webhook config ({named}) to the new value "
             "ONLY IF that probe passes (requires --i-know-this-calls-real-github)"
@@ -1007,9 +1061,12 @@ def run_rotation(
     if dry_run:
         return _dry_run_plan(report, target, base_url, hooks)
 
-    # 0. preflight
-    pre = preflight(target, hooks=hooks, github_token=github_token,
-                    allow_real_github_write=allow_real_github_write)
+    # 0. preflight. An unexpected error here changed nothing, so it is a refusal.
+    try:
+        pre = preflight(target, hooks=hooks, github_token=github_token,
+                        allow_real_github_write=allow_real_github_write, base_url=base_url)
+    except Exception as exc:  # noqa: BLE001
+        pre = Preflight(False, f"preflight could not run ({type(exc).__name__}: {_safe(exc)})")
     if not pre.ok:
         report.add(f"REFUSED: {pre.reason}")
         report.refused = True
@@ -1023,34 +1080,24 @@ def run_rotation(
     _register_secret(new_value)
     report.add("generated new value in memory (never logged)")
 
-    # 2-3. stage, restart the verifier
+    # Steps 2-5 run before anything outside this machine knows the new value.
+    # ANY failure among them — a check that fails or one that cannot run,
+    # including an unexpected exception — rolls back.
     try:
-        report.add(stage_next_value(target, new_value, dry_run=False))
-        report.snapshot_changed = True
+        _stage_check_and_store(report, target, new_value, ref, base_url)
+    except _RollBack as stop:
+        report.add(str(stop))
+        if stop.restore_canonical:
+            report.add(_restore_canonical(ref, old_value))
+        return _rollback(report, target)
     except Exception as exc:  # noqa: BLE001
-        report.add(f"stage FAILED ({_safe(exc)})")
-        return _rollback(report, target)
-    restart = restart_daemon(target.daemon_plist, dry_run=False)
-    report.add(restart)
-    if not restart.ok:
-        return _rollback(report, target)
-
-    # 4. live check under dual-admit
-    result = _probe(VERIFIERS[target.name], new_value, base_url)
-    report.verification = result
-    report.add(f"dual-admit check: {result.detail}")
-    if not result.ok:
+        report.add(f"unexpected error before promotion ({type(exc).__name__}: {_safe(exc)})"
+                   " — rolling back")
+        if report.canonical_touched:
+            report.add(_restore_canonical(ref, old_value))
         return _rollback(report, target)
 
-    # 5. canonical store
-    try:
-        report.add(write_canonical_store(ref, new_value, what="new"))
-    except CanonicalStoreError as exc:
-        report.add(f"1Password write FAILED ({exc}) — rolling back")
-        report.add(_restore_canonical(ref, old_value))
-        return _rollback(report, target)
-
-    # 6. issuer
+    # 6. issuer. A failure here is a checkpoint: GitHub's state is unconfirmed.
     if target.has_external_issuer:
         for repo, hook_id in hooks:
             try:
@@ -1058,53 +1105,96 @@ def run_rotation(
                     github_token=github_token or "", repo=repo, hook_id=hook_id,
                     new_secret=new_value,
                 )
-                report.add(f"updated GitHub webhook config for {repo}#{hook_id}")
-            except GitHubAPIError as exc:
-                report.add(raise_issuer_checkpoint(target, reason=str(exc)))
+                report.add(f"updated GitHub webhook config for {repo}:{hook_id}")
+            except Exception as exc:  # noqa: BLE001 — GitHubAPIError or anything else
+                reason = str(exc) if isinstance(exc, GitHubAPIError) else (
+                    f"{type(exc).__name__}: {_safe(exc)}")
+                report.add(raise_issuer_checkpoint(target, reason=reason))
                 report.add(_restore_canonical(ref, old_value))
                 report.checkpoint_raised = True
                 return report
 
-    # 7. promote, restart presenters then the verifier
+    # 7-8. promote, restart presenters then the verifier, check. Any failure,
+    # including an unexpected exception, re-opens dual-admit with the old value.
+    failures: list[str] = []
     try:
         report.add(promote_and_retire(target, new_value, dry_run=False))
+        for label in (*target.presenter_plists, target.daemon_plist):
+            restart = restart_daemon(label, dry_run=False)
+            report.add(restart)
+            if not restart.ok:
+                failures.append(f"{label} restart not confirmed")
+        if not failures:
+            for check in _post_promotion_checks(
+                target, new_value=new_value, old_value=old_value, base_url=base_url,
+                daemon_checkout=daemon_checkout, hooks=hooks, github_token=github_token,
+            ):
+                report.add(f"post-promotion check: {check.detail} -> "
+                           f"{'ok' if check.ok else 'FAILED'}")
+                if not check.ok:
+                    failures.append(check.detail)
     except Exception as exc:  # noqa: BLE001
-        report.add(f"CHECKPOINT: promotion write failed ({_safe(exc)}); 1Password holds "
-                   f"the new value and {target.next_env_var} is still staged")
-        report.checkpoint_raised = True
-        return report
-    failures: list[str] = []
-    for label in (*target.presenter_plists, target.daemon_plist):
-        restart = restart_daemon(label, dry_run=False)
-        report.add(restart)
-        if not restart.ok:
-            failures.append(f"{label} restart not confirmed")
-
-    # 8. post-promotion checks
-    if not failures:
-        for check in _post_promotion_checks(
-            target, new_value=new_value, old_value=old_value, base_url=base_url,
-            daemon_checkout=daemon_checkout, hooks=hooks, github_token=github_token,
-        ):
-            report.add(f"post-promotion check: {check.detail} -> "
-                       f"{'ok' if check.ok else 'FAILED'}")
-            if not check.ok:
-                failures.append(check.detail)
+        failures.append(f"unexpected error after promotion began "
+                        f"({type(exc).__name__}: {_safe(exc)})")
     if failures:
-        try:
-            report.add(reopen_dual_admit(target, old_value))
-            report.add(restart_daemon(target.daemon_plist, dry_run=False))
-        except Exception as exc:  # noqa: BLE001
-            report.add(f"re-opening dual-admit FAILED ({_safe(exc)})")
-        report.add(f"CHECKPOINT: post-promotion check failed ({'; '.join(failures)}). "
-                   "The new value is primary everywhere; the retired value is back in "
-                   f"{target.next_env_var} so a consumer still holding it keeps working. "
-                   "Manual resolution required.")
         report.checkpoint_raised = True
+        report.add(f"CHECKPOINT: post-promotion step failed ({'; '.join(failures)}).")
+        report.add(_reopen_after_failure(target, old_value))
         return report
 
     report.rolled_forward = True
     return report
+
+
+class _RollBack(Exception):
+    """A pre-promotion step failed; carries a value-free reason."""
+
+    def __init__(self, reason: str, *, restore_canonical: bool = False) -> None:
+        super().__init__(reason)
+        self.restore_canonical = restore_canonical
+
+
+def _stage_check_and_store(
+    report: RotationReport, target: RotationTarget, new_value: str, ref: str, base_url: str
+) -> None:
+    """Steps 2-5. Raises _RollBack (or anything unexpected) to roll back."""
+    report.snapshot_changed = True  # set before the write: a partial write still needs committing
+    report.add(stage_next_value(target, new_value, dry_run=False))
+    restart = restart_daemon(target.daemon_plist, dry_run=False)
+    report.add(restart)
+    if not restart.ok:
+        raise _RollBack(f"{target.daemon_plist} restart not confirmed — rolling back")
+    result = _probe(VERIFIERS[target.name], new_value, base_url)
+    report.verification = result
+    report.add(f"dual-admit check: {result.detail}")
+    if not result.ok:
+        raise _RollBack("dual-admit check failed — rolling back")
+    report.canonical_touched = True
+    try:
+        report.add(write_canonical_store(ref, new_value, what="new"))
+    except CanonicalStoreError as exc:
+        raise _RollBack(f"1Password write FAILED ({exc}) — rolling back",
+                        restore_canonical=True) from None
+
+
+def _reopen_after_failure(target: RotationTarget, old_value: str) -> str:
+    """Re-open dual-admit with the retired value and say truthfully what state
+    that left, whether or not it worked."""
+    try:
+        line = reopen_dual_admit(target, old_value)
+    except Exception as exc:  # noqa: BLE001
+        return (f"re-opening dual-admit FAILED ({type(exc).__name__}: {_safe(exc)}). "
+                f"The new value may be primary with NO {target.next_env_var}: a consumer "
+                "still holding the old value is being rejected. Resolve now — see "
+                "docs/secrets_management.md, 'Resolving a checkpoint'.")
+    restart = restart_daemon(target.daemon_plist, dry_run=False)
+    if not restart.ok:
+        return (f"{line}; but {restart.line} — the running {target.daemon_plist} may not "
+                "admit the old value yet. Resolve now — see docs/secrets_management.md, "
+                "'Resolving a checkpoint'.")
+    return (f"{line}; {restart.line}. The new value is primary everywhere and the retired "
+            f"value is back in {target.next_env_var}, so a consumer still holding it keeps "
+            "working. See docs/secrets_management.md, 'Resolving a checkpoint'.")
 
 
 # ---------------------------------------------------------------------------
@@ -1120,7 +1210,7 @@ def _parse_hook(spec: str) -> tuple[str, str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         description=(
             "Staged rotation for a swarm-issued-and-consumed shared secret "
             "(authority_model.md#grants; conformance.md row 118)."
@@ -1156,10 +1246,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use the gh keyring token for LOGIN (verified to resolve to LOGIN).",
     )
     parser.add_argument(
+        "--notes-file", type=Path, default=None,
+        help="Write the value-free outcome notes here, for the credential registry.",
+    )
+    parser.add_argument(
         "--i-know-this-calls-real-github", action="store_true",
         help="Tripwire: without it the GitHub webhook-config write never runs.",
     )
     return parser
+
+
+EXIT_ROLLED_FORWARD = 0  # also dry-run
+EXIT_ROLLED_BACK = 1
+EXIT_CHECKPOINT = 2
+EXIT_REFUSED = 3
+EXIT_INTERNAL_ERROR = 4  # the script itself crashed; state unknown — inspect
+EXIT_USAGE = 64  # bad arguments (argparse's own 2 would read as a checkpoint)
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str):  # noqa: D102
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+
+def _follow_up(report: RotationReport, target: RotationTarget) -> str | None:
+    """What to do with the private-repo snapshot, by outcome. None if nothing."""
+    if not report.snapshot_changed:
+        return None
+    snap = f"secrets/{target.manifest_file}.sops.enc"
+    if report.rolled_forward:
+        return (f"REQUIRED: commit the snapshot so other machines materialize the new "
+                f"value:\n    cd {sl.SECRETS_BASE} && git add {snap} && git commit -m "
+                f"\"chore(secrets): rotate {target.env_var}\" && git push")
+    if report.rolled_back:
+        return (f"No rotation happened. {snap} was re-encrypted with the same contents; "
+                f"discard that change:\n    cd {sl.SECRETS_BASE} && git checkout -- {snap}")
+    return (f"Do NOT commit {snap} until the checkpoint is resolved (see "
+            "docs/secrets_management.md, 'Resolving a checkpoint').")
 
 
 def main(argv: list[str]) -> int:
@@ -1167,15 +1291,52 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     target = TARGETS[args.target]
 
+    try:
+        report = _run_from_args(args, target)
+    except Exception as exc:  # noqa: BLE001 — run_rotation should not raise; say so if it does
+        print(f"\n=== rotate_swarm_secret: {target.name} ===")
+        print(f"  INTERNAL ERROR ({type(exc).__name__}: {_safe(exc)}). State unknown: check "
+              f"the snapshot, the dotenv and 1Password for {target.next_env_var} before "
+              "running again.")
+        print("No secret value is printed above or anywhere in this run's output.")
+        return EXIT_INTERNAL_ERROR
+
+    print(f"\n=== rotate_swarm_secret: {target.name} ===")
+    for line in report.steps:
+        print(f"  {line}")
+    print(f"  outcome: {report.outcome()}")
+    follow_up = _follow_up(report, target)
+    if follow_up:
+        print(f"  {follow_up}")
+    if args.notes_file and not report.dry_run:
+        args.notes_file.write_text(report.as_neotoma_notes() + "\n")
+        print(f"  record: value-free notes written to {args.notes_file} — store them on the "
+              "credential registry row (last_rotated_at on a rolled-forward run)")
+    print("No secret value is printed above or anywhere in this run's output.")
+
+    if report.refused:
+        return EXIT_REFUSED
+    if report.checkpoint_raised:
+        return EXIT_CHECKPOINT
+    if report.rolled_back:
+        return EXIT_ROLLED_BACK
+    return EXIT_ROLLED_FORWARD
+
+
+def _run_from_args(args: argparse.Namespace, target: RotationTarget) -> RotationReport:
     github_token = None
     if not args.dry_run and target.has_external_issuer:
-        if args.github_token_ref:
-            github_token = sl.op_read(args.github_token_ref)
-        elif args.github_token_gh_user:
-            github_token = github_token_from_gh(args.github_token_gh_user)
+        try:
+            if args.github_token_ref:
+                github_token = sl.op_read(args.github_token_ref)
+            elif args.github_token_gh_user:
+                github_token = github_token_from_gh(args.github_token_gh_user)
+        except Exception as exc:  # noqa: BLE001 — a token problem changes nothing: refuse
+            report = RotationReport(target_name=target.name, dry_run=False, refused=True)
+            report.add(f"REFUSED: GitHub token unavailable ({_safe(exc)})")
+            return report
         _register_secret(github_token)
-
-    report = run_rotation(
+    return run_rotation(
         target,
         dry_run=args.dry_run,
         github_token=github_token,
@@ -1186,27 +1347,6 @@ def main(argv: list[str]) -> int:
         base_url=args.base_url,
         daemon_checkout=args.daemon_checkout,
     )
-
-    print(f"\n=== rotate_swarm_secret: {target.name} ===")
-    for line in report.steps:
-        print(f"  {line}")
-    print(f"  outcome: {report.outcome()}")
-    if report.snapshot_changed:
-        print(
-            f"  REQUIRED: commit the snapshot in the private secrets repo so other "
-            f"machines materialize the same value:\n    cd {sl.SECRETS_BASE} && git add "
-            f"secrets/{target.manifest_file}.sops.enc && git commit -m "
-            f"\"chore(secrets): rotate {target.env_var}\" && git push"
-        )
-    print("No secret value is printed above or anywhere in this run's output.")
-
-    if report.refused:
-        return 3
-    if report.checkpoint_raised:
-        return 2
-    if report.rolled_back:
-        return 1
-    return 0
 
 
 if __name__ == "__main__":

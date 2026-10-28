@@ -334,10 +334,14 @@ decrypting or re-encrypting the `neotoma` snapshot, which also carries provider
 keys and a root secret (the Neotoma mnemonic). The script reads the 1Password
 reference from the manifest at run time; nothing in this repo names the item.
 
-One-time onboarding (already done on the operator's machine — repeat only for a
-fork): create a 1Password item with one field per secret holding the current
-value, add the `apis` block to the manifest, then `secrets_publish.py apis` and
-`secrets_materialize.py apis` (0 changed means the dotenv already agreed).
+**One-time onboarding, before the first rotation** (once per secrets repo; a
+fork does the same with its own vault): create a 1Password item with one field
+per secret holding the CURRENT value, add an `apis` block to the manifest
+mapping both variables to those fields (target `~/.config/neotoma/.env`), then
+`secrets_publish.py apis` and `secrets_materialize.py apis` — "0 changed" means
+the dotenv already agreed. Commit `secrets/apis.sops.enc` and the manifest in
+the private repo. Until this is done a real run is refused at preflight with
+"does not map … onboard the block first"; nothing is touched.
 
 ### Sequence
 
@@ -345,11 +349,12 @@ value, add the `apis` block to the manifest, then `secrets_publish.py apis` and
 write, HTTP call, or `launchctl` call.
 
 0. **Preflight** — refuse (exit `3`, nothing changed) unless
-   `ATELES_ALLOW_DAEMON_RESTART=1` is set in the process's own environment, the
-   manifest maps the target, the snapshot, the dotenv, and 1Password all hold
-   the same current value, no `_NEXT` slot is left over from an earlier run,
-   and — webhook only — `--i-know-this-calls-real-github`, a token, and at
-   least one `--github-hook` are given.
+   `ATELES_ALLOW_DAEMON_RESTART=1` is set in the process's own environment,
+   `--base-url` is loopback `http` or `https`, the manifest maps the target in
+   the `apis` block and in no other block, the snapshot, the dotenv, and
+   1Password all hold the same current value, no `_NEXT` slot is left over from
+   an earlier run, and — webhook only — `--i-know-this-calls-real-github`, a
+   token that resolves, and at least one `--github-hook` are given.
 1. **Generate** a new value in memory.
 2. **Stage** it in the `_NEXT` slot (`APIS_GITHUB_WEBHOOK_SECRET_NEXT` /
    `APIS_APPROVE_EMAIL_SECRET_NEXT`) in the snapshot **and materialize it**, so
@@ -401,12 +406,53 @@ refuses it unless `GET /user` resolves to the same login; `--github-token-ref`
 takes an `op://` reference instead. Hook ids come from
 `gh api repos/<owner>/<repo>/hooks` (GitHub never returns the secret itself).
 
-**Verify it worked.** The outcome line reads `rolled forward`, `rolled back`,
-`CHECKPOINT`, or `refused at preflight`, matching exit codes `0`/`1`/`2`/`3`.
-After any run that changed the snapshot, commit `secrets/apis.sops.enc` in the
-private repo (the script prints the command). Then record the rotation on the
-`credential` registry row (`last_rotated_at`). Nothing this script does prints
-a secret value.
+Steps 2 to 8 never end in a traceback: a check that fails, one that cannot
+run, and an unexpected exception all take the rollback path before promotion
+and the re-open path after it.
+
+**Verify it worked.** The outcome line and exit code agree:
+
+| Exit | Outcome | Snapshot in the private repo |
+|---|---|---|
+| `0` | `rolled forward` (or a dry-run) | commit it (the script prints the command) |
+| `1` | `rolled back` | same contents re-encrypted — discard it (`git checkout --`) |
+| `2` | `CHECKPOINT` | do not commit until resolved (below) |
+| `3` | `refused at preflight` | untouched |
+| `4` | internal error, state unknown | inspect before running again |
+| `64` | bad arguments | untouched |
+
+Pass `--notes-file <path>` to get the value-free outcome notes for the
+`credential` registry row; record `last_rotated_at` there on a rolled-forward
+run. Nothing this script does prints a secret value.
+
+### Resolving a checkpoint
+
+A checkpoint means a step after the new value left this machine could not be
+confirmed. The script stops in a state where no consumer is rejected, and
+names it on the last step line:
+
+- **Issuer update failed** (webhook only): primary is still the old value,
+  `_NEXT` holds the new one (apis admits both), and 1Password holds the old
+  value. Check each hook's recent deliveries (`gh api
+  repos/<owner>/<repo>/hooks/<id>/deliveries`) or redeliver a ping from the
+  hook's settings page. If GitHub never took the new value, roll back:
+  `secrets_publish.py apis` (1Password still holds the old value, so the
+  snapshot loses `_NEXT`), then `secrets_materialize.py apis --remove
+  APIS_GITHUB_WEBHOOK_SECRET_NEXT`, then restart apis. If GitHub did take it,
+  finish by hand: set the new value in 1Password (the value is in `_NEXT` in
+  the snapshot), then the same publish, materialize with `--remove`, restart.
+  Do not run `secrets_publish.py apis` before deciding which: it drops `_NEXT`.
+- **Post-promotion check failed**: the new value is primary in 1Password, the
+  snapshot, and the dotenv, and the retired value is back in `_NEXT`, so apis
+  admits both. Find the consumer the failed check names (a presenter still on
+  the old value, or a GitHub hook) and fix it. Then close the window:
+  `secrets_publish.py apis` (drops `_NEXT` from the snapshot), then
+  `secrets_materialize.py apis --remove <VAR>_NEXT` (drops it from the dotenv;
+  materializing alone never deletes), then restart apis. If the step line
+  says re-opening dual-admit itself FAILED, a consumer on the old value is
+  being rejected right now: resolve that first.
+
+Until `_NEXT` is gone, a new run is refused at preflight.
 
 **Ordering, kept from the 2026-09-26 review of PR #1306:** the issuer is
 updated only after the self-signed dual-admit probe passes, so a failed probe

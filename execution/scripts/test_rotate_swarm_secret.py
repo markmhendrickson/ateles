@@ -94,7 +94,7 @@ def fake_store(monkeypatch, tmp_path):
     real_exists = Path.exists
 
     def fake_exists(self):
-        if self.parent == tmp_path:
+        if self.parent == tmp_path and self.name.endswith(".sops.env"):
             return self.name.removesuffix(".sops.env") in store.files
         return real_exists(self)
 

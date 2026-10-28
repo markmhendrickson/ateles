@@ -268,6 +268,7 @@ def test_failed_dual_admit_check_rolls_back_file_and_daemon(host, monkeypatch):
     assert target.next_env_var not in host.dotenv_values()  # removed from the file, not just the snapshot
     assert host.apis_admits["approve"] == {OLD_APPROVE}
     assert host.onepassword[host.refs[target.env_var]] == OLD_APPROVE
+    assert host.github == {}  # the internal-only target never touches an issuer
 
 
 def test_canonical_store_failure_rolls_back_before_promotion(host, monkeypatch):
@@ -637,3 +638,258 @@ def test_github_ping_check_fails_on_a_401_delivery():
     res = r.github_ping_check(github_token="tok", repo="o/r", hook_id="1",
                               http_request=fake, sleep=lambda s: None)
     assert not res.ok
+
+
+# ---------------------------------------------------------------------------
+# A check that cannot run is a failed check: no exception escapes the
+# rollback / re-open paths (security lens, round 1)
+# ---------------------------------------------------------------------------
+
+
+def test_probe_exception_before_promotion_rolls_back(host, monkeypatch):
+    target = r.TARGETS["approve_email_secret"]
+
+    def reset(value, base_url=None, http_post=None):
+        raise ConnectionResetError("connection reset by peer")
+
+    monkeypatch.setitem(r.VERIFIERS, target.name, reset)
+    report = r.run_rotation(target, dry_run=False)
+    assert report.rolled_back and not report.checkpoint_raised
+    assert target.next_env_var not in host.snapshot()
+    assert target.next_env_var not in host.dotenv_values()
+    assert host.apis_admits["approve"] == {OLD_APPROVE}
+    assert host.onepassword[host.refs[target.env_var]] == OLD_APPROVE
+
+
+def test_presenter_exception_after_promotion_reopens_dual_admit(host, monkeypatch):
+    target = r.TARGETS["approve_email_secret"]
+
+    def timeout(**kw):
+        raise subprocess.TimeoutExpired(cmd="python3", timeout=60)
+
+    monkeypatch.setattr(r, "PRESENTER_VERIFIERS", {TURDUS: timeout})
+    report = r.run_rotation(target, dry_run=False)
+    assert report.checkpoint_raised and not report.rolled_forward
+    env = host.dotenv_values()
+    assert env[target.next_env_var] == OLD_APPROVE
+    assert OLD_APPROVE in host.apis_admits["approve"]
+
+
+def test_unexpected_issuer_exception_is_a_checkpoint(host, monkeypatch):
+    target = r.TARGETS["github_webhook_secret"]
+
+    def boom(**kw):
+        raise ValueError("unexpected")
+
+    monkeypatch.setattr(r, "update_github_webhook_secret", boom)
+    report = r.run_rotation(target, dry_run=False, github_token="tok",
+                            github_hooks=HOOKS, allow_real_github_write=True)
+    assert report.checkpoint_raised
+    assert target.next_env_var in host.snapshot()
+    assert host.onepassword[host.refs[target.env_var]] == OLD_WEBHOOK
+
+
+def test_preflight_exception_is_a_refusal(host, monkeypatch):
+    def broken_decrypt(src):
+        raise RuntimeError("sops decrypt failed")
+
+    monkeypatch.setattr(sl, "sops_decrypt_dotenv", broken_decrypt)
+    report = r.run_rotation(r.TARGETS["approve_email_secret"], dry_run=False)
+    assert report.refused
+    assert not any(kind in ("snapshot_write", "restart", "onepassword_write")
+                   for kind, _ in host.events)
+
+
+def test_reopen_failure_does_not_claim_dual_admit_is_on(host, monkeypatch):
+    target = r.TARGETS["approve_email_secret"]
+    monkeypatch.setattr(
+        r, "PRESENTER_VERIFIERS",
+        {TURDUS: lambda **kw: r.VerificationResult(False, "turdus side 401", 401)},
+    )
+
+    def broken_reopen(t, old):
+        raise RuntimeError("sops encrypt failed")
+
+    monkeypatch.setattr(r, "reopen_dual_admit", broken_reopen)
+    report = r.run_rotation(target, dry_run=False)
+    assert report.checkpoint_raised
+    text = "\n".join(report.steps)
+    assert "re-opening dual-admit FAILED" in text
+    assert "is back in" not in text
+
+
+def test_restart_daemon_never_raises(monkeypatch):
+    monkeypatch.setenv("ATELES_ALLOW_DAEMON_RESTART", "1")
+
+    def hangs(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+
+    res = r.restart_daemon(APIS, dry_run=False, runner=hangs,
+                           pid_reader=lambda label: 100, sleep=lambda s: None)
+    assert not res.ok and "TimeoutExpired" in res.line
+
+
+def test_default_post_turns_any_transport_error_into_status_0(monkeypatch):
+    def reset(*a, **kw):
+        raise ConnectionResetError("reset")
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", reset)
+    status, _ = r._default_post("http://127.0.0.1:1/x", {}, b"")
+    assert status == 0
+    status, _ = r._github_http("GET", "https://api.github.com/x", {}, None)
+    assert status == 0
+
+
+def test_turdus_check_subprocess_timeout_is_a_failed_check(tmp_path):
+    def hangs(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=60)
+
+    assert not r.verify_turdus_presents_accepted_secret(
+        daemon_checkout=tmp_path, runner=hangs).ok
+
+
+# ---------------------------------------------------------------------------
+# CLI: exit codes, no value on any outcome, notes file
+# ---------------------------------------------------------------------------
+
+
+def _no_value_in(out, host):
+    values = {OLD_APPROVE, OLD_WEBHOOK, *host.dotenv_values().values(),
+              *host.snapshot().values()}
+    for v in values:
+        if len(v) >= 12:
+            assert v not in out.out and v not in out.err
+
+
+def test_cli_exit_1_on_rollback_prints_no_value(host, monkeypatch, capsys):
+    monkeypatch.setitem(
+        r.VERIFIERS, "approve_email_secret",
+        lambda value, base_url=None, http_post=None: r.VerificationResult(False, "401", 401),
+    )
+    assert r.main(["approve_email_secret"]) == 1
+    out = capsys.readouterr()
+    _no_value_in(out, host)
+    assert "git checkout --" in out.out  # discard, not "rotate"
+
+
+def test_cli_exit_2_on_checkpoint_prints_no_value(host, monkeypatch, capsys):
+    monkeypatch.setattr(
+        r, "PRESENTER_VERIFIERS",
+        {TURDUS: lambda **kw: r.VerificationResult(False, "turdus side 401", 401)},
+    )
+    assert r.main(["approve_email_secret"]) == 2
+    out = capsys.readouterr()
+    _no_value_in(out, host)
+    assert "Do NOT commit" in out.out
+
+
+def test_cli_exit_4_on_internal_error(host, monkeypatch, capsys):
+    def crash(*a, **kw):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(r, "run_rotation", crash)
+    assert r.main(["approve_email_secret"]) == 4
+    assert "INTERNAL ERROR" in capsys.readouterr().out
+
+
+def test_cli_usage_error_is_not_exit_2(capsys):
+    with pytest.raises(SystemExit) as exc:
+        r.main(["not-a-target"])
+    assert exc.value.code == 64
+
+
+def test_cli_token_unavailable_is_a_refusal(host, monkeypatch, capsys):
+    def no_token(login):
+        raise RuntimeError("no usable gh keyring token")
+
+    monkeypatch.setattr(r, "github_token_from_gh", no_token)
+    rc = r.main(["github_webhook_secret", "--github-hook", "o/a:1",
+                 "--github-token-gh-user", "someone", "--i-know-this-calls-real-github"])
+    assert rc == 3
+    assert not any(kind == "restart" for kind, _ in host.events)
+
+
+def test_cli_notes_file_is_value_free(host, tmp_path, capsys):
+    notes = tmp_path / "notes.txt"
+    assert r.main(["approve_email_secret", "--notes-file", str(notes)]) == 0
+    text = notes.read_text()
+    assert "rolled forward" in text
+    new = host.dotenv_values()["APIS_APPROVE_EMAIL_SECRET"]
+    assert new not in text and OLD_APPROVE not in text
+
+
+# ---------------------------------------------------------------------------
+# Preflight: other blocks, unsafe base URL
+# ---------------------------------------------------------------------------
+
+
+def test_refuses_when_another_block_maps_the_same_variable(host, monkeypatch):
+    target = r.TARGETS["approve_email_secret"]
+    base = host.manifest()
+    base["files"]["neotoma"] = {"default": {target.env_var: "op://Private/other/x"}}
+    monkeypatch.setattr(sl, "load_manifest", lambda: base)
+    report = r.run_rotation(target, dry_run=False)
+    assert report.refused and "neotoma" in report.steps[0]
+
+
+@pytest.mark.parametrize("url", ["http://apis.example.com", "http://10.0.0.5:8742"])
+def test_refuses_a_clear_text_off_machine_base_url(host, url):
+    report = r.run_rotation(r.TARGETS["approve_email_secret"], dry_run=False, base_url=url)
+    assert report.refused
+
+
+# ---------------------------------------------------------------------------
+# The turdus-side probe program itself, against a stub turdus and a local
+# HTTP server: the child really runs and really POSTs
+# ---------------------------------------------------------------------------
+
+
+def _serve(status_for):
+    import http.server
+    import threading
+
+    seen = {}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            seen["header"] = self.headers.get("X-Approve-Secret")
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(status_for(seen["header"]))
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
+
+
+def _stub_checkout(tmp_path, held, url):
+    d = tmp_path / "checkout" / "execution" / "daemons" / "turdus"
+    d.mkdir(parents=True)
+    (d / "turdus.py").write_text(
+        f"APIS_APPROVE_EMAIL_SECRET = {held!r}\nAPIS_APPROVE_URL = {url!r}\n"
+    )
+    return tmp_path / "checkout"
+
+
+@pytest.mark.parametrize("accepted,expect_ok", [(True, True), (False, False)])
+def test_turdus_probe_program_posts_what_turdus_holds(tmp_path, accepted, expect_ok):
+    held = "stub-turdus-held-value"
+    server, seen = _serve(lambda hdr: 400 if (accepted and hdr == held) else 401)
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/approve-email"
+        res = r.verify_turdus_presents_accepted_secret(
+            daemon_checkout=_stub_checkout(tmp_path, held, url))
+    finally:
+        server.shutdown()
+    assert seen["header"] == held
+    assert res.ok is expect_ok
+    assert held not in res.detail
+
+
+def test_turdus_probe_program_reports_unset(tmp_path):
+    res = r.verify_turdus_presents_accepted_secret(
+        daemon_checkout=_stub_checkout(tmp_path, "", "http://127.0.0.1:1/x"))
+    assert not res.ok and "no approve secret" in res.detail
