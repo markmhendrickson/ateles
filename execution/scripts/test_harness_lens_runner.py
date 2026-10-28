@@ -57,6 +57,19 @@ def _repo_scoped_env_fixture(monkeypatch):
     monkeypatch.setattr(hlr, "repo_scoped_env", lambda repo: dict(_FIXTURE_ENV))
 
 
+_REAL_HEAD_CHECKS_HOLD = hlr.head_checks_hold
+
+
+@pytest.fixture(autouse=True)
+def _head_checks_not_held(monkeypatch):
+    """Unit decisions do not read live GitHub check state. The tests of the
+    check-state hold itself restore `_REAL_HEAD_CHECKS_HOLD`."""
+    async def not_held(target):
+        return None
+
+    monkeypatch.setattr(hlr, "head_checks_hold", not_held)
+
+
 @pytest.fixture(autouse=True)
 def _canonical_fixture_role(monkeypatch):
     """Existing runner tests use a valid role without a live Neotoma read."""
@@ -1649,6 +1662,11 @@ def test_reader_preflight_cli_before_inference(
     monkeypatch.setattr(module.Worktree, "remove", lambda self: None)
     monkeypatch.setattr(module.HarnessSandbox, "build", classmethod(ready))
     monkeypatch.setattr(module, "check_headroom", lambda provider: None)
+
+    async def not_held(target):
+        return None
+
+    monkeypatch.setattr(module, "head_checks_hold", not_held)
     monkeypatch.setattr(module, "current_pr_head", lambda **kwargs: SAMPLE_HEAD)
     monkeypatch.setattr(module, "capture_stash_ref_state", lambda path: None)
     monkeypatch.setattr(module, "verify_stash_ref_unchanged_after_dispatch", lambda *args: None)

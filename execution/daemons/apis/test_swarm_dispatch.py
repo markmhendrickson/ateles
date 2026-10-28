@@ -1351,6 +1351,33 @@ def _async_return(value):
     return _coro()
 
 
+@pytest.mark.parametrize("combined", [False, True], ids=["individual", "combined"])
+def test_panel_rechecks_ci_after_inheritance_before_seating_lenses(monkeypatch, combined):
+    calls = []
+    dispatcher = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+    dispatcher.config.combined_review_pass = combined
+    held_sources = []
+
+    async def gate(trigger, *, source):
+        held_sources.append(source)
+        # Initial checks are green; they turn red during the inheritance run.
+        return len(held_sources) > 1
+
+    async def record_skill(skill, prompt, **kwargs):
+        calls.append(("seat", skill))
+        return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+
+    monkeypatch.setattr(dispatcher, "_hold_panel_until_checks_green", gate)
+    monkeypatch.setattr(swarm_dispatch, "run_skill", record_skill)
+    asyncio.run(dispatcher._handle_pr(_trigger(body="Closes #80.")))
+    assert [item for item in calls if item[0] == "seat"] == [("seat", "lanius")]
+    assert len(held_sources) == 2
+    assert held_sources[-1] == "combined_review_pass" if combined else held_sources[-1].startswith("panel_lens:")
+    assert not any(item[0] in {"gate", "persist_head", "review"} for item in calls)
+
+
 def test_handle_pr_blocking_verdict_routes_findings(monkeypatch):
     calls = []
     d = _pr_dispatcher_with_stubs(
