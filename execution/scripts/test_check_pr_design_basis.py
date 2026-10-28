@@ -91,6 +91,31 @@ class DesignBasisLine(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("MISSING", why)
 
+    def test_shorter_nested_fence_does_not_expose_basis(self):
+        for char in ("`", "~"):
+            with self.subTest(char=char):
+                body = f"{char * 4}markdown\n{char * 3}\n{GOOD}\n{char * 3}\n{char * 4}"
+                self.assertFalse(self.ok(body)[0])
+
+    def test_mismatched_fence_does_not_expose_basis(self):
+        for opening, other in (("`", "~"), ("~", "`")):
+            with self.subTest(opening=opening):
+                body = f"{opening * 3}markdown\n{other * 4}\n{GOOD}\n{opening * 3}"
+                self.assertFalse(self.ok(body)[0])
+
+    def test_fence_with_trailing_text_does_not_close_block(self):
+        for char in ("`", "~"):
+            with self.subTest(char=char):
+                body = f"{char * 3}markdown\n{char * 3}still code\n{GOOD}\n{char * 3}"
+                self.assertFalse(self.ok(body)[0])
+
+    def test_matching_fence_of_sufficient_length_exposes_following_basis(self):
+        for opening, closing in (("```", "```"), ("```", "````"),
+                                 ("~~~~", "~~~~"), ("~~~~", "~~~~~")):
+            with self.subTest(opening=opening, closing=closing):
+                body = f"{opening}markdown\nexample\n  {closing} \t\n{GOOD}\n"
+                self.assertTrue(self.ok(body)[0])
+
     def test_one_valid_line_among_several_passes(self):
         self.assertTrue(self.ok(f"Design basis:\n{GOOD}\n")[0])
 
@@ -151,6 +176,14 @@ class Cli(unittest.TestCase):
         self.assertEqual(self.run_cli("nothing", CODE).returncode, 1)
         self.assertEqual(self.run_cli(None, CODE).returncode, 1)
         self.assertEqual(self.run_cli("", ["docs/dev/a.md"]).returncode, 0)
+
+    def test_nested_fence_with_no_visible_basis_fails(self):
+        for body in (f"````markdown\n```python\n{GOOD}\n```\n````",
+                     f"```markdown\n~~~\n{GOOD}\n```"):
+            with self.subTest(body=body):
+                result = self.run_cli(body, CODE)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("MISSING", result.stdout)
 
     def test_unreadable_inputs_are_not_a_pass(self):
         r = subprocess.run(

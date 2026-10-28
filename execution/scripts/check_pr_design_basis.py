@@ -90,7 +90,7 @@ GENERATED_PATTERNS = (
 DOCS_ONLY = re.compile(r"^docs/.+\.md$")
 
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
 _LINE_RE = re.compile(
     r"^[ \t]*(?:>[ \t]*)*(?:[-*+][ \t]+)?(?:\*\*|__)?[ \t]*design[ \t]+basis[ \t]*:"
     r"(?:\*\*|__)?(?P<value>.*)$",
@@ -125,12 +125,19 @@ def design_basis_lines(body: str | None) -> list[str]:
     """Values of every ``Design basis:`` line outside comments and code fences."""
     text = _COMMENT_RE.sub("", body or "")
     values: list[str] = []
-    fenced = False
+    fence = ""
     for line in text.splitlines():
-        if _FENCE_RE.match(line):
-            fenced = not fenced
+        marker = _FENCE_RE.match(line)
+        if fence:
+            # An inner example, another fence character or an info string
+            # cannot close the block and expose its example as a declaration.
+            if (marker and marker.group(1)[0] == fence[0]
+                    and len(marker.group(1)) >= len(fence)
+                    and not marker.group(2).strip()):
+                fence = ""
             continue
-        if fenced:
+        if marker:
+            fence = marker.group(1)
             continue
         m = _LINE_RE.match(line)
         if m:
