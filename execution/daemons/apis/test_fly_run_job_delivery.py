@@ -244,6 +244,29 @@ def test_a_delivery_pushes_the_branch_and_opens_the_pull_request(world):
     _no_secret_anywhere(record, world)
 
 
+def test_codex_grants_are_filled_with_the_checkout_git_dir_and_the_pr_text_dir(world):
+    seen = {}
+    argv = ["codex", "exec", "--sandbox", "workspace-write", "--cd", run_job.WORKSPACE_PLACEHOLDER,
+            "--add-dir", run_job.GIT_DIR_PLACEHOLDER, "--add-dir", run_job.PR_DIR_PLACEHOLDER, "-"]
+    rc, record = _run(_job(world["tmp"], argv=argv), _agent(world, seen=seen))
+    assert rc == 0 and record["delivery_status"] == "opened"
+    run_argv, checkout = seen["argv"], Path(seen["cwd"])
+    grants = [run_argv[i + 1] for i, a in enumerate(run_argv) if a == "--add-dir"]
+    pr_file = seen["stdin"].split(b"to ", 1)[1].rstrip(b".").decode()
+    assert grants == [str(checkout / ".git"), str(Path(pr_file).parent)]
+    assert run_argv[run_argv.index("--cd") + 1] == str(checkout)
+    assert run_argv[-1] == "-" and not any(a.startswith("@@ATELES_JOB_") for a in run_argv)
+    _no_secret_anywhere(record, world)
+
+
+@pytest.mark.parametrize("name", ["GIT_DIR_PLACEHOLDER", "PR_DIR_PLACEHOLDER"])
+def test_a_grant_placeholder_without_a_delivery_is_refused(world, name):
+    job_dir = _job(world["tmp"], delivery=None, secrets={"LANIUS_NEOTOMA_TOKEN": ROLE_TOKEN},
+                   argv=["codex", "exec", "--add-dir", getattr(run_job, name), "-"])
+    rc, record = _run(job_dir, lambda *a, **k: pytest.fail("nothing may run"))
+    assert rc == run_job.EXIT_JOB_INVALID
+
+
 def test_an_open_pull_request_for_the_branch_is_updated_not_duplicated(world):
     world["api"]["open"] = [_pr(12)]
     rc, record = _run(_job(world["tmp"]), _agent(world))
