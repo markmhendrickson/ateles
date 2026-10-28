@@ -433,7 +433,10 @@ names it on the last step line:
 
 - **Issuer update failed** (webhook only): primary is still the old value,
   `_NEXT` holds the new one (apis admits both), and 1Password holds the old
-  value. Check each hook's recent deliveries (`gh api
+  value — unless the step lines say `1Password restore FAILED`, in which case
+  it may still hold the new one. Hooks listed before the failing one were
+  already updated (each has its own `updated GitHub webhook config` line);
+  check every hook, not only the failing one. Check each hook's recent deliveries (`gh api
   repos/<owner>/<repo>/hooks/<id>/deliveries`) or redeliver a ping from the
   hook's settings page. If GitHub never took the new value, roll back:
   `secrets_publish.py apis` (1Password still holds the old value, so the
@@ -442,17 +445,37 @@ names it on the last step line:
   finish by hand: set the new value in 1Password (the value is in `_NEXT` in
   the snapshot), then the same publish, materialize with `--remove`, restart.
   Do not run `secrets_publish.py apis` before deciding which: it drops `_NEXT`.
-- **Post-promotion check failed**: the new value is primary in 1Password, the
-  snapshot, and the dotenv, and the retired value is back in `_NEXT`, so apis
-  admits both. Find the consumer the failed check names (a presenter still on
-  the old value, or a GitHub hook) and fix it. Then close the window:
-  `secrets_publish.py apis` (drops `_NEXT` from the snapshot), then
-  `secrets_materialize.py apis --remove <VAR>_NEXT` (drops it from the dotenv;
-  materializing alone never deletes), then restart apis. If the step line
-  says re-opening dual-admit itself FAILED, a consumer on the old value is
-  being rejected right now: resolve that first.
+- **Post-promotion step failed**: 1Password holds the new value and apis
+  admits both. The `re-opened dual-admit` line says which way round:
+  - `new value primary, retired value restored to <VAR>_NEXT` — promotion
+    landed. Find the consumer the failed check names (a presenter still on
+    the old value, or a GitHub hook) and fix it. Then close the window:
+    `secrets_publish.py apis` (drops `_NEXT` from the snapshot), then
+    `secrets_materialize.py apis --remove <VAR>_NEXT` (drops it from the
+    dotenv; materializing alone never deletes), then restart apis.
+  - `promotion had NOT landed ... new value re-staged in <VAR>_NEXT` — the
+    snapshot write for the promotion failed. 1Password already holds the new
+    value, so publishing, materializing with `--remove`, then restarting the
+    presenters and finally apis finishes the promotion.
+  - `re-opening dual-admit FAILED` — a consumer holding the value that is not
+    primary is being rejected right now: resolve that first.
+- **1Password restore failed during a rollback**: the snapshot and the dotenv
+  are back on the old value, but 1Password may still hold the new one. Do not
+  run `secrets_publish.py apis`: it would make the new value primary with no
+  dual-admit. Set the 1Password field back to the snapshot's value by hand.
+- **Rollback itself failed, or apis did not confirm a restart after it**:
+  `_NEXT` may still be staged or still admitted. Run
+  `secrets_materialize.py apis --remove <VAR>_NEXT` after removing `_NEXT`
+  from the snapshot (`secrets_publish.py apis`, 1Password still on the old
+  value), then restart apis and check its new pid.
 
-Until `_NEXT` is gone, a new run is refused at preflight.
+**The snapshot after a checkpoint:** do not commit `secrets/apis.sops.enc`
+while the checkpoint is open. Commit it once the resolution's
+`secrets_publish.py apis` has run and the three stores agree — that is the
+state other machines should materialize.
+
+Until `_NEXT` is gone, a new run is refused at preflight; once snapshot,
+dotenv and 1Password agree with no `_NEXT`, a fresh run starts cleanly.
 
 **Ordering, kept from the 2026-09-26 review of PR #1306:** the issuer is
 updated only after the self-signed dual-admit probe passes, so a failed probe

@@ -128,7 +128,8 @@ mechanism remains separate follow-up work.
    classic `repo` scope — fine-grained PATs 403 on public-repo writes).
    `APIS_GITHUB_WEBHOOK_SECRET` and `APIS_APPROVE_EMAIL_SECRET` are managed by
    the private manifest's `apis` block (1Password → `secrets/apis.sops.enc` →
-   this dotenv): never hand-edit those two lines, and rotate them with
+   this dotenv) once the one-time onboarding in docs/secrets_management.md
+   has created that block. From then on never hand-edit those two lines, and rotate them with
    `execution/scripts/rotate_swarm_secret.py` (docs/secrets_management.md).
 3. `launchctl load execution/daemons/apis/com.ateles.apis.plist`.
 4. Acceptance check (per #80): open a test issue → gates init + Pavo

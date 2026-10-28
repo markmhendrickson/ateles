@@ -707,7 +707,7 @@ def test_reopen_failure_does_not_claim_dual_admit_is_on(host, monkeypatch):
         {TURDUS: lambda **kw: r.VerificationResult(False, "turdus side 401", 401)},
     )
 
-    def broken_reopen(t, old):
+    def broken_reopen(t, old, new):
         raise RuntimeError("sops encrypt failed")
 
     monkeypatch.setattr(r, "reopen_dual_admit", broken_reopen)
@@ -893,3 +893,150 @@ def test_turdus_probe_program_reports_unset(tmp_path):
     res = r.verify_turdus_presents_accepted_secret(
         daemon_checkout=_stub_checkout(tmp_path, "", "http://127.0.0.1:1/x"))
     assert not res.ok and "no approve secret" in res.detail
+
+
+# ---------------------------------------------------------------------------
+# Round-2 panel: recovery paths must report the state they actually left
+# ---------------------------------------------------------------------------
+
+
+def test_reopen_after_unlanded_promotion_keeps_the_new_value_admitted(host, monkeypatch):
+    """Security (round 2): if the promotion's own snapshot write fails, re-open
+    must not overwrite the staged new value with the old one: 1Password (and,
+    for the webhook, GitHub) already hold the new value."""
+    target = r.TARGETS["github_webhook_secret"]
+    real_encrypt = host.encrypt
+    calls = {"n": 0}
+
+    def encrypt_fails_on_promotion(plaintext, dest):
+        calls["n"] += 1
+        if calls["n"] == 2:  # 1 = stage, 2 = promote, 3 = re-open
+            raise RuntimeError("sops encrypt failed")
+        real_encrypt(plaintext, dest)
+
+    monkeypatch.setattr(sl, "sops_encrypt_dotenv", encrypt_fails_on_promotion)
+    report = r.run_rotation(target, dry_run=False, github_token="tok",
+                            github_hooks=HOOKS, allow_real_github_write=True)
+    assert report.checkpoint_raised and not report.rolled_forward
+    new = host.onepassword[host.refs[target.env_var]]
+    assert new != OLD_WEBHOOK
+    assert host.snapshot()[target.env_var] == OLD_WEBHOOK
+    assert host.snapshot()[target.next_env_var] == new
+    assert host.dotenv_values()[target.next_env_var] == new
+    assert host.apis_admits["webhook"] == {OLD_WEBHOOK, new}
+    assert all(host.github[f"{repo}#{hid}"] in host.apis_admits["webhook"]
+               for repo, hid in HOOKS)
+    assert "had NOT landed" in "\n".join(report.steps)
+
+
+def test_reopen_after_landed_promotion_restores_the_old_value(host, monkeypatch):
+    target = r.TARGETS["approve_email_secret"]
+    monkeypatch.setattr(
+        r, "PRESENTER_VERIFIERS",
+        {TURDUS: lambda **kw: r.VerificationResult(False, "turdus side 401", 401)},
+    )
+    report = r.run_rotation(target, dry_run=False)
+    new = host.onepassword[host.refs[target.env_var]]
+    assert report.checkpoint_raised
+    assert host.snapshot()[target.env_var] == new
+    assert host.snapshot()[target.next_env_var] == OLD_APPROVE
+    assert host.apis_admits["approve"] == {OLD_APPROVE, new}
+
+
+def _onepassword_readback_lies(host, monkeypatch, *, restore_fails: bool):
+    """The new value's write lands but its read-back differs; optionally the
+    restore of the old value fails outright."""
+    olds = (OLD_APPROVE, OLD_WEBHOOK)
+    real_write = host.op_write
+
+    def op_read(ref):
+        v = host.onepassword[ref]
+        return v if v in olds else "x" * 40
+
+    def op_write(item_ref, field_label, value):
+        if restore_fails and value in olds:
+            raise RuntimeError("1Password CLI unavailable")
+        real_write(item_ref, field_label, value)
+
+    monkeypatch.setattr(sl, "op_read", op_read)
+    monkeypatch.setattr(r, "op_write_password_field", op_write)
+
+
+def test_partial_onepassword_write_is_restored_on_rollback(host, monkeypatch):
+    """QA (round 2): a write that landed but failed read-back is undone."""
+    _onepassword_readback_lies(host, monkeypatch, restore_fails=False)
+    target = r.TARGETS["approve_email_secret"]
+    report = r.run_rotation(target, dry_run=False)
+    assert report.rolled_back and not report.checkpoint_raised
+    assert host.onepassword[host.refs[target.env_var]] == OLD_APPROVE
+
+
+def test_failed_onepassword_restore_is_a_checkpoint_not_a_rollback(host, monkeypatch, capsys):
+    """Security (round 2): a rollback that leaves 1Password on the new value
+    is not "no rotation happened": the next publish would bring it back."""
+    _onepassword_readback_lies(host, monkeypatch, restore_fails=True)
+    target = r.TARGETS["approve_email_secret"]
+    assert r.main(["approve_email_secret"]) == 2
+    out = capsys.readouterr()
+    assert "Do NOT run secrets_publish.py" in out.out
+    assert "No rotation happened" not in out.out
+    assert "Do NOT commit" in out.out
+    assert target.next_env_var not in host.dotenv_values()
+    assert host.apis_admits["approve"] == {OLD_APPROVE}
+    _no_value_in(out, host)
+
+
+def test_issuer_checkpoint_does_not_claim_a_restore_that_failed(host, monkeypatch):
+    target = r.TARGETS["github_webhook_secret"]
+
+    def boom(**kw):
+        raise r.GitHubAPIError("PATCH returned 500")
+
+    monkeypatch.setattr(r, "update_github_webhook_secret", boom)
+
+    def op_write(item_ref, field_label, value):
+        if value == OLD_WEBHOOK:
+            raise RuntimeError("1Password CLI unavailable")
+        host.onepassword[item_ref] = value
+
+    monkeypatch.setattr(r, "op_write_password_field", op_write)
+    report = r.run_rotation(target, dry_run=False, github_token="tok",
+                            github_hooks=HOOKS, allow_real_github_write=True)
+    text = "\n".join(report.steps)
+    assert report.checkpoint_raised
+    assert "restored to the OLD value" not in text
+    assert "1Password restore FAILED" in text and "may still hold the NEW value" in text
+
+
+def test_cli_unwritable_notes_file_is_a_usage_error_before_anything_runs(host, tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        r.main(["approve_email_secret", "--notes-file", str(tmp_path / "no-such-dir" / "n")])
+    assert exc.value.code == 64
+    assert not host.events  # nothing staged, written or restarted
+
+
+def test_cli_notes_write_failure_keeps_the_rotation_exit_code(host, tmp_path, monkeypatch,
+                                                              capsys):
+    """Arch/security/ux (round 2): a finished rotation must not exit 1 ("rolled
+    back, discard the snapshot") because its notes could not be written."""
+    notes = tmp_path / "notes.txt"
+    real_write_text = Path.write_text
+
+    def write_text(self, *a, **kw):
+        if self == notes:
+            raise PermissionError("read-only file system")
+        return real_write_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+    assert r.main(["approve_email_secret", "--notes-file", str(notes)]) == 0
+    out = capsys.readouterr().out
+    assert "could not write --notes-file" in out and "commit the snapshot" in out
+
+
+def test_turdus_probe_status_0_is_a_failed_check(tmp_path):
+    """QA (round 2): turdus unable to reach apis is not success."""
+    def ran(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout="status=0\n", stderr="")
+
+    res = r.verify_turdus_presents_accepted_secret(daemon_checkout=tmp_path, runner=ran)
+    assert not res.ok

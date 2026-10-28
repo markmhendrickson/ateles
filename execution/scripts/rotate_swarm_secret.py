@@ -334,17 +334,33 @@ def roll_back(target: RotationTarget, *, dry_run: bool) -> str:
     return head + _materialize(target, remove=(target.next_env_var,))
 
 
-def reopen_dual_admit(target: RotationTarget, old_value: str) -> str:
-    """After a failed post-promotion check: put the RETIRED value back in the
-    `_NEXT` slot so apis admits both while a human looks. The new value stays
-    primary (it is what 1Password and, for the webhook, GitHub now hold)."""
+def reopen_dual_admit(target: RotationTarget, old_value: str, new_value: str) -> str:
+    """After a failed post-promotion step: leave apis admitting BOTH values
+    while a human looks, reconciled against what the snapshot actually holds.
+
+    - Promotion landed (primary = new): the retired value goes back in `_NEXT`.
+    - Promotion did not land (primary = old, e.g. its snapshot write failed):
+      the new value is re-staged in `_NEXT`. Writing the old value there would
+      overwrite the staged new value, and apis would then reject the new value
+      that 1Password and, for the webhook, GitHub already hold.
+    - Primary is neither: raise. This function never guesses.
+    """
     current = _read_snapshot(target)
-    current[target.next_env_var] = old_value
+    primary = current.get(target.env_var, "")
+    if hmac.compare_digest(primary.encode(), new_value.encode()):
+        current[target.next_env_var] = old_value
+        head = (f"re-opened dual-admit: new value primary, retired value restored to "
+                f"{target.next_env_var}")
+    elif hmac.compare_digest(primary.encode(), old_value.encode()):
+        current[target.next_env_var] = new_value
+        head = (f"re-opened dual-admit: promotion had NOT landed in the snapshot — old "
+                f"value still primary, new value re-staged in {target.next_env_var}")
+    else:
+        raise RuntimeError(
+            f"the snapshot's {target.env_var} matches neither the old nor the new value"
+        )
     _write_snapshot(target, current)
-    return (
-        f"re-opened dual-admit: retired value restored to {target.next_env_var}; "
-        + _materialize(target)
-    )
+    return f"{head}; " + _materialize(target)
 
 
 def raise_issuer_checkpoint(target: RotationTarget, *, reason: str) -> str:
@@ -361,12 +377,11 @@ def raise_issuer_checkpoint(target: RotationTarget, *, reason: str) -> str:
         "dual-admit verification already passed. Dual-admit is left ON "
         f"({target.next_env_var} still staged) — the daemon admits both "
         "values, so no delivery is rejected either way. Manual resolution "
-        "required: confirm GitHub's actual webhook secret, then either "
-        "retry the issuer update (promoting on success) or roll back "
-        "manually if GitHub is confirmed still on the old value. 1Password "
-        "is restored to the OLD value; do not run secrets_publish.py for this "
-        "block until resolved (it would drop the staged value). This script "
-        "will not guess. See docs/secrets_management.md, 'Resolving a checkpoint'."
+        "required: confirm which secret each GitHub hook actually holds, then "
+        "finish by hand (a re-run is refused while the staged value is present). "
+        "Do not run secrets_publish.py for this block until resolved (it would "
+        "drop the staged value). This script will not guess. See "
+        "docs/secrets_management.md, 'Resolving a checkpoint'."
     )
 
 
@@ -410,11 +425,24 @@ def write_canonical_store(ref: str, value: str, *, what: str) -> str:
     return f"wrote the {what} value to 1Password ({ref}) and read it back: match"
 
 
-def _restore_canonical(ref: str, old_value: str) -> str:
+def _restore_canonical(ref: str, old_value: str) -> tuple[bool, str]:
+    """Put the old value back in 1Password. Returns (restored, status line);
+    a failed restore is the caller's to escalate, never a footnote."""
     try:
-        return write_canonical_store(ref, old_value, what="retired (restored)")
-    except CanonicalStoreError as exc:
-        return f"WARNING: could not restore the old value in 1Password ({exc})"
+        return True, write_canonical_store(ref, old_value, what="retired (restored)")
+    except Exception as exc:  # noqa: BLE001 — CanonicalStoreError or anything else
+        return False, f"1Password restore FAILED ({_safe(exc)})"
+
+
+def _canonical_mismatch_checkpoint(target: RotationTarget, ref: str) -> str:
+    return (
+        f"CHECKPOINT: 1Password ({ref}) may still hold the NEW value while the snapshot "
+        f"and the dotenv hold the old one. Do NOT run secrets_publish.py for the "
+        f"'{target.manifest_file}' block: it would make the new value primary with no "
+        "dual-admit. Set the 1Password field back to the snapshot's value by hand; the "
+        "next run's preflight refuses until all three agree. See "
+        "docs/secrets_management.md, 'Resolving a checkpoint'."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1085,17 +1113,23 @@ def run_rotation(
     # including an unexpected exception — rolls back.
     try:
         _stage_check_and_store(report, target, new_value, ref, base_url)
-    except _RollBack as stop:
-        report.add(str(stop))
-        if stop.restore_canonical:
-            report.add(_restore_canonical(ref, old_value))
-        return _rollback(report, target)
-    except Exception as exc:  # noqa: BLE001
-        report.add(f"unexpected error before promotion ({type(exc).__name__}: {_safe(exc)})"
-                   " — rolling back")
-        if report.canonical_touched:
-            report.add(_restore_canonical(ref, old_value))
-        return _rollback(report, target)
+    except Exception as exc:  # noqa: BLE001 — _RollBack or anything unexpected
+        if isinstance(exc, _RollBack):
+            report.add(str(exc))
+            restore = exc.restore_canonical
+        else:
+            report.add(f"unexpected error before promotion ({type(exc).__name__}: "
+                       f"{_safe(exc)}) — rolling back")
+            restore = report.canonical_touched
+        restored = True
+        if restore:
+            restored, line = _restore_canonical(ref, old_value)
+            report.add(line)
+        _rollback(report, target)
+        if not restored:
+            report.add(_canonical_mismatch_checkpoint(target, ref))
+            report.checkpoint_raised = True
+        return report
 
     # 6. issuer. A failure here is a checkpoint: GitHub's state is unconfirmed.
     if target.has_external_issuer:
@@ -1110,7 +1144,11 @@ def run_rotation(
                 reason = str(exc) if isinstance(exc, GitHubAPIError) else (
                     f"{type(exc).__name__}: {_safe(exc)}")
                 report.add(raise_issuer_checkpoint(target, reason=reason))
-                report.add(_restore_canonical(ref, old_value))
+                restored, line = _restore_canonical(ref, old_value)
+                report.add(line)
+                if not restored:
+                    report.add(f"1Password ({ref}) may still hold the NEW value — set it to "
+                               "match whichever value you resolve GitHub to.")
                 report.checkpoint_raised = True
                 return report
 
@@ -1139,7 +1177,7 @@ def run_rotation(
     if failures:
         report.checkpoint_raised = True
         report.add(f"CHECKPOINT: post-promotion step failed ({'; '.join(failures)}).")
-        report.add(_reopen_after_failure(target, old_value))
+        report.add(_reopen_after_failure(target, old_value, new_value))
         return report
 
     report.rolled_forward = True
@@ -1177,11 +1215,11 @@ def _stage_check_and_store(
                         restore_canonical=True) from None
 
 
-def _reopen_after_failure(target: RotationTarget, old_value: str) -> str:
-    """Re-open dual-admit with the retired value and say truthfully what state
-    that left, whether or not it worked."""
+def _reopen_after_failure(target: RotationTarget, old_value: str, new_value: str) -> str:
+    """Re-open dual-admit and say truthfully what state that left, whether or
+    not it worked."""
     try:
-        line = reopen_dual_admit(target, old_value)
+        line = reopen_dual_admit(target, old_value, new_value)
     except Exception as exc:  # noqa: BLE001
         return (f"re-opening dual-admit FAILED ({type(exc).__name__}: {_safe(exc)}). "
                 f"The new value may be primary with NO {target.next_env_var}: a consumer "
@@ -1192,9 +1230,9 @@ def _reopen_after_failure(target: RotationTarget, old_value: str) -> str:
         return (f"{line}; but {restart.line} — the running {target.daemon_plist} may not "
                 "admit the old value yet. Resolve now — see docs/secrets_management.md, "
                 "'Resolving a checkpoint'.")
-    return (f"{line}; {restart.line}. The new value is primary everywhere and the retired "
-            f"value is back in {target.next_env_var}, so a consumer still holding it keeps "
-            "working. See docs/secrets_management.md, 'Resolving a checkpoint'.")
+    return (f"{line}; {restart.line}. apis now admits both the old and the new value, so "
+            "a consumer holding either keeps working. 1Password holds the new value. See "
+            "docs/secrets_management.md, 'Resolving a checkpoint'.")
 
 
 # ---------------------------------------------------------------------------
@@ -1213,7 +1251,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(
         description=(
             "Staged rotation for a swarm-issued-and-consumed shared secret "
-            "(authority_model.md#grants; conformance.md row 118)."
+            "(authority_model.md#grants; conformance.md row 118). Without "
+            "--dry-run this is LIVE: it writes the snapshot, the dotenv and "
+            "1Password and restarts daemons, and refuses unless "
+            "ATELES_ALLOW_DAEMON_RESTART=1 is set."
+        ),
+        epilog=(
+            "exit codes: 0 rolled forward (or dry-run); 1 rolled back, nothing "
+            "rotated; 2 checkpoint, dual-admit left on, resolve by hand; 3 refused "
+            "at preflight, nothing changed; 4 internal error, state unknown; "
+            "64 usage error. See docs/secrets_management.md, 'Swarm-run rotation'."
         ),
     )
     parser.add_argument("target", choices=sorted(TARGETS), help="Which secret to rotate.")
@@ -1279,17 +1326,34 @@ def _follow_up(report: RotationReport, target: RotationTarget) -> str | None:
         return (f"REQUIRED: commit the snapshot so other machines materialize the new "
                 f"value:\n    cd {sl.SECRETS_BASE} && git add {snap} && git commit -m "
                 f"\"chore(secrets): rotate {target.env_var}\" && git push")
-    if report.rolled_back:
-        return (f"No rotation happened. {snap} was re-encrypted with the same contents; "
-                f"discard that change:\n    cd {sl.SECRETS_BASE} && git checkout -- {snap}")
-    return (f"Do NOT commit {snap} until the checkpoint is resolved (see "
-            "docs/secrets_management.md, 'Resolving a checkpoint').")
+    if report.checkpoint_raised:
+        return (f"Do NOT commit {snap} until the checkpoint is resolved (see "
+                "docs/secrets_management.md, 'Resolving a checkpoint').")
+    return (f"No rotation happened. {snap} was re-encrypted with the same contents; "
+            f"discard that change:\n    cd {sl.SECRETS_BASE} && git checkout -- {snap}")
+
+
+def _notes_path_problem(path: Path) -> str | None:
+    """Why the notes file could not be written, checked BEFORE the rotation runs
+    so a bad path is a usage error, never a crash after a finished rotation."""
+    if path.is_dir():
+        return f"--notes-file {path} is a directory"
+    parent = path.parent if str(path.parent) else Path(".")
+    if not parent.is_dir():
+        return f"--notes-file directory {parent} does not exist"
+    if not os.access(parent, os.W_OK) or (path.exists() and not os.access(path, os.W_OK)):
+        return f"--notes-file {path} is not writable"
+    return None
 
 
 def main(argv: list[str]) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     target = TARGETS[args.target]
+    if args.notes_file and not args.dry_run:
+        problem = _notes_path_problem(args.notes_file)
+        if problem:
+            parser.error(problem)  # exits EXIT_USAGE before anything changes
 
     try:
         report = _run_from_args(args, target)
@@ -1309,9 +1373,18 @@ def main(argv: list[str]) -> int:
     if follow_up:
         print(f"  {follow_up}")
     if args.notes_file and not report.dry_run:
-        args.notes_file.write_text(report.as_neotoma_notes() + "\n")
-        print(f"  record: value-free notes written to {args.notes_file} — store them on the "
-              "credential registry row (last_rotated_at on a rolled-forward run)")
+        # The rotation is over: a failed write must not change its exit code.
+        try:
+            args.notes_file.write_text(report.as_neotoma_notes() + "\n")
+            print(f"  record: value-free notes written to {args.notes_file} — store them on "
+                  "the credential registry row (last_rotated_at on a rolled-forward run)")
+        except OSError as exc:
+            print(f"  WARNING: could not write --notes-file ({type(exc).__name__}: "
+                  f"{_safe(exc)}); the lines above are the record. The exit code below "
+                  "still reports the rotation's outcome.")
+    elif not report.dry_run and not report.refused:
+        print("  record: store this outcome on the credential registry row "
+              "(last_rotated_at on a rolled-forward run); --notes-file writes it to a file")
     print("No secret value is printed above or anywhere in this run's output.")
 
     if report.refused:
