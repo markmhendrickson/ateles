@@ -39,6 +39,82 @@ CLAIM_593_SATISFIED = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Read back the shipped instruction surface, including the limits which make
+# each instruction safe. Rule-name parity alone cannot detect a lost condition.
+CURRENT_POLICY_CLAUSES = {
+    "ent_ed51119266e2604302671de9": (
+        "current evidence identifies the next authorized action it blocks",
+        "proves no existing safe supported route can perform that action",
+        "A benefit to future work is insufficient",
+        "A new operator message adds an event; it does not implicitly pause, cancel, replace or reprioritize admitted work",
+    ),
+    "ent_00a75e37c4db0cdaa5d90f98": (
+        "capacity alone neither creates scope nor requires starting lower-priority work",
+        "a justified queue accepted by the active continuation evaluator",
+        "Assignment, a successful process exit or a progress report is not completion or live execution",
+        "Neotoma stays authoritative; a native goal is a derived continuation aid",
+        "Record each limit's primary provenance: agent supervision, provider/resource constraint or human authority",
+        "freshly read the original task, full current authority/exception, primary decisions and superseding amendments",
+    ),
+    "ent_33d6d29108e45e92e3d1fa98": (
+        "routine diagnosis, scoped edits and already-authorized isolated tests through success or a concrete blocker",
+        "arrange a qualified validation counterpart with prompt feedback",
+        "Structural repairs use their canonical owner and review path",
+    ),
+    "ent_d0f1a840e549b3b299f62397": (
+        "Define the complete next-milestone acceptance path and applicable CI stages at the start of a correction batch",
+        "exercise supported whole-flow checks early enough to return findings to the author",
+    ),
+    "ent_1c0cbb99d2c8011358ff1dc3": (
+        "Architecture, security or new functionality alone does not require human consent",
+        "owning reviewers decide implementation, corrections, necessary tests and affected review",
+        "Schema migrations, foundation governance, destructive effects and independently reserved acts retain their gates",
+    ),
+    "ent_e774dddc392478472c3a84c6": (
+        "the complete report stands on public source behavior and synthetic examples",
+        "Keep private motivation and its mapping in Neotoma",
+        "Vulnerabilities and soft authorization/confidentiality boundaries remain private",
+    ),
+    "ent_f79d4aa1ba7acf957a0a855d": (
+        "Reconcile accepted requests, queued human input, answers and superseding decisions since the last checkpoint",
+        "Capture and assignment are not delivered acceptance",
+        "verify exactly one planning ascent per task",
+        "Use existing records, not a new ledger/schema or full historical audit every turn",
+    ),
+    "ent_0f5e4724f6bb8e60d1e65cc0": (
+        "Establish the smallest complete authorized user path early",
+        "Label evidence by what it proves: mock/unit, real source read, persisted transformation, integrated app flow, merge, deployment or verified served effect",
+        "supported runtimes, locked dependencies, setup order, affected callers/selectors and command groups",
+        "record omissions or environmental denials",
+        "The existing audience of this section remains unchanged",
+    ),
+}
+CURRENT_POLICY_BOUNDARIES = (
+    "Create a goal only when the user or system/developer instructions explicitly request it",
+    "Pause/resume/clear and budgets remain with the user/system",
+    "never retroactively relabel or renew a consumed exception",
+    "Uncertain ownership holds without a replacement",
+    "Independent owning review, integration, CI and merge/deployment authority remain with their owners",
+    "this grants no wider sandbox, credential, spend or held-task permission",
+    "If confidentiality or security status is uncertain, keep it private",
+    "This permission creates no credential/grant, spend, new audience/channel, broader send, product-release or runtime authority",
+    "this mirror does not activate admission support or renew them",
+    "it grants no wider execution, credential, network, spend, real-data or send authority",
+)
+
+
+def _assert_current_policy_mirror_contract(text: str) -> None:
+    assert "### Current outcome and continuation contract" in text
+    for policy_id, clauses in CURRENT_POLICY_CLAUSES.items():
+        assert policy_id in text, f"missing canonical policy {policy_id}"
+        for clause in clauses:
+            assert clause in text, f"{policy_id}: missing scoped clause {clause!r}"
+
+
+def _assert_current_policy_mirror_authority_boundaries(text: str) -> None:
+    for condition in CURRENT_POLICY_BOUNDARIES:
+        assert condition in text, f"missing authority boundary {condition!r}"
+
 
 def _claude_text() -> str:
     return CLAUDE_MD.read_text(encoding="utf-8")
@@ -178,6 +254,34 @@ def test_standing_constraints_fork_test_and_config_single_source():
 def test_negative_no_593_acceptance_claim_in_verification_section():
     _offset, section = _verification_section(_claude_text())
     assert CLAIM_593_SATISFIED.search(section) is None
+
+
+def test_current_policy_mirror_contract():
+    _assert_current_policy_mirror_contract(_claude_text())
+
+
+def test_current_policy_mirror_preserves_authority_boundaries():
+    _assert_current_policy_mirror_authority_boundaries(_claude_text())
+
+
+def test_current_policy_mirror_mutations_fail():
+    """Each new instruction and limiting condition must independently bind."""
+    original = _claude_text()
+    _assert_current_policy_mirror_contract(original)
+    _assert_current_policy_mirror_authority_boundaries(original)
+    clauses = [c for values in CURRENT_POLICY_CLAUSES.values() for c in values]
+    for checker, conditions in (
+        (_assert_current_policy_mirror_contract, clauses),
+        (_assert_current_policy_mirror_authority_boundaries, CURRENT_POLICY_BOUNDARIES),
+    ):
+        for condition in conditions:
+            assert original.count(condition) == 1, f"ambiguous mutation: {condition!r}"
+            mutated = original.replace(condition, "[removed]", 1)
+            with pytest.raises(AssertionError):
+                checker(mutated)
+    for policy_id in CURRENT_POLICY_CLAUSES:
+        with pytest.raises(AssertionError):
+            _assert_current_policy_mirror_contract(original.replace(policy_id, "[removed]"))
 
 
 @pytest.mark.parametrize(
