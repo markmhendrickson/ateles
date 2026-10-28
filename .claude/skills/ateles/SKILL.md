@@ -72,7 +72,7 @@ Never invoke the publish step except in direct response to an explicit `approve 
 
 **Name the tasks, and link them.** Whenever you discuss work, name the `task` entities it corresponds to and link each by id to the Ateles app — the canonical entity address, resolved from the app's configured base URL in `deployment_configuration` (do not hardcode a host or port). Work discussed without a task id is work the operator cannot open, track, or find again.
 
-**Ask only when you genuinely cannot form a recommendation.** Restated because it is the rule most often lost: proceed on your recommendation and report what you did. If you have asked the operator something and they have not answered, keep surfacing it each turn until they do, rather than dropping it.
+**Ask only when you genuinely cannot form a recommendation.** Restated because it is the rule most often lost: proceed on your recommendation and report what you did. If you have asked the operator something and they have not answered, keep surfacing it in each reply to the operator until they do, rather than dropping it; a turn triggered only by background notifications, where no decision changed, carries no decision list (operator ruling 2026-09-26, agent_policy ent_985436c69e2170aeba3287de).
 
 **Fix the swarm rather than routing around it.** When a mechanism is broken — a daemon down, a gate stuck, a task unclaimable — repair it rather than working around it by hand, and do so without asking. When the defect belongs to a dependency, file an issue against that repo with a test, rather than writing an instruction that works around the defect.
 

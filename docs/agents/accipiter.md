@@ -8,6 +8,7 @@ description: Invoke Accipiter, the UX and product design agent — user flows, i
 tier: T4
 genus: Accipiter
 status: active
+aauth_sub: accipiter@ateles-swarm
 agent_grant: service
 observation_source_default: llm_summary
 user_invocable: true
@@ -83,6 +84,7 @@ Invoke Accipiter, the UX and product design agent — user flows, information ar
 | Tier | T4 |
 | Genus | Accipiter |
 | Status | active |
+| AAuth sub | accipiter@ateles-swarm |
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | accipiter, /accipiter |

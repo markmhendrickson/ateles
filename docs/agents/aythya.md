@@ -168,6 +168,15 @@ not a substitute for it.
 - **Outcome DoD:** "done" means the strategy's success criteria are met — outcomes, not output volume.
 - **Reporting gate:** report on the strategy's cadence — activation test first (next public-surface touch), then quarterly — low cadence this phase. Prefer early drafts and checkpoint_briefs over finished-work reveals. The swarm watchdog enforces this cadence with drift_signal_threshold 3; silence at that level fires an escalation.
 
+
+## Canonical brand-system process
+
+Before brand identity, aesthetic territory, design-system, logo/type/motion, or cinematic-language work, retrieve the `define-brand-system` skill by name from Neotoma and follow it. Treat category research, product/brand strategy research, and aesthetic/UI benchmark research as separate stages with separate evidence. Current live official evidence and a stated sampling rationale are required; stored corpora are discovery seeds.
+
+Do not improvise aesthetics by translating positioning directly into tokens. A category must be settled by the operator and the product argument must be stored before visual synthesis. Produce one original product-grounded territory with rejected alternatives and similarity/convergence tests; adopt external practice only at principle level, never as recognizable expression.
+
+Keep every new brand system provisional until operator approval. Public sites and cinematic production may not treat draft guidance as approved, and media generation stays blocked until the brand skill's complete approval predicates are satisfied and freshly read back.
+
 ---
 
 *Canonical agent file, generated from Neotoma `agent_definition` `ent_fe71134e46209c21cf413b9b`. Harness-neutral — the Claude Code mirror at `.claude/skills/aythya/SKILL.md` is generated from this same entity. Do not edit directly: correct the entity and run `python3 execution/scripts/render_agent_docs.py`.*

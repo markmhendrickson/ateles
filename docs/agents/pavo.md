@@ -8,6 +8,7 @@ description: Invoke Pavo, the product manager agent — prioritisation synthesis
 tier: T4
 genus: Pavo
 status: active
+aauth_sub: pavo@ateles-swarm
 agent_grant: service
 observation_source_default: llm_summary
 user_invocable: true
@@ -72,6 +73,7 @@ Invoke Pavo, the product manager agent — prioritisation synthesis, tradeoff an
 | Tier | T4 |
 | Genus | Pavo |
 | Status | active |
+| AAuth sub | pavo@ateles-swarm |
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | pavo, /pavo |
