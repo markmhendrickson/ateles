@@ -28,6 +28,7 @@ for _p in (str(_REPO_ROOT), str(_DAEMON_DIR), str(_SCRIPTS_DIR)):
 import harness_lens_runner as hlr  # noqa: E402
 import panel_check_gate as pcg  # noqa: E402
 
+_REAL_CURRENT_PR_METADATA = hlr.current_pr_metadata
 HEAD = "a" * 40
 REPO = "owner/repo"
 
@@ -201,7 +202,8 @@ def test_live_pr_reader_rejects_failed_or_malformed_output(monkeypatch, returnco
 
 
 @pytest.mark.parametrize("error", [OSError("unavailable"),
-    subprocess.TimeoutExpired("gh", 30), hlr.RepoAccessError("unreadable")])
+    subprocess.TimeoutExpired("gh", 30), hlr.RepoAccessError("unreadable"),
+    RuntimeError("unexpected read failure")])
 def test_live_pr_reader_converts_read_failures_to_a_hold_input(monkeypatch, error):
     def unavailable(repo):
         raise error
@@ -216,3 +218,30 @@ def test_live_pr_reader_returns_one_snapshot(monkeypatch):
     monkeypatch.setattr(hlr.subprocess, "run", lambda *a, **k: SimpleNamespace(
         returncode=0, stdout=json.dumps(metadata)))
     assert hlr.current_pr_metadata(repo=REPO, pr=7) == metadata
+
+
+def test_unexpected_reader_failure_holds_natural_run_before_preparation(runner, monkeypatch):
+    state, go = runner
+    state["gate"] = GREEN
+
+    def unavailable(repo):
+        raise RuntimeError("private diagnostic must not be echoed")
+
+    monkeypatch.setattr(hlr, "current_pr_metadata", _REAL_CURRENT_PR_METADATA)
+    monkeypatch.setattr(hlr, "repo_scoped_env", unavailable)
+    report = go()
+    assert report["held_for_checks"] and report["no_model_call_made"]
+    assert report["ok"] is False and report["posted"] is False
+    assert "private diagnostic" not in json.dumps(report)
+    assert state["worktrees"] == state["sandboxes"] == state["dispatches"] == 0
+    assert "asked" not in state
+
+
+@pytest.mark.parametrize("signal", [KeyboardInterrupt(), SystemExit(), asyncio.CancelledError()])
+def test_live_pr_reader_preserves_cancellation_and_interrupts(monkeypatch, signal):
+    def interrupted(repo):
+        raise signal
+
+    monkeypatch.setattr(hlr, "repo_scoped_env", interrupted)
+    with pytest.raises(type(signal)):
+        hlr.current_pr_metadata(repo=REPO, pr=7)

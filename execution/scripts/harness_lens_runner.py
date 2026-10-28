@@ -2467,7 +2467,7 @@ def current_pr_metadata(*, repo: str, pr: int) -> dict | None:
         if result.returncode != 0:
             return None
         snapshot = json.loads(result.stdout)
-    except (OSError, subprocess.TimeoutExpired, RepoAccessError, ValueError):
+    except Exception:  # noqa: BLE001 — any unreadable PR holds; never publish raw errors
         return None
     return snapshot if isinstance(snapshot, dict) else None
 
