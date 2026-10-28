@@ -275,6 +275,7 @@ from lib.credential_templates import (  # noqa: E402
     placeholder_template_sandbox_regexes,
 )
 import harness_router  # noqa: E402
+import panel_check_gate  # noqa: E402
 from lib import github_app_token as _github_app_token  # noqa: E402
 from harness_router import headroom_resolution  # noqa: E402
 from review_panel import lens_by_name  # noqa: E402
@@ -2450,6 +2451,48 @@ def current_pr_head(*, repo: str, pr: int) -> str:
         return ""
 
 
+def current_pr_base_ref(*, repo: str, pr: int) -> str:
+    """Return the PR's base branch name via `gh`, or "" if unreadable.
+
+    Its own function for the same reason as `current_pr_head`: tests patch
+    exactly this. An empty base makes the check gate treat every pending check
+    as required, which is the stricter reading.
+    """
+    result = subprocess.run(
+        ["gh", "pr", "view", str(pr), "-R", repo, "--json", "baseRefName"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=repo_scoped_env(repo),
+    )
+    try:
+        return json.loads(result.stdout or "{}").get("baseRefName", "") or ""
+    except json.JSONDecodeError:
+        return ""
+
+
+async def head_checks_hold(target: "LensTarget") -> str | None:
+    """Why a lens may not be seated on *target*'s head yet, or None when it may.
+
+    A lens verdict on a head whose gating checks are red or still running is
+    wasted work: the head changes to fix CI, or merges red (an audit of 469
+    lens-reviewed PRs found 47 approved heads that already had a failed check).
+    Uses the same gate the Apis review panel does (`panel_check_gate`), which
+    reads checks by the standard the panel-gated approval tool applies, and
+    fails closed: an unreadable check state is a hold, never a pass.
+    """
+    base_ref = await asyncio.to_thread(
+        current_pr_base_ref, repo=target.repo, pr=target.pr
+    )
+    gate = await panel_check_gate.read_check_gate(target.repo, target.head, base_ref)
+    if gate.green:
+        return None
+    return (
+        f"{target.repo}#{target.pr} lens {target.lens!r} held until the head's "
+        f"checks are green — {gate.reason}"
+    )
+
+
 def read_stash_ref_oid(worktree: Path) -> str | None:
     """Resolve refs/stash through loose or packed storage using real git.
 
@@ -2793,6 +2836,21 @@ async def run_one(
             "refusal_reason": reason, "no_model_call_made": True, "posted": False,
         }
     check_headroom(provider)
+
+    # Seat no lens on a head whose gating checks are not green. Before any
+    # worktree, sandbox or model call exists, so a hold costs nothing.
+    checks_hold = await head_checks_hold(target)
+    if checks_hold:
+        return {
+            "ok": False,
+            "provider": provider,
+            "lens": target.lens,
+            "reason": checks_hold,
+            "refusal_reason": checks_hold,
+            "held_for_checks": True,
+            "no_model_call_made": True,
+            "posted": False,
+        }
 
     worktree_path = (
         scratch_root / f"{repo_worktree_name}-wt-{target.lens}-{target.pr}-{provider}"

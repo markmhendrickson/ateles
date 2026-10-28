@@ -102,6 +102,7 @@ import build_delivery
 import fly_runner
 import lens_authors
 import model_tiering
+import panel_check_gate
 import review_carry
 import review_delta
 import skill_runner
@@ -4062,6 +4063,20 @@ class _CIHeadClaim:
 
 
 @dataclass
+class _PanelCIHold:
+    """A PR head the review panel is being held back from until its checks are green.
+
+    Kept in memory only, keyed by (repository, PR number). It exists so the
+    check-completion event that makes the head green can re-dispatch the panel
+    it held; the periodic sweeps re-drive a PR with no review by themselves, so
+    a hold lost to a restart is recovered on the next poll, never lost for good.
+    """
+
+    head: str
+    reason: str
+
+
+@dataclass
 class DispatchConfig:
     neotoma_base_url: str = os.environ.get(
         "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
@@ -4252,6 +4267,11 @@ class SwarmDispatcher:
         # exception or cancellation leave ``handled`` false so the waiter
         # re-enters and re-fetches the live head and aggregate required-CI state.
         self._ci_head_claims: dict[tuple[str, int, str], _CIHeadClaim] = {}
+        # PR heads the review panel is held back from until their checks are
+        # green, keyed by (casefolded repository, PR number). Set and cleared by
+        # `_hold_panel_until_checks_green`; read by `_handle_ci_status_for_current_head`
+        # to re-dispatch a held panel when the head's checks complete.
+        self._panel_ci_holds: dict[tuple[str, int], _PanelCIHold] = {}
         # (source, "owner/repo#N") pairs whose label-gate skip has already been
         # logged at WARNING by a periodic sweep — see `_label_gate_log`.
         self._label_gate_warned: set[tuple[str, str]] = set()
@@ -5034,6 +5054,17 @@ class SwarmDispatcher:
                 ):
                     summary["label_gated"] = summary.get("label_gated", 0) + 1
                     continue
+                # Held for checks (checked BEFORE the retry budget): a PR whose
+                # panel is being held until its checks are green has no review
+                # BECAUSE of the hold, so it must neither be re-dispatched nor
+                # count toward the stalled-review escalation that would page the
+                # operator about a "failing review agent".
+                if await self._hold_panel_until_checks_green(
+                    self._pr_trigger_from_api(repository, pr),
+                    source="resume_stalled_reviews",
+                ):
+                    summary["held_for_checks"] = summary.get("held_for_checks", 0) + 1
+                    continue
                 attempts = self._stall_retries.get(ref, 0)
 
                 if attempts >= max_retries:
@@ -5665,6 +5696,16 @@ class SwarmDispatcher:
                     source="resume_missing_lens_reviews",
                 ):
                     summary["label_gated"] = summary.get("label_gated", 0) + 1
+                    continue
+                # Held for checks, before any retry is counted: re-seating a
+                # lens on a head whose checks are not green is the same wasted
+                # work the panel hold prevents, and the missing verdict is not
+                # the lens failing.
+                if await self._hold_panel_until_checks_green(
+                    self._pr_trigger_from_api(repository, pr),
+                    source="resume_missing_lens_reviews",
+                ):
+                    summary["held_for_checks"] = summary.get("held_for_checks", 0) + 1
                     continue
                 summary["scanned"] += len(lenses)
                 escalated = self._missing_lens_escalated.setdefault(ref, set())
@@ -7352,6 +7393,74 @@ class SwarmDispatcher:
 
     # ── pull_request pipeline ────────────────────────────────────────────────
 
+    async def _read_head_check_gate(
+        self, repository: str, head_sha: str, base_ref: str
+    ) -> "panel_check_gate.CheckGate":
+        """Whether a lens may be seated on *head_sha* (the tests' seam).
+
+        Delegates to `panel_check_gate.read_check_gate`, which reads the head's
+        checks by the same standard the panel-gated approval tool applies.
+        Never raises; an unreadable state comes back as a hold.
+        """
+        return await panel_check_gate.read_check_gate(repository, head_sha, base_ref)
+
+    async def _hold_panel_until_checks_green(
+        self, trigger: SwarmTrigger, *, source: str
+    ) -> bool:
+        """True when the review panel must NOT be seated on the PR's head yet.
+
+        A lens verdict on a head whose gating checks are red or still running is
+        wasted work: the head either changes to fix CI (so the verdict is
+        carried or redone) or merges red. An audit of 469 lens-reviewed PRs
+        found 47 where a lens approved a head that already had a failed check
+        and 6 that merged red. So the panel waits until the head's checks are
+        green.
+
+        Fails closed. The PR or its checks being unreadable is a hold, never a
+        pass, and a head whose state the gate cannot call green is held. A held
+        panel is logged with its reason, naming the head and the failing or
+        pending checks, and remembered in `_panel_ci_holds`; the head's
+        check-suite completion event re-dispatches it
+        (`_handle_ci_status_for_current_head`), and the 10-minute review sweeps
+        re-drive it on the next poll if that event is lost.
+
+        A closed or merged PR is not held (nothing to review). Returns False,
+        and clears any hold, when the head's checks are green.
+        """
+        ref = f"{trigger.repository}#{trigger.number}"
+        key = (trigger.repository.casefold(), trigger.number)
+        pr = await self._fetch_pr(trigger.repository, trigger.number)
+        if pr is not None and pr.get("state") not in (None, "open"):
+            self._panel_ci_holds.pop(key, None)
+            return False
+        live_head = _normalise_full_sha(((pr or {}).get("head") or {}).get("sha", ""))
+        head = live_head or _normalise_full_sha(trigger.head_sha or "")
+        if pr is None:
+            gate = panel_check_gate.unreadable_gate(
+                head, "the PR could not be fetched"
+            )
+        else:
+            gate = await self._read_head_check_gate(
+                trigger.repository, head, ((pr.get("base") or {}).get("ref") or "")
+            )
+        if gate.green:
+            if self._panel_ci_holds.pop(key, None) is not None:
+                log.info(
+                    f"[{DAEMON_NAME}] {ref}: head {head[:9]} checks are green — "
+                    f"releasing the held review panel ({source})"
+                )
+            return False
+        previous = self._panel_ci_holds.get(key)
+        self._panel_ci_holds[key] = _PanelCIHold(head=head, reason=gate.reason)
+        changed = previous is None or previous.head != head or previous.reason != gate.reason
+        log.log(
+            logging.WARNING if gate.unreadable else logging.INFO,
+            f"[{DAEMON_NAME}] {ref}: review panel HELD ({source}) — "
+            f"{gate.reason}. Lenses are seated once the head's checks are green"
+            + ("" if changed else " (unchanged since the last look)"),
+        )
+        return True
+
     async def _handle_pr(self, trigger: SwarmTrigger) -> None:
         ref = f"{trigger.repository}#{trigger.number}"
         # A push/reopen changes which artifact may stand. Retire stale bot
@@ -7361,6 +7470,14 @@ class SwarmDispatcher:
             await self._supersede_stale_verdicts(
                 trigger.repository, trigger.number, trigger.head_sha
             )
+        # Hold the panel until the head's gating checks are green. Every path
+        # that seats the panel (webhook, the review sweeps, the CI-green
+        # re-panel, an operator /swarm-run) enters here, so this one check
+        # binds them all; the check-completion event re-drives a held PR.
+        if await self._hold_panel_until_checks_green(
+            trigger, source=trigger.kind or "pr"
+        ):
+            return
         parent = self._parent_issue_number(trigger.body, trigger.repository)
 
         # 0. Pipeline-bypass guard (ateles): a product-code PR with NO parent
@@ -10106,6 +10223,9 @@ class SwarmDispatcher:
             )
             return
         if pr.get("state") != "open" or pr.get("draft"):
+            if pr.get("state") != "open":
+                # A closed or merged PR has no panel to re-drive.
+                self._panel_ci_holds.pop((trigger.repository.casefold(), pr_number), None)
             return
         current_head = (pr.get("head") or {}).get("sha", "")
         if trigger.ci_head_sha and current_head and trigger.ci_head_sha != current_head:
@@ -10193,6 +10313,24 @@ class SwarmDispatcher:
             log.info(f"[{DAEMON_NAME}] {ref}: CI completed failing — routing to fix")
             await self._route_ci_failure(pr_trigger, parent)
             return True
+        # A review panel held back until this head's checks are green is
+        # re-dispatched by the check completion that may have made them green.
+        # `_handle_pr` re-reads the gate itself, so a head that is still not
+        # green simply stays held; this branch never decides green.
+        held = self._panel_ci_holds.get((trigger.repository.casefold(), pr_number))
+        if held is not None and held.head == _normalise_full_sha(current_head):
+            if not await self._label_gate_allows(
+                pr_trigger, source="ci_status_held_panel"
+            ):
+                return True
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: checks completed on held head "
+                f"{current_head[:9]} — re-driving the held review panel"
+            )
+            await self._handle_pr(pr_trigger)
+            # Handled only if the hold lifted and the panel ran; a head still
+            # held is not handled, so an equivalent later completion re-drives it.
+            return (trigger.repository.casefold(), pr_number) not in self._panel_ci_holds
         if ci != "green":
             # Pending/unknown is not handled: an overlapping same-conclusion
             # completion may be the suite that makes the aggregate conclusive.

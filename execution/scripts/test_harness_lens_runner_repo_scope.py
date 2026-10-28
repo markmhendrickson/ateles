@@ -50,6 +50,15 @@ _REAL_REPO_SCOPED_ENV = getattr(hlr, "repo_scoped_env", None)
 
 
 @pytest.fixture(autouse=True)
+def _head_checks_not_held(monkeypatch):
+    """These tests are about credential scoping, not check state."""
+    async def not_held(target):
+        return None
+
+    monkeypatch.setattr(hlr, "head_checks_hold", not_held)
+
+
+@pytest.fixture(autouse=True)
 def _ambient_credential(monkeypatch):
     """The daemon's environment carries a credential that cannot read the repo."""
     monkeypatch.setenv("GH_TOKEN", AMBIENT)
