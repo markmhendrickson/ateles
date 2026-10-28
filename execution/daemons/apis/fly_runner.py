@@ -948,14 +948,18 @@ class FlyLedger:
     def settle_delivery(self, key: str, token: str, entry: dict) -> bool:
         """Replace the receipt for *key* with *entry* only if the stored receipt
         is still the reservation *token* made (compare-and-set); otherwise leave
-        it untouched and return False. *entry* carries the same token."""
+        it untouched and return False. *entry* carries the same token. Preserve
+        an existing notification claim under the ledger lock so a late or
+        repeated settlement cannot make the receipt notifiable again."""
         if not isinstance(entry.get("status"), str) or entry.get("token") != token:
             raise FlyLedgerError("delivery receipt does not carry its reservation token")
 
         def write(receipts: dict) -> bool:
             if key not in receipts or receipts[key].get("token") != token:
                 return False
-            receipts[key] = entry
+            current = receipts[key]
+            receipts[key] = ({**entry, "notified_at": current["notified_at"]}
+                             if "notified_at" in current else entry)
             return True
 
         return self._write_delivery(key, write)

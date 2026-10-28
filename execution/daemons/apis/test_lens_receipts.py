@@ -106,6 +106,32 @@ def test_notification_is_claimed_exactly_once(path):
     assert lr.claim_notification("lens:owner/repo#8@" + HEAD + ":qa", ledger=fresh(path)) is None
 
 
+def test_notification_claim_survives_duplicate_settlement(path):
+    _, res = lr.reserve(KEY, META, ledger=fresh(path))
+    assert lr.settle(res, lr.FAILED, ledger=fresh(path))
+    claimed = lr.claim_notification(KEY, ledger=fresh(path), clock=lambda: 1_700_000_000.0)
+    assert claimed is not None
+    assert lr.claim_notification(KEY, ledger=fresh(path)) is None
+
+    for _ in range(2):
+        assert lr.settle(res, lr.FAILED, ledger=fresh(path))
+        assert lr.held(KEY, ledger=fresh(path))["notified_at"] == 1_700_000_000.0
+        assert lr.claim_notification(KEY, ledger=fresh(path)) is None
+
+
+def test_notification_claim_before_settlement_survives(path):
+    first = fresh(path)
+    _, res = lr.reserve(KEY, META, ledger=first)
+    claimed = lr.claim_notification(KEY, ledger=first, clock=lambda: 1_700_000_001.0)
+    assert claimed is not None and claimed["status"] == lr.LAUNCHING
+
+    # A second ledger handle settles after the claim, as in a late worker result.
+    second = fresh(path)
+    assert lr.settle(res, lr.FAILED, ledger=second)
+    assert lr.held(KEY, ledger=fresh(path))["notified_at"] == 1_700_000_001.0
+    assert lr.claim_notification(KEY, ledger=fresh(path)) is None
+
+
 def test_two_notifiers_that_read_the_same_entry_cannot_both_win(path, monkeypatch):
     _, res = lr.reserve(KEY, META, ledger=fresh(path))
     stale = dict(lr.held(KEY, ledger=fresh(path)))

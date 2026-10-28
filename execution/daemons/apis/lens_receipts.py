@@ -5,6 +5,8 @@ deliveries (``FlyLedger.delivery_receipts``), under a ``lens:`` key that names
 the repository, pull request, head commit and lens, so a lens dispatcher can see
 across restarts that this lens already ran (or is running) on this head. The
 operator clears a stuck entry with ``fly_delivery_receipt.py`` like any other.
+Once a notification is claimed, later settlements retain its original
+``notified_at``; no later claim may send another notice for that reservation.
 
 Synchronous: async callers wrap each call in ``asyncio.to_thread``.
 """
@@ -95,7 +97,8 @@ def reserve(key: str, meta: dict, *, ledger=None, clock=time.time):
 
 def settle(res: Reservation, status: str, *, ledger=None, clock=time.time, **fields) -> bool:
     """Replace the entry with *status* (and *fields*) only while it is still
-    this reservation's (compare-and-set on the token). False on any failure."""
+    this reservation's (compare-and-set on the token), retaining any prior
+    notification claim. False on any failure."""
     entry = {**res.meta, **fields, "status": status, "token": res.token, "recorded_at": clock()}
     try:
         return bool(_ledger(ledger).settle_delivery(res.key, res.token, entry))
