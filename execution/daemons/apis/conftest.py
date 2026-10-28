@@ -210,3 +210,30 @@ def _isolate_codex_login(monkeypatch, tmp_path):
     (home / "auth.json").write_text("{}", encoding="utf-8")
     (home / "auth.json").chmod(0o600)
     monkeypatch.setenv("CODEX_HOME", str(home))
+
+
+@pytest.fixture(autouse=True)
+def _panel_check_hold_off_by_default(monkeypatch):
+    """The review panel's check-state hold reads GitHub; no unrelated test may.
+
+    `SwarmDispatcher._hold_panel_until_checks_green` fetches the PR and reads
+    its check runs before any lens is seated, so every test that drives
+    `_handle_pr` or a review sweep without stubbing GitHub would otherwise hit
+    the network (and, failing closed, hold). Default it to "not held". The tests
+    of the hold itself (`test_panel_check_hold.py`) restore the real method from
+    `swarm_dispatch._REAL_HOLD_PANEL_UNTIL_CHECKS_GREEN` and stub only the
+    check-state reader.
+    """
+    import swarm_dispatch
+
+    real = swarm_dispatch.SwarmDispatcher._hold_panel_until_checks_green
+
+    async def _not_held(self, trigger, *, source):
+        return False
+
+    monkeypatch.setattr(
+        swarm_dispatch, "_REAL_HOLD_PANEL_UNTIL_CHECKS_GREEN", real, raising=False
+    )
+    monkeypatch.setattr(
+        swarm_dispatch.SwarmDispatcher, "_hold_panel_until_checks_green", _not_held
+    )
