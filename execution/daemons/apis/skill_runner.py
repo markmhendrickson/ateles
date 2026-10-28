@@ -1869,6 +1869,12 @@ class SkillResult:
     fly_delivery_commit: str = ""
     fly_pr_number: int | None = None
     fly_pr_url: str = ""
+    # The delivered pull request read back from GitHub (build_delivery.
+    # run_fly_delivery): ``passed``, ``failed`` (the reason says which field
+    # differed or why it could not be read) or ``not_applicable`` (no pull
+    # request was reported). Empty for every other dispatch.
+    fly_delivery_readback: str = ""
+    fly_delivery_readback_reason: str = ""
     # Nothing was sent to Fly: the job was not eligible (including a refused
     # delivery-token mint) or its launch provably did not take effect. A
     # builder may then run its delivery locally, as it would without Fly.
