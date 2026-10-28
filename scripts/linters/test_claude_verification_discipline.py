@@ -60,10 +60,14 @@ CURRENT_POLICY_CLAUSES = {
         "routine diagnosis, scoped edits and already-authorized isolated tests through success or a concrete blocker",
         "arrange a qualified validation counterpart with prompt feedback",
         "Structural repairs use their canonical owner and review path",
+        "Inter-session coordination uses existing task/dependency records and authorized direct messages",
+        "Keep a deferred handoff on its owning task with its prerequisite and next owner/action",
     ),
     "ent_d0f1a840e549b3b299f62397": (
         "Define the complete next-milestone acceptance path and applicable CI stages at the start of a correction batch",
         "exercise supported whole-flow checks early enough to return findings to the author",
+        "Each task has exactly one coordinating session, named on the task",
+        "Preserve original owners and early recoverable WIP",
     ),
     "ent_1c0cbb99d2c8011358ff1dc3": (
         "Architecture, security or new functionality alone does not require human consent",
@@ -99,6 +103,8 @@ CURRENT_POLICY_BOUNDARIES = (
     "If confidentiality or security status is uncertain, keep it private",
     "This permission creates no credential/grant, spend, new audience/channel, broader send, product-release or runtime authority",
     "this mirror does not activate admission support or renew them",
+    "do not create cron, heartbeat or scheduled wakeups for this coordination",
+    "separately requested business schedules retain their own authority",
     "it grants no wider execution, credential, network, spend, real-data or send authority",
 )
 
