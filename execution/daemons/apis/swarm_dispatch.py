@@ -10921,7 +10921,7 @@ class SwarmDispatcher:
         if entry is None:
             return False
         command = f"{build_delivery.FLY_RECEIPT_COMMAND} clear {key}"
-        self.notifier.send(
+        delivered = self.notifier.send(
             f"Lens receipt {key} is held (status: {entry.get('status', 'unknown')}; "
             f"run id: {entry.get('run_id') or 'not reported'}). The lens will not "
             "be re-dispatched at this head until the receipt is cleared, and "
@@ -10930,6 +10930,8 @@ class SwarmDispatcher:
             priority=Priority.BLOCKER,
             handler=DAEMON_NAME,
         )
+        if not delivered:
+            log.error(f"[{DAEMON_NAME}] lens receipt {key}: BLOCKER notice was not delivered")
         return True
 
     async def _settle_lens_receipts(

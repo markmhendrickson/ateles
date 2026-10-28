@@ -50,6 +50,7 @@ class _Notifier:
 
     def send(self, message, **kwargs):
         self.sent.append((message, kwargs))
+        return True
 
 
 def _dispatcher(monkeypatch, pages=None):
@@ -207,4 +208,15 @@ async def test_notification_claim_survives_dispatcher_restart(monkeypatch, tmp_p
     assert await second._notify_lens_receipt(KEY) is False
     assert len(first_notifier.sent) + len(second_notifier.sent) == 1
     assert "not reported" in first_notifier.sent[0][0]
+    assert "notified_at" in lens_receipts.held(KEY, ledger=fly_runner.FlyLedger(path))
+
+
+@pytest.mark.asyncio
+async def test_undelivered_notice_still_cannot_duplicate(monkeypatch, tmp_path, caplog):
+    _, path = _awaiting(monkeypatch, tmp_path)
+    dispatcher, _, notifier = _dispatcher(monkeypatch)
+    monkeypatch.setattr(notifier, "send", lambda *args, **kwargs: False)
+    assert await dispatcher._notify_lens_receipt(KEY) is True
+    assert "BLOCKER notice was not delivered" in caplog.text
+    assert await dispatcher._notify_lens_receipt(KEY) is False
     assert "notified_at" in lens_receipts.held(KEY, ledger=fly_runner.FlyLedger(path))
