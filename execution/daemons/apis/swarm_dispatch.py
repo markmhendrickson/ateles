@@ -5549,6 +5549,8 @@ class SwarmDispatcher:
                     has_worktree=bool(worktree),
                     changed_files=changed_files,
                 ),
+                # Read-only on Fly: a lens reviews and never delivers.
+                github_read_only=True,
                 action_class=model_tiering.lens_review_class(lens.lens),
                 escalation_signals=review_signals,
                 github_token=_token_for_agent_on_repo(lens.agent, repository),
@@ -6274,6 +6276,8 @@ class SwarmDispatcher:
                 # an advisory section still held the Neotoma wildcard over the
                 # shared bearer.
                 seated_reviewer=True,
+                # Read-only on Fly: a lens reviews and never delivers.
+                github_read_only=True,
                 # A spec section is its lens's review of the issue. No diff
                 # exists yet, so there is nothing to escalate on.
                 action_class=model_tiering.lens_review_class(section.lens),
@@ -7704,6 +7708,8 @@ class SwarmDispatcher:
                     # re-seated after their gate cleared held the Neotoma
                     # wildcard over the shared bearer too.
                     seated_reviewer=True,
+                    # Read-only on Fly: a lens reviews and never delivers.
+                    github_read_only=True,
                     action_class=model_tiering.lens_review_class(lens.lens),
                     escalation_signals=panel_signals,
                 )
@@ -8989,6 +8995,8 @@ class SwarmDispatcher:
                 # Every seated lens is denied `correct`, not only a gate
                 # owner (dispatcher security run at e874537f, BLOCKING).
                 seated_reviewer=True,
+                # Read-only on Fly: a lens reviews and never delivers.
+                github_read_only=True,
                 # Fix guidance is the lens's own domain judgement, so it runs
                 # at the lens's tier: security and arch stay top.
                 action_class=model_tiering.lens_review_class(lens),
@@ -13479,6 +13487,8 @@ class SwarmDispatcher:
                     for item in combinable
                 ),
                 seated_reviewer=True,
+                # Read-only on Fly: a lens reviews and never delivers.
+                github_read_only=True,
                 action_class=model_tiering.lens_review_class(first.lens),
                 escalation_signals=signals,
             )
