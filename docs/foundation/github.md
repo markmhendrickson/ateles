@@ -375,7 +375,7 @@ owner, whose verdict closes on a pull request existing, its CI green at the pinn
 mergeable as read** (`workflows.md#feature`), so a conflict opens `impl` again by the step's `on_fail`
 rather than surfacing at the merge. Whether that path is built is a `status.md` row. A green run that took longer
 than the scope's declared CI time budget does not hold the step: it is recorded as a standing finding beside the
-verdict, as the open decision 163 proposes
+verdict, as decision 163 (ruled 2026-10-28) rules
 (`workflows.md#ci-at-the-pinned-head-is-a-step-resource-with-a-declared-time-budget-and-heavy-suites-run-in-a-release-candidate-run`).
 
 ## The transitions the mining found unhandled
@@ -475,12 +475,12 @@ principals rewrite — is open (decision 85, 2026-09-07, on the operator's quest
 
 ## What is deployed is a commit on the default branch, and a verdict is valid only for a head that is, or becomes, what is deployed
 
-**Open (decision 162, drafted 2026-10-27 at the operator's direction).** Registered in
-`conformance.md#the-register-of-open-design-decisions`. **Recommendation:** rule it as stated below. This section is
-a proposal. It stays open after the change that drafted it merges, and the register row moves from open to ruled only
-through an explicit operator ruling recorded on the row, which is the register's convention; merging rules nothing.
-The operator may rule its rules separately. If it is never ruled, the design stays as it is: a verdict is pinned to a
-head with no edge to any deployment.
+**Ruled (decision 162, 2026-10-28, the operator's): what is deployed is a commit that is an ancestor of the default
+branch's head, judged on the commit with the ref as provenance, and a verdict is valid for a deployment only where its
+pinned head is, or becomes by a merge, what is deployed, with the verdict and the merge recorded before the
+deployment.** Registered as ruled in `conformance.md#the-register-of-open-design-decisions`, on the operator's
+ruling in an interactive session, as the recommendation drafted on 2026-10-27 stated it. The size limit and the stale
+sweep stay declaration data per scope. The section below is the argument for the ruling.
 
 **The rules in this section.**
 
@@ -513,7 +513,7 @@ re-derived when the question is later asked. Ancestry only grows, so a commit de
 merged afterwards would read as on the default branch if it were re-derived, although it ran before any merge or
 verdict existed. The observation records the commit read back, the ref named, and whether the commit was on the
 history at that time; the `deployment` row of `#repository-level-events-the-swarms-operations-produce-or-depend-on`
-gains the ref and that result when this is ruled. A deployment whose commit is not on the history is not a
+gains the ref and that result. A deployment whose commit is not on the history is not a
 deployment of reviewed work, whatever its pull request says, and `verify_deployed` does not sign on it. The rule is
 the pinned-head rule applied one hop further. A verdict pins a head so that a conclusion about an old state cannot
 pass for a conclusion about the current one, and a deployment is the point at which the current state starts to
@@ -552,8 +552,8 @@ section's sense: that exercise is not deployed reviewed work, its verdict pins t
 about that head only (`workflows.md#the-acceptance-step-exercises-a-change-against-the-real-external-systems-it-touches-before-merge`).
 And it does not decide how a client instance's runtime is deployed, which decision 148 and the instance's
 `deployment_configuration` own (`adapters.md#a-client-instance-runs-a-minimal-runtime-of-its-own-and-its-delivery-never-depends-on-swarm-coordination`).
-If this is ruled, the `release` workflow's `verify_deployed` row gains the ancestry condition in the change that
-rules it; this proposal edits no closing condition outside `feature`.
+The `release` workflow's `verify_deployed` row is to gain the ancestry condition in a follow-up change; the
+change that records this ruling edits no closing condition outside `feature`.
 
 **The rejected alternatives.** Stating the size limit and the sweep as invariants was rejected under rule 3. A
 stored flag marking a commit reviewed was rejected under rule 2. Testing the ref and not the commit was rejected
