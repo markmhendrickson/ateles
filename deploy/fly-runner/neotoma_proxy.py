@@ -233,6 +233,15 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                     log.warning("neotoma proxy %s %s upstream stream broke after %d bytes", method, path, bytes_out)
                     return
                 if not chunk:
+                    if resp.length is not None and resp.length > 0:
+                        self.close_connection = True
+                        log.warning(
+                            "neotoma proxy %s %s upstream truncated with %d bytes outstanding",
+                            method,
+                            path,
+                            resp.length,
+                        )
+                        return
                     break
                 self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
                 self.wfile.flush()

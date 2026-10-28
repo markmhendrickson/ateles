@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import http.client
 import importlib.util
+import io
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -219,6 +220,59 @@ def test_response_streams_before_upstream_finishes(upstream, proxy_port):
     conn.close()
     assert upstream.released_in_time is True
     assert received == b"data: a\n\ndata: b\n\n"
+
+
+class _MemorySocket:
+    def __init__(self, response):
+        self.response = response
+
+    def makefile(self, mode):
+        return io.BytesIO(self.response)
+
+
+def _relay_memory_response(payload, declared_length):
+    upstream_wire = (
+        b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nContent-Type: text/event-stream\r\n\r\n"
+        % declared_length
+        + payload
+    )
+    upstream = http.client.HTTPResponse(_MemorySocket(upstream_wire))
+    upstream.begin()
+    handler = neotoma_proxy._ProxyHandler.__new__(neotoma_proxy._ProxyHandler)
+    handler.wfile = io.BytesIO()
+    handler.request_version = "HTTP/1.1"
+    handler.requestline = "GET /mcp HTTP/1.1"
+    handler.close_connection = False
+    handler._relay(upstream, "GET", "/mcp", 0)
+    downstream = http.client.HTTPResponse(_MemorySocket(handler.wfile.getvalue()))
+    downstream.begin()
+    assert downstream.status == 200
+    assert downstream.getheader("Transfer-Encoding") == "chunked"
+    return downstream, handler
+
+
+def test_truncated_content_length_response_is_not_cleanly_terminated(caplog):
+    downstream, handler = _relay_memory_response(b"ab", 50)
+    with pytest.raises(http.client.IncompleteRead) as error:
+        downstream.read()
+    assert error.value.partial == b"ab"
+    assert handler.close_connection is True
+    assert "neotoma proxy GET /mcp upstream truncated with 48 bytes outstanding" in caplog.text
+
+
+def test_zero_byte_truncated_content_length_response_is_not_cleanly_terminated(caplog):
+    downstream, handler = _relay_memory_response(b"", 50)
+    with pytest.raises(http.client.IncompleteRead) as error:
+        downstream.read()
+    assert error.value.partial == b""
+    assert handler.close_connection is True
+    assert "neotoma proxy GET /mcp upstream truncated with 50 bytes outstanding" in caplog.text
+
+
+def test_complete_content_length_response_is_cleanly_terminated():
+    downstream, handler = _relay_memory_response(b"ab", 2)
+    assert downstream.read() == b"ab"
+    assert handler.close_connection is False
 
 
 @pytest.mark.parametrize("method", ["GET", "DELETE"])
