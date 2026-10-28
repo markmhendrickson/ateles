@@ -363,6 +363,21 @@ def test_unexpected_failure_prints_only_the_fixed_envelope(
     assert_no_leak(out, err, logs)
 
 
+def test_failure_outside_the_reads_prints_only_the_fixed_envelope(
+    env, capsys, caplog, monkeypatch
+):
+    # Escapes collect() itself, so only main's last-resort handler stands
+    # between the exception text (carrying a credential) and the output.
+    def boom(cls):
+        raise RuntimeError(f"{SENTINEL} {TOKEN}")
+
+    monkeypatch.setattr(fly_runner.FlyConfig, "from_env", classmethod(boom))
+    code, out, err, logs = run(capsys, caplog, [], Fake({}))
+    assert code == 2 and out == fly_machine_status.FALLBACK_OUTPUT + "\n" and err == ""
+    assert "Traceback" not in out + err
+    assert_no_leak(out, err, logs)
+
+
 def test_interruption_prints_a_fixed_envelope(env, capsys, caplog, monkeypatch):
     def interrupt(*a, **k):
         raise KeyboardInterrupt(SENTINEL)
