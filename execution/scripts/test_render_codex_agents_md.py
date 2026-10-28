@@ -200,7 +200,10 @@ class TestOmissions(unittest.TestCase):
         )
         source = CLAUDE_MD.read_text()
         for requirement in requirements:
-            self.assertIn(requirement, source)
+            self.assertTrue(
+                requirement in source,
+                f"Expected canonical clause missing: {requirement}",
+            )
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "AGENTS.md"
             generated = run("--out", str(out))
