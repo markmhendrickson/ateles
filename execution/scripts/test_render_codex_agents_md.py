@@ -357,6 +357,43 @@ class TestProjectionBoundaries(unittest.TestCase):
             self.assertEqual(out.read_bytes(), current + suffix)
             self.assertEqual(run("--out", str(out), "--check").returncode, EXIT_OK)
 
+    def test_legacy_header_after_human_prefix_refuses_ambiguous_migration(self):
+        sys.path.insert(0, str(SCRIPT.parent))
+        import render_codex_agents_md as mod
+
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp) / "AGENTS.md"
+            self.assertEqual(run("--out", str(out)).returncode, EXIT_OK)
+            current = out.read_bytes()
+            human = b"Human prefix must remain exact\r\n"
+            original = human + (mod.LEGACY_HEADER + "\n").encode() + current
+            out.write_bytes(original)
+            for mode in ((), ("--check",)):
+                with self.subTest(mode=mode):
+                    result = run("--out", str(out), *mode)
+                    self.assertEqual(result.returncode, EXIT_USAGE)
+                    self.assertIn(
+                        "legacy generated header follows user content", result.stderr
+                    )
+                    self.assertEqual(out.read_bytes(), original)
+
+    def test_exact_legacy_header_without_markers_does_not_establish_ownership(self):
+        sys.path.insert(0, str(SCRIPT.parent))
+        import render_codex_agents_md as mod
+
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp) / "AGENTS.md"
+            original = (
+                mod.LEGACY_HEADER + "\nHuman notes without a managed region\r\n"
+            ).encode()
+            out.write_bytes(original)
+            for mode in ((), ("--check",)):
+                with self.subTest(mode=mode):
+                    self.assertEqual(
+                        run("--out", str(out), *mode).returncode, EXIT_USAGE
+                    )
+                    self.assertEqual(out.read_bytes(), original)
+
     def test_empty_source_and_symlink_target_fail_closed(self):
         with TemporaryDirectory() as tmp:
             source, out, real = (
