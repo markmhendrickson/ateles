@@ -164,7 +164,7 @@ class TestCheckFails(unittest.TestCase):
             source = Path(tmp) / "CLAUDE.md"
             source.write_text(
                 CLAUDE_MD.read_text(encoding="utf-8")
-                + "\n- **Never run a migration against prod without a dry "
+                + "\n## New standing requirements\n\n- **Never run a migration against prod without a dry "
                 "run.** Planted.\n",
                 encoding="utf-8",
             )
