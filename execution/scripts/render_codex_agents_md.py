@@ -18,10 +18,8 @@ error (no write). Stdlib only; no network, credentials or configuration writes.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.util
 import os
-import re
 import sys
 import tempfile
 from pathlib import Path
@@ -95,65 +93,31 @@ Do not install or change hooks or configuration as a consequence of rendering.
 
 All source constraints and deliberately unresolved conflict pairs below retain
 their authority. Descriptive implementation evidence is not a new permission.
+Historical status, identifiers and described steps do not admit new work,
+establish live ownership, renew exceptions or expand authority.
 """
-
-# Only these reviewed non-policy sections are omitted (ignoring edge whitespace). A new clause in
-# one changes its digest and refuses generation/checking until it is reviewed;
-# a heading-pattern filter could silently drop a future standing instruction.
-SECTION_OMISSIONS: dict[str, tuple[str, str]] = {
-    "Swarm governance layer": (
-        "456129cdb024e5701bea731db86ba0d7121c7dd35ce0542d1c69505bb3a2a994",
-        "Historical schema inventory referencing the omitted orientation table, not standing instructions.",
-    ),
-    "Key entity IDs": (
-        "83b401d1cb10dbcf373bb0971fda17588566c4ea1d76d5de037978fcd5cc8827",
-        "Operator-specific orientation identifiers, not portable standing instructions.",
-    ),
-    "Current phase blockers (Phase 5–6)": (
-        "2f964d7c942fa90e144f8700dbf5043b25c565052dd376a7633d61a45cdec301",
-        "Historical execution/status and credential setup, not standing instructions.",
-    ),
-    "Recently resolved": (
-        "f1d519df96d07a67a6dd05e2c45d28c6005015d07406945989171490f834faf1",
-        "Historical implementation changelog; ongoing constraints are preserved in their canonical sections.",
-    ),
-}
-
-# Kept as named witnesses for the existing rule-identity extractor. Mechanism
-# bullets are now retained as Claude-specific references, not silently omitted.
-DELIBERATE_OMISSIONS = {
-    "Secrets management — SOPS+age, snapshots in the PRIVATE `ateles-private` repo (Design B)": "Historical changelog; exact section omission is digest-bound.",
-    "Issues sync runaway": "Historical changelog; exact section omission is digest-bound.",
-    "Post-checkout hook in worktrees": "Historical changelog; exact section omission is digest-bound.",
-}
 
 # The old renderer put this machine-authored header outside its markers. Only
 # that exact generated prefix may migrate; arbitrary human bytes never do.
 LEGACY_HEADER = "# Ateles / Neotoma — standing operator instructions (Codex)\n\n**This file is generated. Do not hand-edit inside the generated markers.**\nSource of truth: `CLAUDE.md` on `origin/main` of the `ateles` repo.\nRegenerate with `execution/scripts/render_codex_agents_md.py`; `--check` holds\nit equal to its source in `scripts/lint.sh`.\n\nThese are standing operator instructions, not suggestions. Each was set or\nre-stated because it was broken and cost real work. They are reproduced here\nbecause Codex inlines this file into every session, the same way Claude Code\nre-injects `CLAUDE.md` after every compaction — an instruction that lives only\nin conversation is lost at the first context boundary.\n\n## What is different about running in Codex\n\n`CLAUDE.md` documents several rules as *mechanically enforced* by Claude Code\nhooks (`git_stash_guard.py`, `gmail_send_gate.py`,\n`sibling_repo_worktree_guard.py`, `decision_shape_gate.py`,\n`stop_finalizer.py`). **Those hooks do not run in Codex.** Codex has its own\nhook mechanism (`session_start_command` / `session_end_command` in\n`~/.codex/config.toml`), and as of this writing it carries session-anchoring\nonly, not any of the guards.\n\nSo in Codex every rule below is enforced by **you reading it**, with no\nmechanism behind it. Where a rule names a hook as its enforcement, treat the\nrule as fully binding and the hook as absent. The two that have bitten hardest\nwith no guard in place:\n\n- **`git stash` is not blocked here.** Never run it in any form.\n- **A Gmail send is not gated here.** No `gws gmail ... drafts update`,\n  `drafts send`, or `messages send` without a per-message operator approval.\n\n## Resuming a workstream\n\nTo pick up an Ateles or Neotoma workstream that stopped mid-flight, use the\n`continue-session` skill (`~/.codex/skills/continue-session/`). It derives\npresent state rather than asserting it, and it carries these same constraints.\n"
 
 
-def project_source(source_text: str) -> tuple[str, list[str]]:
+def project_source(source_text: str) -> str:
+    """Retain the complete canonical source without classifying its sections.
+
+    A historical or inventory heading can contain an ongoing restriction.
+    Neither its name nor a digest proves that any clause may be omitted.
+    Historical data remains context, not new task admission or permission.
+    """
     if not source_text.strip():
         die("source is empty; the check did NOT run")
     if BEGIN in source_text or END in source_text:
         die("source contains target ownership markers; refusing ambiguous input")
-    kept, honoured = [], []
-    for section in re.split(r"(?=^## )", source_text, flags=re.MULTILINE):
-        title = section.splitlines()[0][3:] if section.startswith("## ") else None
-        if title in SECTION_OMISSIONS:
-            digest, reason = SECTION_OMISSIONS[title]
-            if hashlib.sha256(section.strip().encode()).hexdigest() != digest:
-                die(
-                    f"omitted section {title!r} changed; review its full content before omitting it"
-                )
-            honoured.append(f"{title}: {reason}")
-        else:
-            kept.append(section)
-    return "".join(kept).strip(), honoured
+    return source_text.strip()
 
 
 def render(source_text: str) -> str:
-    body, _ = project_source(source_text)
+    body = project_source(source_text)
     return f"{BEGIN}\n{HEADER.rstrip()}\n\n## Canonical source (Claude Code mechanisms are contextual)\n\n{body}\n{END}"
 
 
@@ -207,15 +171,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         source_text = args.source.read_text(encoding="utf-8")
         expected = render(source_text)
-        _, honoured = project_source(source_text)
         module = load_extractor()
         source_rules = rule_keys(module, source_text, str(args.source))
         projected_rules = rule_keys(module, expected, "projection")
-        omitted = {module.normalize(k) for k in DELIBERATE_OMISSIONS}
         missing = [
             r
             for k, r in source_rules.items()
-            if r.kind == "bullet" and k not in projected_rules and k not in omitted
+            if r.kind == "bullet" and k not in projected_rules
         ]
         if missing:
             die(
@@ -258,8 +220,6 @@ def main(argv: list[str] | None = None) -> int:
                 prefix = prefix[len(LEGACY_HEADER) + 1 :]
             atomic_write(args.out, prefix + expected + suffix)
             print(f"rendered {args.out.name} ({args.out.stat().st_size} bytes)")
-        if honoured:
-            print("Deliberate omissions honoured: " + "; ".join(honoured))
         print(
             f"OK: complete source projection current ({len(source_rules)} rule identities checked)"
         )

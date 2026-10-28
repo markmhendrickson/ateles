@@ -12,7 +12,7 @@ invocation against that target. These tests exercise the command's failure modes
   what a hand-maintained copy does over time;
 * `CLAUDE.md` GAINING a rule the rendered copy lacks, which is the realistic
   drift direction — the source moves and the copy does not;
-* changed content in an explicitly omitted section, which requires review before generation.
+* ongoing constraints hidden under inventory/history headings, which must survive verbatim.
 
 Every test writes to a temporary `--out`, never the operator's real Codex home.
 
@@ -191,34 +191,77 @@ class TestCheckFails(unittest.TestCase):
 
 
 class TestOmissions(unittest.TestCase):
-    """A suppression nobody checks is how a real rule goes missing."""
+    """Regression coverage for constraints once lost through section omissions."""
 
-    def test_omissions_are_reported_not_silent(self) -> None:
+    def test_ongoing_constraints_in_historical_sections_survive(self):
+        requirements = (
+            "encrypted snapshots must NOT live here",
+            "Same private-repo rule applies to neotoma (public product) + openclaw (public fork): their operator secrets materialize from `ateles-private`, never committed to those repos.",
+        )
+        source = CLAUDE_MD.read_text()
+        for requirement in requirements:
+            self.assertIn(requirement, source)
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "AGENTS.md"
-            run("--out", str(out))
-            result = run("--check", "--out", str(out))
-            self.assertIn("Deliberate omissions honoured", result.stdout)
+            generated = run("--out", str(out))
+            self.assertEqual(generated.returncode, EXIT_OK, generated.stderr)
+            self.assertEqual(run("--out", str(out), "--check").returncode, EXIT_OK)
+            original = out.read_text()
+            for requirement in requirements:
+                self.assertTrue(
+                    requirement in original,
+                    f"Missing ongoing source clause: {requirement}",
+                )
+            for requirement in requirements:
+                with self.subTest(requirement=requirement):
+                    out.write_text(original.replace(requirement, "[removed]"))
+                    self.assertEqual(
+                        run("--out", str(out), "--check").returncode, EXIT_LOST
+                    )
+            out.write_text(original)
+            self.assertEqual(run("--out", str(out), "--check").returncode, EXIT_OK)
 
-    def test_every_omission_carries_a_reason(self) -> None:
-        sys.path.insert(0, str(SCRIPT.parent))
-        import render_codex_agents_md as mod  # noqa: E402
-
-        self.assertTrue(mod.DELIBERATE_OMISSIONS)
-        for key, reason in mod.DELIBERATE_OMISSIONS.items():
-            self.assertTrue(reason.strip(), f"{key} has no stated reason")
-
-    def test_current_source_omission_digests_are_accepted(self) -> None:
-        """The current source is a positive witness for reviewed omissions.
-
-        The changed-omission-section test separately exercises refusal; this
-        positive round-trip uses a temporary target and proves no live freshness.
-        """
+    def test_complete_actual_source_survives_without_section_classification(self):
+        # Independent witness: compare the raw canonical source, not the
+        # projector's own expected result. Covers paragraphs and table rows,
+        # including reservations hidden under an inventory/history heading.
+        source = CLAUDE_MD.read_text().strip()
+        self.assertTrue(source)
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "AGENTS.md"
-            run("--out", str(out))
-            result = run("--check", "--out", str(out))
-            self.assertEqual(result.returncode, EXIT_OK, result.stderr)
+            generated = run("--out", str(out))
+            self.assertEqual(generated.returncode, EXIT_OK, generated.stderr)
+            self.assertTrue(
+                source in out.read_text(),
+                f"Complete canonical source missing ({len(source.encode())} bytes)",
+            )
+
+    def test_source_content_survives_every_formerly_omitted_heading(self):
+        headings = (
+            "Key entity IDs",
+            "Current phase blockers (Phase 5–6)",
+            "Recently resolved",
+            "Swarm governance layer",
+        )
+        for heading in headings:
+            with self.subTest(heading=heading), TemporaryDirectory() as tmp:
+                source, out = Path(tmp) / "CLAUDE.md", Path(tmp) / "AGENTS.md"
+                # Deliberately has no bold rule lead: identity checks alone
+                # cannot establish preservation of a paragraph or table row.
+                raw = f"# Fixture source\n\n## {heading}\n\nA continuing restriction remains binding here.\n"
+                source.write_text(raw)
+                generated = run("--source", str(source), "--out", str(out))
+                self.assertEqual(generated.returncode, EXIT_OK, generated.stderr)
+                self.assertTrue(
+                    raw.strip() in out.read_text(),
+                    f"Source content lost under {heading}",
+                )
+                self.assertEqual(
+                    run(
+                        "--source", str(source), "--out", str(out), "--check"
+                    ).returncode,
+                    EXIT_OK,
+                )
 
 
 class TestManagedRegionContract(unittest.TestCase):
@@ -250,16 +293,11 @@ class TestManagedRegionContract(unittest.TestCase):
                 self.assertEqual(out.read_bytes(), before)
 
     def test_source_body_change_with_same_rule_identity_fails(self):
-        # The old identity-only checker passes this exact mutation. Clear only
-        # its unrelated whole-source omission fixtures for the small witness.
+        # A body change must fail even when the rule identity is unchanged.
         sys.path.insert(0, str(SCRIPT.parent))
         import render_codex_agents_md as mod
-        from unittest.mock import patch
 
-        with (
-            TemporaryDirectory() as tmp,
-            patch.dict(mod.DELIBERATE_OMISSIONS, {}, clear=True),
-        ):
+        with TemporaryDirectory() as tmp:
             source, out = Path(tmp) / "CLAUDE.md", Path(tmp) / "AGENTS.md"
             source.write_text(
                 "- **Never hardcode secrets, IBANs, or contact details** — always read from env or parquet.\n"
@@ -329,20 +367,35 @@ class TestProjectionBoundaries(unittest.TestCase):
                 EXIT_OK,
             )
 
-    def test_changed_omission_section_refuses_without_writing(self):
+    def test_new_constraint_in_historical_section_changes_the_projection(self):
         with TemporaryDirectory() as tmp:
             source, out = Path(tmp) / "CLAUDE.md", Path(tmp) / "AGENTS.md"
+            source.write_text(CLAUDE_MD.read_text())
+            self.assertEqual(
+                run("--source", str(source), "--out", str(out)).returncode, EXIT_OK
+            )
+            addition = (
+                "A newly added restriction under a historical heading must survive."
+            )
             source.write_text(
-                CLAUDE_MD.read_text().replace(
-                    "## Recently resolved",
-                    "## Recently resolved\n\n- **New binding rule.** Must survive.",
+                source.read_text().replace(
+                    "## Recently resolved", "## Recently resolved\n\n" + addition
                 )
             )
-            for mode in ((), ("--check",)):
-                result = run("--source", str(source), "--out", str(out), *mode)
-                self.assertEqual(result.returncode, EXIT_USAGE)
-                self.assertIn("omitted section", result.stderr)
-                self.assertFalse(out.exists())
+            self.assertEqual(
+                run("--source", str(source), "--out", str(out), "--check").returncode,
+                EXIT_LOST,
+            )
+            self.assertEqual(
+                run("--source", str(source), "--out", str(out)).returncode, EXIT_OK
+            )
+            self.assertTrue(
+                addition in out.read_text(), "New source restriction was lost"
+            )
+            self.assertEqual(
+                run("--source", str(source), "--out", str(out), "--check").returncode,
+                EXIT_OK,
+            )
 
     def test_legacy_machine_header_migrates_without_touching_human_suffix(self):
         sys.path.insert(0, str(SCRIPT.parent))
