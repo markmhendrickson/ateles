@@ -39,6 +39,7 @@ import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import httpx
 
@@ -119,6 +120,33 @@ def unreadable_gate(head: str, why: str) -> CheckGate:
         reason=f"head {short}: check state unreadable ({why}) — holding, not passing",
         unreadable=why,
     )
+
+
+def live_pr_problem(
+    pr: object, requested_head: str, *, normalise_sha: Callable[[str], str]
+) -> str | None:
+    """Validate the live REST PR snapshot before interpreting any check results.
+
+    Both callers use the review reader's existing full-SHA normalizer. This
+    validates which artifact is eligible; ``evaluate_checks`` alone still
+    decides whether its checks are green. Missing/malformed fields never
+    substitute the requested head or an assumed open state.
+    """
+    if not isinstance(pr, dict):
+        return "the live PR could not be read"
+    if pr.get("state") != "open":
+        return "the live PR state is not a readable open state"
+    head = pr.get("head")
+    raw_head = head.get("sha") if isinstance(head, dict) else None
+    live_head = normalise_sha(raw_head) if isinstance(raw_head, str) else ""
+    expected = normalise_sha(requested_head) if isinstance(requested_head, str) else ""
+    if not live_head or not expected or live_head != expected:
+        return "the live PR head is missing or differs from the requested review head"
+    base = pr.get("base")
+    base_ref = base.get("ref") if isinstance(base, dict) else None
+    if not isinstance(base_ref, str) or not base_ref.strip():
+        return "the live PR base branch is unreadable"
+    return None
 
 
 def _evaluate_checks():

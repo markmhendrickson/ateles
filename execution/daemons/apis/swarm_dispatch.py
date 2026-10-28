@@ -7435,23 +7435,18 @@ class SwarmDispatcher:
         ref = f"{trigger.repository}#{trigger.number}"
         key = (trigger.repository.casefold(), trigger.number)
         pr = await self._fetch_pr(trigger.repository, trigger.number)
-        if pr is not None and pr.get("state") not in (None, "open"):
+        if isinstance(pr, dict) and pr.get("state") == "closed":
             self._panel_ci_holds.pop(key, None)
             return True
-        live_head = _normalise_full_sha(((pr or {}).get("head") or {}).get("sha", ""))
-        expected_head = _normalise_full_sha(trigger.head_sha or "")
-        head = live_head or expected_head
-        if pr is None:
-            gate = panel_check_gate.unreadable_gate(
-                head, "the PR could not be fetched"
-            )
-        elif not live_head or not expected_head or live_head != expected_head:
-            gate = panel_check_gate.unreadable_gate(
-                head, "the live PR head is missing or differs from the requested review head"
-            )
+        head = _normalise_full_sha(trigger.head_sha) if isinstance(trigger.head_sha, str) else ""
+        problem = panel_check_gate.live_pr_problem(
+            pr, trigger.head_sha, normalise_sha=_normalise_full_sha
+        )
+        if problem:
+            gate = panel_check_gate.unreadable_gate(head, problem)
         else:
             gate = await self._read_head_check_gate(
-                trigger.repository, head, ((pr.get("base") or {}).get("ref") or "")
+                trigger.repository, head, pr["base"]["ref"]
             )
         if gate.green:
             if self._panel_ci_holds.pop(key, None) is not None:

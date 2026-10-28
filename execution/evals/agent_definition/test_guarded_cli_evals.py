@@ -38,7 +38,9 @@ def test_guarded_cli_requires_available_canonical_definition(monkeypatch, tmp_pa
     # CI readiness is an external input, independent of the role-loading
     # behavior this offline eval judges. Keep the real seating gate and supply
     # a known-green head rather than reading GitHub or the host's credentials.
-    monkeypatch.setattr(runner, "current_pr_base_ref", lambda **kw: "main")
+    monkeypatch.setattr(runner, "current_pr_metadata", lambda **kw: {
+        "state": "open", "head": {"sha": "a" * 40}, "base": {"ref": "main"},
+    })
 
     async def green_checks(repository, head_sha, base_ref):
         assert repository == "example/project" and head_sha == "a" * 40

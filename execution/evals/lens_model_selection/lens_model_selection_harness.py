@@ -210,7 +210,9 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         mp.setattr(active_runner, "current_pr_head", lambda **kw: HEAD)
         # Remote check readiness is fixture data; model selection and the
         # real launch/validation path remain under test without GitHub reads.
-        mp.setattr(active_runner, "current_pr_base_ref", lambda **kw: "main")
+        mp.setattr(active_runner, "current_pr_metadata", lambda **kw: {
+            "state": "open", "head": {"sha": HEAD}, "base": {"ref": "main"},
+        })
 
         async def green_checks(repository, head_sha, base_ref):
             assert repository == "eval-owner/eval-repo" and head_sha == HEAD

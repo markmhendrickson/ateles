@@ -204,6 +204,22 @@ def test_a_closed_pr_is_not_held(world):
     assert state["gate_reads"] == 0
 
 
+@pytest.mark.parametrize("pr", [
+    {}, [],
+    {key: value for key, value in _pr().items() if key != "state"},
+    *(_pr(state=value) for value in (None, "unknown", "OPEN", " open ", 1)),
+    *({**_pr(), "head": value} for value in ([], {"sha": 1})),
+    *({**_pr(), "base": value} for value in ([], {}, {"ref": None}, {"ref": 1})),
+])
+def test_invalid_live_metadata_cannot_release_even_green_checks(world, pr):
+    d, state = world
+    state.update(pr=pr, gate=GREEN)
+    _run(d._handle_pr(_trigger()))
+    assert state["seated"] == []
+    assert state["gate_reads"] == 0
+    assert KEY in d._panel_ci_holds
+
+
 @pytest.mark.parametrize("live_head", [OTHER_HEAD, ""], ids=["changed", "missing"])
 def test_green_checks_for_another_or_unknown_live_head_cannot_release_review(world, live_head):
     d, state = world

@@ -2451,24 +2451,25 @@ def current_pr_head(*, repo: str, pr: int) -> str:
         return ""
 
 
-def current_pr_base_ref(*, repo: str, pr: int) -> str:
-    """Return the PR's base branch name via `gh`, or "" if unreadable.
+def current_pr_metadata(*, repo: str, pr: int) -> dict | None:
+    """Read one live REST PR snapshot with repository-scoped credentials.
 
-    Its own function for the same reason as `current_pr_head`: tests patch
-    exactly this. An empty base makes the check gate treat every pending check
-    as required, which is the stricter reading.
+    REST uses the same state/head/base shape as Apis. No partial CLI result or
+    failed read may supply an assumed state or substitute a requested head.
     """
-    result = subprocess.run(
-        ["gh", "pr", "view", str(pr), "-R", repo, "--json", "baseRefName"],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=repo_scoped_env(repo),
-    )
     try:
-        return json.loads(result.stdout or "{}").get("baseRefName", "") or ""
-    except json.JSONDecodeError:
-        return ""
+        result = subprocess.run(
+            ["gh", "api", f"repos/{repo}/pulls/{pr}", "--jq",
+             "{state,head:{sha:.head.sha},base:{ref:.base.ref}}"],
+            capture_output=True, text=True, check=False, timeout=30,
+            env=repo_scoped_env(repo),
+        )
+        if result.returncode != 0:
+            return None
+        snapshot = json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, RepoAccessError, ValueError):
+        return None
+    return snapshot if isinstance(snapshot, dict) else None
 
 
 async def head_checks_hold(target: "LensTarget") -> str | None:
@@ -2481,15 +2482,24 @@ async def head_checks_hold(target: "LensTarget") -> str | None:
     reads checks by the standard the panel-gated approval tool applies, and
     fails closed: an unreadable check state is a hold, never a pass.
     """
-    base_ref = await asyncio.to_thread(
-        current_pr_base_ref, repo=target.repo, pr=target.pr
+    pr = await asyncio.to_thread(
+        current_pr_metadata, repo=target.repo, pr=target.pr
     )
-    gate = await panel_check_gate.read_check_gate(target.repo, target.head, base_ref)
+    problem = panel_check_gate.live_pr_problem(
+        pr, target.head, normalise_sha=swarm_dispatch._normalise_full_sha
+    )
+    if problem:
+        gate = panel_check_gate.unreadable_gate(target.head, problem)
+    else:
+        gate = await panel_check_gate.read_check_gate(
+            target.repo, swarm_dispatch._normalise_full_sha(target.head), pr["base"]["ref"]
+        )
     if gate.green:
         return None
     return (
         f"{target.repo}#{target.pr} lens {target.lens!r} held until the head's "
-        f"checks are green — {gate.reason}"
+        f"checks are green — {gate.reason}. Rerun against the current open PR "
+        "head after its gating checks are green."
     )
 
 
