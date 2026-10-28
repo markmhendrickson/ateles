@@ -36,8 +36,8 @@ canonical_context_entities:
   - operator_profile
   - product_profile
   - locale_profile
-  - channel_config
   - vendor_binding
+  - channel_config
   - calendar_routing_config
 ---
 

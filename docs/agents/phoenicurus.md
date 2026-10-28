@@ -8,6 +8,7 @@ description: Invoke Phoenicurus, the QA agent — test coverage audits, regressi
 tier: T4
 genus: Phoenicurus
 status: active
+aauth_sub: phoenicurus@ateles-swarm
 agent_grant: service
 observation_source_default: llm_summary
 user_invocable: true
@@ -85,6 +86,7 @@ Invoke Phoenicurus, the QA agent — test coverage audits, regression assessment
 | Tier | T4 |
 | Genus | Phoenicurus |
 | Status | active |
+| AAuth sub | phoenicurus@ateles-swarm |
 | Agent grant | service |
 | Observation source | llm_summary |
 | Triggers | phoenicurus, /phoenicurus |

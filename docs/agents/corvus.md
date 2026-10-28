@@ -336,13 +336,18 @@ The operator-interface agent (roster role operator_interface) digests these. The
 
 ## GitHub deliverable (swarm pipeline)
 
-When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (exact attribution header, **VERDICT** line, checkbox DoD, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is a **Content / Comms Note**, posted/edited as ONE comment:
+When invoked by the swarm on a GitHub issue or PR, follow the shared SWARM_GITHUB_CONTRACT for comment chrome (exact attribution header, **VERDICT** line, checkbox DoD, edit-not-duplicate, Neotoma backlinks). Your role-specific deliverable is a **Content / Comms Note**, posted/edited as ONE comment.
+
+**Fixed position.** The comment, and the reply you return, start with at most one `<!-- review:content commit=<full40hex> -->` marker line (optional); after it, the FIRST line of your reply must be your header; the second line your verdict. Nothing else goes above the header — no plain `review:content` line, heading, or other text — and the rest of the review follows below the verdict line.
+
+**Verdict** (the second line, directly under your header) — `COMMENT` (content guidance) or `REQUEST_CHANGES` (a `[BLOCKING]` doc/comms gap).
+
+The rest of the note follows below the verdict line:
 
 - **Doc impact** — which docs need adding/updating.
 - **Changelog entry** — the user-facing one-liner for the release notes.
 - **External-comms hook** — is there anything worth surfacing publicly (and to whom).
 - **Naming / voice consistency** — does terminology match the product's conventions.
-- **Verdict** — `COMMENT` (content guidance) or `REQUEST_CHANGES` (a `[BLOCKING]` doc/comms gap).
 
 Keep it structured, not an essay. Reference the Neotoma entities (issue / plan_contribution) you create or read.
 
