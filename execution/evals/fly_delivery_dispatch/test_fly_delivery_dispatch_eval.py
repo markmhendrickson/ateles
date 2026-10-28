@@ -29,6 +29,7 @@ import build_delivery as delivery  # noqa: E402
 import fly_delivery_eval as job_eval  # noqa: E402
 import skill_runner  # noqa: E402
 import fly_runner  # noqa: E402
+from lib import github_app_token  # noqa: E402
 from lib.daemon_runtime import artifact_resolver  # noqa: E402
 from test_fly_runner import FakeFly, make_executor, FLY_TOKEN  # noqa: E402
 from test_swarm_dispatch import (  # noqa: E402
@@ -80,7 +81,7 @@ def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
         status="pending",
     )
 
-    def stand_in_gh(repo, number):
+    def stand_in_gh(repo, number, token=None):
         # GitHub's answer, built from the stand-in remote and PR API rather
         # than from the runner's report: the branch head is read off the bare
         # remote the job pushed to.
@@ -96,6 +97,10 @@ def run_scenario(scenario, tmp_path, monkeypatch, *, mutation=None):
         }), ""
 
     monkeypatch.setattr(artifact_resolver, "_gh_pr_view", stand_in_gh)
+    # The read-back mints a PR-opener App token for the delivered repository.
+    monkeypatch.setattr(
+        github_app_token, "identity_token", lambda identity, repo=None: "readback-token"
+    )
     monkeypatch.setattr(artifact_resolver.time, "sleep", lambda s: None)
 
     async def run(skill, prompt, **kw):

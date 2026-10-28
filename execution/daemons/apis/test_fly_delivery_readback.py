@@ -213,3 +213,30 @@ def test_the_task_summary_is_logged_only_after_the_readback(monkeypatch, caplog,
         assert not got.ok and "Read-back FAILED: commit differs." in lines[0]
     else:
         assert got.ok and lines[0].endswith("Read-back: passed.")
+
+
+def test_the_readback_is_made_with_the_pr_opener_app_for_that_repository(
+    monkeypatch, github_pr
+):
+    launch(monkeypatch)
+    got = asyncio.run(run_task())
+    assert got.ok
+    assert github_pr["mints"] == [("pr_opener", REPO)]
+    assert github_pr["tokens"] and all(
+        t == f"app-token-for-{REPO}" for t in github_pr["tokens"]
+    )
+
+
+def test_no_pr_opener_token_means_the_delivery_is_not_verified(
+    monkeypatch, github_pr
+):
+    from lib import github_app_token
+
+    def refuse(identity, repo=None):
+        raise github_app_token.AppTokenError("GitHub App not configured")
+
+    monkeypatch.setattr(github_app_token, "identity_token", refuse)
+    launch(monkeypatch)
+    got = asyncio.run(run_task())
+    assert not got.ok and "read-back credential is unavailable" in got.error
+    assert github_pr["tokens"] == []

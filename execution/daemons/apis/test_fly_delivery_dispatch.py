@@ -19,6 +19,7 @@ import apis
 import build_delivery as delivery
 import fly_runner
 import skill_runner
+from lib import github_app_token
 from lib.daemon_runtime import artifact_resolver
 from skill_runner import SkillResult
 from test_swarm_dispatch import (
@@ -73,12 +74,21 @@ def pr_answer(**over):
 @pytest.fixture(autouse=True)
 def github_pr(monkeypatch):
     """The real pull request as GitHub would return it for `gh pr view`. A test
-    changes ``box["answer"]`` to put a different pull request on the remote."""
-    box = {"answer": (0, json.dumps(pr_answer()), "")}
+    changes ``box["answer"]`` to put a different pull request on the remote.
 
-    def view(repo, number):
+    The read-back credential is a stand-in PR-opener App token; ``box`` records
+    each mint (identity, repo) and the token every read was made with."""
+    box = {"answer": (0, json.dumps(pr_answer()), ""), "mints": [], "tokens": []}
+
+    def mint(identity, repo=None):
+        box["mints"].append((identity, repo))
+        return f"app-token-for-{repo}"
+
+    def view(repo, number, token=None):
+        box["tokens"].append(token)
         return box["answer"]
 
+    monkeypatch.setattr(github_app_token, "identity_token", mint)
     monkeypatch.setattr(artifact_resolver, "_gh_pr_view", view)
     monkeypatch.setattr(artifact_resolver.time, "sleep", lambda s: None)
     return box
