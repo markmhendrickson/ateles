@@ -1746,6 +1746,7 @@ async def dispatch_task(
     gate_override: bool = False,
     snapshot_hydrated: bool | None = None,
     detach_after_accept: bool = False,
+    run_key_override: str | None = None,
 ) -> None:
     """
     Route a task to the appropriate T4 skill and spawn it via a bundled-plan CLI.
@@ -1771,9 +1772,14 @@ async def dispatch_task(
             EXECUTING, while completing the harness run in the background.
             Used by the request/response checkpoint-release path so client
             cancellation cannot abort work that the operator already released.
+        run_key_override: Stable identity supplied by a retry or approval owner.
     """
     title = snapshot.get("title", "(untitled)")
     current_status = snapshot.get("status")
+    dispatch_run_key = run_key_override or (
+        f"{trigger}-{snapshot.get('attempt', snapshot.get('attempt_count', 0))}"
+    )
+    lifecycle_key = run_key_override or trigger
 
     # ── Terminal guard: a finished task is not dispatchable (ateles#1038) ────
     #
@@ -2025,7 +2031,7 @@ async def dispatch_task(
         # An approved release consumes the prior hold. Supplying the empty
         # reason produces taskreason-apis-{task_id}-routed-approved.
         reason="" if gate_override else None,
-        key_suffix=trigger,
+        key_suffix=lifecycle_key,
     )
     if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.ROUTED):
         log.warning(
@@ -2060,7 +2066,7 @@ async def dispatch_task(
                 from_status=TaskStatus.ROUTED.value,
                 reason=f"readiness {assessment.score:.2f}<{assessment.threshold:.2f}: "
                 f"missing {', '.join(assessment.missing)}",
-                key_suffix=trigger,
+                key_suffix=lifecycle_key,
             )
             if RUN_EMAIL:
                 send_run_email(
@@ -2341,7 +2347,7 @@ async def dispatch_task(
         TaskStatus.EXECUTING,
         handler=DAEMON_NAME,
         from_status=TaskStatus.ROUTED.value,
-        key_suffix=trigger,
+        key_suffix=lifecycle_key,
     )
     if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.EXECUTING):
         log.warning(
@@ -2358,9 +2364,7 @@ async def dispatch_task(
     async def _finish_dispatch() -> None:
         # E1/E2: this run's thread. run_key keys it to the attempt so SSE
         # replays reuse it while a genuine retry opens a fresh run.
-        run_key = (
-            f"{trigger}-{snapshot.get('attempt', snapshot.get('attempt_count', 0))}"
-        )
+        run_key = dispatch_run_key
 
         # E1: open and verify one conversation + agent_session for this
         # execution run. When capture is required, the durable provenance is a
@@ -2368,14 +2372,112 @@ async def dispatch_task(
         run_conversation_id: str | None = None
         run_agent_session_id: str | None = None
         run_session = None
-        if RUN_CONVERSATIONS:
-            run_session = create_run_session(
-                task_id=entity_id,
-                plan_id=snapshot.get("plan_id") or None,
-                agent=skill,
-                run_key=run_key,
-                title=f"{skill} run · {title[:60]}",
+        recovery_reason = "Verifying run records (up to 45 seconds); worker not started"
+        prior_reason = "" if gate_override else (snapshot.get("blocked_reason") or "")
+        prelaunch_version: str | None = None
+        marker_owned = False
+
+        def _conditional_prelaunch(field: str, value: str, suffix: str) -> bool:
+            nonlocal prelaunch_version
+            write = set_task_field_if_version(
+                entity_id, field, value, expected_version=prelaunch_version,
+                handler=DAEMON_NAME, key_suffix=f"{run_key}-{suffix}",
             )
+            if write.ok:
+                # A committed write without a new version cannot authorize the
+                # next field. Never obtain a replacement token mid-sequence.
+                prelaunch_version = write.version
+            return bool(write.ok and write.version)
+
+        async def _settle_prelaunch(reason: str, suffix: str) -> None:
+            if not prelaunch_version:
+                return
+            if not await _prelaunch_io(
+                _conditional_prelaunch, "blocked_reason", reason, f"{suffix}-reason"
+            ):
+                return
+            await _prelaunch_io(
+                _conditional_prelaunch, "status", TaskStatus.FAILED.value,
+                f"{suffix}-status",
+            )
+
+        async def _settle_cancelled_prelaunch() -> None:
+            if not marker_owned:
+                return
+            current = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+            if (
+                current
+                and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
+                and current.get("blocked_reason", "") in {prior_reason, recovery_reason, ""}
+            ):
+                await _settle_prelaunch(
+                    "Dispatch cancelled during run verification; worker not started",
+                    "cancelled",
+                )
+
+        async def _prelaunch_io(fn, *args, **kwargs):
+            operation = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+            try:
+                return await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                # Let an in-flight write/read finish before deciding which
+                # task state still belongs to this cancelled dispatch.
+                try:
+                    await operation
+                except Exception:  # noqa: BLE001 — settle from current state
+                    pass
+                await _settle_cancelled_prelaunch()
+                raise
+
+        if RUN_CONVERSATIONS:
+            current, prelaunch_version = await _prelaunch_io(
+                fetch_task_snapshot_and_version, entity_id
+            )
+            recovery_visible = bool(
+                current and prelaunch_version
+                and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
+                and current.get("blocked_reason", "") == prior_reason
+            )
+            if recovery_visible:
+                recovery_visible = await _prelaunch_io(
+                    _conditional_prelaunch, "blocked_reason", recovery_reason,
+                    "recovering",
+                )
+            if recovery_visible:
+                current = await _prelaunch_io(fetch_task_snapshot, entity_id)
+                recovery_visible = bool(
+                    current and current.get("blocked_reason") == recovery_reason
+                    and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
+                )
+            marker_owned = recovery_visible
+            if recovery_visible:
+                run_session = await _prelaunch_io(
+                    create_run_session,
+                    task_id=entity_id,
+                    plan_id=snapshot.get("plan_id") or None,
+                    agent=skill,
+                    run_key=run_key,
+                    title=f"{skill} run · {title[:60]}",
+                )
+            if run_session:
+                current = await _prelaunch_io(fetch_task_snapshot, entity_id)
+                if not (
+                    current and current.get("blocked_reason") == recovery_reason
+                    and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
+                ):
+                    job.failed(f"task {entity_id} changed during run verification; not started")
+                    return
+                cleared = await _prelaunch_io(
+                    _conditional_prelaunch, "blocked_reason", "", "verified",
+                )
+                if cleared:
+                    current = await _prelaunch_io(fetch_task_snapshot, entity_id)
+                    cleared = bool(
+                        current and current.get("blocked_reason") == ""
+                        and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
+                    )
+                if not cleared:
+                    run_session = None
             if run_session:
                 run_conversation_id = run_session.conversation_id
                 run_agent_session_id = run_session.agent_session_id
@@ -2392,14 +2494,14 @@ async def dispatch_task(
                 log.error(
                     f"[{DAEMON_NAME}] task {entity_id} {reason} — not spawning"
                 )
-                set_task_status(
-                    entity_id,
-                    TaskStatus.FAILED,
-                    handler=DAEMON_NAME,
-                    from_status=TaskStatus.EXECUTING.value,
-                    reason=reason,
-                    key_suffix=trigger,
-                )
+                current = await _prelaunch_io(fetch_task_snapshot, entity_id)
+                if marker_owned and (
+                    current and current.get("blocked_reason", "") in {
+                        prior_reason, recovery_reason, ""
+                    }
+                    and normalize_status(current.get("status")) == TaskStatus.EXECUTING.value
+                ):
+                    await _settle_prelaunch(reason, "failed")
                 notifier.send(
                     f"{skill} not started on {entity_id}: {reason}",
                     priority=Priority.BLOCKER,
@@ -2416,7 +2518,7 @@ async def dispatch_task(
                     role=role,
                     content=content,
                     sender_kind="orchestrator",
-                    idempotency_key=f"runturn-{entity_id}-{stage}-{trigger}",
+                    idempotency_key=f"runturn-{entity_id}-{stage}-{run_key}",
                 )
             if RUN_EMAIL:
                 send_run_email(
@@ -2460,7 +2562,7 @@ async def dispatch_task(
                 handler=DAEMON_NAME,
                 from_status=TaskStatus.EXECUTING.value,
                 reason=f"dispatch raised {type(exc).__name__}: {exc}",
-                key_suffix=trigger,
+                key_suffix=run_key,
             )
             job.failed(
                 f"task {entity_id} → {skill} dispatch failed: {type(exc).__name__}"
@@ -2823,7 +2925,7 @@ async def dispatch_task(
                     handler=DAEMON_NAME,
                     from_status=TaskStatus.EXECUTING.value,
                     result=pending_result,
-                    key_suffix=trigger,
+                    key_suffix=run_key,
                 )
             if run_session and not update_run_session_status(
                 run_session, status="completed"
@@ -2844,7 +2946,7 @@ async def dispatch_task(
                     from_status=TaskStatus.VERIFIED.value,
                     reason=reason,
                     result=pending_result,
-                    key_suffix=trigger,
+                    key_suffix=run_key,
                 )
                 notifier.send(
                     f"{skill} returned successfully on {entity_id}, but {reason}; "
@@ -2947,7 +3049,7 @@ async def dispatch_task(
                 result=pending_result.replace(
                     "provenance=unverified", "provenance=verified"
                 ),
-                key_suffix=trigger,
+                key_suffix=run_key,
             )
             job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
         elif getattr(result, "fly_delivery_status", ""):
@@ -2960,7 +3062,7 @@ async def dispatch_task(
             set_task_status(
                 entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
                 from_status=TaskStatus.EXECUTING.value, reason=reason,
-                result=reason, key_suffix=trigger,
+                result=reason, key_suffix=run_key,
             )
             try:
                 saved = fetch_task_snapshot(entity_id) or {}
@@ -2992,7 +3094,7 @@ async def dispatch_task(
                 handler=DAEMON_NAME,
                 from_status=TaskStatus.EXECUTING.value,
                 reason=reason,
-                key_suffix=trigger,
+                key_suffix=run_key,
             )
             notifier.send(
                 f"{skill} on {entity_id}: {reason}",
@@ -3017,7 +3119,7 @@ async def dispatch_task(
                 handler=DAEMON_NAME,
                 from_status=TaskStatus.EXECUTING.value,
                 reason=reason,
-                key_suffix=trigger,
+                key_suffix=run_key,
             )
             notifier.send(
                 f"{skill} failed on {entity_id} ({reason}) — task marked FAILED",
@@ -4166,6 +4268,7 @@ async def handle_checkpoint_brief(
         notifier=notifier,
         gate_override=True,
         detach_after_accept=detach_after_accept,
+        run_key_override=f"approved-{entity_id}",
     )
     final_task = fetch_task_snapshot(task_id)
     if final_task is None or final_task.get("blocked_reason") != "":
@@ -4391,8 +4494,11 @@ async def main() -> None:
     #    once attempts are exhausted — without blocking the SSE loop.
     watchdog = TaskWatchdog()
 
-    async def watchdog_dispatch(task_id: str, snapshot: dict, trigger: str) -> None:
-        await dispatch_task(task_id, snapshot, trigger, notifier=notifier)
+    async def watchdog_dispatch(task_id: str, snapshot: dict, trigger: str, run_key: str) -> None:
+        await dispatch_task(
+            task_id, snapshot, trigger, notifier=notifier,
+            run_key_override=run_key,
+        )
 
     # 6b. Task reconciliation sweep (ateles#586/#589): the LEVEL-triggered
     #     backstop under the edge-triggered SSE create path. The watchdog above
