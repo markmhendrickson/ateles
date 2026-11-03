@@ -36,7 +36,7 @@ def test_actual_eval(tmp_path, monkeypatch):
                                                 "synthetic_private_fixture_error")
     fixture = {"prior_cleanup_failure": False, "faults": [],
                "original_cleanup": "not_attempted", "planting": "not_started",
-               "errors": []}
+               "errors": [], "cleanup_failure": None}
     def controlled(root):
         if INJECT == "plant_refused":
             def failed_write(path, *args, **kwargs):
@@ -78,6 +78,15 @@ def test_actual_eval(tmp_path, monkeypatch):
                 fixture["planting"] = "refused"
             fixture["errors"] = [cleanup_error(
                 exc, boundary_error=target.runner.rd.RepoWorkError)]
+            # Fixed cleanup metadata only: never the exception reason, repr,
+            # filename, or arbitrary category/status attributes.
+            if type(exc) is target.runner.rd.RepoWorkError:
+                category, status = exc.category, exc.status
+                fixture["cleanup_failure"] = {
+                    "category": category if type(category) is str and category in {
+                        "work_failed", "work_root_refused"} else "unclassified",
+                    "status": status if type(status) is str and status in {
+                        "", "os_error"} else "unclassified"}
             if isinstance(exc, target.runner.rd.RepoWorkError):
                 raise
             # Fixture-only normalization; explicit stage assertions still fail.
@@ -133,6 +142,7 @@ def test_actual_eval(tmp_path, monkeypatch):
             pytest.fail("diagnostic fixture stage failure: " + json.dumps({
                 "original_cleanup": fixture["original_cleanup"],
                 "planting": fixture["planting"], "errors": fixture["errors"],
+                "cleanup_failure": fixture["cleanup_failure"],
                 "cleanup": trace.cleanup}), pytrace=False)
         return trace
     monkeypatch.setattr(target.runner, "run_scenario", capture)
@@ -152,12 +162,19 @@ def test_actual_eval(tmp_path, monkeypatch):
     return done, output, details, proof, runtime
 
 
-def _assert_cleanup_fixture(result, case, prior_cleanup_failure):
-    done, output, details, proof, runtime = result
-    stage_evidence = "diagnostic fixture stage evidence: " + json.dumps({
+def _fixture_stage_evidence(proof, details):
+    # The fixture owns fixed stages; cleanup_error/cleanup_details already
+    # bound and redact error types, inventories and paths. The new boundary
+    # category/status fields are projected to fixed cleanup-only values above.
+    return "diagnostic fixture stage evidence: " + json.dumps({
         "original_cleanup": proof["original_cleanup"],
         "planting": proof["planting"], "errors": proof["errors"],
-        "cleanup": details})
+        "cleanup_failure": proof["cleanup_failure"], "cleanup": details})
+
+
+def _assert_cleanup_fixture(result, case, prior_cleanup_failure):
+    done, output, details, proof, runtime = result
+    stage_evidence = _fixture_stage_evidence(proof, details)
     if not prior_cleanup_failure:
         assert proof["original_cleanup"] == "returned" and proof["planting"] == "completed", stage_evidence
     assert done.returncode == 1 and "1 failed" in output
@@ -210,10 +227,11 @@ def test_fixture_stage_refusal_is_bounded_and_cannot_pass(tmp_path, scenario, ca
         "synthetic_private_cleanup_content", str(runtime)))
     assert "diagnostic fixture stage failure" in output
     assert details is not None and proof is not None
-    assert proof["original_cleanup"] == ("refused" if inject == "original_refused" else "returned")
-    assert proof["planting"] == ("not_started" if inject == "original_refused" else "refused")
-    assert len(proof["errors"]) == 1
-    assert set(proof["errors"][0]) == {"type", "errno"}
+    stage_evidence = _fixture_stage_evidence(proof, details)
+    assert proof["original_cleanup"] == ("refused" if inject == "original_refused" else "returned"), stage_evidence
+    assert proof["planting"] == ("not_started" if inject == "original_refused" else "refused"), stage_evidence
+    assert len(proof["errors"]) == 1, stage_evidence
+    assert set(proof["errors"][0]) == {"type", "errno"}, stage_evidence
     if case == "root_lstat":
         assert proof["faults"] and details["incomplete"]
     elif inject == "plant_refused":
@@ -294,4 +312,4 @@ def test_original_refusal_outer_failure_preserves_safe_stage_evidence(
         assert '"category": "unclassified"' in message and '"status": "unclassified"' in message
     assert all(value not in message + output for value in (
         "synthetic_private_fixture_error", "synthetic_private_cleanup_filename",
-        "synthetic_private_cleanup_content", str(runtime), str(tmp_path)))
+        "synthetic_private_cleanup_content", str(runtime)))
