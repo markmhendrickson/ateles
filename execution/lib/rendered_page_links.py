@@ -226,7 +226,7 @@ class Neotoma:
                 or envelope.get("id") != request_id
             ):
                 raise ValueError
-            if envelope.get("error"):
+            if "error" in envelope:
                 raise PublicationError("native_publication_failed")
             result = envelope.get("result")
             if not isinstance(result, dict) or result.get("isError"):

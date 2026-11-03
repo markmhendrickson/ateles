@@ -130,6 +130,43 @@ def test_redirects_are_never_followed_and_the_token_is_never_echoed(monkeypatch)
     assert handlers and handlers[0]().redirect_request(None, None, 302, "", {}, "") is None
 
 
+def test_protocol_headers_preserve_configured_authentication_and_json_contract(
+    monkeypatch,
+):
+    import io
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.net")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "configured-synthetic-bearer")
+    seen = []
+
+    class Response(io.BytesIO):
+        pass
+
+    class Opener:
+        def open(self, req, timeout):
+            seen.append(req)
+            return Response(b"{}")
+
+    monkeypatch.setattr(
+        neotoma_http.urllib.request, "build_opener", lambda *_: Opener()
+    )
+    neotoma_http.request_json(
+        "POST",
+        "/mcp",
+        {},
+        headers={
+            "Mcp-Method": "tools/call",
+            "Authorization": "wrong",
+            "User-Agent": "wrong",
+            "Content-Type": "text/plain",
+        },
+    )
+    assert seen[0].get_header("Authorization") == "Bearer configured-synthetic-bearer"
+    assert seen[0].get_header("Mcp-method") == "tools/call"
+    assert seen[0].get_header("User-agent") == neotoma_http.USER_AGENT
+    assert seen[0].get_header("Content-type") == "application/json"
+
+
 def test_missing_token_or_base_url_is_a_config_problem_not_a_missing_binding(monkeypatch):
     monkeypatch.delenv("NEOTOMA_BEARER_TOKEN", raising=False)
     monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.example.net")
