@@ -859,3 +859,24 @@ def test_existing_correction_rejects_fetch_race_before_model(world, existing_cor
     _, record = _run(_job(world["tmp"], delivery=spec), never)
     assert record["delivery_status"] == "clone_failed"
     assert _remote_ref(world, f"refs/heads/{spec['branch']}") == old
+
+
+@pytest.mark.parametrize("target", [
+    {}, {"head_sha": "a" * 40}, {"pr_number": "12"},
+    {"pr_number": "12", "head_sha": None},
+    {"pr_number": "12", "head_sha": ""},
+    {"pr_number": "12", "head_sha": 7},
+    {"pr_number": "12", "head_sha": "a" * 39},
+    {"pr_number": "12", "head_sha": "a" * 40},
+])
+def test_optional_exact_head_is_only_absent_for_legacy_new_delivery(target):
+    raw = {**DELIVERY, **target}
+    secrets = {run_job.DELIVERY_TOKEN_NAME: TOKEN}
+    valid = target == {} or target == {"pr_number": "12", "head_sha": "a" * 40}
+    if not valid:
+        with pytest.raises(run_job.JobError):
+            run_job._load_delivery(raw, REPO, secrets, ())
+        return
+    spec = run_job._load_delivery(raw, REPO, secrets, ())
+    assert spec.pr_number == (12 if target else None)
+    assert spec.head_sha == ("a" * 40 if target else "")

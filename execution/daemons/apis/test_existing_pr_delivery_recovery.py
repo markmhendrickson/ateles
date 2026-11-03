@@ -398,3 +398,28 @@ def test_accepted_metadata_divergence_reports_same_ref_post_effect_hold(world, e
     text = delivery.fly_delivery_summary(result, REPO + "#12")
     assert "was pushed" in text and "existing PR #12 could not be confirmed" in text
     assert "no push was started" not in text and all(method == "GET" for method, _ in calls)
+
+
+@pytest.mark.parametrize("aliases", [None, "owner/repo#34", {}, [None], [""], [7]])
+@pytest.mark.parametrize("persisted", [False, True])
+def test_malformed_present_associations_never_become_legacy_absence(aliases, persisted):
+    import json
+    import fly_runner
+    ledger = delivery._delivery_ledger()
+    key = REPO + "#12"
+    # A genuine legacy receipt remains a durable exclusion after a fresh read.
+    assert ledger.reserve_delivery(key, {"status": "unknown", "token": "inert-old"})
+    assert not ledger.reserve_delivery(key, {"status": "launching", "token": "competitor"})
+    before = ledger.path.read_bytes()
+    entry = {"status": "launching", "token": "inert-new", "associated_keys": aliases}
+    if persisted:
+        document = json.loads(before)
+        document["deliveries"][key]["associated_keys"] = aliases
+        ledger.path.write_text(json.dumps(document))
+        before = ledger.path.read_bytes()
+        with pytest.raises(fly_runner.FlyLedgerError):
+            ledger.reserve_delivery(REPO + "#35", {"status": "launching"})
+    else:
+        with pytest.raises(fly_runner.FlyLedgerError):
+            ledger.reserve_delivery(REPO + "#35", entry)
+    assert ledger.path.read_bytes() == before
