@@ -321,7 +321,7 @@ def test_normal_dispatch_keeps_known_no_launch_as_technical_hold(dispatch_env, m
     from task_watchdog import TaskWatchdog, WatchdogAction
     _, _, store = dispatch_env
     eid = "ent_inert_prelaunch_hold"
-    row = snapshot(status="pending", confidence=0.95, issue_number=34)
+    row = snapshot(status="pending", blocked_reason="", confidence=0.95, issue_number=34)
     store.put(eid, row)
     result = SkillResult("cicada", False, None, "kept output", "kept diagnostic",
                          error="selected adapter refused before launch", provider="codex",
@@ -338,7 +338,21 @@ def test_normal_dispatch_keeps_known_no_launch_as_technical_hold(dispatch_env, m
     monkeypatch.setattr(apis, "_spawn_harness_skill", refused)
     monkeypatch.setattr(apis, "RUN_EMAIL", False)
     notice = _StubNotifier()
-    asyncio.run(apis.dispatch_task(eid, row, "approved", notice, gate_override=True))
+    # Seed the trusted invocation context for this downstream diagnostic unit.
+    # The joined handoff suite exercises its authenticated consumer origin;
+    # task-supplied fields/approved triggers cannot create this context.
+    current, version = store.read_versioned(eid)
+    record = {'entity_type': 'task', 'entity_version': version, 'snapshot': current}
+    def raw_record(key):
+        latest, token = store.read_versioned(key)
+        return {'entity_type': 'task', 'entity_version': token, 'snapshot': latest}
+    monkeypatch.setattr(apis, 'fetch_task_record', raw_record)
+    monkeypatch.setattr(apis, 'read_verified_entity_owner', lambda *a, **kw: 'inert-owner')
+    binding = apis._ApprovedCorrectionLifecycle(
+        eid, apis._correction_lifecycle_shape(current), version, "inert-release",
+        'inert-owner', apis._correction_provenance_shape(record))
+    asyncio.run(apis.dispatch_task(eid, row, "approved", notice, gate_override=True,
+                                 _approved_correction_lifecycle=binding))
     saved = store.rows[eid]
     assert saved["status"] == "blocked"
     assert "not launched" in saved["result"] and "kept diagnostic" in saved["result"]
