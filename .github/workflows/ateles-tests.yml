@@ -51,6 +51,7 @@ on:
       - "templates/codex/**"
       # The scripts fixture imports the complete-profile preparation core.
       - "execution/lib/instance_profile_guard.py"
+      - "execution/lib/rendered_page_links.py"
       - "execution/lib/instance_auth_profile_guard.py"
       - "execution/lib/instance_auth_profile_adapter.py"
       - "execution/lib/instance_auth_profile_preflight.py"
