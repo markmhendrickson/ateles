@@ -244,3 +244,54 @@ def test_completed_planting_with_different_root_still_fails(tmp_path, scenario):
     assert details["root"]["kind"] == "directory"
     with pytest.raises(AssertionError, match="diagnostic fixture stage evidence"):
         _assert_cleanup_fixture(result, "root_file", False)
+
+
+@pytest.mark.parametrize("scenario", ["delivery_pushes_and_opens_a_pull_request",
+                                      "refused_import_pushes_nothing"])
+@pytest.mark.parametrize("failure", ["boundary", "os_error", "untrusted_boundary"])
+def test_original_refusal_outer_failure_preserves_safe_stage_evidence(
+        tmp_path, monkeypatch, scenario, failure):
+    write = Path.write_text
+
+    def template(path, text, *args, **kwargs):
+        if path.name == "test_eval_output.py":
+            old = '''            raise target.runner.rd.RepoWorkError(target.runner.rd.WORK_FAILED,
+                                                "synthetic_private_fixture_error")'''
+            assert text.count(old) == 1
+            if failure == "os_error":
+                new = '''            raise PermissionError(errno.EACCES,
+                                  "synthetic_private_fixture_error", str(root))'''
+            elif failure == "untrusted_boundary":
+                new = '''            raise target.runner.rd.RepoWorkError(
+                "synthetic_private_cleanup_filename", "synthetic_private_fixture_error",
+                "synthetic_private_cleanup_content")'''
+            else:
+                new = old
+            text = text.replace(old, new)
+        return write(path, text, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", template)
+    result = _run_cleanup_fixture(tmp_path, "root_file", False, scenario,
+                                  inject="original_refused")
+    done, output, _, proof, runtime = result
+    assert done.returncode == 1 and "diagnostic fixture stage failure" in output
+    assert proof["original_cleanup"] == "refused" and proof["planting"] == "not_started"
+    # Exercise the actual outer plant-refused assertion with the earlier-stage
+    # refusal: the CI failure MUST remain a failure, now carrying safe evidence.
+    monkeypatch.setattr(sys.modules[__name__], "_run_cleanup_fixture", lambda *a, **kw: result)
+    with pytest.raises(AssertionError) as caught:
+        test_fixture_stage_refusal_is_bounded_and_cannot_pass(
+            tmp_path, scenario, "root_file", "plant_refused")
+    message = str(caught.value)
+    assert "diagnostic fixture stage evidence: " in message
+    assert '"original_cleanup": "refused"' in message
+    assert '"planting": "not_started"' in message and '"cleanup":' in message
+    if failure == "os_error":
+        assert '"type": "PermissionError"' in message and '"errno": 13' in message
+    elif failure == "boundary":
+        assert '"category": "work_failed"' in message and '"type": "RepoWorkError"' in message
+    else:
+        assert '"category": "unclassified"' in message and '"status": "unclassified"' in message
+    assert all(value not in message + output for value in (
+        "synthetic_private_fixture_error", "synthetic_private_cleanup_filename",
+        "synthetic_private_cleanup_content", str(runtime), str(tmp_path)))
