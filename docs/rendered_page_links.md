@@ -13,6 +13,10 @@ transport with the same configured origin and bearer identity. The conceptual
 `/rendered-pages/publish` path in Neotoma's contract metadata has no REST handler
 and must not be called as an HTTP publication endpoint. JSON-RPC and tool errors
 are sanitized; an ambiguous transport failure is held without an automatic retry.
+Publication metadata and canonical-correction HTTP headers carry the helper's
+generic client name/version for fallback attribution. This is self-reported
+client identity, not an authentication or permission upgrade. A present MCP
+`isError` flag must be literal boolean false before a result can be accepted.
 
 Resolve the owning `deployment_configuration` at runtime. With the existing
 Neotoma environment and authenticated `gh` identity, invoke:

@@ -29,6 +29,8 @@ from typing import Any
 from lib.capabilities import neotoma_http
 
 BINDING_FIELD = "short_links"
+CLIENT_NAME = "ateles-rendered-page-links"
+CLIENT_VERSION = "1.0"
 ENTITY_RE = re.compile(r"ent_[a-f0-9]{24}\Z")
 SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 
@@ -211,8 +213,8 @@ class Neotoma:
                             "io.modelcontextprotocol/protocolVersion": version,
                             "io.modelcontextprotocol/clientCapabilities": {},
                             "io.modelcontextprotocol/clientInfo": {
-                                "name": "ateles-rendered-page-links",
-                                "version": "1.0",
+                                "name": CLIENT_NAME,
+                                "version": CLIENT_VERSION,
                             },
                         },
                     },
@@ -233,7 +235,9 @@ class Neotoma:
             if "error" in envelope:
                 raise PublicationError("native_publication_failed")
             result = envelope.get("result")
-            if not isinstance(result, dict) or result.get("isError"):
+            if not isinstance(result, dict) or (
+                "isError" in result and result["isError"] is not False
+            ):
                 raise PublicationError("native_publication_failed")
             content = result.get("content")
             if (
@@ -267,6 +271,7 @@ class Neotoma:
                 "idempotency_key": "rendered-page-binding-" + uuid.uuid4().hex,
             },
             timeout=120,
+            headers={"X-Client-Name": CLIENT_NAME, "X-Client-Version": CLIENT_VERSION},
         )
         current = self.read(entity_id)
         if current.get("snapshot", {}).get(BINDING_FIELD) != binding:

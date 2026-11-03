@@ -324,6 +324,13 @@ def test_real_neotoma_adapter_preserves_request_shape_cas_and_no_owner_field(
         "malformed_content",
         "http_error",
         "redirect",
+        "flag_false",
+        "flag_null",
+        "flag_zero",
+        "flag_empty_string",
+        "flag_empty_list",
+        "flag_empty_dict",
+        "flag_string_false",
     ],
 )
 def test_native_publish_uses_real_mcp_http_boundary_and_sanitizes_errors(
@@ -376,6 +383,17 @@ def test_native_publish_uses_real_mcp_http_boundary_and_sanitizes_errors(
                 }
             if failure == "tool_error":
                 result["result"]["isError"] = True
+            flags = {
+                "flag_false": False,
+                "flag_null": None,
+                "flag_zero": 0,
+                "flag_empty_string": "",
+                "flag_empty_list": [],
+                "flag_empty_dict": {},
+                "flag_string_false": "false",
+            }
+            if failure in flags:
+                result["result"]["isError"] = flags[failure]
             if failure == "wrong_id":
                 result["id"] = "different-request"
             if failure == "malformed_content":
@@ -396,7 +414,7 @@ def test_native_publish_uses_real_mcp_http_boundary_and_sanitizes_errors(
     monkeypatch.setenv("NEOTOMA_BASE_URL", f"http://localhost:{server.server_port}")
     monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-neotoma-bearer")
     try:
-        if failure:
+        if failure not in {None, "flag_false"}:
             with pytest.raises(links.PublicationError) as error:
                 links.Neotoma().publish(payload)
             assert str(error.value) in {
@@ -427,6 +445,55 @@ def test_native_publish_uses_real_mcp_http_boundary_and_sanitizes_errors(
             },
         }
         assert "private" not in path.lower() and "synthetic-" not in path
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_canonical_binding_write_carries_same_client_attribution_and_cas(monkeypatch):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    store = Store()
+    corrections = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            assert self.path == "/correct"
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            corrections.append(
+                (body, {key.lower(): value for key, value in self.headers.items()})
+            )
+            store.update_binding(CONFIG, store.record, body["value"])
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"success":true}')
+
+        def do_GET(self):
+            assert self.path == "/entities/" + CONFIG
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(store.read(CONFIG)).encode())
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("NEOTOMA_BASE_URL", f"http://localhost:{server.server_port}")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-configured-bearer")
+    try:
+        updated = binding()
+        updated["registry"]["new-page"] = PAGE_A
+        readback = links.Neotoma().update_binding(CONFIG, store.record, updated)
+        assert readback["snapshot"]["short_links"] == updated
+        assert len(corrections) == 1
+        body, headers = corrections[0]
+        assert body["expected_version"] == "v0" and body["field"] == "short_links"
+        assert headers["authorization"] == "Bearer synthetic-configured-bearer"
+        assert headers.get("x-client-name") == "ateles-rendered-page-links"
+        assert headers.get("x-client-version") == "1.0"
     finally:
         server.shutdown()
         server.server_close()
