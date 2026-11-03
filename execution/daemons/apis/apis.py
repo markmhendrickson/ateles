@@ -795,6 +795,7 @@ async def _spawn_harness_skill(
     run_conversation_id: str | None = None,
     run_agent_session_id: str | None = None,
     _lifecycle_version: str | None = None,
+    _lifecycle_provenance: _ApprovedCorrectionLifecycle | None = None,
 ) -> "object":
     """
     Spawn a T4 agent for a task event. The subprocess mechanics live in
@@ -885,6 +886,7 @@ async def _spawn_harness_skill(
                 key=key, run_agent_session_id=run_agent_session_id, notifier=notifier,
                 action_class=action_class, target=target, task_snapshot=snapshot,
                 task_lifecycle_version=_lifecycle_version,
+                task_lifecycle_provenance=_lifecycle_provenance,
             )  # fmt: skip
             if fly_result is not None:
                 return fly_result
@@ -946,7 +948,8 @@ def _fly_receipt_key(snapshot: dict, entity_id: str) -> str:
     return build_delivery.fly_delivery_key(repository, issue[1] if issue else None, entity_id)
 
 
-def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *, lifecycle_version=None):
+def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *, lifecycle_version=None,
+                              lifecycle_provenance=None):
     """Bind the explicit owner policy read to this current exclusive invocation.
 
     Upstream normal task/checkpoint admission remains authoritative. A fresh
@@ -961,6 +964,15 @@ def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *,
 
     bound = {}
 
+    async def current_record():
+        if lifecycle_version is not None:
+            if (not isinstance(lifecycle_provenance, _ApprovedCorrectionLifecycle)
+                    or lifecycle_provenance.task_id != entity_id
+                    or lifecycle_provenance.version != lifecycle_version):
+                return None, None
+            return await asyncio.to_thread(_read_correction_lifecycle_record, lifecycle_provenance)
+        return await asyncio.to_thread(fetch_task_snapshot_and_version, entity_id)
+
     def context_shape(row, *, lifecycle_transition=False):
         # Compare the complete JSON task shape, including key presence and
         # JSON types. Only the existing dispatch->executing lifecycle fields
@@ -973,7 +985,7 @@ def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *,
         try:
             if not bound or os.environ.get("APIS_OPERATOR_LOGIN", "") != bound["login"]:
                 return "the explicit owner policy context changed or is missing"
-            fresh, version = await asyncio.to_thread(fetch_task_snapshot_and_version, entity_id)
+            fresh, version = await current_record()
             if version != bound["version"] or context_shape(fresh) != context_shape(bound["snapshot"]):
                 return "the current task changed during the owner policy read"
             for repo, number in ((claim.repository, claim.number), *claim.aliases):
@@ -991,7 +1003,7 @@ def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *,
                 return ("control configuration is missing APIS_OPERATOR_LOGIN for the existing account; "
                         "verify that binding before normal re-admission; all other gates remain held")
             login = validate_login(configured_login)
-            fresh, version = await asyncio.to_thread(fetch_task_snapshot_and_version, entity_id)
+            fresh, version = await current_record()
             if not isinstance(snapshot, dict) or not isinstance(fresh, dict) or not version:
                 return "the current correction task could not be bound for the policy read"
             # Executing is the existing normal admission/lifecycle entrance;
@@ -1047,7 +1059,7 @@ def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *,
 async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, role: str | None,
                                  repository: str, key, run_agent_session_id: str | None,
                                  notifier, action_class: str, target=None, task_snapshot=None,
-                                 task_lifecycle_version=None):  # fmt: skip
+                                 task_lifecycle_version=None, task_lifecycle_provenance=None):  # fmt: skip
     """A task-routed build delivered on Fly, or None to run it locally."""
     try:
         receipt_key = build_delivery.fly_delivery_key(
@@ -1078,7 +1090,8 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
             fly_prompt += f"\n\n{build_delivery.tracking_instructions(claim)}"
         if target:
             try:
-                binding = ({"lifecycle_version": task_lifecycle_version}
+                binding = ({"lifecycle_version": task_lifecycle_version,
+                            "lifecycle_provenance": task_lifecycle_provenance}
                            if task_lifecycle_version is not None else {})
                 policy_read, policy_current = _correction_policy_reader(
                     entity_id, task_snapshot, repository, target, claim, **binding)
@@ -1906,12 +1919,38 @@ class _ApprovedCorrectionLifecycle:
     snapshot_json: str
     version: str
     release_key: str
+    principal: str
+    provenance_json: str
 
 
 def _correction_lifecycle_shape(snapshot):
     import json
 
     return json.dumps(snapshot, sort_keys=True, allow_nan=False, separators=(",", ":"))
+
+
+def _correction_provenance_shape(record):
+    """Retain raw tenant presence and JSON types before any snapshot projection."""
+    layers = []
+    current = record
+    while isinstance(current, dict):
+        layers.append({"user_id": current["user_id"]} if "user_id" in current else {})
+        current = current.get("snapshot")
+    return _correction_lifecycle_shape(layers)
+
+
+def _read_correction_lifecycle_record(binding):
+    """Verify the current raw record, then project that SAME record for this run."""
+    record = fetch_task_record(binding.task_id)
+    if (not isinstance(record, dict)
+            or _correction_provenance_shape(record) != binding.provenance_json
+            or read_verified_entity_owner(binding.task_id, record,
+                                          expected_user_id=binding.principal) != binding.principal):
+        return None, None
+    version = record.get("entity_version")
+    if not isinstance(version, str) or not version:
+        return None, None
+    return _snapshot_with_tenant(record), version
 
 
 def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
@@ -1924,7 +1963,7 @@ def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
 
     try:
         expected = json.loads(binding.snapshot_json)
-        fresh, version = fetch_task_snapshot_and_version(binding.task_id)
+        fresh, version = _read_correction_lifecycle_record(binding)
         if (not isinstance(fresh, dict) or version != binding.version
                 or _correction_lifecycle_shape(fresh) != binding.snapshot_json):
             return None
@@ -1941,7 +1980,7 @@ def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
                 return None
             expected[field] = value
             expected_shape = _correction_lifecycle_shape(expected)
-            fresh, version = fetch_task_snapshot_and_version(binding.task_id)
+            fresh, version = _read_correction_lifecycle_record(binding)
             if (not isinstance(fresh, dict) or version != committed.version
                     or _correction_lifecycle_shape(fresh) != expected_shape):
                 return None
@@ -2248,9 +2287,10 @@ async def dispatch_task(
         correction_lifecycle = _advance_correction_lifecycle(
             correction_lifecycle, TaskStatus.ROUTED, clear_reason=True)
         if correction_lifecycle is None:
-            log.warning("[%s] correction %s changed during routed hold release — not spawning",
+            log.warning("[%s] correction %s routed lifecycle release could not be verified — not spawning",
                         DAEMON_NAME, entity_id)
-            notifier.send(f"Approved correction {entity_id} changed during routed hold release — not started",
+            notifier.send(f"Approved correction {entity_id} lifecycle release could not be verified; "
+                          "this attempt was not started. Reconcile current task/admission state.",
                           priority=Priority.BLOCKER, handler=DAEMON_NAME)
             job.failed(f"task {entity_id} lifecycle release was not qualified")
             return
@@ -2573,9 +2613,10 @@ async def dispatch_task(
         correction_lifecycle = _advance_correction_lifecycle(
             correction_lifecycle, TaskStatus.EXECUTING)
         if correction_lifecycle is None:
-            log.warning("[%s] correction %s changed before executing — not spawning",
+            log.warning("[%s] correction %s executing lifecycle handoff could not be verified — not spawning",
                         DAEMON_NAME, entity_id)
-            notifier.send(f"Approved correction {entity_id} changed before executing — not started",
+            notifier.send(f"Approved correction {entity_id} lifecycle handoff could not be verified; "
+                          "this attempt was not started. Reconcile current task/admission state.",
                           priority=Priority.BLOCKER, handler=DAEMON_NAME)
             job.failed(f"task {entity_id} executing handoff was not qualified")
             return
@@ -2596,7 +2637,10 @@ async def dispatch_task(
         )
         return
 
+    completed = False
+
     async def _finish_dispatch() -> None:
+        nonlocal completed
         # E1/E2: this run's thread. run_key keys it to the attempt so SSE
         # replays reuse it while a genuine retry opens a fresh run.
         run_key = (
@@ -2682,6 +2726,7 @@ async def dispatch_task(
 
                 dispatch_snapshot = json.loads(correction_lifecycle.snapshot_json)
                 lifecycle_binding["_lifecycle_version"] = correction_lifecycle.version
+                lifecycle_binding["_lifecycle_provenance"] = correction_lifecycle
             result = await _spawn_harness_skill(
                 skill,
                 entity_id,
@@ -3184,6 +3229,7 @@ async def dispatch_task(
                     f"task {entity_id} dispatched → {skill} "
                     f"(gate: {_gate_label}; {note})"
                 )
+                completed = True
                 return
             _run_stage(
                 "assistant", f"{skill} completed (trigger={trigger}).", stage="done"
@@ -3199,6 +3245,13 @@ async def dispatch_task(
                 key_suffix=trigger,
             )
             job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
+            if correction_lifecycle is not None:
+                # A completed non-detached invocation cannot be acknowledged
+                # from its earlier EXECUTING state after a failed terminal write.
+                saved = fetch_task_snapshot(entity_id) or {}
+                completed = (normalize_status(saved.get("status")) == TaskStatus.DONE.value
+                             and saved.get("result") == pending_result.replace(
+                                 "provenance=unverified", "provenance=verified"))
         elif getattr(result, "fly_delivery_status", ""):
             reason = build_delivery.fly_delivery_summary(result, _fly_receipt_key(snapshot, entity_id))
             if result.error and result.error not in reason:
@@ -3305,7 +3358,7 @@ async def dispatch_task(
         return True if correction_lifecycle is not None else None
 
     await _finish_dispatch()
-    return True if correction_lifecycle is not None else None
+    return completed if correction_lifecycle is not None else None
 
 
 # ── Checkpoint resolution ───────────────────────────────────────────────────
@@ -4426,7 +4479,8 @@ async def handle_checkpoint_brief(
             try:
                 correction_lifecycle = _ApprovedCorrectionLifecycle(
                     task_id, _correction_lifecycle_shape(lifecycle_snapshot), task_version,
-                    hashlib.sha256(f"{entity_id}:{version}:{task_version}".encode()).hexdigest()[:16])
+                    hashlib.sha256(f"{entity_id}:{version}:{task_version}".encode()).hexdigest()[:16],
+                    task_user_id, _correction_provenance_shape(task_record))
             except (TypeError, ValueError):
                 return False
             task_snapshot = lifecycle_snapshot

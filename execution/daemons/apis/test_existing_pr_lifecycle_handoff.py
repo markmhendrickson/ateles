@@ -25,6 +25,8 @@ from test_fly_delivery_dispatch import _StubNotifier
 def joined(normal, admitted_reader, monkeypatch, tmp_path):
     denials = (tmp_path / 'joined-checkpoint-denials').resolve()
     assert denials.is_absolute() and not denials.exists()
+    denials.mkdir(mode=0o700)
+    assert denials.stat().st_mode & 0o777 == 0o700 and not list(denials.iterdir())
     monkeypatch.setenv('APIS_CHECKPOINT_DENIAL_DIR', str(denials))
     row, _, evidence, calls = normal
     row.update(status='awaiting_approval', blocked_reason='prior synthetic review hold',
@@ -54,6 +56,8 @@ def joined(normal, admitted_reader, monkeypatch, tmp_path):
 
     def fetch_record(entity_id):
         assert entity_id == task_id
+        if state['unreadable_status'] is not None and record['snapshot']['status'] == state['unreadable_status']:
+            return None
         return copy.deepcopy(record)
 
     def fetch_version(entity_id):
