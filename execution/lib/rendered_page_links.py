@@ -210,6 +210,10 @@ class Neotoma:
                         "_meta": {
                             "io.modelcontextprotocol/protocolVersion": version,
                             "io.modelcontextprotocol/clientCapabilities": {},
+                            "io.modelcontextprotocol/clientInfo": {
+                                "name": "ateles-rendered-page-links",
+                                "version": "1.0",
+                            },
                         },
                     },
                 },

@@ -421,6 +421,10 @@ def test_native_publish_uses_real_mcp_http_boundary_and_sanitizes_errors(
         assert body["params"]["_meta"] == {
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
             "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+                "name": "ateles-rendered-page-links",
+                "version": "1.0",
+            },
         }
         assert "private" not in path.lower() and "synthetic-" not in path
     finally:
