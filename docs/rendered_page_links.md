@@ -109,7 +109,10 @@ reject stale source both before building and before deploying. Success must
 match the bound SHA and remain terminal across three spaced reads; every
 registry alias is then checked for HTTP 200, the complete approved HTML, redirect script and hash CSP against the shared
 versioned JSON template fetched from `template_path` at the qualified source SHA.
-Queued runs read the current private secret when they build.
+GitHub captures repository secrets when a workflow run is queued. Immediately
+before deployment, a public metadata guard requires the newest run of this
+workflow/default branch, regardless of newer run outcome; unreadable or
+incomplete history holds. Recovery dispatches a fresh run after reconciliation.
 
 An interrupted `registry_committed` transaction retries a secret write only
 while the recorded metadata still matches. If the PUT happened but its metadata
