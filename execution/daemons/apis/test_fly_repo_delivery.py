@@ -1466,3 +1466,22 @@ def test_an_exhausted_deadline_starts_no_git_and_no_api_call(world, monkeypatch)
                 call()
             assert exc.value.category == rd.NO_TIME
     assert started == []
+
+
+def test_existing_correction_cannot_rewind_even_with_an_exact_remote_lease(world, monkeypatch):
+    """The lease is a CAS, never authority for a non-fast-forward overwrite."""
+    agent_commit(world)
+    assert deliver(world) is not None
+    remote = world["remote"]
+    git(remote, "update-ref", f"refs/heads/{BRANCH}", world["base"], home=world["home"])
+    git(world["work"].origin, "fetch", "-q", str(remote), world["old"], home=world["home"])
+    # A caller supplies a recorded older commit. The root-owned ancestry guard
+    # must refuse BEFORE send-pack, despite its matching expected remote ref.
+    git(world["work"].origin, "update-ref", f"refs/heads/{BRANCH}", world["old"], home=world["home"])
+    monkeypatch.setattr(rd, "GITHUB_REMOTE", f"file://{remote}")
+    monkeypatch.setattr(rd, "GITHUB_REMOTE_TRANSPORT", "file")
+    with pytest.raises(rd.RepoWorkError, match="not a fast-forward"):
+        rd.push_branch(world["work"], repository=REPO, branch=BRANCH,
+                       default_branch="main", head=world["old"], token=TOKEN,
+                       expected_head=world["base"])
+    assert git(remote, "rev-parse", f"refs/heads/{BRANCH}", home=world["home"]) == world["base"]

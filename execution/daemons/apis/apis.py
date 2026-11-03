@@ -778,6 +778,11 @@ def _dispatch_mode_from_snapshot(snapshot: dict) -> str | None:
 # ── T4 dispatch ────────────────────────────────────────────────────────────────
 
 
+
+def _correction_not_started(skill: str, reason: str):
+    return SkillResult(skill, False, None, "", "", error=reason,
+                       fly_delivery_not_launched=True, fly_delivery_cleanup="not_reserved")
+
 async def _spawn_harness_skill(
     skill: str,
     entity_id: str,
@@ -841,6 +846,19 @@ async def _spawn_harness_skill(
     # never a reference found in the task's prose.
     repository = _dispatch_repo_from_snapshot(snapshot)
     key = build_delivery.issue_key(snapshot, repository)
+    try:
+        target = (build_delivery.existing_pr_target(snapshot, repository)
+                  if build_delivery.is_delivery_dispatch(skill, action_class)
+                  or snapshot.get("task_type") == "existing_pr_correction" else None)
+        if target and not build_delivery.is_delivery_dispatch(skill, action_class):
+            raise build_delivery.BuildWorktreeError("existing PR correction is not a permitted delivery dispatch")
+    except build_delivery.BuildWorktreeError as exc:
+        if snapshot.get("task_type") == "existing_pr_correction":
+            return _correction_not_started(skill, f"build not started: {exc.reason}")
+        return SkillResult(skill, False, None, "", "", error=f"build not started: {exc.reason}")
+    if target:
+        if key and build_delivery.active_build(*key):
+            return _correction_not_started(skill, "the correction source already has an active builder")
     if build_delivery.is_delivery_dispatch(skill, action_class):
         if not repository:
             log.warning(
@@ -863,7 +881,7 @@ async def _spawn_harness_skill(
             fly_result = await _run_fly_delivery_task(
                 skill, prompt, entity_id=entity_id, role=role, repository=repository,
                 key=key, run_agent_session_id=run_agent_session_id, notifier=notifier,
-                action_class=action_class,
+                action_class=action_class, target=target, task_snapshot=snapshot,
             )  # fmt: skip
             if fly_result is not None:
                 return fly_result
@@ -887,9 +905,11 @@ async def _spawn_harness_skill(
 
     with contextlib.ExitStack() as stack:
         if delivery and key:
-            claim = stack.enter_context(
-                build_delivery.claim_build(*key, f"task:{entity_id}")
-            )
+            try:
+                claim = stack.enter_context(
+                    build_delivery.claim_build(*key, f"task:{entity_id}"))
+            except build_delivery.BuildWorktreeError as exc:
+                return SkillResult(skill, False, None, "", "", error=exc.reason)
             prompt = (
                 f"{prompt}\n\n{build_delivery.worktree_instructions(worktree)}"
                 f"\n\n{build_delivery.tracking_instructions(claim)}"
@@ -914,26 +934,149 @@ def _fly_receipt_key(snapshot: dict, entity_id: str) -> str:
     repository = _dispatch_repo_from_snapshot(snapshot)
     if not repository:
         return ""
-    issue = build_delivery.issue_key(snapshot, repository)
+    try:
+        target = build_delivery.existing_pr_target(snapshot, repository)
+    except build_delivery.BuildWorktreeError:
+        target = None  # The spawn refuses malformed placement before any effects.
+    issue = ((repository.lower(), target.number) if target
+             else build_delivery.issue_key(snapshot, repository))
     return build_delivery.fly_delivery_key(repository, issue[1] if issue else None, entity_id)
+
+
+def _correction_policy_reader(entity_id, snapshot, repository, target, claim):
+    """Bind the explicit owner policy read to this current exclusive invocation.
+
+    Upstream normal task/checkpoint admission remains authoritative. A fresh
+    version/scope read here detects changes while the separate control read is
+    awaited; its result is never a reusable approval or task-supplied proof.
+    """
+    import copy
+    import json
+    from lib.github_account import validate_login
+    from lib.github_policy_control import read_owner_policy
+    from lib.daemon_runtime.artifact_resolver import qualify_default_protection
+
+    bound = {}
+
+    def context_shape(row, *, lifecycle_transition=False):
+        # Compare the complete JSON task shape, including key presence and
+        # JSON types. Only the existing dispatch->executing lifecycle fields
+        # may differ initially; unknown/new scope keys must not be adopted.
+        ignored = {"status", "updated_at", "updated_date", "result"} if lifecycle_transition else set()
+        return json.dumps({key: value for key, value in row.items() if key not in ignored},
+                          sort_keys=True, allow_nan=False, separators=(",", ":"))
+
+    async def current():
+        try:
+            if not bound or os.environ.get("APIS_OPERATOR_LOGIN", "") != bound["login"]:
+                return "the explicit owner policy context changed or is missing"
+            fresh, version = await asyncio.to_thread(fetch_task_snapshot_and_version, entity_id)
+            if version != bound["version"] or context_shape(fresh) != context_shape(bound["snapshot"]):
+                return "the current task changed during the owner policy read"
+            for repo, number in ((claim.repository, claim.number), *claim.aliases):
+                held = build_delivery.active_build(repo, number)
+                if not held or held.run_id != claim.run_id or held.holder != claim.holder:
+                    return "the correction no longer owns its source/PR exclusion"
+        except Exception:
+            return "the current owner policy invocation could not be revalidated"
+        return None
+
+    async def read():
+        try:
+            configured_login = os.environ.get("APIS_OPERATOR_LOGIN", "")
+            if not configured_login.strip():
+                return ("control configuration is missing APIS_OPERATOR_LOGIN for the existing account; "
+                        "verify that binding before normal re-admission; all other gates remain held")
+            login = validate_login(configured_login)
+            fresh, version = await asyncio.to_thread(fetch_task_snapshot_and_version, entity_id)
+            if not isinstance(snapshot, dict) or not isinstance(fresh, dict) or not version:
+                return "the current correction task could not be bound for the policy read"
+            # Executing is the existing normal admission/lifecycle entrance;
+            # this reader cannot turn a held/pending checkpoint into execution.
+            if normalize_status(fresh.get("status")) != TaskStatus.EXECUTING.value:
+                return "the correction task is not in its admitted executing state"
+            if context_shape(snapshot, lifecycle_transition=True) != context_shape(fresh, lifecycle_transition=True):
+                return ("the correction scope/actor/source/attempt/history changed before the policy read; "
+                        "normal re-admission is required")
+            if (build_delivery.existing_pr_target(fresh, repository) != target
+                    or _dispatch_repo_from_snapshot(fresh) != repository):
+                return "the current correction target changed before the policy read"
+            bound.update(login=login, version=version, snapshot=copy.deepcopy(fresh))
+            reason = await current()
+            if reason:
+                return reason
+            # Explicit selection for this predicate only. PR/source and job
+            # delivery continue under their normal App, never this credential.
+            evidence = await asyncio.to_thread(read_owner_policy, repository, login)
+            if (evidence.get("principal") != login or evidence.get("host") != "github.com"
+                    or isinstance(evidence.get("principal_id"), bool)
+                    or not isinstance(evidence.get("principal_id"), int) or evidence["principal_id"] <= 0
+                    or str(evidence.get("repository", "")).lower() != repository.lower()):
+                return "the explicit owner policy response does not match the current invocation"
+            if evidence["default_branch"] == target.branch:
+                return "the correction target became the repository default branch"
+            details = evidence["details"]
+            ids = [row.get("id") for row in details if isinstance(row, dict)]
+            if len(ids) != len(details) or len(set(ids)) != len(ids):
+                return "the explicit owner policy details are malformed"
+            by_id = {row["id"]: row for row in details}
+            reason = qualify_default_protection(repository, evidence["rulesets"], by_id.get)
+            if reason:
+                return reason
+            reason = await current()
+            if reason:
+                return reason
+            log.info("[%s] selected explicit owner policy read for correction: principal=%s principal_id=%s repo=%s; delivery remains App-owned",
+                     DAEMON_NAME, evidence["principal"], evidence["principal_id"], repository)
+            return None
+        except Exception:
+            return "the explicit owner policy read was not qualified; no delivery started"
+
+    return read, current
 
 
 async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, role: str | None,
                                  repository: str, key, run_agent_session_id: str | None,
-                                 notifier, action_class: str):  # fmt: skip
+                                 notifier, action_class: str, target=None, task_snapshot=None):  # fmt: skip
     """A task-routed build delivered on Fly, or None to run it locally."""
-    plan = build_delivery.plan_fly_delivery(
-        repository, f"task-{entity_id[-8:]}",
-        key=build_delivery.fly_delivery_key(repository, key[1] if key else None, entity_id),
-        issue_number=key[1] if key else None,
-    )
+    try:
+        receipt_key = build_delivery.fly_delivery_key(
+            repository, target.number if target else key[1] if key else None, entity_id)
+        source_key = (build_delivery.fly_delivery_key(repository, key[1])
+                      if target and key and key[1] != target.number else "")
+        plan = build_delivery.plan_fly_delivery(
+            repository, f"task-{entity_id[-8:]}", key=receipt_key,
+            issue_number=key[1] if key else None, target=target, source_key=source_key,
+        )
+    except build_delivery.BuildWorktreeError as exc:
+        if target:
+            return _correction_not_started(skill, f"build not started: {exc.reason}")
+        return SkillResult(skill, False, None, "", "", error=f"build not started: {exc.reason}")
     if plan is None:
         return None
     with contextlib.ExitStack() as stack:
         fly_prompt = f"{prompt}\n\n{build_delivery.fly_delivery_instructions(plan)}"
-        if key:
-            claim = stack.enter_context(build_delivery.claim_build(*key, f"task:{entity_id}"))
+        claim_key = (repository, target.number) if target else key
+        if claim_key:
+            try:
+                claim = stack.enter_context(build_delivery.claim_build(
+                    *claim_key, f"task:{entity_id}", exclusive=bool(target),
+                    aliases=(key,) if target and key and key != claim_key else ()))
+            except build_delivery.BuildWorktreeError as exc:
+                return (_correction_not_started(skill, exc.reason) if target
+                        else SkillResult(skill, False, None, "", "", error=exc.reason))
             fly_prompt += f"\n\n{build_delivery.tracking_instructions(claim)}"
+        if target:
+            try:
+                policy_read, policy_current = _correction_policy_reader(
+                    entity_id, task_snapshot, repository, target, claim)
+                reason = await build_delivery.verify_existing_pr_target(
+                    repository, target, lambda repo: _token_for_agent_on_repo(skill, repo),
+                    policy_reader=policy_read, policy_current=policy_current)
+            except build_delivery.BuildWorktreeError as exc:
+                reason = exc.reason
+            if reason:
+                return _correction_not_started(skill, f"existing PR correction not started: {reason}")
 
         async def launch():
             return await run_skill(
@@ -975,8 +1118,9 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
             result.ok = True
         else:
             result.ok = False
-            result.error = (f"Fly delivery not verified: {unverified}. {summary}"
-                            if unverified else summary)
+            if not (target and result.fly_delivery_not_launched):
+                result.error = (f"Fly delivery not verified: {unverified}. {summary}"
+                                if unverified else summary)
         if result.fly_delivery_readback == "passed":
             log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary} Read-back: passed.")
         elif result.fly_delivery_readback == "failed":
@@ -2951,9 +3095,9 @@ async def dispatch_task(
             )
             job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
         elif getattr(result, "fly_delivery_status", ""):
-            reason = result.error or build_delivery.fly_delivery_summary(
-                result, _fly_receipt_key(snapshot, entity_id)
-            )
+            reason = build_delivery.fly_delivery_summary(result, _fly_receipt_key(snapshot, entity_id))
+            if result.error and result.error not in reason:
+                reason = result.error + "\n" + reason
             _run_stage("assistant", reason, stage="blocked")
             if run_session:
                 update_run_session_status(run_session, status="failed")
@@ -2974,6 +3118,27 @@ async def dispatch_task(
             )
             notifier.send(notice, priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
             job.failed(f"task {entity_id} → {skill} Fly delivery ended")
+        elif (getattr(result, "fly_delivery_not_launched", False)
+              and getattr(result, "fly_delivery_cleanup", "") in {"released", "not_reserved"}):
+            reason = _redact_secrets(build_delivery.fly_prelaunch_failure_summary(result))
+            _run_stage("assistant", reason, stage="blocked")
+            if run_session:
+                update_run_session_status(run_session, status="failed")
+            set_task_status(
+                entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value, reason=reason,
+                result=reason, key_suffix=trigger)
+            try:
+                saved = fetch_task_snapshot(entity_id) or {}
+                held = (normalize_status(saved.get("status")) == TaskStatus.BLOCKED.value
+                        and saved.get("result") == reason)
+            except Exception:
+                held = False
+            notice = reason if held else (
+                "Known no launch; the technical hold could not be read back. "
+                "Reconcile current task/admission before any later dispatch.\n" + reason)
+            notifier.send(notice, priority=Priority.BLOCKER, handler=DAEMON_NAME)
+            job.failed(f"task {entity_id} → {skill} prelaunch technical repair")
         elif getattr(result, "remote_outcome_unknown", False):
             # ateles#1456: the remote run may have done its work. BLOCKED, not
             # FAILED: the watchdog retries FAILED tasks and leaves BLOCKED ones
