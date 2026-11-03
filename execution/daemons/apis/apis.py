@@ -3244,7 +3244,6 @@ async def dispatch_task(
                 ),
                 key_suffix=trigger,
             )
-            job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
             if correction_lifecycle is not None:
                 # A completed non-detached invocation cannot be acknowledged
                 # from its earlier EXECUTING state after a failed terminal write.
@@ -3252,6 +3251,14 @@ async def dispatch_task(
                 completed = (normalize_status(saved.get("status")) == TaskStatus.DONE.value
                              and saved.get("result") == pending_result.replace(
                                  "provenance=unverified", "provenance=verified"))
+                if not completed:
+                    notifier.send(
+                        f"{skill} completion on {entity_id} could not be verified. "
+                        "Reconcile current task/admission state before another dispatch.",
+                        priority=Priority.BLOCKER, handler=DAEMON_NAME)
+                    job.failed(f"task {entity_id} → {skill} completion was not verified")
+                    return
+            job.finished(f"task {entity_id} dispatched → {skill} (gate: {_gate_label})")
         elif getattr(result, "fly_delivery_status", ""):
             reason = build_delivery.fly_delivery_summary(result, _fly_receipt_key(snapshot, entity_id))
             if result.error and result.error not in reason:
