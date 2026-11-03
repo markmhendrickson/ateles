@@ -44,7 +44,8 @@ def joined(normal, admitted_reader, monkeypatch, tmp_path):
     authority = build_checkpoint_authorization_envelope(
         task_record=record, policy=policy, decision=decision,
         action_type='open_or_merge_pr', user_id=owner, required_approver_jkt='A' * 43)
-    checkpoint = dict(entity_id=checkpoint_id, entity_type='checkpoint_brief', user_id=owner,
+    checkpoint = dict(
+        entity_id=checkpoint_id, entity_type='checkpoint_brief', user_id=owner,  # vocab-ok: existing authenticated checkpoint wire type
         entity_version='checkpoint-v1', snapshot=dict(status='approved', resolved_dispatched=False,
             task_entity_id=task_id, body=authority, title='Approve scoped correction',
             gate_action=decision.action.value, blast_radius=decision.blast_radius.value))

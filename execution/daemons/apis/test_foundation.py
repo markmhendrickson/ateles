@@ -719,8 +719,8 @@ class TestVocabularyLint:
         """Advisory, not a Never: a nonzero candidate list must not fail the check."""
         mod = self._lint()
         rc = mod.main([])
-        capsys.readouterr()
-        assert rc == 0
+        captured = capsys.readouterr()
+        assert rc == 0, captured.out + captured.err
 
     def test_undefined_word_candidates_reads_from_the_real_corpus(self) -> None:
         """A sanity check that the scan is wired to real files and not returning nothing by accident."""
@@ -736,9 +736,51 @@ class TestVocabularyLint:
     def test_no_undefined_words_flag_suppresses_the_report(self, capsys) -> None:
         mod = self._lint()
         rc = mod.main(["--no-undefined-words"])
-        out = capsys.readouterr().out
-        assert rc == 0
+        captured = capsys.readouterr()
+        out = captured.out
+        assert rc == 0, out + captured.err
         assert "undefined-word candidates" not in out
+
+    @pytest.mark.parametrize("show_candidates", [True, False])
+    def test_advisory_flag_preserves_hard_checks_and_documented_wire_compatibility(
+        self, tmp_path: Path, capsys, show_candidates: bool
+    ) -> None:
+        """A CLI advisory flag cannot waive a new code name or a prose Never."""
+        import shutil
+
+        mod = self._lint()
+        fdir = tmp_path / "docs" / "foundation"
+        fdir.mkdir(parents=True)
+        shutil.copyfile(_REPO_ROOT / "docs" / "foundation" / "vocabulary.md", fdir / "vocabulary.md")
+        prose = fdir / "work_model.md"
+        prose.write_text("# Synthetic corpus\n\n" + "widgetconcept " * (mod.UNDEFINED_WORD_THRESHOLD + 1))
+        code = tmp_path / "execution" / "daemons" / "synthetic_adapter.py"
+        code.parent.mkdir(parents=True)
+        wire = 'entity_type = "checkpoint_brief"\n'  # vocab-ok: fixture proves an undocumented wire name still fails
+        code.write_text(wire)
+        args = ["--root", str(tmp_path)] + ([] if show_candidates else ["--no-undefined-words"])
+        rc = mod.main(args)
+        captured = capsys.readouterr()
+        assert rc == 1, captured.out + captured.err
+        assert "RETIRED-IN-CODE" in captured.out
+        assert ("undefined-word candidates" in captured.out) is show_candidates
+        if show_candidates:
+            assert "widgetconcept" in captured.out
+
+        # The existing compatibility mechanism documents a real wire spelling;
+        # it does not expand the baseline or change the vocabulary's design.
+        code.write_text(wire.rstrip() + "  # vocab-ok: existing authenticated checkpoint wire type\n")
+        rc = mod.main(args)
+        captured = capsys.readouterr()
+        assert rc == 0, captured.out + captured.err
+        assert "0 new hit(s)" in captured.out
+        assert ("undefined-word candidates" in captured.out) is show_candidates
+
+        prose.write_text(prose.read_text() + "\nA work item is waiting.\n")
+        rc = mod.main(args)
+        captured = capsys.readouterr()
+        assert rc == 1, captured.out + captured.err
+        assert "NEVER" in captured.out
 
     def test_every_first_mention_is_linked(self) -> None:
         """A defined term mentioned in another entry links to its definition.
