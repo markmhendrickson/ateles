@@ -8,6 +8,7 @@ Neotoma's native publish operation remains unchanged.
 from __future__ import annotations
 
 import contextlib
+import base64
 import copy
 import fcntl
 import hashlib
@@ -25,7 +26,7 @@ import urllib.request
 import uuid
 from typing import Any
 
-from . import neotoma_http
+from lib.capabilities import neotoma_http
 
 BINDING_FIELD = "short_links"
 ENTITY_RE = re.compile(r"ent_[a-f0-9]{24}\Z")
@@ -41,9 +42,13 @@ class PublicationError(RuntimeError):
 
 
 def origin(value: Any) -> str:
-    if not isinstance(value, str):
+    if not isinstance(value, str) or re.search(r"\s|[\\\x00-\x1f\x7f]", value):
         raise PublicationError("invalid_origin")
-    parsed = urllib.parse.urlsplit(value)
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        parsed.port
+    except ValueError:
+        raise PublicationError("invalid_origin") from None
     if (
         parsed.scheme != "https"
         or not parsed.hostname
@@ -69,10 +74,12 @@ def binding_from(record: dict) -> dict:
         "publisher_host",
         "expected_github_login",
         "expected_user_id",
+        "github_host",
         "branch",
         "workflow",
         "secret_name",
         "secret_updated_at",
+        "template_path",
     ):
         if not isinstance(binding.get(key), str) or not binding[key].strip():
             raise PublicationError("short_link_binding_incomplete")
@@ -80,10 +87,16 @@ def binding_from(record: dict) -> dict:
         r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", binding.get("repository", "")
     ):
         raise PublicationError("invalid_repository")
+    if not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)*", binding["github_host"]):
+        raise PublicationError("invalid_github_host")
     if not re.fullmatch(r"[A-Z][A-Z0-9_]*", binding["secret_name"]):
         raise PublicationError("invalid_secret_name")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", binding["workflow"]):
         raise PublicationError("invalid_workflow")
+    if not re.fullmatch(
+        r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\.json", binding["template_path"]
+    ):
+        raise PublicationError("invalid_template_path")
     origin(binding.get("site_origin"))
     origin(binding.get("target_origin"))
     if binding["branch"] != snap.get("deploy_branch"):
@@ -203,10 +216,63 @@ class Neotoma:
 
 
 class GitHub:
-    def _run(self, args: list[str], *, stdin: str | None = None) -> str:
+    def __init__(self):
+        self._credential = None
+        self._host = None
+
+    def _run(self, args: list[str], *, stdin: str | None = None, host: str) -> str:
+        names = {
+            "HOME",
+            "PATH",
+            "LANG",
+            "LC_ALL",
+            "TMPDIR",
+            "GH_CONFIG_DIR",
+            "XDG_CONFIG_HOME",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "NO_PROXY",
+        }
+        environment = {
+            name: value for name, value in os.environ.items() if name in names
+        }
+        environment.update({"GH_HOST": host, "GH_PROMPT_DISABLED": "1"})
+        if self._credential is None:
+            for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+                if name in os.environ:
+                    value = os.environ[name]
+                    if not value.strip():
+                        raise PublicationError("github_credential_missing")
+                    self._credential = value
+                    break
+            if self._credential is None:
+                try:
+                    captured = subprocess.run(
+                        ["gh", "auth", "token", "--hostname", host],
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                        env=environment,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    raise PublicationError("github_credential_unavailable") from None
+                if captured.returncode or not captured.stdout.strip():
+                    raise PublicationError("github_credential_unavailable")
+                self._credential = captured.stdout.strip()
+            self._host = host
+        if host != self._host:
+            raise PublicationError("github_credential_host_changed")
+        environment["GH_TOKEN"] = self._credential
         try:
             result = subprocess.run(
-                ["gh", *args], input=stdin, capture_output=True, text=True, timeout=120
+                ["gh", *args],
+                input=stdin,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=environment,
             )
         except (OSError, subprocess.TimeoutExpired):
             raise PublicationError("github_request_failed") from None
@@ -216,12 +282,13 @@ class GitHub:
 
     def check_identity(self, binding: dict) -> None:
         if (
-            self._run(["api", "user", "--jq", ".login"])
+            self._run(["api", "user", "--jq", ".login"], host=binding["github_host"])
             != binding["expected_github_login"]
         ):
             raise PublicationError("github_identity_mismatch")
         branch = self._run(
-            ["api", f"repos/{binding['repository']}", "--jq", ".default_branch"]
+            ["api", f"repos/{binding['repository']}", "--jq", ".default_branch"],
+            host=binding["github_host"],
         )
         if branch != binding["branch"]:
             raise PublicationError("github_default_branch_mismatch")
@@ -232,13 +299,52 @@ class GitHub:
                 [
                     "api",
                     f"repos/{binding['repository']}/actions/secrets/{binding['secret_name']}",
-                ]
+                ],
+                host=binding["github_host"],
             )
         )
         value = data.get("updated_at")
         if not isinstance(value, str):
             raise PublicationError("secret_metadata_missing")
         return value
+
+    def source_sha(self, binding: dict) -> str:
+        sha = self._run(
+            [
+                "api",
+                f"repos/{binding['repository']}/commits/{binding['branch']}",
+                "--jq",
+                ".sha",
+            ],
+            host=binding["github_host"],
+        )
+        if not re.fullmatch(r"[a-f0-9]{40}", sha):
+            raise PublicationError("production_source_unavailable")
+        return sha
+
+    def template(self, binding: dict, sha: str) -> dict:
+        encoded = self._run(
+            [
+                "api",
+                f"repos/{binding['repository']}/contents/{binding['template_path']}?ref={sha}",
+                "--jq",
+                ".content",
+            ],
+            host=binding["github_host"],
+        )
+        try:
+            template = json.loads(base64.b64decode(encoded).decode("utf-8"))
+            if (
+                set(template) != {"version", "html", "script"}
+                or template["version"] != 1
+                or template["script"].count("{{DESTINATION_JSON}}") != 1
+                or template["html"].count("{{SCRIPT}}") != 1
+                or template["html"].count("{{CSP_DIGEST}}") != 1
+            ):
+                raise ValueError
+        except (ValueError, TypeError, AttributeError):
+            raise PublicationError("invalid_alias_template") from None
+        return template
 
     def write_secret(self, binding: dict, payload: str) -> str:
         self.check_identity(binding)
@@ -247,6 +353,7 @@ class GitHub:
         self._run(
             ["secret", "set", binding["secret_name"], "--repo", binding["repository"]],
             stdin=payload,
+            host=binding["github_host"],
         )
         return self.secret_updated_at(binding)
 
@@ -263,7 +370,10 @@ class GitHub:
                 binding["branch"],
                 "-f",
                 f"alias_request_id={request_id}",
-            ]
+                "-f",
+                f"expected_source_sha={binding['pending']['source_sha']}",
+            ],
+            host=binding["github_host"],
         )
 
     def wait(
@@ -289,7 +399,8 @@ class GitHub:
                         "100",
                         "--json",
                         "databaseId,displayTitle,status,conclusion,headSha",
-                    ]
+                    ],
+                    host=binding["github_host"],
                 )
             )
             matches = [
@@ -309,6 +420,8 @@ class GitHub:
                 if stable >= 3:
                     if matches[0].get("conclusion") != "success":
                         raise PublicationError("alias_deployment_failed")
+                    if matches[0].get("headSha") != binding["pending"]["source_sha"]:
+                        raise PublicationError("deployment_source_mismatch")
                     return matches[0]
             else:
                 stable, previous = 0, None
@@ -332,22 +445,22 @@ class Reader:
         except (OSError, UnicodeError, urllib.error.HTTPError):
             raise PublicationError("recipient_page_not_verified") from None
 
-    def verify_aliases(self, binding: dict) -> None:
+    def verify_aliases(self, binding: dict, template: dict) -> None:
         for slug, entity_id in binding["registry"].items():
             html = self.get(f"{binding['site_origin']}/p/{slug}/")
             destination = f"{binding['target_origin']}/entities/{entity_id}/html"
-            # Match the generator's fixed-destination statement, not a substring elsewhere.
-            if f"const destination = new URL({json.dumps(destination)});" not in html:
-                raise PublicationError("served_alias_destination_mismatch")
-            for required in (
-                'name="robots" content="noindex,nofollow,noarchive"',
-                'name="referrer" content="no-referrer"',
-                "destination.searchParams.set('access_token', token)",
-            ):
-                if required not in html:
-                    raise PublicationError("served_alias_controls_missing")
-            if re.search(r"\b(?:src|href)\s*=", html, re.I):
-                raise PublicationError("served_alias_external_assets")
+            script = template["script"].replace(
+                "{{DESTINATION_JSON}}",
+                json.dumps(destination, ensure_ascii=False).replace("<", "\\u003c"),
+            )
+            digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+            expected = (
+                template["html"]
+                .replace("{{CSP_DIGEST}}", digest)
+                .replace("{{SCRIPT}}", script)
+            )
+            if html != expected:
+                raise PublicationError("served_alias_template_mismatch")
 
 
 class Publisher:
@@ -391,6 +504,13 @@ class Publisher:
         }
         if set(request) - allowed:
             raise PublicationError("unexpected_publication_field")
+        if request.get("entity_id") and set(request) & {
+            "title",
+            "html_body",
+            "custom_css",
+            "meta_description",
+        }:
+            raise PublicationError("existing_page_requires_prior_content_update")
         if not request.get("entity_id") and not request.get("idempotency_key"):
             raise PublicationError("inline_publication_idempotency_required")
         record = self.neotoma.read(configuration_id)
@@ -411,6 +531,10 @@ class Publisher:
                     "branch",
                     "workflow",
                     "publisher_host",
+                    "github_host",
+                    "expected_github_login",
+                    "expected_user_id",
+                    "template_path",
                 )
             ):
                 raise PublicationError("publisher_binding_changed")
@@ -445,27 +569,41 @@ class Publisher:
                     binding["pending"] = {
                         "request_id": uuid.uuid4().hex,
                         "phase": "registry_committed",
+                        "entity_id": entity_id,
+                        "input_digest": hashlib.sha256(
+                            json.dumps(request, sort_keys=True).encode()
+                        ).hexdigest(),
+                        "source_sha": self.github.source_sha(binding),
                     }
+                    binding["pending"]["binding_digest"] = self._binding_digest(
+                        configuration_id, binding
+                    )
                     record = self.neotoma.update_binding(
                         configuration_id, record, binding
                     )
                 if binding.get("pending"):
                     self._finish_pending(configuration_id, record, binding)
                 else:
-                    self.reader.verify_aliases(binding)
+                    self.reader.verify_aliases(
+                        binding,
+                        self.github.template(binding, self.github.source_sha(binding)),
+                    )
                 short = f"{binding['site_origin']}/p/{slug}/?{urllib.parse.urlencode({'t': token})}"
                 return {
                     "entity_id": entity_id,
                     "share_url": short,
                     "alias_status": "verified",
                 }
-            except Exception:
+            except Exception as exc:
                 # No upstream message/output/URL is copied into a diagnostic.
                 return {
                     "entity_id": entity_id,
                     "share_url": original,
                     "alias_status": "fallback",
                     "outstanding_work": "rendered_page_alias_registration_or_verification",
+                    "error_code": str(exc)
+                    if isinstance(exc, PublicationError)
+                    else "alias_operation_failed",
                 }
 
     @staticmethod
@@ -487,8 +625,8 @@ class Publisher:
                         and re.fullmatch(r"[A-Z0-9_]{1,100}", code)
                         else "RENDERED_PAGE_CONFORMANCE",
                         "severity": severity
-                        if severity in {"warning", "error", "info"}
-                        else "warning",
+                        if severity in {"warn", "block"}
+                        else "block",
                     }
                 )
             raise PublicationError(
@@ -524,6 +662,23 @@ class Publisher:
             r"[a-f0-9]{32}", str(pending.get("request_id", ""))
         ):
             raise PublicationError("invalid_pending_publication")
+        if (
+            set(pending)
+            != {
+                "request_id",
+                "phase",
+                "entity_id",
+                "input_digest",
+                "source_sha",
+                "binding_digest",
+            }
+            or not ENTITY_RE.fullmatch(str(pending.get("entity_id", "")))
+            or not re.fullmatch(r"[a-f0-9]{64}", str(pending.get("input_digest", "")))
+            or not re.fullmatch(r"[a-f0-9]{40}", str(pending.get("source_sha", "")))
+            or pending.get("binding_digest")
+            != self._binding_digest(configuration_id, binding)
+        ):
+            raise PublicationError("pending_publication_binding_changed")
         if pending.get("phase") == "registry_committed":
             payload = json.dumps(
                 {"origin": binding["target_origin"], "links": binding["registry"]},
@@ -544,6 +699,33 @@ class Publisher:
             pending["request_id"],
             deadline=time.monotonic() + self.wait_seconds,
         )
-        self.reader.verify_aliases(binding)
+        self.reader.verify_aliases(
+            binding, self.github.template(binding, pending["source_sha"])
+        )
         del binding["pending"]
         self.neotoma.update_binding(configuration_id, record, binding)
+
+    @staticmethod
+    def _binding_digest(configuration_id: str, binding: dict) -> str:
+        keys = (
+            "publisher_host",
+            "repository",
+            "branch",
+            "workflow",
+            "secret_name",
+            "expected_user_id",
+            "github_host",
+            "expected_github_login",
+            "site_origin",
+            "target_origin",
+            "registry",
+            "template_path",
+        )
+        bound = {key: binding[key] for key in keys}
+        bound["configuration_id"] = configuration_id
+        if isinstance(binding.get("pending"), dict):
+            bound["transaction"] = {
+                key: binding["pending"].get(key)
+                for key in ("request_id", "entity_id", "input_digest", "source_sha")
+            }
+        return hashlib.sha256(json.dumps(bound, sort_keys=True).encode()).hexdigest()

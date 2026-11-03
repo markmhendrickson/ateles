@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from lib.capabilities import rendered_page_links as links
+from execution.lib import rendered_page_links as links
 
 CONFIG = "ent_" + "1" * 24
 PAGE_A = "ent_" + "a" * 24
@@ -32,6 +32,8 @@ def binding():
         "secret_updated_at": "initial",
         "expected_github_login": "publisher",
         "expected_user_id": "graph-owner",
+        "github_host": "github.example",
+        "template_path": "scripts/short-link-template.json",
         "site_origin": "https://site.example",
         "target_origin": "https://records.example",
         "registry": {"existing": OLD_PAGE},
@@ -110,6 +112,12 @@ class GitHub:
         self.metadata = f"write-{len(self.payloads)}"
         return self.metadata
 
+    def source_sha(self, binding):
+        return "f" * 40
+
+    def template(self, binding, sha):
+        return {}
+
     def dispatch(self, binding, request_id):
         self.dispatches.append(request_id)
 
@@ -130,7 +138,7 @@ class Reader:
         self.urls.append(url)
         return "actual page content"
 
-    def verify_aliases(self, binding):
+    def verify_aliases(self, binding, template):
         if self.fail:
             raise links.PublicationError("served_alias_destination_mismatch")
         self.verified.append(copy.deepcopy(binding["registry"]))
@@ -301,7 +309,7 @@ def test_actual_gh_subprocess_keeps_registry_on_stdin_and_sanitizes_errors(
     script.write_text(
         "#!/usr/bin/env python3\nimport json,os,sys\n"
         "args=sys.argv[1:]\n"
-        "with open(os.environ['TEST_GH_CALLS'],'a') as f:f.write(json.dumps({'args':args,'stdin':sys.stdin.read()})+'\\n')\n"
+        f"with open({str(calls)!r},'a') as f:f.write(json.dumps({{'args':args,'stdin':sys.stdin.read(),'host':os.environ.get('GH_HOST'),'credential':os.environ.get('GH_TOKEN'),'neotoma_present':'NEOTOMA_BEARER_TOKEN' in os.environ}})+'\\n')\n"
         "if args[:2]==['api','user']: print('publisher')\n"
         "elif 'actions/secrets' in ' '.join(args): print(json.dumps({'updated_at':'initial'}))\n"
         "elif args[0]=='api': print('main')\n"
@@ -311,35 +319,59 @@ def test_actual_gh_subprocess_keeps_registry_on_stdin_and_sanitizes_errors(
     script.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("TEST_GH_CALLS", str(calls))
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-process-secret")
+    monkeypatch.setenv("GH_TOKEN", "synthetic-existing-gh-token")
     github = links.GitHub()
+    github.check_identity(binding())
+    monkeypatch.setenv("GH_TOKEN", "synthetic-different-gh-account")
     payload = json.dumps(
         {"origin": "https://records.example", "links": {"existing": OLD_PAGE}}
     )
     assert github.write_secret(binding(), payload) == "initial"
     rows = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert {row["credential"] for row in rows} == {"synthetic-existing-gh-token"}
     sent = next(row for row in rows if row["args"][:2] == ["secret", "set"])
     assert sent["stdin"] == payload
+    assert sent["host"] == "github.example"
+    assert sent["neotoma_present"] is False
     assert payload not in json.dumps(sent["args"])
+    dispatch_binding = binding()
+    dispatch_binding["pending"] = {"source_sha": "f" * 40}
     with pytest.raises(links.PublicationError) as error:
-        github.dispatch(binding(), "0" * 32)
+        github.dispatch(dispatch_binding, "0" * 32)
     assert "upstream-private-token" not in str(error.value)
 
 
 def test_served_page_verification_requires_actual_destination_and_controls():
+    import base64
+    import hashlib
+
     reader = links.Reader()
     b = binding()
     target = f"https://records.example/entities/{OLD_PAGE}/html"
+    template = {
+        "script": "const destination = new URL({{DESTINATION_JSON}});",
+        "html": "<meta content=\"script-src 'sha256-{{CSP_DIGEST}}'\"><script>{{SCRIPT}}</script>",
+    }
+    script = template["script"].replace("{{DESTINATION_JSON}}", json.dumps(target))
     html = (
-        f"const destination = new URL({json.dumps(target)});"
-        'name="robots" content="noindex,nofollow,noarchive" '
-        'name="referrer" content="no-referrer" '
-        "destination.searchParams.set('access_token', token)"
+        template["html"]
+        .replace(
+            "{{CSP_DIGEST}}",
+            base64.b64encode(hashlib.sha256(script.encode()).digest()).decode(),
+        )
+        .replace("{{SCRIPT}}", script)
     )
     reader.get = lambda _: html
-    reader.verify_aliases(b)
-    reader.get = lambda _: html.replace(target, "https://other.example/page")
-    with pytest.raises(links.PublicationError, match="destination_mismatch"):
-        reader.verify_aliases(b)
+    reader.verify_aliases(b, template)
+    for altered in (
+        html.replace(target, "https://other.example/page"),
+        html + "<script>fetch(location.search)</script>",
+        html.replace("sha256-", "mutated-"),
+    ):
+        reader.get = lambda _, altered=altered: altered
+        with pytest.raises(links.PublicationError, match="template_mismatch"):
+            reader.verify_aliases(b, template)
 
 
 def test_cli_never_echoes_invalid_sensitive_input(tmp_path):
@@ -356,3 +388,270 @@ def test_cli_never_echoes_invalid_sensitive_input(tmp_path):
     assert result.returncode == 1
     assert "synthetic-private-token" not in result.stdout + result.stderr
     assert json.loads(result.stdout)["error_code"] == "publication_request_failed"
+
+
+def test_inline_publication_requires_and_forwards_stable_idempotency(setup):
+    publisher, store, _, _ = setup
+    with pytest.raises(links.PublicationError, match="idempotency_required"):
+        publisher.publish(
+            CONFIG,
+            {"audience": "guest", "title": "Shared brief", "html_body": "<p>Body</p>"},
+        )
+    assert store.published == []
+    request = {
+        "audience": "guest",
+        "title": "Shared brief",
+        "html_body": "<p>Body</p>",
+        "idempotency_key": "publication-1",
+    }
+    assert publisher.publish(CONFIG, request)["alias_status"] == "verified"
+    assert publisher.publish(CONFIG, request)["alias_status"] == "verified"
+    assert all(
+        fields["idempotency_key"] == "publication-1" for fields in store.published
+    )
+    assert set(store.record["snapshot"]["short_links"]["registry"].values()) == {
+        OLD_PAGE,
+        PAGE_A,
+    }
+
+
+def test_pending_transaction_refuses_changed_binding_and_keeps_original_registry(setup):
+    publisher, store, github, _ = setup
+    github.fail_wait = True
+    assert (
+        publisher.publish(CONFIG, {"audience": "guest", "entity_id": PAGE_A})[
+            "alias_status"
+        ]
+        == "fallback"
+    )
+    pending = copy.deepcopy(store.record["snapshot"]["short_links"]["pending"])
+    assert pending["entity_id"] == PAGE_A
+    assert pending["source_sha"] == "f" * 40
+    store.record["snapshot"]["short_links"]["registry"]["unapproved-change"] = PAGE_B
+    with pytest.raises(links.PublicationError, match="binding_changed"):
+        publisher.publish(CONFIG, {"audience": "guest", "entity_id": PAGE_B})
+    assert len(store.published) == 1
+    assert len(github.dispatches) == 1
+    assert store.record["snapshot"]["short_links"]["pending"] == pending
+
+
+def test_pending_prior_page_finishes_before_another_request_without_adopting_its_result(
+    setup,
+):
+    publisher, store, github, _ = setup
+    github.fail_wait = True
+    publisher.publish(CONFIG, {"audience": "guest", "entity_id": PAGE_A})
+    github.fail_wait = False
+    result = publisher.publish(CONFIG, {"audience": "guest", "entity_id": PAGE_B})
+    assert result["entity_id"] == PAGE_B
+    assert len(github.dispatches) == 2
+    assert set(github.payloads[-1]["links"].values()) == {OLD_PAGE, PAGE_A, PAGE_B}
+
+
+def test_conformance_warning_blocks_all_sharing_and_retains_codes(setup):
+    publisher, store, github, reader = setup
+    original = store.publish
+
+    def warned(fields):
+        result = original(fields)
+        result["conformance_warnings"] = [
+            {
+                "code": "RENDERED_PAGE_THEME_REQUIRED",
+                "severity": "block",
+                "message": "private content",
+            }
+        ]
+        return result
+
+    store.publish = warned
+    with pytest.raises(links.PublicationError, match="conformance_requires") as error:
+        publisher.publish(CONFIG, {"audience": "guest", "entity_id": PAGE_A})
+    assert error.value.conformance_warnings == [
+        {"code": "RENDERED_PAGE_THEME_REQUIRED", "severity": "block"}
+    ]
+    assert reader.urls == [] and github.dispatches == []
+
+
+def test_completed_deploy_must_hold_across_spaced_reads_and_match_source(monkeypatch):
+    github = links.GitHub()
+    current = [0]
+    monkeypatch.setattr(links.time, "monotonic", lambda: current[0])
+    b = binding()
+    b["pending"] = {"source_sha": "f" * 40}
+    reads = []
+
+    def run(_, **kwargs):
+        assert kwargs["host"] == "github.example"
+        reads.append(current[0])
+        return json.dumps(
+            [
+                {
+                    "databaseId": 1,
+                    "displayTitle": "Rendered page aliases opaque",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "headSha": "f" * 40,
+                }
+            ]
+        )
+
+    github._run = run
+    github.wait(
+        b,
+        "opaque",
+        deadline=100,
+        sleep=lambda seconds: current.__setitem__(0, current[0] + seconds),
+    )
+    assert reads == [0, 15, 30]
+    b["pending"]["source_sha"] = "e" * 40
+    with pytest.raises(links.PublicationError, match="source_mismatch"):
+        github.wait(
+            b,
+            "opaque",
+            deadline=100,
+            sleep=lambda seconds: current.__setitem__(0, current[0] + seconds),
+        )
+
+
+def test_secret_effect_without_receipt_holds_without_overwriting_unknown_value(setup):
+    publisher, store, github, _ = setup
+    update = store.update_binding
+
+    def lose_receipt(entity, record, b):
+        if b.get("pending", {}).get("phase") == "secret_updated":
+            raise links.PublicationError("configuration_write_not_verified")
+        return update(entity, record, b)
+
+    store.update_binding = lose_receipt
+    result = publisher.publish(CONFIG, {"audience": "guest", "entity_id": PAGE_A})
+    assert result["alias_status"] == "fallback"
+    assert result["error_code"] == "configuration_write_not_verified"
+    store.update_binding = update
+    with pytest.raises(links.PublicationError, match="secret_changed_outside"):
+        publisher.publish(CONFIG, {"audience": "guest", "entity_id": PAGE_A})
+    assert len(github.payloads) == 1 and github.dispatches == []
+    assert len(store.published) == 1
+
+
+def test_ambiguous_dispatch_never_repeats_and_preserves_recovery_state(setup):
+    publisher, store, github, _ = setup
+
+    def lost_dispatch(*_):
+        raise links.PublicationError("github_request_failed")
+
+    def absent_run(*_, **kwargs):
+        raise links.PublicationError("alias_deployment_pending")
+
+    github.dispatch = lost_dispatch
+    result = publisher.publish(CONFIG, {"audience": "guest", "entity_id": PAGE_A})
+    assert result["alias_status"] == "fallback"
+    assert (
+        store.record["snapshot"]["short_links"]["pending"]["phase"]
+        == "dispatch_requested"
+    )
+    github.wait = absent_run
+    with pytest.raises(links.PublicationError, match="deployment_pending"):
+        publisher.publish(CONFIG, {"audience": "guest", "entity_id": PAGE_B})
+    assert len(store.published) == 1 and len(github.payloads) == 1
+
+
+def test_existing_page_content_must_be_corrected_before_publish(setup):
+    publisher, store, _, _ = setup
+    with pytest.raises(links.PublicationError, match="prior_content_update"):
+        publisher.publish(
+            CONFIG,
+            {"audience": "guest", "entity_id": PAGE_A, "html_body": "<p>Changed</p>"},
+        )
+    assert store.published == []
+
+
+def test_recipient_http_boundary_sends_no_auth_and_refuses_redirects():
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(dict(self.headers))
+            self.send_response(200 if self.path == "/page" else 302)
+            self.send_header("Location", "/page")
+            self.end_headers()
+            self.wfile.write(b"recipient content")
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        assert links.Reader().get(base + "/page") == "recipient content"
+        with pytest.raises(links.PublicationError, match="recipient_page_not_verified"):
+            links.Reader().get(base + "/redirect")
+        assert len(seen) == 2 and all(
+            "Authorization" not in headers for headers in seen
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_keyring_credential_is_captured_once_and_explicit_empty_is_rejected(
+    tmp_path, monkeypatch
+):
+    script = tmp_path / "gh"
+    calls = tmp_path / "auth-calls"
+    script.write_text(
+        "#!/usr/bin/env python3\nimport os,sys\n"
+        "if sys.argv[1:3]==['auth','token']:\n"
+        f" with open({str(calls)!r},'a') as f:f.write('capture\\n')\n"
+        " print('synthetic-keyring-token')\n"
+        "else:\n"
+        " assert os.environ['GH_TOKEN']=='synthetic-keyring-token'\n"
+        " print('publisher' if sys.argv[2]=='user' else 'main')\n"
+    )
+    script.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    github = links.GitHub()
+    github.check_identity(binding())
+    github.check_identity(binding())
+    assert calls.read_text() == "capture\n"
+    monkeypatch.setenv("GH_TOKEN", "")
+    with pytest.raises(links.PublicationError, match="credential_missing"):
+        links.GitHub().check_identity(binding())
+    assert calls.read_text() == "capture\n"
+
+
+def test_template_fetch_is_data_at_exact_source_and_pending_source_is_bound(setup):
+    import base64
+
+    github = links.GitHub()
+    calls = []
+    template = {
+        "version": 1,
+        "script": "{{DESTINATION_JSON}}",
+        "html": "{{CSP_DIGEST}}{{SCRIPT}}",
+    }
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return base64.b64encode(json.dumps(template).encode()).decode()
+
+    github._run = run
+    assert github.template(binding(), "e" * 40) == template
+    assert (
+        calls[0][0][1]
+        == "repos/example/site/contents/scripts/short-link-template.json?ref="
+        + "e" * 40
+    )
+    publisher, store, fake_github, _ = setup
+    fake_github.fail_wait = True
+    publisher.publish(CONFIG, {"audience": "guest", "entity_id": PAGE_A})
+    store.record["snapshot"]["short_links"]["pending"]["source_sha"] = "e" * 40
+    with pytest.raises(links.PublicationError, match="binding_changed"):
+        publisher.publish(CONFIG, {"audience": "guest", "entity_id": PAGE_A})
+    assert len(store.published) == 1
