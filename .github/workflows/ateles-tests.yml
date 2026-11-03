@@ -44,6 +44,9 @@ on:
       - "lib/test_transcript_clarity.py"
       - "lib/github_app_token.py"
       - "lib/test_github_app_token.py"
+      - "lib/github_account.py"
+      - "lib/github_owner_policy.py"
+      - "lib/github_policy_control.py"
       - "execution/scripts/**"
       # The Codex turn guard's installer tests read these two inputs, so an
       # edit to either alone must re-run them.
