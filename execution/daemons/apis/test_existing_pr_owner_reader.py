@@ -9,6 +9,7 @@ import build_delivery as delivery
 from lib import github_policy_control as control
 from lib.daemon_runtime import artifact_resolver as artifacts
 from skill_runner import SkillResult
+from test_fly_run_job_delivery import world as world, existing_correction as existing_correction
 from test_existing_pr_delivery import snapshot, admitted_reader as admitted_reader
 from test_fly_delivery_dispatch import _StubNotifier
 
@@ -208,3 +209,58 @@ def test_normal_entrance_requires_verified_nonsecret_numeric_identity(normal, pr
     result = spawn(row)
     assert result.fly_delivery_not_launched and calls == ['owner']
     assert not delivery._delivery_ledger().delivery_receipts()
+
+
+@pytest.mark.parametrize("closed_after_push", [False, True])
+def test_current_task_owner_runner_receipt_and_daemon_readback_whole_flow(
+        normal, admitted_reader, world, existing_correction, monkeypatch, closed_after_push):
+    from types import SimpleNamespace
+    import fly_runner
+    import skill_runner
+    import test_fly_run_job_delivery as flow
+    from lib import github_app_token
+    row, current, _, calls = normal
+    spec, api_calls, _ = existing_correction
+    row["head_sha"] = spec["head_sha"]
+    current["snapshot"] = copy.deepcopy(row)
+    admitted_reader["headRefOid"] = spec["head_sha"]
+    monkeypatch.setattr(github_app_token, "identity_token", lambda *a: "inert-readback-token")
+    records = []
+
+    async def runner(skill, prompt, **kw):
+        calls.append("real-inert-runner")
+        selected = kw["fly_delivery"]
+        assert selected["branch"] == spec["branch"] and selected["head_sha"] == spec["head_sha"]
+        rc, record = flow._run(flow._job(world["tmp"], delivery=selected), flow._agent(world))
+        assert rc == 0 and record["delivery_status"] == "updated"
+        records.append(record)
+        admitted_reader["headRefOid"] = record["delivery_commit"]
+        if closed_after_push:
+            admitted_reader["state"] = "CLOSED"
+        job = SimpleNamespace(delivery=selected, delivery_result=fly_runner.delivery_result_from_record(record))
+        return SkillResult(skill, True, 0, "", "", remote_run_id="inert-private-git-run",
+                           **skill_runner._fly_delivery_fields(job, unknown=False))
+
+    monkeypatch.setattr(apis, "run_skill", runner)
+    result = spawn(row)
+    assert calls == ["owner", "real-inert-runner"] and len(records) == 1
+    record = records[0]
+    remote = flow._remote_ref(world, f"refs/heads/{spec['branch']}")
+    assert remote == record["delivery_commit"] != spec["head_sha"]
+    assert flow.git(world["remote"], "merge-base", spec["head_sha"], remote, home=world["home"]) == spec["head_sha"]
+    assert flow.git(world["remote"], "show", f"{spec['branch']}:prior-wip.txt", home=world["home"]) == "preserved original work"
+    assert all(method == "GET" for method, _ in api_calls)
+    receipts = delivery._delivery_ledger().delivery_receipts()
+    assert list(receipts) == [REPO + "#12"]
+    receipt = receipts[REPO + "#12"]
+    assert receipt["associated_keys"] == [REPO + "#34"]
+    assert receipt["existing_pr"]["head_sha"] == spec["head_sha"]
+    assert receipt["commit"] == remote and receipt["pr_number"] == 12
+    assert receipt["readback"] == ("failed" if closed_after_push else "passed")
+    assert result.fly_delivery_readback == receipt["readback"]
+    assert bool(result.ok) is not closed_after_push
+    assert delivery.active_build(REPO, 12) is None and delivery.active_build(REPO, 34) is None
+    # The settled receipt excludes a second consumer without erasing history.
+    assert "already recorded" in delivery.fly_delivery_blocker(REPO + "#34")
+    assert not spawn(row).ok
+    assert calls == ["owner", "real-inert-runner"]
