@@ -718,3 +718,144 @@ def test_cleanup_assertion_records_nested_links_without_reading_targets(world, m
     details = _assert_safe_cleanup_failure(lambda: _no_secret_anywhere({}, world), world)
     assert len(details["leftovers"]) == 1 and details["leftovers"][0]["kind"] == "link"
     assert details["incomplete"] is False and details["truncated"] is False
+
+
+# Existing-PR corrections retain the runner's custody, import checks and result
+# channel, but can never call the create-or-edit-PR path.
+@pytest.fixture
+def existing_correction(world, monkeypatch):
+    branch = "codex/scoped-correction"
+    src = world["tmp"] / "src"
+    git(src, "checkout", "-qb", branch, home=world["home"])
+    (src / "prior-wip.txt").write_text("preserved original work\n")
+    git(src, "add", ".", home=world["home"])
+    git(src, "commit", "-qm", "prior reviewed WIP", home=world["home"])
+    head = git(src, "rev-parse", "HEAD", home=world["home"])
+    git(src, "push", str(world["remote"]), f"HEAD:refs/heads/{branch}", home=world["home"])
+    spec = {**DELIVERY, "branch": branch, "pr_number": "12", "head_sha": head}
+    calls = []
+    state = {"state": "open", "merged": False}
+
+    def api(method, path, token, body=None):
+        calls.append((method, path))
+        assert method == "GET", "an existing correction attempted PR publication"
+        if path == f"/repos/{REPO}":
+            return 200, {"full_name": REPO, "default_branch": "main"}
+        assert path == f"/repos/{REPO}/pulls/12"
+        return 200, {"number": 12, "html_url": f"https://github.com/{REPO}/pull/12",
+                     "head": {"ref": branch, "sha": _remote_ref(world, f"refs/heads/{branch}"),
+                              "repo": {"full_name": REPO}},
+                     "base": {"ref": "main", "repo": {"full_name": REPO}}, **state}
+
+    monkeypatch.setattr(rd, "_api", api)
+    return spec, calls, state
+
+
+def test_existing_correction_preserves_wip_and_updates_only_the_admitted_pr(world, existing_correction):
+    spec, calls, _ = existing_correction
+    rc, record = _run(_job(world["tmp"], delivery=spec), _agent(world))
+    assert rc == 0 and record["delivery_status"] == "updated"
+    assert record["pr_number"] == 12
+    assert record["delivery_branch"] == spec["branch"]
+    assert record["delivery_commit"] != spec["head_sha"]
+    assert _remote_ref(world, f"refs/heads/{spec['branch']}") == record["delivery_commit"]
+    assert git(world["remote"], "show", f"{spec['branch']}:prior-wip.txt", home=world["home"]) == "preserved original work"
+    assert git(world["remote"], "merge-base", spec["head_sha"], record["delivery_commit"], home=world["home"]) == spec["head_sha"]
+    assert calls == [("GET", f"/repos/{REPO}"), ("GET", f"/repos/{REPO}/pulls/12")] * 3
+    assert git(world["remote"], "for-each-ref", "--format=%(refname)", "refs/heads/cicada", home=world["home"]) == ""
+
+
+@pytest.mark.parametrize("when", ["before_clone", "after_model"])
+def test_existing_correction_stale_head_never_pushes_or_creates_pr(world, existing_correction, when):
+    spec, calls, _ = existing_correction
+    old = git(world["remote"], "rev-parse", "main", home=world["home"])
+    def move():
+        git(world["remote"], "update-ref", f"refs/heads/{spec['branch']}", old, home=world["home"])
+    agent = _agent(world)
+    def run(*a, **kw):
+        got = agent(*a, **kw)
+        move()
+        return got
+    if when == "before_clone":
+        move()
+        def run(*a, **kw):
+            raise AssertionError("a stale target reached the model")
+    rc, record = _run(_job(world["tmp"], delivery=spec), run)
+    assert record["delivery_status"] == ("clone_failed" if when == "before_clone" else "push_failed")
+    assert _remote_ref(world, f"refs/heads/{spec['branch']}") == old
+    assert all(method == "GET" for method, _ in calls)
+
+
+def test_existing_correction_competing_update_after_final_read_is_not_overwritten(world, existing_correction, monkeypatch):
+    spec, calls, _ = existing_correction
+    original_push = rd.push_branch
+    old = git(world["remote"], "rev-parse", "main", home=world["home"])
+    def race(work, **kw):
+        # The final GET just confirmed the admitted head. Another writer moves
+        # the ref before send-pack; ordinary FF push would silently accept this
+        # ancestor as a new base, but the exact-head conditional must reject it.
+        # Hydrate this test's source ancestry so an ordinary push genuinely
+        # could fast-forward the rewind. Otherwise the shallow boundary itself
+        # rejects it, making removal of the exact-head guard inconclusive.
+        git(work.origin, "fetch", "--unshallow", str(world["remote"]),
+            f"refs/heads/{spec['branch']}", home=world["home"])
+        git(world["remote"], "update-ref", f"refs/heads/{spec['branch']}", old, home=world["home"])
+        return original_push(work, **kw)
+    monkeypatch.setattr(rd, "push_branch", race)
+    _, record = _run(_job(world["tmp"], delivery=spec), _agent(world))
+    assert record["delivery_status"] == "push_failed"
+    assert _remote_ref(world, f"refs/heads/{spec['branch']}") == old
+    assert len(calls) == 4
+
+
+def test_existing_correction_noop_keeps_the_original_head(world, existing_correction):
+    spec, calls, _ = existing_correction
+    _, record = _run(_job(world["tmp"], delivery=spec), _agent(world, commits=0))
+    assert record["delivery_status"] == "no_changes"
+    assert _remote_ref(world, f"refs/heads/{spec['branch']}") == spec["head_sha"]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("change", [
+    {"state": "closed"}, {"merged": True},
+    {"head": {"ref": "codex/other", "sha": "a" * 40, "repo": {"full_name": REPO}}},
+    {"head": {"ref": "codex/scoped-correction", "sha": "a" * 40, "repo": {"full_name": "fork/repo"}}},
+    {"base": {"ref": "other", "repo": {"full_name": REPO}}},
+    {"base": {"ref": "main", "repo": {"full_name": "foreign/repo"}}},
+    {"number": 13},
+])
+def test_existing_correction_wrong_source_refuses_before_model(world, existing_correction, change):
+    spec, calls, state = existing_correction
+    state.update(change)
+    def never(*a, **kw):
+        raise AssertionError("a wrong PR reached the model")
+    _, record = _run(_job(world["tmp"], delivery=spec), never)
+    assert record["delivery_status"] == "clone_failed"
+    assert _remote_ref(world, f"refs/heads/{spec['branch']}") == spec["head_sha"]
+
+
+@pytest.mark.parametrize("change", [
+    {"pr_number": ""}, {"head_sha": ""}, {"pr_number": "0"}, {"head_sha": "abc"},
+    {"branch": "codex/main"}, {"branch": "main"}, {"branch": "codex/release/v1"},
+])
+def test_existing_correction_malformed_job_never_starts_model(world, existing_correction, change):
+    spec, _, _ = existing_correction
+    def never(*a, **kw):
+        raise AssertionError("malformed correction reached the model")
+    rc, _ = _run(_job(world["tmp"], delivery={**spec, **change}), never)
+    assert rc == run_job.EXIT_JOB_INVALID
+
+
+def test_existing_correction_rejects_fetch_race_before_model(world, existing_correction, monkeypatch):
+    spec, calls, _ = existing_correction
+    original_clone = rd.clone_origin
+    old = git(world["remote"], "rev-parse", "main", home=world["home"])
+    def race(*a, **kw):
+        git(world["remote"], "update-ref", f"refs/heads/{spec['branch']}", old, home=world["home"])
+        return original_clone(*a, **kw)
+    monkeypatch.setattr(rd, "clone_origin", race)
+    def never(*a, **kw):
+        raise AssertionError("fetch race reached the model")
+    _, record = _run(_job(world["tmp"], delivery=spec), never)
+    assert record["delivery_status"] == "clone_failed"
+    assert _remote_ref(world, f"refs/heads/{spec['branch']}") == old

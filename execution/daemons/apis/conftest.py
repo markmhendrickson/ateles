@@ -172,9 +172,12 @@ def _fly_runner_off_and_isolated(monkeypatch, tmp_path):
     """The Fly executor is off by default (ateles#1456): no test inherits an
     operator's ``APIS_FLY_RUNNER_CLASSES``, and none touches the real ledger."""
     import fly_runner
+    import build_delivery
 
     monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES", raising=False)
-    monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(tmp_path / "isolated-fly-ledger.json"))
+    ledger_path = (tmp_path / "isolated-fly-ledger.json").resolve()
+    monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(ledger_path))
+    assert Path(build_delivery._registry_path()).resolve() == ledger_path
     monkeypatch.setattr(fly_runner, "_EXECUTOR", None)
     fly_runner._LOGIN_LOCKS.clear()
 

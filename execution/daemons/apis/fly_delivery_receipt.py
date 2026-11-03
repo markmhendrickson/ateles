@@ -59,6 +59,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_delivery  # noqa: E402
@@ -80,6 +81,25 @@ def describe(key: str, entry: dict) -> str:
         f"commit:    {entry.get('commit') or 'not reported'}\n"
         f"recorded:  {_iso(entry.get('recorded_at'))}"
     )
+    target = entry.get("existing_pr")
+    if isinstance(target, dict):
+        text += (
+            f"\nadmitted PR: #{target.get('pr_number') or 'not reported'}"
+            f"\nadmitted base: {target.get('base_branch') or 'not reported'}"
+            f"\nadmitted branch: {target.get('branch') or 'not reported'}"
+            f"\nadmitted old head: {target.get('head_sha') or 'not reported'}")
+        evidence = SimpleNamespace(fly_delivery_reason=entry.get("reason") or "",
+                                   fly_delivery_status=entry.get("status") or "")
+        text += "\npush evidence: " + build_delivery.delivery_push_state(evidence)
+        text += " (the commit field alone is not push confirmation)"
+        if entry.get("associated_keys"):
+            text += "\nsource associations: " + ", ".join(entry["associated_keys"])
+        for label, field in (("failure", "reason"), ("readback", "readback"), ("readback cause", "readback_reason")):
+            if entry.get(field):
+                text += f"\n{label}: {entry[field]}"
+        text += ("\nRecovery: inspect and reconcile this exact target first. Clearing this receipt alone "
+                 "does not refresh the old head, renew exhausted/noop attempts or release a held task. "
+                 "A later permitted dispatch needs fresh current task/target/checkpoint and target-policy qualification.")
     if entry.get("kind") == "lens":
         text += (
             f"\nlens:      {entry.get('lens') or 'not reported'}\n"
@@ -121,7 +141,8 @@ def _find(receipts: dict, key: str) -> tuple[str, dict] | None:
     """The stored (key, receipt) for the canonical *key*, whatever spelling
     the ledger holds it under."""
     for stored, entry in receipts.items():
-        if stored == key or build_delivery.canonical_key(stored) == key:
+        if (stored == key or build_delivery.canonical_key(stored) == key
+                or key in {build_delivery.canonical_key(k) for k in entry.get("associated_keys", [])}):
             return stored, entry
     return None
 
