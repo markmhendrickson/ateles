@@ -4,9 +4,15 @@ The agent publishing workflow uses `execution/scripts/publish_rendered_page.py`
 for approved guest publications. It publishes through Neotoma, registers or
 reuses a readable `/p/<slug>/` alias, rebuilds the existing Pages site when
 necessary, and returns the shortened URL only after verifying the served alias.
-Native Neotoma `publish_rendered_page` MCP calls and `/rendered-pages/publish`
-HTTP calls still return their original long URLs; this helper is the owning
+Native Neotoma `publish_rendered_page` MCP calls still return their original
+long URLs; this helper is the owning
 agent entrance, not a server hook.
+
+Publication uses the supported MCP operation over Neotoma's stateless `/mcp`
+transport with the same configured origin and bearer identity. The conceptual
+`/rendered-pages/publish` path in Neotoma's contract metadata has no REST handler
+and must not be called as an HTTP publication endpoint. JSON-RPC and tool errors
+are sanitized; an ambiguous transport failure is held without an automatic retry.
 
 Resolve the owning `deployment_configuration` at runtime. With the existing
 Neotoma environment and authenticated `gh` identity, invoke:

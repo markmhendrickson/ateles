@@ -191,9 +191,64 @@ class Neotoma:
             raise PublicationError("neotoma_identity_mismatch")
 
     def publish(self, fields: dict) -> dict:
-        return neotoma_http.request_json(
-            "POST", "/rendered-pages/publish", fields, timeout=120
-        )
+        # This operation is MCP-only: contract metadata names a conceptual HTTP
+        # path, but Neotoma registers no REST handler for it. Use its supported
+        # stateless transport at the same bound origin and bearer identity.
+        request_id = uuid.uuid4().hex
+        version = "2026-07-28"
+        try:
+            envelope = neotoma_http.request_json(
+                "POST",
+                "/mcp",
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "publish_rendered_page",
+                        "arguments": fields,
+                        "_meta": {
+                            "io.modelcontextprotocol/protocolVersion": version,
+                            "io.modelcontextprotocol/clientCapabilities": {},
+                        },
+                    },
+                },
+                timeout=120,
+                headers={
+                    "MCP-Protocol-Version": version,
+                    "Mcp-Method": "tools/call",
+                    "Mcp-Name": "publish_rendered_page",
+                },
+            )
+            if (
+                not isinstance(envelope, dict)
+                or envelope.get("jsonrpc") != "2.0"
+                or envelope.get("id") != request_id
+            ):
+                raise ValueError
+            if envelope.get("error"):
+                raise PublicationError("native_publication_failed")
+            result = envelope.get("result")
+            if not isinstance(result, dict) or result.get("isError"):
+                raise PublicationError("native_publication_failed")
+            content = result.get("content")
+            if (
+                not isinstance(content, list)
+                or len(content) != 1
+                or content[0].get("type") != "text"
+            ):
+                raise ValueError
+            published = json.loads(content[0]["text"])
+            if not isinstance(published, dict):
+                raise ValueError
+            return published
+        except PublicationError:
+            raise
+        except (neotoma_http.NeotomaRequestError, OSError):
+            # Do not retry an ambiguous native effect or copy its URL/body.
+            raise PublicationError("native_publication_transport_failed") from None
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise PublicationError("native_publication_response_invalid") from None
 
     def update_binding(self, entity_id: str, record: dict, binding: dict) -> dict:
         neotoma_http.request_json(
