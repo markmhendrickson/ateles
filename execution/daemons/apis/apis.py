@@ -257,6 +257,7 @@ from lib.daemon_runtime.action_type import (  # noqa: E402
     resolve_gate_action_type,
 )
 from lib.daemon_runtime.gating import (  # noqa: E402
+    _snapshot_with_tenant,
     ExecutionPolicy,
     checkpoint_already_dispatched,
     checkpoints_for_task,
@@ -4417,12 +4418,18 @@ async def handle_checkpoint_brief(
                 log.warning("[%s] correction %s has no exact lifecycle reason/version binding",
                             DAEMON_NAME, task_id)
                 return False
+            # Use the SAME tenant-preserving view as the existing versioned
+            # reader, derived from this already authenticated record. Raw
+            # snapshots can omit provenance carried by the record envelope.
+            # This is a copy; no fresh scope or task-supplied proof is adopted.
+            lifecycle_snapshot = _snapshot_with_tenant(task_record)
             try:
                 correction_lifecycle = _ApprovedCorrectionLifecycle(
-                    task_id, _correction_lifecycle_shape(task_snapshot), task_version,
+                    task_id, _correction_lifecycle_shape(lifecycle_snapshot), task_version,
                     hashlib.sha256(f"{entity_id}:{version}:{task_version}".encode()).hexdigest()[:16])
             except (TypeError, ValueError):
                 return False
+            task_snapshot = lifecycle_snapshot
 
         log.info(
             f"[{DAEMON_NAME}] checkpoint {entity_id} APPROVED — re-dispatching task "

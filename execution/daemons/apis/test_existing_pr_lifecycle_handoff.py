@@ -12,6 +12,7 @@ import pytest
 import apis
 import build_delivery as delivery
 from lib.daemon_runtime import task_lifecycle as lifecycle
+from lib.daemon_runtime import gating as gating_module
 from lib.daemon_runtime.gating import (
     ExecutionPolicy, build_checkpoint_authorization_envelope, evaluate_gate,
 )
@@ -21,7 +22,10 @@ from test_fly_delivery_dispatch import _StubNotifier
 
 
 @pytest.fixture
-def joined(normal, admitted_reader, monkeypatch):
+def joined(normal, admitted_reader, monkeypatch, tmp_path):
+    denials = (tmp_path / 'joined-checkpoint-denials').resolve()
+    assert denials.is_absolute() and not denials.exists()
+    monkeypatch.setenv('APIS_CHECKPOINT_DENIAL_DIR', str(denials))
     row, _, evidence, calls = normal
     row.update(status='awaiting_approval', blocked_reason='prior synthetic review hold',
                notes='complete original review and attempt history', title='Scoped correction',
@@ -53,11 +57,10 @@ def joined(normal, admitted_reader, monkeypatch):
         return copy.deepcopy(record)
 
     def fetch_version(entity_id):
-        current = fetch_record(entity_id)
-        if (current['entity_type'] != 'task'
-                or current['snapshot']['status'] == state['unreadable_status']):
+        current, version = gating_module.fetch_task_snapshot_and_version(entity_id)
+        if current is None or current['status'] == state['unreadable_status']:
             return None, None
-        return current['snapshot'], current['entity_version']
+        return current, version
 
     def post(url, *, json: dict, **kwargs):
         assert url == 'https://inert.invalid/correct'
@@ -115,11 +118,13 @@ def joined(normal, admitted_reader, monkeypatch):
 
     state['rebind'] = rebind
 
-    monkeypatch.setattr(apis, 'fetch_task_record', fetch_record)
-    monkeypatch.setattr(apis, 'fetch_task_snapshot', lambda key: fetch_record(key)['snapshot'])
+    monkeypatch.setattr(gating_module, '_fetch_entity', fetch_record)
+    monkeypatch.setattr(apis, 'fetch_task_record', gating_module.fetch_task_record)
+    monkeypatch.setattr(apis, 'fetch_task_snapshot', gating_module.fetch_task_snapshot)
     monkeypatch.setattr(apis, 'fetch_task_snapshot_and_version', fetch_version)
     monkeypatch.setattr(apis, 'fetch_checkpoint_record', lambda key: copy.deepcopy(checkpoint))
-    monkeypatch.setattr(apis, 'read_verified_entity_owner', lambda *a, **kw: owner)
+    monkeypatch.setattr(gating_module, 'fetch_entity_user_id', lambda key: owner)
+    monkeypatch.setattr(apis, 'read_verified_entity_owner', gating_module.read_verified_entity_owner)
     monkeypatch.setattr(apis, 'read_authenticated_checkpoint_authorization',
                         lambda *a: json.loads(checkpoint['snapshot']['body']))
     monkeypatch.setattr(apis, 'read_authenticated_checkpoint_resolution',
@@ -147,6 +152,11 @@ def release(state):
 def test_normal_checkpoint_reason_clear_reaches_bound_reader_and_one_receipt(joined):
     release(joined)
     seen = joined['seen']
+    if not seen:
+        assert joined['calls'] == [] and not delivery._delivery_ledger().delivery_receipts()
+        assert joined['row'] == joined['original']
+        print('CAUSAL_TENANT_DENIAL: real versioned reader preserves envelope tenant; '
+              'raw admitted shape differs; zero owner/job/receipt')
     assert seen['authoritative_snapshot']['status'] == 'executing'
     assert seen['authoritative_snapshot']['blocked_reason'] == ''
     if seen.get('reader_reason'):
@@ -186,6 +196,7 @@ CHANGES = [
     ('notes', 'changed complete review history'), ('description', 'changed scope'),
     ('body', 'new worker instructions'), ('task_type', 'different_type'),
     ('action_type', 'local_edit'), ('repository', 'other/repo'),
+    ('user_id', '22222222-2222-4222-8222-222222222222'),
     ('assigned_to', 'another-role'), ('attempt_count', 4), ('issue_number', 35),
     ('head_sha', 'b' * 40), ('pr_number', 13), ('context', '{}'),
     ('unknown_scope', {'accepted': False}), ('unknown_scope', {'accepted': 0}),
@@ -286,6 +297,61 @@ def test_task_record_type_change_is_not_a_task_lifecycle_transition(joined, stag
     assert release(joined) is False
     assert joined['calls'] == [] and joined['record']['entity_type'] == 'different_type'
     assert_no_delivery(joined)
+
+
+@pytest.mark.parametrize('target', ['task_envelope', 'task_snapshot', 'checkpoint_envelope',
+                                   'checkpoint_snapshot', 'spoofed_task_proof'])
+@pytest.mark.parametrize('tenant', [None, '', '22222222-2222-4222-8222-222222222222'])
+def test_initial_tenant_conflict_cannot_create_checkpoint_lifecycle_context(joined, target, tenant):
+    record = joined['record'] if target.startswith('task') or target == 'spoofed_task_proof' else joined['checkpoint']
+    row = record['snapshot'] if target.endswith('snapshot') else record
+    row['user_id'] = tenant
+    if target == 'spoofed_task_proof':
+        record['snapshot'].update(owner_policy_approved=True, approved_user_id=record['user_id'],
+                                  controller_reason_cleared=True)
+    assert release(joined) is False
+    assert joined['writes'] == [] and joined['calls'] == []
+    assert_no_delivery(joined)
+
+
+@pytest.mark.parametrize('stage', ['before_clear', 'before_reader', 'owner_await'])
+def test_envelope_tenant_change_during_lifecycle_or_await_never_rebinds(joined, monkeypatch, stage):
+    foreign = '22222222-2222-4222-8222-222222222222'
+    def change():
+        joined['record']['user_id'] = foreign
+    if stage == 'before_clear':
+        def before(write):
+            if write['field'] == 'blocked_reason':
+                change()
+        joined['before_write'] = before
+    elif stage == 'before_reader':
+        joined['before_reader'] = change
+    else:
+        from lib import github_policy_control as control
+        original = control.read_owner_policy
+        def owner(*args):
+            result = original(*args)
+            change()
+            return result
+        monkeypatch.setattr(control, 'read_owner_policy', owner)
+    assert release(joined) is False
+    assert joined['calls'] == (['owner'] if stage == 'owner_await' else [])
+    assert joined['record']['user_id'] == foreign
+    assert_no_delivery(joined)
+
+
+@pytest.mark.parametrize('tenant_shape', ['envelope_only', 'matching_snapshot', 'observations_only'])
+def test_existing_verified_tenant_views_preserve_admitted_source(joined, tenant_shape):
+    if tenant_shape == 'matching_snapshot':
+        joined['record']['snapshot']['user_id'] = joined['record']['user_id']
+    elif tenant_shape == 'observations_only':
+        joined['record'].pop('user_id')
+    joined['rebind']()
+    release(joined)
+    assert joined['calls'] == ['owner', 'job']
+    assert joined['seen']['receiving_snapshot'] == joined['seen']['authoritative_snapshot']
+    assert joined['row'] == joined['original']
+    assert list(delivery._delivery_ledger().delivery_receipts()) == ['owner/repo#12']
 
 
 @pytest.mark.parametrize('reason', [_ABSENT, None, False, [], 0])
