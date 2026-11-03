@@ -852,6 +852,8 @@ class FlyLedger:
         if not isinstance(deliveries, dict) or not all(
             isinstance(key, str) and isinstance(value, dict)
             and isinstance(value.get("status"), str)
+            and ("associated_keys" not in value or (isinstance(value["associated_keys"], list)
+                 and all(isinstance(k, str) and k for k in value["associated_keys"])))
             for key, value in deliveries.items()
         ):
             raise FlyLedgerError(f"Fly ledger {name}: delivery receipts are unreadable")
@@ -944,7 +946,16 @@ class FlyLedger:
             raise FlyLedgerError("delivery receipt has no status")
 
         def write(receipts: dict) -> bool:
-            if key in receipts:
+            import build_delivery
+
+            def keys(name, row):
+                aliases = row.get("associated_keys", [])
+                if not isinstance(aliases, list) or not all(isinstance(a, str) and a for a in aliases):
+                    raise FlyLedgerError("delivery receipt associations are malformed")
+                return {build_delivery.canonical_key(k) for k in (name, *aliases)}
+
+            requested = keys(key, entry)
+            if any(requested & keys(stored, held) for stored, held in receipts.items()):
                 return False
             receipts[key] = entry
             return True
@@ -964,8 +975,10 @@ class FlyLedger:
             if key not in receipts or receipts[key].get("token") != token:
                 return False
             current = receipts[key]
-            receipts[key] = ({**entry, "notified_at": current["notified_at"]}
-                             if "notified_at" in current else entry)
+            kept = {**entry, **({"associated_keys": current["associated_keys"]}
+                               if "associated_keys" in current else {})}
+            receipts[key] = ({**kept, "notified_at": current["notified_at"]}
+                             if "notified_at" in current else kept)
             return True
 
         return self._write_delivery(key, write)
@@ -981,7 +994,8 @@ class FlyLedger:
         def write(receipts: dict) -> bool:
             if receipts.get(key) != expected:
                 return False
-            receipts[key] = entry
+            receipts[key] = {**entry, **({"associated_keys": expected["associated_keys"]}
+                                        if "associated_keys" in expected else {})}
             return True
 
         return self._write_delivery(key, write)
@@ -2073,11 +2087,15 @@ def _check_delivery(delivery: Any, *, repository: str, stdin: bytes, github_requ
                     timeout: float) -> dict:  # fmt: skip
     """A delivery spec the job runner will accept, or ``FlyIneligible`` (the
     builder then runs locally, as today)."""
-    if not isinstance(delivery, dict) or tuple(sorted(delivery)) != tuple(sorted(DELIVERY_SPEC_KEYS)):
+    keys = set(delivery) if isinstance(delivery, dict) else set()
+    if keys not in (set(DELIVERY_SPEC_KEYS), set(DELIVERY_SPEC_KEYS) | {"pr_number", "head_sha"}):
         raise FlyIneligible("the delivery spec is malformed")
-    if not all(isinstance(delivery[k], str) and delivery[k] for k in DELIVERY_SPEC_KEYS):
+    if not all(isinstance(delivery[k], str) and delivery[k] for k in keys):
         raise FlyIneligible("the delivery spec has an empty field")
     _delivery_repository(repository)
+    if "pr_number" in delivery and (not re.fullmatch(r"[1-9][0-9]*", delivery["pr_number"])
+                                     or not re.fullmatch(r"[0-9a-f]{40}", delivery["head_sha"])):
+        raise FlyIneligible("the existing PR number or exact head is malformed")
     if github_requested:
         raise FlyIneligible("a delivering job carries no read-class GitHub token")
     if not isinstance(stdin, bytes) or PR_FILE_PLACEHOLDER.encode() not in stdin:

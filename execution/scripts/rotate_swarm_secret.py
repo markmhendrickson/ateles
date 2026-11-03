@@ -560,23 +560,14 @@ def github_ping_check(
 
 
 def github_token_from_gh(login: str) -> str:
-    """The keyring token `gh` holds for `login`, verified to resolve to that
-    login before use (an empty or wrong-account token is refused). Ambient
-    GH_TOKEN/GITHUB_TOKEN are ignored so the keyring entry is what is read."""
-    env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
-    result = subprocess.run(
-        ["gh", "auth", "token", "--user", login],
-        capture_output=True, text=True, timeout=20, env=env,
-    )
-    token = result.stdout.strip()
-    if result.returncode != 0 or len(token) < 20:
-        raise RuntimeError(f"no usable gh keyring token for {login!r}")
-    _register_secret(token)
-    status, text = _github_http("GET", "https://api.github.com/user", _github_headers(token), None)
-    found = json.loads(text).get("login") if status == 200 else None
-    if found != login:
-        raise RuntimeError(f"gh token for {login!r} resolves to {found!r} (HTTP {status})")
-    return token
+    """Preserve the existing caller's in-memory, identity and redaction contract."""
+    # Import only the extracted narrow account reader, not a second workflow.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_control_github_account", Path(__file__).resolve().parents[2] / "lib" / "github_account.py")
+    account = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(account)
+    return account.github_token_from_gh(login, register_secret=_register_secret)
 
 
 # ---------------------------------------------------------------------------

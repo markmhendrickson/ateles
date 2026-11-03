@@ -1879,6 +1879,11 @@ class SkillResult:
     # delivery-token mint) or its launch provably did not take effect. A
     # builder may then run its delivery locally, as it would without Fly.
     fly_ineligible_before_launch: bool = False
+    # Selected correction: retain the original result plus proven prelaunch
+    # cleanup. A known no-launch repair is held without automatic redispatch.
+    fly_delivery_not_launched: bool = False
+    fly_delivery_cleanup: str = ""
+    fly_existing_pr_number: int | None = None
     # A Fly run is not gated by the Mac's usage reading (operator ruling
     # 2026-10-15). When that reading WOULD have refused this provider
     # locally, what it said; empty when it would have allowed it.
@@ -1953,6 +1958,7 @@ def _fly_delivery_fields(job, *, unknown: bool) -> dict:
         "fly_delivery_commit": got.get("delivery_commit") or "",
         "fly_pr_number": got.get("pr_number"),
         "fly_pr_url": got.get("pr_url") or "",
+        "fly_existing_pr_number": int(job.delivery["pr_number"]) if "pr_number" in job.delivery else None,
     }
 
 
@@ -4847,6 +4853,7 @@ async def run_skill(
         local_first=local_first,
         fly_bound=fly_bound,
         fly_extra=fly_extra,
+        single_provider=bool(fly_delivery and "pr_number" in fly_delivery),
     )
 
 
@@ -5004,6 +5011,7 @@ async def _run_provider_attempts(
     owns_pending_gate: bool = False, local_first: bool = False,
     fallback_models_for=None,
     fly_bound: frozenset[str] = frozenset(), fly_extra: tuple[str, ...] = (),
+    single_provider: bool = False,
 ) -> SkillResult:
     """One selection/cooldown/failover mechanism for every harness entrypoint.
 
@@ -5167,7 +5175,7 @@ async def _run_provider_attempts(
     fallback_for = fallback_models_for or _local_fallback_models
     local_failure = ""
     fallback_models: dict[str, str] | None = None
-    pending = list(candidates)
+    pending = list(candidates[:1] if single_provider else candidates)
     if (
         local_first
         and provider is None
@@ -5354,6 +5362,11 @@ async def _run_provider_attempts(
         )
 
     assert last_result is not None  # candidates was non-empty
+    if single_provider:
+        # Preserve the one selected adapter's structured cause and diagnostics.
+        # Its existing cooldown handling above still applies; no failover or
+        # aggregate "all providers exhausted" message replaces the result.
+        return last_result
     last_result.ok = False
     last_result.error = (
         "all eligible subscription-backed harness providers were exhausted "

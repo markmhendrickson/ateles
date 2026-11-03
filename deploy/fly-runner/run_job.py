@@ -214,6 +214,8 @@ class DeliverySpec:
     base_branch: str
     author_name: str
     author_email: str
+    pr_number: int | None = None
+    head_sha: str = ""
 
 
 @dataclass
@@ -242,10 +244,10 @@ def _load_delivery(raw: Any, repository: str, secrets: dict[str, str],
                    child_names: tuple[str, ...]) -> DeliverySpec:  # fmt: skip
     """The job's delivery spec, or ``JobError`` naming what is wrong."""
     rd = _repo_delivery()
-    if not isinstance(raw, dict) or set(raw) != DELIVERY_KEYS:
+    if not isinstance(raw, dict) or set(raw) not in (DELIVERY_KEYS, DELIVERY_KEYS | {"pr_number", "head_sha"}):
         raise JobError("delivery must be an object with exactly "
                        + ", ".join(sorted(DELIVERY_KEYS)))  # fmt: skip
-    if not all(isinstance(raw[k], str) and raw[k] for k in DELIVERY_KEYS):
+    if not all(isinstance(raw[k], str) and raw[k] for k in raw):
         raise JobError("every delivery field must be a non-empty string")
     if DELIVERY_TOKEN_NAME not in secrets:
         raise JobError("a delivery needs its GitHub token")
@@ -258,11 +260,16 @@ def _load_delivery(raw: Any, repository: str, secrets: dict[str, str],
         raise JobError("delivery base_branch is not acceptable")
     try:
         rd.check_repository(repository)
-        rd.check_push_branch(raw["branch"], raw["base_branch"])
+        rd.check_push_branch(raw["branch"], raw["base_branch"], existing="pr_number" in raw)
+        if "pr_number" in raw and (not re.fullmatch(r"[1-9][0-9]*", raw["pr_number"])
+                                   or not re.fullmatch(r"[0-9a-f]{40}", raw["head_sha"])):
+            raise JobError("the existing PR number or exact head is invalid")
     except rd.RepoWorkError as exc:
         raise JobError(f"delivery refused: {exc.reason}") from None
     return DeliverySpec(branch=raw["branch"], base_branch=raw["base_branch"],
-                        author_name=raw["author_name"], author_email=raw["author_email"])  # fmt: skip
+                        author_name=raw["author_name"], author_email=raw["author_email"],
+                        pr_number=int(raw["pr_number"]) if "pr_number" in raw else None,
+                        head_sha=raw.get("head_sha", ""))  # fmt: skip
 
 
 def load_job(job_dir: Path) -> Job:
@@ -1188,13 +1195,21 @@ def _run_delivering_job(job: Job, delivery: DeliveryRun, runner, argv: list[str]
     failure = failed_category = None
     with rd.bounded_by(work_by):
         try:
+            if spec.pr_number:
+                rd.require_existing_pr(repository=job.repository, number=spec.pr_number,
+                                       branch=spec.branch, base_branch=spec.base_branch,
+                                       head=spec.head_sha, token=token)
             delivery.work = rd.prepare_work(WORK_ROOT, run_id=job.run_id)
             delivery.base = rd.clone_origin(
                 delivery.work, url=rd.GITHUB_REMOTE.format(repository=job.repository),
-                base_branch=spec.base_branch, token=token, allow=rd.GITHUB_REMOTE_TRANSPORT)
-            rd.make_checkout(delivery.work, branch=spec.branch, base_branch=spec.base_branch,
+                base_branch=spec.branch if spec.pr_number else spec.base_branch, token=token,
+                allow=rd.GITHUB_REMOTE_TRANSPORT,
+                **({"expected_head": spec.head_sha} if spec.pr_number else {}))
+            rd.make_checkout(delivery.work, branch=spec.branch,
+                             base_branch=spec.branch if spec.pr_number else spec.base_branch,
                              repository=job.repository, ident=ident,
-                             author=(spec.author_name, spec.author_email))  # fmt: skip
+                             author=(spec.author_name, spec.author_email),
+                             **({"existing": True} if spec.pr_number else {}))  # fmt: skip
         except rd.RepoWorkError as exc:
             failure, failed_category = str(exc), exc.category
     if failure is not None:
@@ -1236,34 +1251,59 @@ def _deliver(job: Job, delivery: DeliveryRun, rc: int, timed_out: bool,
     token = job.secrets[DELIVERY_TOKEN_NAME]
     failure = failed_category = None
     pushed = False
+    push_attempted = False
+    if spec.pr_number:
+        delivery.pr_number = spec.pr_number  # admitted identity, not delivery success
     with rd.bounded_by(work_by):
         step = "not_delivered"
         try:
-            if not rd.export_agent_work(work, branch=spec.branch, base=delivery.base, ident=ident):
+            existing = {"existing": True} if spec.pr_number else {}
+            if not rd.export_agent_work(work, branch=spec.branch, base=delivery.base, ident=ident, **existing):
                 delivery.status, delivery.reason = "no_changes", "the branch adds no commits"
                 return
-            imported = rd.import_agent_work(work, branch=spec.branch, base=delivery.base)
+            imported = rd.import_agent_work(work, branch=spec.branch, base=delivery.base, **existing)
             delivery.commit = imported.head
             step = "push_failed"
+            if spec.pr_number:
+                rd.require_existing_pr(repository=job.repository, number=spec.pr_number,
+                                       branch=spec.branch, base_branch=spec.base_branch,
+                                       head=spec.head_sha, token=token)
+            push_attempted = True
             rd.push_branch(work, repository=job.repository, branch=spec.branch,
-                           default_branch=spec.base_branch, head=imported.head, token=token)
+                           default_branch=spec.base_branch, head=imported.head, token=token,
+                           **({"expected_head": spec.head_sha} if spec.pr_number else {}))
             pushed = True
             step = "pr_failed"
-            title, body = _pr_text(rd, work, job.secrets)
-            pr = rd.open_or_update_pr(repository=job.repository, branch=spec.branch,
-                                      default_branch=spec.base_branch, token=token,
-                                      title=title, body=body)  # fmt: skip
+            if spec.pr_number:
+                pr = rd.require_existing_pr(repository=job.repository, number=spec.pr_number,
+                                           branch=spec.branch, base_branch=spec.base_branch,
+                                           head=imported.head, token=token)
+            else:
+                title, body = _pr_text(rd, work, job.secrets)
+                pr = rd.open_or_update_pr(repository=job.repository, branch=spec.branch,
+                                          default_branch=spec.base_branch, token=token,
+                                          title=title, body=body)  # fmt: skip
         except rd.RepoWorkError as exc:
             failure, failed_category = str(exc), exc.category
+            # These guard/deadline outcomes explicitly precede send-pack.
+            # An actual git timeout/connection failure remains uncertain.
+            if exc.category in {rd.PUSH_REFUSED, rd.NO_TIME} or exc.status == "not_started":
+                push_attempted = False
     if failure is not None and failed_category == rd.NO_TIME:
         # Nothing further was started. A completed push stays on the remote:
         # the record keeps its branch and commit, with no pull request.
         delivery.status = "no_time"
         delivery.reason = ("the branch was pushed; no time was left for the pull request"
                            if pushed else failure)  # fmt: skip
+        if spec.pr_number:
+            state = "confirmed" if pushed else "unknown" if push_attempted else "not_started"
+            delivery.reason = f"[push={state}] existing PR #{spec.pr_number}: {delivery.reason}"
         return
     if failure is not None:
         delivery.status, delivery.reason = step, failure
+        if spec.pr_number:
+            state = "confirmed" if pushed else "unknown" if push_attempted else "not_started"
+            delivery.reason = f"[push={state}] existing PR #{spec.pr_number}: {failure}"
         return
     delivery.status, delivery.reason = pr.action, ""
     delivery.pr_number, delivery.pr_url = pr.number, pr.url

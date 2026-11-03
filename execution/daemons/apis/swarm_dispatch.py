@@ -42,6 +42,7 @@ behind APIS_AUTONOMY_AUTO_MERGE regardless.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -7138,9 +7139,12 @@ class SwarmDispatcher:
             issue_number=trigger.number,
         )
         if plan is not None:
-            with build_delivery.claim_build(
-                trigger.repository, trigger.number, "swarm-build-handoff"
-            ) as claim:
+            with contextlib.ExitStack() as claims:
+                try:
+                    claim = claims.enter_context(build_delivery.claim_build(
+                        trigger.repository, trigger.number, "swarm-build-handoff"))
+                except build_delivery.BuildWorktreeError as exc:
+                    raise build_delivery.BuildNotStarted(trigger.repository, trigger.number, exc) from exc
                 async def launch():
                     return await run_skill(
                         "cicada",
@@ -7183,9 +7187,12 @@ class SwarmDispatcher:
             ) from exc
         # Registered for the whole run so a task the build files to track its own
         # work is recognised as this build, not dispatched as a second one.
-        with build_delivery.claim_build(
-            trigger.repository, trigger.number, "swarm-build-handoff"
-        ) as claim:
+        with contextlib.ExitStack() as claims:
+            try:
+                claim = claims.enter_context(build_delivery.claim_build(
+                    trigger.repository, trigger.number, "swarm-build-handoff"))
+            except build_delivery.BuildWorktreeError as exc:
+                raise build_delivery.BuildNotStarted(trigger.repository, trigger.number, exc) from exc
             result = await run_skill(
                 "cicada",
                 self._cicada_build_prompt(
