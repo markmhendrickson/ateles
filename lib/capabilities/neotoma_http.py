@@ -57,7 +57,12 @@ def bearer_token() -> str:
 
 
 def request_json(
-    method: str, path: str, body: dict[str, Any] | None = None, *, timeout: float = 15.0
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    *,
+    timeout: float = 15.0,
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     url = base_url() + path
     token = bearer_token()
@@ -66,6 +71,7 @@ def request_json(
         data=json.dumps(body).encode() if body is not None else None,
         method=method,
         headers={
+            **(headers or {}),
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -73,7 +79,9 @@ def request_json(
         },
     )
     try:
-        with urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout) as resp:  # noqa: S310
+        with urllib.request.build_opener(_NoRedirect).open(
+            req, timeout=timeout
+        ) as resp:  # noqa: S310
             return json.load(resp)
     except urllib.error.HTTPError as exc:
         text = (exc.read() or b"")[:600].decode("utf-8", "replace")

@@ -286,6 +286,16 @@ def test_real_neotoma_adapter_preserves_request_shape_cas_and_no_owner_field(
         if path == "/correct":
             fixture.update_binding(CONFIG, fixture.record, body["value"])
             return {"success": True}
+        if path == "/mcp":
+            return {
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": {
+                    "content": [
+                        {"type": "text", "text": json.dumps({"entity_id": PAGE_A})}
+                    ]
+                },
+            }
         return fixture.read(CONFIG)
 
     monkeypatch.setattr(links.neotoma_http, "request_json", request)
@@ -295,10 +305,199 @@ def test_real_neotoma_adapter_preserves_request_shape_cas_and_no_owner_field(
     adapter.check_identity("graph-owner")
     adapter.publish({"entity_id": PAGE_A})
     adapter.update_binding(CONFIG, record, binding())
-    assert calls[2] == ("POST", "/rendered-pages/publish", {"entity_id": PAGE_A})
+    assert calls[2][0:2] == ("POST", "/mcp")
+    assert calls[2][2]["method"] == "tools/call"
+    assert calls[2][2]["params"]["name"] == "publish_rendered_page"
+    assert calls[2][2]["params"]["arguments"] == {"entity_id": PAGE_A}
     correction = next(body for _, path, body in calls if path == "/correct")
     assert correction["expected_version"] == "v0"
     assert correction["field"] == "short_links"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        None,
+        "rpc_error",
+        "tool_error",
+        "wrong_id",
+        "malformed_content",
+        "http_error",
+        "redirect",
+        "flag_false",
+        "flag_null",
+        "flag_zero",
+        "flag_empty_string",
+        "flag_empty_list",
+        "flag_empty_dict",
+        "flag_string_false",
+    ],
+)
+def test_native_publish_uses_real_mcp_http_boundary_and_sanitizes_errors(
+    monkeypatch, failure
+):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    requests = []
+    payload = {
+        "title": "Synthetic page",
+        "html_body": "<p>Private body marker</p>",
+        "idempotency_key": "stable-create-key",
+    }
+    published = {
+        "entity_id": PAGE_A,
+        "access_token": "synthetic-guest-token",
+        "share_url": "https://records.example/page",
+        "conformance_warnings": [{"code": "THEME_REQUIRED", "severity": "warn"}],
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append((self.path, dict(self.headers), body))
+            if self.path != "/mcp":
+                self.send_response(404)
+                self.end_headers()
+                return
+            if failure in {"http_error", "redirect"}:
+                self.send_response(503 if failure == "http_error" else 307)
+                self.send_header("Location", "/unexpected-redirect")
+                self.end_headers()
+                self.wfile.write(b"synthetic-guest-token private upstream URL/body")
+                return
+            result = {
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(published)}]
+                },
+            }
+            if failure == "rpc_error":
+                result = {
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "error": {
+                        "code": -32603,
+                        "message": "synthetic-guest-token private upstream URL/body",
+                    },
+                }
+            if failure == "tool_error":
+                result["result"]["isError"] = True
+            flags = {
+                "flag_false": False,
+                "flag_null": None,
+                "flag_zero": 0,
+                "flag_empty_string": "",
+                "flag_empty_list": [],
+                "flag_empty_dict": {},
+                "flag_string_false": "false",
+            }
+            if failure in flags:
+                result["result"]["isError"] = flags[failure]
+            if failure == "wrong_id":
+                result["id"] = "different-request"
+            if failure == "malformed_content":
+                result["result"]["content"][0]["text"] = (
+                    "private invalid JSON synthetic-guest-token"
+                )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode())
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("NEOTOMA_BASE_URL", f"http://localhost:{server.server_port}")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-neotoma-bearer")
+    try:
+        if failure not in {None, "flag_false"}:
+            with pytest.raises(links.PublicationError) as error:
+                links.Neotoma().publish(payload)
+            assert str(error.value) in {
+                "native_publication_failed",
+                "native_publication_response_invalid",
+                "native_publication_transport_failed",
+            }
+            assert "synthetic-guest-token" not in str(error.value)
+        else:
+            assert links.Neotoma().publish(payload) == published
+        assert len(requests) == 1, "native effects and redirects must never be retried"
+        path, headers, body = requests[0]
+        headers = {key.lower(): value for key, value in headers.items()}
+        assert path == "/mcp"
+        assert headers["authorization"] == "Bearer synthetic-neotoma-bearer"
+        assert headers["mcp-protocol-version"] == "2026-07-28"
+        assert (
+            headers["mcp-method"] == "tools/call"
+            and headers["mcp-name"] == "publish_rendered_page"
+        )
+        assert body["params"]["arguments"] == payload
+        assert body["params"]["_meta"] == {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+                "name": "ateles-rendered-page-links",
+                "version": "1.0",
+            },
+        }
+        assert "private" not in path.lower() and "synthetic-" not in path
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_canonical_binding_write_carries_same_client_attribution_and_cas(monkeypatch):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    store = Store()
+    corrections = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            assert self.path == "/correct"
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            corrections.append(
+                (body, {key.lower(): value for key, value in self.headers.items()})
+            )
+            store.update_binding(CONFIG, store.record, body["value"])
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"success":true}')
+
+        def do_GET(self):
+            assert self.path == "/entities/" + CONFIG
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(store.read(CONFIG)).encode())
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("NEOTOMA_BASE_URL", f"http://localhost:{server.server_port}")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-configured-bearer")
+    try:
+        updated = binding()
+        updated["registry"]["new-page"] = PAGE_A
+        readback = links.Neotoma().update_binding(CONFIG, store.record, updated)
+        assert readback["snapshot"]["short_links"] == updated
+        assert len(corrections) == 1
+        body, headers = corrections[0]
+        assert body["expected_version"] == "v0" and body["field"] == "short_links"
+        assert headers["authorization"] == "Bearer synthetic-configured-bearer"
+        assert headers.get("x-client-name") == "ateles-rendered-page-links"
+        assert headers.get("x-client-version") == "1.0"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_actual_gh_subprocess_keeps_registry_on_stdin_and_sanitizes_errors(
