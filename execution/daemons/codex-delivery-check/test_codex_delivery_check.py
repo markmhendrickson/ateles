@@ -312,6 +312,9 @@ class FakeNotifier:
     def clear_dedupe(self, key):
         self.cleared.append(key)
 
+    def flush_digest(self):
+        return False
+
 
 def result(name, keys=(), error=None):
     return cdc.CheckResult(name, [cdc.Finding(k, f"msg {k}") for k in keys], error)
@@ -617,3 +620,134 @@ def test_repo_map_unreadable_or_malformed_fails_loudly(tmp_path):
     with pytest.raises(ValueError):
         cdc.load_repo_map({cdc.REPO_MAP_ENV: str(bad)})
     assert cdc.load_repo_map({}) == {}
+
+
+# ── email delivery from the swarm mailbox ────────────────────────────────────
+
+TEST_TO = "ops@example.test"
+
+
+class _Gws:
+    """Stands in for subprocess.run inside the notifier. Never sends mail."""
+
+    def __init__(self, rc=0):
+        self.cmds, self.rc = [], rc
+
+    def __call__(self, cmd, **kw):
+        self.cmds.append(list(cmd))
+        return type("R", (), {"returncode": self.rc, "stderr": "", "stdout": ""})()
+
+
+def _email_setup(monkeypatch, tmp_path, silence, rc=0):
+    """Real Notifier, email on, dotenv-like values set, no real mail."""
+    from lib.notify import notifier as nmod
+
+    state = tmp_path / "state.json"
+    for k, v in {
+        "ATELES_NOTIFY_EMAIL": "1",
+        "OPERATOR_EMAIL": TEST_TO,
+        "ATELES_SWARM_EMAIL": "alias+swarm@example.test",
+        "ATELES_NOTIFY_TO": "",
+        "ATELES_DEDUPE_JOURNAL_PATH": str(tmp_path / "dedupe.json"),
+        "ATELES_DIGEST_QUEUE_PATH": str(tmp_path / "global-shared.json"),
+    }.items():
+        monkeypatch.setenv(k, v)
+    gws = _Gws(rc)
+    monkeypatch.setattr(nmod.subprocess, "run", gws)
+    monkeypatch.setattr(nmod.Notifier, "_in_silence_window", lambda self: silence)
+    queue = cdc.isolate_notifier_env(state)
+    return nmod.Notifier(rubric={"timezone": "UTC", "digest_times": ""}), gws, queue
+
+
+def test_email_has_no_from_and_targets_operator(monkeypatch, tmp_path):
+    from lib.notify.notifier import Priority
+
+    n, gws, _ = _email_setup(monkeypatch, tmp_path, silence=False)
+    assert cdc._alert(n, "stuck goal", Priority.WARN, "k2") is True
+    cmd = gws.cmds[-1]
+    assert cmd[:3] == ["gws", "gmail", "+send"]
+    assert "--from" not in cmd
+    assert cmd[cmd.index("--to") + 1] == TEST_TO
+
+
+def test_job_queue_is_its_own_and_shared_queue_is_untouched(monkeypatch, tmp_path):
+    from lib.notify.notifier import Priority
+
+    shared = tmp_path / "shared.json"
+    shared.write_text(json.dumps(["⚠ other daemon notice"]))
+    n, gws, queue = _email_setup(monkeypatch, tmp_path, silence=False)
+    assert queue == tmp_path / "codex-delivery-held.json"
+    # a global value pointing at the shared file must not win
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(shared))
+    cdc.isolate_notifier_env(tmp_path / "state.json")
+    n2 = type(n)(rubric={"timezone": "UTC", "digest_times": ""})
+    assert n2._digest_path == queue
+    before = shared.read_text()
+    n2.send("a finding", Priority.WARN, handler="h")
+    cdc.release_held_notices(n2)
+    assert shared.read_text() == before
+    assert all("other daemon" not in " ".join(c) for c in gws.cmds)
+
+
+def test_held_notice_goes_out_after_silence_and_waits_during_it(
+    monkeypatch, tmp_path
+):
+    from lib.notify import notifier as nmod
+    from lib.notify.notifier import Priority
+
+    n, gws, queue = _email_setup(monkeypatch, tmp_path, silence=True)
+    assert n.send("overnight finding", Priority.WARN, handler="h") is False
+    assert len(n._digest_queue) == 1 and gws.cmds == []
+    assert cdc.release_held_notices(n) is False  # still silent: stays queued
+    assert len(n._digest_queue) == 1 and gws.cmds == []
+    monkeypatch.setattr(nmod.Notifier, "_in_silence_window", lambda self: False)
+    assert cdc.release_held_notices(n) is True
+    assert len(gws.cmds) == 1 and "overnight finding" in gws.cmds[0][-1]
+    assert n._digest_queue == []
+
+
+def test_held_notice_stays_queued_when_delivery_fails(monkeypatch, tmp_path):
+    from lib.notify import notifier as nmod
+    from lib.notify.notifier import Priority
+
+    n, gws, queue = _email_setup(monkeypatch, tmp_path, silence=True, rc=1)
+    n.send("overnight finding", Priority.WARN, handler="h")
+    monkeypatch.setattr(nmod.Notifier, "_in_silence_window", lambda self: False)
+    monkeypatch.setattr(n, "_apprise", None)  # no Telegram fallback
+    assert cdc.release_held_notices(n) is False
+    assert len(gws.cmds) == 1 and len(n._digest_queue) == 1
+
+
+def test_main_releases_held_notices_before_alerting(monkeypatch, tmp_path):
+    import os
+
+    from lib.notify.notifier import Notifier
+
+    order = []
+    fake = FakeNotifier()
+    fake.flush_digest = lambda: order.append("flush") or False
+    orig_send = fake.send
+    fake.send = lambda *a, **k: order.append("send") or orig_send(*a, **k)
+    monkeypatch.setitem(sys.modules, "lib.daemon_runtime", type("M", (), {}))
+    monkeypatch.setattr(Notifier, "from_neotoma", staticmethod(lambda: fake))
+    monkeypatch.setattr(cdc, "run_checks", lambda **kw: [result("c", ["k1"])])
+    monkeypatch.setenv("CODEX_DELIVERY_STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", "/should/be/overridden")
+    monkeypatch.setenv("ATELES_SWARM_EMAIL", "alias+swarm@example.test")
+    assert cdc.main(["--once"]) == 0
+    assert order[0] == "flush" and "send" in order
+    assert os.environ["ATELES_DIGEST_QUEUE_PATH"] == str(
+        tmp_path / "codex-delivery-held.json"
+    )
+    assert os.environ["ATELES_SWARM_EMAIL"] == ""
+
+
+def test_plist_template_sends_email_from_swarm_mailbox():
+    path = Path(__file__).parent / "com.ateles.codex-delivery-check.plist.tmpl"
+    text = path.read_text()
+    assert "@" not in text
+    env = plistlib.loads(text.replace("<HOME>", "/h").encode())["EnvironmentVariables"]
+    assert env["ATELES_NOTIFY_EMAIL"] == "1"
+    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == "/h/.config/gws-swarm"
+    assert "/h/.nvm/versions/node/v20.20.0/bin" in env["PATH"].split(":")
