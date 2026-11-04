@@ -1,0 +1,13 @@
+{
+  "source": "Documents/data/recordings/20260907 1114 mic.mp4 (not committed)",
+  "jsonl": "Documents/data/recordings/20260907 1114 mic_live.jsonl",
+  "note": "16 kHz mono PCM windows at the live JSONL chunk boundaries. Full mp4 is ~405 MB and is not in git.",
+  "chunks": {
+    "0": {"start_s": 34.94, "end_s": 64.9, "label": "speech", "rms_db": -27.1, "text": "tuple is actually defined by the swarm, like I said, defined in its own entity type, and just when and where and why, that's part of the operations. And I suppose I could benefit from some examples, because right now, yeah, it says every policy decision point and enforcement point, and the entities, blah."},
+    "1": {"start_s": 64.9, "end_s": 104.83, "label": "speech", "rms_db": -35.0, "text": "Scope. Yeah, it says define authority whole. What does that even mean? Define authority whole."},
+    "2": {"start_s": 104.83, "end_s": 139.78, "label": "fabrication", "rms_db": -44.7, "text": "Heat to 10C and heat to 40C to remove bubbles. Aluminum foil must be placed into hot water towel to quickly clean and they should cool."},
+    "3": {"start_s": 139.78, "end_s": 179.71, "label": "silence", "rms_db": -56.3, "text": ""},
+    "4": {"start_s": 179.71, "end_s": 209.66, "label": "speech", "rms_db": -36.4, "text": "I'd like you to explain it, and then possibly we should reward."},
+    "5": {"start_s": 209.66, "end_s": 244.61, "label": "fabrication", "rms_db": -39.0, "text": "每个昆布照片上收盘会昆布一般的昆布 书香的这一程会一会面包裹 美人鱼包裹 水 天星"}
+  }
+}
