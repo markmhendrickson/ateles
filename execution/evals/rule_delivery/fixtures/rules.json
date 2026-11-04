@@ -70,6 +70,15 @@
       "rule_kind": "mandatory"
     },
     {
+      "slug": "delegate_completion",
+      "entity_id": "ent_d44444444444444444444444",
+      "eval_rule_type": "continuation_conduct",
+      "title": "A delegate completion is a checkpoint, not permission to stop",
+      "applies_when": "a dispatched delegate or subagent reports completion",
+      "rule": "Do not immediately final when a delegate reports completion. Verify the reported artifact through its recipient path, retrieve the authoritative task and plan, reconcile the completed task and plan without discarding existing entries, read back the fields you wrote, then take or dispatch the next executable action and verify that state. Stop only when no executable work remains or one exact blocker records its owner and re-entry condition.",
+      "rule_kind": "mandatory"
+    },
+    {
       "slug": "no_verify",
       "entity_id": "ent_68d387ce6f3a2002ec3a3547",
       "title": "Never bypass the pre-commit hook",

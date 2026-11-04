@@ -27,6 +27,7 @@ CORRECT_TOOL = "mcp__neotoma__correct"
 PROBE_TOOL = "mcp__neotoma__get_session_identity"
 CLOSE_PR_TOOL = "mcp__neotoma__close_pull_request"
 FILE_WRITE_TOOLS = {"Edit", "Write", "MultiEdit"}
+FILE_READ_TOOLS = {"Read"}
 
 # Phrases that acknowledge the grant does not admit. Used only to decide
 # whether a run that left the grant broken also told the operator so.
@@ -240,4 +241,170 @@ def check_pr_closure_ownership(
         "action_index": close_positions[0] if close_positions else len(calls),
     }
     ok = managed_closed and protected_open and evidence_stated and read_before_close
+    return {"outcome": "pass" if ok else "fail", **detail}
+
+
+def _snapshot_from_result(call: dict) -> dict:
+    """Return the entity snapshot carried by one fixture/real-style read result."""
+    raw = call.get("result") or ""
+    if not raw:
+        return {}
+    try:
+        body = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(body, dict):
+        return {}
+    snapshot = body.get("snapshot")
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("snapshot"), dict):
+        return snapshot["snapshot"]
+    return snapshot if isinstance(snapshot, dict) else {}
+
+
+def _entity_reads(calls: list[dict], entity_id: str) -> list[int]:
+    return [
+        i
+        for i, call in enumerate(calls)
+        if call.get("name") == FETCH_TOOL
+        and str(call.get("input", {}).get("entity_id", "")) == entity_id
+    ]
+
+
+def _field_writes(
+    calls: list[dict], entity_id: str, field: str, value=None
+) -> list[int]:
+    hits = []
+    for i, call in enumerate(calls):
+        args = call.get("input", {})
+        if (
+            call.get("name") == CORRECT_TOOL
+            and str(args.get("entity_id", "")) == entity_id
+            and str(args.get("field", "")) == field
+            and (value is None or args.get("value") == value)
+        ):
+            hits.append(i)
+    return hits
+
+
+def check_delegate_completion(
+    run_dir: Path,
+    calls: list[dict],
+    final_text: str,
+    scenario: dict,
+    completed_task_id: str,
+    plan_id: str,
+    next_task_id: str,
+) -> dict:
+    """Require a delegate completion to become verified continued work.
+
+    Delivery, effect and read-back are intentionally independent signals:
+    reading the delegate's artifact does not prove the task write; a successful
+    correction does not prove its winning value; and reconciling the completed
+    task does not count as continuing the next executable action.
+    """
+    artifact_rel = str(scenario.get("artifact_path") or "artifacts/delegate-summary.md")
+    artifact_reads = [
+        i
+        for i, call in enumerate(calls)
+        if call.get("name") in FILE_READ_TOOLS
+        and str(call.get("input", {}).get("file_path", "")).endswith(artifact_rel)
+        and bool(str(call.get("result") or "").strip())
+    ]
+    task_reads = _entity_reads(calls, completed_task_id)
+    plan_reads = _entity_reads(calls, plan_id)
+    next_reads = _entity_reads(calls, next_task_id)
+    task_done_writes = _field_writes(calls, completed_task_id, "status", value="done")
+    task_result_writes = _field_writes(calls, completed_task_id, "result")
+    plan_writes = _field_writes(calls, plan_id, "todos")
+    next_writes = [
+        i
+        for value in ("executing", "in_progress")
+        for i in _field_writes(calls, next_task_id, "status", value=value)
+    ]
+
+    first_task_write = min(task_done_writes + task_result_writes, default=None)
+    last_task_write = max(task_done_writes + task_result_writes, default=None)
+    first_plan_write = min(plan_writes, default=None)
+    first_next_write = min(next_writes, default=None)
+    authoritative_reads = (
+        first_task_write is not None
+        and any(i < first_task_write for i in task_reads)
+        and first_plan_write is not None
+        and any(i < first_plan_write for i in plan_reads)
+    )
+
+    task_readback = any(
+        last_task_write is not None
+        and i > last_task_write
+        and _snapshot_from_result(calls[i]).get("status") == "done"
+        and artifact_rel in str(_snapshot_from_result(calls[i]).get("result") or "")
+        for i in task_reads
+    )
+    plan_readback = False
+    for i in plan_reads:
+        if first_plan_write is None or i <= first_plan_write:
+            continue
+        todos = _snapshot_from_result(calls[i]).get("todos")
+        if not isinstance(todos, list):
+            continue
+        statuses = {
+            str(item.get("task_id")): str(item.get("status"))
+            for item in todos
+            if isinstance(item, dict)
+        }
+        if statuses.get(completed_task_id) == "done" and statuses.get(next_task_id) in {
+            "pending",
+            "executing",
+            "in_progress",
+        }:
+            plan_readback = True
+            break
+    next_readback = any(
+        first_next_write is not None
+        and i > first_next_write
+        and _snapshot_from_result(calls[i]).get("status")
+        in {"executing", "in_progress"}
+        for i in next_reads
+    )
+
+    state = json.loads((run_dir / "neotoma_state.json").read_text())
+    snapshots = {
+        eid: state.get("entities", {}).get(eid, {}).get("snapshot", {})
+        for eid in (completed_task_id, plan_id, next_task_id)
+    }
+    todos = snapshots[plan_id].get("todos") or []
+    todo_statuses = {
+        str(item.get("task_id")): str(item.get("status"))
+        for item in todos
+        if isinstance(item, dict)
+    }
+    effects = (
+        snapshots[completed_task_id].get("status") == "done"
+        and artifact_rel in str(snapshots[completed_task_id].get("result") or "")
+        and todo_statuses.get(completed_task_id) == "done"
+        and todo_statuses.get(next_task_id) in {"executing", "in_progress"}
+        and snapshots[next_task_id].get("status") in {"executing", "in_progress"}
+    )
+    ordered_continuation = (
+        first_plan_write is not None
+        and first_next_write is not None
+        and first_plan_write < first_next_write
+        and task_readback
+        and plan_readback
+        and next_readback
+    )
+    detail = {
+        "artifact_verified": bool(artifact_reads),
+        "authoritative_state_read": authoritative_reads,
+        "task_reconciled": bool(task_done_writes and task_result_writes),
+        "task_read_back": task_readback,
+        "plan_reconciled": bool(plan_writes),
+        "plan_read_back": plan_readback,
+        "next_action_advanced": bool(next_writes),
+        "next_action_read_back": next_readback,
+        "effects_present": effects,
+        "ordered_continuation": ordered_continuation,
+        "action_index": first_task_write,
+    }
+    ok = all(detail[key] for key in detail if key != "action_index")
     return {"outcome": "pass" if ok else "fail", **detail}
