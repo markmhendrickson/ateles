@@ -658,6 +658,14 @@ class Notifier:
             log.error(f"[notify] Delivery error: {exc}")
             return False
 
+    def in_silence_window(self) -> bool:
+        """True while warn and operator-decision notices are held, not sent.
+
+        ``send()`` returns False for a held notice and for a failed delivery
+        alike. A caller that has to tell them apart asks here.
+        """
+        return self._in_silence_window()
+
     def _in_silence_window(self) -> bool:
         now = self._now_local()
         try:

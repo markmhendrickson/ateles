@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for the hourly Codex delivery check. Render by substituting <HOME>
+  (install.sh does this through render_daemon_plist.py). Read-only: no model
+  calls, no resume, no edits outside its own state file.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ateles.codex-delivery-check</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string><HOME>/ateles-rc-src/.venv/bin/python3</string>
+        <string><HOME>/ateles-rc-src/execution/daemons/codex-delivery-check/codex_delivery_check.py</string>
+        <string>--once</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string><HOME>/ateles-rc-src</string>
+
+    <!-- Hourly, at seven minutes past. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>7</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string><HOME>/Library/Logs/ateles/codex-delivery-check.log</string>
+    <key>StandardErrorPath</key>
+    <string><HOME>/Library/Logs/ateles/codex-delivery-check.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string><HOME></string>
+        <key>PATH</key>
+        <string><HOME>/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>CODEX_DELIVERY_REPO_MAP</key>
+        <string><HOME>/.config/ateles/codex_delivery_repo_map.json</string>
+    </dict>
+</dict>
+</plist>
