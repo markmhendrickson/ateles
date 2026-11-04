@@ -172,6 +172,44 @@ class TestEntityFrontmatterDriftIsDetected:
         )
 
 
+class TestSideEffectClassProjection:
+    def test_fresh_mirror_projects_read_only_class(self, tmp_path: Path) -> None:
+        skill = _skill(side_effect_class="read_only")
+        path = tmp_path / "build-landing-page" / "SKILL.md"
+
+        assert sync_skills.run_write([skill], {ENTITY_ID: path}, {}, "repo", False) == 0
+        out = path.read_text()
+
+        assert "\nside_effect_class: read_only\n" in out
+        assert sync_skills.run_check([skill], {ENTITY_ID: path}, {}, "repo") == 0
+
+    def test_existing_mirror_reconciles_entity_class(self) -> None:
+        skill = _skill(side_effect_class="read_only")
+        existing = _mirror("Build a landing page through five explicit staged steps.")
+        existing = existing.replace(
+            "user_invocable: true\n",
+            "user_invocable: true\nside_effect_class: state_changing\n",
+        )
+
+        existing_fm, _ = sync_skills._split_frontmatter(existing)
+        assert "side_effect_class" in sync_skills.frontmatter_drift(skill, existing_fm)
+        assert "\nside_effect_class: read_only\n" in sync_skills.canonical_text(
+            skill, existing
+        )
+
+    def test_unspecified_class_preserves_existing_mirror(self) -> None:
+        skill = _skill()
+        existing = _mirror("Build a landing page through five explicit staged steps.")
+        existing = existing.replace(
+            "user_invocable: true\n",
+            "user_invocable: true\nside_effect_class: read_only\n",
+        )
+
+        existing_fm, _ = sync_skills._split_frontmatter(existing)
+        assert "side_effect_class" not in sync_skills.frontmatter_drift(skill, existing_fm)
+        assert sync_skills.canonical_text(skill, existing) == existing
+
+
 # ------------------------------------- the opposite failure: churn
 
 class TestFormattingChurnIsNotDrift:

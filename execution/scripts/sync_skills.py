@@ -66,7 +66,7 @@ DO_NOT_EDIT = (
 # Frontmatter keys we project from the entity (used both when writing a
 # brand-new mirror and when reconciling an existing one's drifted values).
 # `content` is the body.
-FM_SCALAR = ["name", "description", "slug", "user_invocable"]
+FM_SCALAR = ["name", "description", "slug", "user_invocable", "side_effect_class"]
 FM_LIST = ["triggers", "supported_harnesses"]
 
 # The frontmatter keys the ENTITY owns. Drift in any of these is a real defect:
@@ -522,7 +522,8 @@ def canonical_text(skill: dict, existing: str | None) -> str:
     present in it.
 
     "Reconciled" rather than "preserved": the entity owns `description`,
-    `triggers`, `slug`, `user_invocable`, `supported_harnesses` and `name`, so a
+    `triggers`, `slug`, `user_invocable`, `side_effect_class`,
+    `supported_harnesses` and `name`, so a
     change to any of them must reach the mirror — a harness reads `description`
     and `triggers` to decide whether to load the skill at all. Only the keys
     whose parsed VALUE actually differs are rewritten; everything else (header,
