@@ -347,6 +347,22 @@ def test_paired_plain_local_override_is_rejected_before_inference(tmp_path):
     run.assert_not_called()
 
 
+@pytest.mark.parametrize("override", ["backend", "flag", "environment"])
+def test_multichannel_plain_overrides_cannot_downmix(tmp_path, monkeypatch, override):
+    audio = tmp_path / "stereo.wav"
+    audio.write_bytes(b"synthetic")
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    kwargs = {"backend": "local"} if override == "backend" else {"use_diarization": False}
+    if override == "environment":
+        monkeypatch.setenv("RECORD_MEETING_DIARIZE", "0")
+        kwargs = {}
+    with patch.object(ta, "get_audio_channel_count", return_value=2), patch.object(ta, "transcribe_local") as run:
+        with pytest.raises(RuntimeError, match="Original channels retained"):
+            ta.transcribe_audio_file(audio, **kwargs)
+    run.assert_not_called()
+
+
 def test_paired_default_preserves_system_and_mic_raw_events(tmp_path, monkeypatch):
     monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
     mic, system = tmp_path / "mic.wav", tmp_path / "system.wav"

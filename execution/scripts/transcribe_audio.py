@@ -1668,23 +1668,24 @@ def transcribe_audio_file(
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    # RECORD_MEETING_DIARIZE historically defaulted to "1", which made ElevenLabs
-    # the implicit default for every file whenever a key was present. The default
-    # is now local, so an unset value no longer means "diarize" — only an
-    # explicit "1" does. record_meeting sets it explicitly, so meeting
-    # transcription is unaffected.
+    channels = get_audio_channel_count(audio_path)
     resolved_backend = resolve_backend(
         explicit=backend,
         use_diarization=use_diarization,
-        channel_count=get_audio_channel_count(audio_path),
+        channel_count=channels,
     )
+    if channels and channels > 1 and resolved_backend not in (BACKEND_FLUID, BACKEND_ELEVENLABS):
+        raise RuntimeError(
+            "Multichannel recording requires speaker separation; remove the plain "
+            "transcription override. Original channels retained."
+        )
     if verbose:
         print(f"TRANSCRIPTION_BACKEND_SELECTED={resolved_backend}", flush=True)
 
     if resolved_backend == BACKEND_FLUID:
         return transcribe_fluid(
             audio_path, language=language, verbose=verbose,
-            channel_count=get_audio_channel_count(audio_path) or 1,
+            channel_count=channels or 1,
         )
 
     if resolved_backend == BACKEND_LOCAL:
