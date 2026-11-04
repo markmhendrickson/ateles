@@ -340,10 +340,16 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
     assert "Vexcorb" not in combined
 
 
-def test_paired_plain_local_override_is_rejected_before_inference(tmp_path):
+@pytest.mark.parametrize("override", ["backend", "environment"])
+def test_paired_plain_local_override_is_rejected_before_inference(tmp_path, monkeypatch, override):
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    backend = "local" if override == "backend" else None
+    if override == "environment":
+        monkeypatch.setenv("RECORD_MEETING_DIARIZE", "0")
     with patch.object(ta, "transcribe_fluid") as run:
         with pytest.raises(RuntimeError, match="Paired transcription supports"):
-            ta.transcribe_two_files(tmp_path / "mic.wav", tmp_path / "system.wav", backend="local")
+            ta.transcribe_two_files(tmp_path / "mic.wav", tmp_path / "system.wav", backend=backend)
     run.assert_not_called()
 
 

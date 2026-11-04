@@ -1582,7 +1582,7 @@ def transcribe_two_files(
 
     Returns same shape as transcribe_audio_file().
     """
-    selected = resolve_backend(explicit=backend, use_diarization=True)
+    selected = resolve_backend(explicit=backend, channel_count=2)
     if selected == BACKEND_FLUID:
         tracks = []
         events = []
