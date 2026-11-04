@@ -74,6 +74,18 @@ Deliberately not collected: query text or response bodies. Those carry the
 operator's personal data, and a diagnostic artifact that leaks PII is a worse
 problem than the outage. Sizes and timings only.
 
+Which app it interrogates
+-------------------------
+
+There is no built-in app name. The target is resolved at runtime from an
+explicit argument, `NEOTOMA_FLY_APP`, or a local `fly.toml` — see
+`resolve_app()`. Both fallbacks are readable with Neotoma down, which is the
+whole constraint: the per-instance deploy binding is canonically a Neotoma
+`deployment_configuration` entity, and reading this module's own target from
+the datastore whose outage it documents is the dependency loop that already
+keeps snapshots off Neotoma. If nothing resolves, the Fly collectors are
+skipped and the reason is recorded; the module never guesses a target.
+
 Failure posture
 ---------------
 
@@ -101,7 +113,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-DEFAULT_APP = os.environ.get("NEOTOMA_FLY_APP", "neotoma-markmhendrickson")
 DEFAULT_MACHINE = os.environ.get("NEOTOMA_FLY_MACHINE", "")
 DEFAULT_BUDGET_SECONDS = float(os.environ.get("NEOTOMA_FORENSICS_BUDGET_SECONDS", "45"))
 DEFAULT_HEALTH_PORT = os.environ.get("NEOTOMA_HTTP_PORT", "3180")
@@ -122,6 +133,84 @@ def snapshot_dir() -> Path:
     if root:
         return Path(root).expanduser()
     return Path.home() / ".local" / "state" / "ateles" / "neotoma-forensics"
+
+
+def _app_from_fly_toml(path: Path) -> str | None:
+    """Read the `app` key out of a fly.toml without a TOML dependency.
+
+    Only the top-level `app = "..."` assignment is honoured: it is the first
+    non-comment key in every fly.toml flyctl generates, and a hand-rolled
+    reader that wandered into `[build]` or `[env]` sections would be worse
+    than no reader at all. Stops at the first table header for that reason.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            break  # into a table; the top-level `app` key is not here
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "app":
+            return value.strip().strip("\"'") or None
+    return None
+
+
+def _fly_config_candidates() -> list[Path]:
+    explicit = os.environ.get("NEOTOMA_FLY_CONFIG")
+    if explicit:
+        return [Path(explicit).expanduser()]
+    roots = [os.environ.get("NEOTOMA_REPO_ROOT"), os.getcwd()]
+    return [Path(r).expanduser() / "fly.toml" for r in roots if r]
+
+
+def resolve_app(explicit: str | None = None) -> str | None:
+    """Which Fly app to interrogate — resolved at runtime, never baked in.
+
+    There is deliberately no default. An app name is operator-specific deploy
+    config, and a literal fallback in this repo would both name the operator's
+    instance in a public repository and quietly make the module non-portable:
+    a fork inheriting someone else's app name is worse than one that says it
+    does not know, because it would point a real capture at a real machine
+    belonging to somebody else.
+
+    Resolution order, most explicit first:
+
+    1. the caller's argument
+    2. ``NEOTOMA_FLY_APP``
+    3. the ``app`` key of a local ``fly.toml`` (``NEOTOMA_FLY_CONFIG``, else
+       ``NEOTOMA_REPO_ROOT``/cwd)
+
+    Both sources are readable **offline**, which is the constraint that rules
+    out the otherwise-canonical home for this binding. Per-instance deploy
+    config lives in a Neotoma ``deployment_configuration`` entity, but this
+    module runs exactly when Neotoma cannot serve requests — resolving its own
+    target from the datastore whose outage it exists to document would be the
+    same dependency loop that keeps snapshots off Neotoma in the first place.
+
+    Returns ``None`` when nothing resolves. Callers surface that as a blocker;
+    nothing here guesses a target.
+    """
+    if explicit:
+        return explicit
+    from_env = os.environ.get("NEOTOMA_FLY_APP", "").strip()
+    if from_env:
+        return from_env
+    for candidate in _fly_config_candidates():
+        app = _app_from_fly_toml(candidate)
+        if app:
+            return app
+    return None
+
+
+APP_UNRESOLVED = (
+    "No Fly app resolved. Set NEOTOMA_FLY_APP, or run from a checkout whose "
+    "fly.toml names the app (or point NEOTOMA_FLY_CONFIG at one). The Fly "
+    "collectors were skipped; local collectors still ran."
+)
 
 
 @dataclass
@@ -222,8 +311,15 @@ def _parse_kv_kb(text: str, keys: tuple[str, ...]) -> dict[str, int]:
     return out
 
 
-def default_collectors(app: str, machine: str) -> list[Collector]:
-    """Ordered by evidence decay rate: the log window disappears first."""
+def default_collectors(app: str | None, machine: str) -> list[Collector]:
+    """Ordered by evidence decay rate: the log window disappears first.
+
+    With no app resolved, every collector here would fail identically and
+    uninformatively, so none are returned; `capture()` records the reason once
+    instead of seven times.
+    """
+    if not app:
+        return []
 
     def fly_logs() -> str:
         # The single most perishable artifact. A restart erases it outright.
@@ -350,7 +446,7 @@ def _is_float(s: str) -> bool:
 def capture(
     reason: str,
     *,
-    app: str = DEFAULT_APP,
+    app: str | None = None,
     machine: str = DEFAULT_MACHINE,
     budget_seconds: float = DEFAULT_BUDGET_SECONDS,
     collectors: list[Collector] | None = None,
@@ -360,13 +456,22 @@ def capture(
 
     Never raises for a collector failure: an incident is the worst possible
     time to discover that the diagnostic tool has its own unhandled exception.
+    An unresolvable app is treated the same way — recorded as an error on the
+    snapshot, not raised, because a snapshot missing its Fly section is still
+    worth more during an incident than a traceback.
     """
     started = time.monotonic()
     snap = Snapshot(
         reason=reason,
         started_at=datetime.now(timezone.utc).isoformat(),
     )
-    chosen = collectors if collectors is not None else default_collectors(app, machine)
+    if collectors is None:
+        resolved = resolve_app(app)
+        if not resolved:
+            snap.errors["_app"] = APP_UNRESOLVED
+        chosen = default_collectors(resolved, machine)
+    else:
+        chosen = collectors
     for collector in sorted(chosen, key=lambda c: c.priority):
         if time.monotonic() - started >= budget_seconds:
             # Recovery is urgent. Stop collecting, keep what we have, say so.
@@ -402,7 +507,7 @@ def recover_with_capture(
     reason: str,
     recovery: Callable[[], Any],
     *,
-    app: str = DEFAULT_APP,
+    app: str | None = None,
     machine: str = DEFAULT_MACHINE,
     budget_seconds: float = DEFAULT_BUDGET_SECONDS,
     collectors: list[Collector] | None = None,
@@ -418,7 +523,10 @@ def recover_with_capture(
     awake at the time is expected to recall.
 
     The capture is bounded and never raises, so it cannot become a reason that
-    an outage lasts longer.
+    an outage lasts longer. That includes an unresolvable Fly app: recovery
+    still runs, with the missing target recorded on the snapshot. Blocking a
+    restart because the diagnostic tool could not identify its own target
+    would invert the priority this module is built around.
     """
     snap = capture(
         reason,

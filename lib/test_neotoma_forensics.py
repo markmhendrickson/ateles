@@ -9,10 +9,13 @@ abort the capture, and the capture must not abort the recovery).
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from lib import neotoma_forensics as nf
 from lib.neotoma_forensics import (
     Collector,
     capture,
@@ -172,6 +175,100 @@ def test_pending_snapshots_lists_newest_first(tmp_path: Path):
 
 def test_pending_snapshots_is_empty_when_nothing_captured(tmp_path: Path):
     assert pending_snapshots(tmp_path / "nope") == []
+
+
+# --- app resolution -------------------------------------------------------
+#
+# The load-bearing property here is that resolution works with Neotoma down.
+# Every source exercised below is env or local disk for that reason.
+
+
+def test_module_holds_no_operator_specific_deploy_target():
+    """The regression guard for the finding on #655.
+
+    Delegates to the config-sourcing linter rather than restating the pattern,
+    so this test cannot drift from the rule it is guarding — and so the handle
+    it looks for is named in exactly one place in the repo.
+    """
+    repo = Path(nf.__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(repo / "scripts" / "linters" / "check_hardcoded_config.py"),
+            str(Path(nf.__file__).resolve()),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=repo,
+    )
+    assert result.returncode == 0, (
+        "Operator-specific config is baked into this module. It must be "
+        f"resolved at runtime (env / fly.toml), never hardcoded.\n{result.stderr}"
+    )
+
+
+def test_explicit_argument_wins_over_env(monkeypatch):
+    monkeypatch.setenv("NEOTOMA_FLY_APP", "from-env")
+    assert nf.resolve_app("from-argument") == "from-argument"
+
+
+def test_env_supplies_the_app(monkeypatch):
+    monkeypatch.setenv("NEOTOMA_FLY_APP", "an-app")
+    assert nf.resolve_app() == "an-app"
+
+
+def test_falls_back_to_fly_toml_when_env_is_unset(monkeypatch, tmp_path: Path):
+    """The offline path: no env, no Neotoma, just a checkout on disk."""
+    config = tmp_path / "fly.toml"
+    config.write_text('# a comment\napp = "app-from-toml"\n\n[build]\napp = "wrong"\n')
+    monkeypatch.delenv("NEOTOMA_FLY_APP", raising=False)
+    monkeypatch.setenv("NEOTOMA_FLY_CONFIG", str(config))
+    assert nf.resolve_app() == "app-from-toml"
+
+
+def test_fly_toml_reader_ignores_keys_inside_tables(tmp_path: Path):
+    """A key named `app` under [build] or [env] is not the app name."""
+    config = tmp_path / "fly.toml"
+    config.write_text('[build]\napp = "not-the-app"\n')
+    assert nf._app_from_fly_toml(config) is None
+
+
+def test_resolve_app_returns_none_when_nothing_is_available(monkeypatch, tmp_path):
+    monkeypatch.delenv("NEOTOMA_FLY_APP", raising=False)
+    monkeypatch.delenv("NEOTOMA_REPO_ROOT", raising=False)
+    monkeypatch.setenv("NEOTOMA_FLY_CONFIG", str(tmp_path / "absent.toml"))
+    assert nf.resolve_app() is None
+
+
+def test_capture_still_writes_a_snapshot_when_no_app_resolves(monkeypatch, tmp_path):
+    """A missing target degrades the snapshot; it does not prevent one."""
+    monkeypatch.delenv("NEOTOMA_FLY_APP", raising=False)
+    monkeypatch.setenv("NEOTOMA_FLY_CONFIG", str(tmp_path / "absent.toml"))
+    snap = capture("no app", directory=tmp_path)
+    assert snap.path is not None and snap.path.exists()
+    assert "NEOTOMA_FLY_APP" in snap.errors["_app"]
+
+
+def test_recovery_still_runs_when_no_app_resolves(monkeypatch, tmp_path: Path):
+    """The whole point of the module is that recovery is never blocked.
+
+    An unidentifiable Fly app must not be the thing that keeps an operator
+    from restarting a wedged instance.
+    """
+    monkeypatch.delenv("NEOTOMA_FLY_APP", raising=False)
+    monkeypatch.setenv("NEOTOMA_FLY_CONFIG", str(tmp_path / "absent.toml"))
+    ran: list[bool] = []
+    snap, _ = recover_with_capture(
+        "wedged", lambda: ran.append(True), directory=tmp_path
+    )
+    assert ran == [True]
+    assert snap.path is not None and snap.path.exists()
+
+
+def test_no_fly_collectors_are_attempted_without_an_app():
+    """Seven identical failures are noise; one recorded reason is evidence."""
+    assert nf.default_collectors(None, "") == []
+    assert nf.default_collectors("an-app", "") != []
 
 
 if __name__ == "__main__":
