@@ -62,10 +62,17 @@ UNDEPLOYED_HOURS = 24
 TASK_HORIZON_DAYS = 7
 TASK_PAGE = 25
 TASK_MAX_PAGES = 8
+# A task further past due than this is old backlog, not a change worth an
+# alert. It is counted in the report so it stays visible in a dry run.
+TASK_OVERDUE_ALERT_DAYS = 7
+# Optional JSON file mapping a Fly app to its "owner/name" repo, for deployment
+# records that do not name one. Private to the host, never committed.
+REPO_MAP_ENV = "CODEX_DELIVERY_REPO_MAP"
 TERMINAL_TASK_STATUSES = frozenset(
     {"done", "completed", "complete", "cancelled", "canceled", "closed", "dropped"}
 )
 MAX_NEW_ALERTS_PER_RUN = 10
+BASELINE_LIST_PER_CHECK = 12
 SUBPROCESS_TIMEOUT = 60
 
 _RRULE_SECONDS = {
@@ -285,7 +292,27 @@ def _snapshot(entity: dict[str, Any]) -> dict[str, Any]:
     return snap if isinstance(snap, dict) else {}
 
 
-def _repo_for(snap: dict[str, Any]) -> str | None:
+def load_repo_map(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """Read the optional app-to-repo map. A named file that cannot be read fails."""
+    env = os.environ if environ is None else environ
+    path = env.get(REPO_MAP_ENV, "").strip()
+    if not path:
+        return {}
+    data = json.loads(Path(path).expanduser().read_text())
+    if not isinstance(data, dict) or not all(
+        isinstance(v, str) and re.fullmatch(r"[\w.-]+/[\w.-]+", v)
+        for v in data.values()
+    ):
+        raise ValueError(f"{REPO_MAP_ENV} must map app names to owner/name repos")
+    return data
+
+
+def _repo_for(
+    snap: dict[str, Any], repo_map: dict[str, str] | None = None
+) -> str | None:
+    mapped = (repo_map or {}).get(str(snap.get("fly_app") or ""))
+    if mapped:
+        return mapped
     for fld in ("repo", "github_repo", "source_repo"):
         value = snap.get(fld)
         if isinstance(value, str) and re.fullmatch(r"[\w.-]+/[\w.-]+", value.strip()):
@@ -367,6 +394,7 @@ def check_deploys(
     configs: list[dict[str, Any]],
     run: Callable[[list[str]], str],
     now: datetime,
+    repo_map: dict[str, str] | None = None,
 ) -> tuple[list[Finding], list[str]]:
     findings: list[Finding] = []
     notes: list[str] = []
@@ -377,15 +405,24 @@ def check_deploys(
         env = snap.get("environment")
         target = f"{label} ({env})" if env and snap.get("project") else label
         app = snap.get("fly_app")
-        repo = _repo_for(snap)
+        repo = _repo_for(snap, repo_map)
         if not app or not repo:
             notes.append(f"{target}: not checkable (needs a Fly app and a repo)")
             continue
         try:
             outcome = _check_one_deploy(ent, app, repo, target, run, now)
         except Exception as exc:  # noqa: BLE001 — one target must not hide the rest
-            notes.append(
-                f"{target}: could not check ({type(exc).__name__}: {str(exc)[:80]})"
+            # An alert, not a note: a target that could not be read must never
+            # look the same as a target with nothing waiting.
+            findings.append(
+                Finding(
+                    key=f"{KEY_PREFIX}:deploy-unreadable:{ent.get('entity_id') or app}",
+                    message=(
+                        f"Could not check whether {target} is deployed "
+                        f"({type(exc).__name__}: {str(exc)[:80]}). This is not an "
+                        "all-clear."
+                    ),
+                )
             )
             continue
         if outcome is None:
@@ -424,6 +461,7 @@ def check_tasks(
     horizon = today + timedelta(days=TASK_HORIZON_DAYS)
     offset = 0
     more = False
+    old_overdue = 0
     for _ in range(TASK_MAX_PAGES):
         rows, more = fetch_page(offset)
         offset += len(rows)
@@ -444,6 +482,9 @@ def check_tasks(
             )
             if due < today:
                 days = (today - due).days
+                if days > TASK_OVERDUE_ALERT_DAYS:
+                    old_overdue += 1
+                    continue
                 findings.append(
                     Finding(
                         key=f"{KEY_PREFIX}:task-overdue:{ident}",
@@ -466,6 +507,11 @@ def check_tasks(
         if not more or not rows:
             more = False
             break
+    if old_overdue:
+        notes.append(
+            f"tasks: {old_overdue} more than {TASK_OVERDUE_ALERT_DAYS} days past due "
+            "(backlog, not alerted)"
+        )
     if more:
         notes.append(
             f"tasks: stopped after {TASK_MAX_PAGES * TASK_PAGE} rows; older entries not examined"
@@ -558,9 +604,31 @@ class NeotomaReader:
 # ── orchestration ────────────────────────────────────────────────────────────
 
 
+def _gh_env(argv: list[str]) -> dict[str, str] | None:
+    """A short-lived App token for a ``gh api repos/<owner>/<name>`` read.
+
+    The ambient token from the daemon's dotenv cannot see private repos, and a
+    private repo answers it with an error that used to read as a failed check.
+    """
+    if argv[0] != "gh":
+        return None
+    for arg in argv:
+        match = re.match(r"repos/([\w.-]+/[\w.-]+)", arg)
+        if match:
+            from lib.github_app_token import token_env
+
+            return {**os.environ, **token_env(match.group(1))}
+    return None
+
+
 def run_command(argv: list[str]) -> str:
     proc = subprocess.run(
-        argv, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT, check=False
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=SUBPROCESS_TIMEOUT,
+        check=False,
+        env=_gh_env(argv),
     )
     if proc.returncode != 0:
         raise RuntimeError(f"{argv[0]} exited {proc.returncode}")
@@ -602,7 +670,9 @@ def run_checks(
     results.append(
         _guard(
             "merged-but-not-deployed",
-            lambda: check_deploys(reader().deployment_configs(), run, now),
+            lambda: check_deploys(
+                reader().deployment_configs(), run, now, load_repo_map()
+            ),
         )
     )
     results.append(
@@ -658,15 +728,21 @@ def apply_results(
     notifier: Any,
     priority: Any,
     max_new: int = MAX_NEW_ALERTS_PER_RUN,
+    baseline: bool = False,
 ) -> dict[str, list[str]]:
     """Send alerts for new findings, clear keys that resolved, return new state.
 
     A check that failed keeps its previous keys (its true state is unknown, so
     nothing is cleared) and raises a "could not check" alert in their place.
+
+    On the first run (``baseline``) everything already open is reported in one
+    message and recorded, so later runs alert only on change. A failed check
+    still alerts: a failure is never folded into a baseline.
     """
     new_state: dict[str, list[str]] = {}
     sent = 0
     overflow = 0
+    summary: list[str] = []
     for result in results:
         previous = set(state.get(result.name, []))
         fail_key = failure_key(result.name)
@@ -675,6 +751,16 @@ def apply_results(
                 f = failure_finding(result)
                 notifier.send(f.message, priority, handler=HANDLER, dedupe_key=f.key)
             new_state[result.name] = sorted(previous | {fail_key})
+            continue
+        if baseline:
+            new_state[result.name] = sorted(f.key for f in result.findings)
+            summary.append(f"{result.name}: {len(result.findings)}")
+            summary.extend(
+                f"- {f.message}" for f in result.findings[:BASELINE_LIST_PER_CHECK]
+            )
+            hidden = len(result.findings) - BASELINE_LIST_PER_CHECK
+            if hidden > 0:
+                summary.append(f"- and {hidden} more")
             continue
         if fail_key in previous:
             notifier.clear_dedupe(fail_key)
@@ -696,6 +782,14 @@ def apply_results(
         for resolved in previous - set(current):
             notifier.clear_dedupe(resolved)
         new_state[result.name] = sorted(kept)
+    if summary:
+        notifier.send(
+            "Delivery check started. Already open:\n"
+            + "\n".join(summary)
+            + "\nYou will hear again only when something changes.",
+            priority,
+            handler=HANDLER,
+        )
     if overflow:
         notifier.send(
             f"{overflow} more delivery findings were found this run; only the "
@@ -745,7 +839,11 @@ def main(argv: list[str] | None = None) -> int:
     from lib.notify.notifier import Notifier, Priority
 
     new_state = apply_results(
-        results, load_state(state_path), Notifier.from_neotoma(), Priority.WARN
+        results,
+        load_state(state_path),
+        Notifier.from_neotoma(),
+        Priority.WARN,
+        baseline=not state_path.exists(),
     )
     save_state(state_path, new_state)
     return 1 if failed else 0

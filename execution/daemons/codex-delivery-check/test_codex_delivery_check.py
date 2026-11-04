@@ -366,8 +366,37 @@ def test_one_unreadable_target_does_not_hide_the_others():
             raise RuntimeError("fly exited 1")
         return fake_run(NOW - timedelta(days=3), [NOW - timedelta(hours=30)])(argv)
 
-    findings, notes = cdc.check_deploys([good, bad], run, NOW)
-    assert len(findings) == 1 and any("could not check" in n for n in notes)
+    findings, _ = cdc.check_deploys([good, bad], run, NOW)
+    # Both surface: the undeployed target, and the unreadable one as its own
+    # alert, so a failed read can never pass for "nothing waiting".
+    assert len(findings) == 2
+    unreadable = [f for f in findings if "Could not check" in f.message]
+    assert len(unreadable) == 1 and "not an all-clear" in unreadable[0].message
+
+
+def test_gh_reads_use_an_app_token_for_that_repo(monkeypatch):
+    seen = {}
+
+    def fake_token_env(repo):
+        seen["repo"] = repo
+        return {"GH_TOKEN": "t", "GITHUB_TOKEN": "t"}
+
+    def fake_subprocess_run(argv, **kw):
+        seen["env"] = kw["env"]
+        return type("P", (), {"returncode": 0, "stdout": "ok"})()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "lib.github_app_token",
+        type("M", (), {"token_env": staticmethod(fake_token_env)}),
+    )
+    monkeypatch.setattr(cdc.subprocess, "run", fake_subprocess_run)
+    assert cdc.run_command(["gh", "api", "repos/o/r/commits?sha=main"]) == "ok"
+    assert seen["repo"] == "o/r" and seen["env"]["GH_TOKEN"] == "t"
+    seen.clear()
+    assert cdc.run_command(["gh", "api", "repos/o/r", "--jq", ".x"]) == "ok"
+    assert seen["repo"] == "o/r" and seen["env"]["GH_TOKEN"] == "t"
+    assert cdc._gh_env(["fly", "releases"]) is None
 
 
 def test_every_target_unreadable_is_a_failure():
@@ -412,3 +441,61 @@ def test_plist_template_is_hourly_and_identity_free():
         and "--dry-run" not in data["ProgramArguments"]
     )
     assert "ateles-rc-src" in data["ProgramArguments"][1]
+
+
+# ── first-run baseline, overdue backlog, repo map ────────────────────────────
+
+
+def test_first_run_sends_one_summary_then_stays_quiet():
+    many = [f"k{i}" for i in range(40)]
+    n = FakeNotifier()
+    state = cdc.apply_results([result("goals", many)], {}, n, "warn", baseline=True)
+    assert len(n.sent) == 1
+    assert "goals: 40" in n.sent[0][0] and "and 28 more" in n.sent[0][0]
+    n2 = FakeNotifier()
+    cdc.apply_results([result("goals", many)], state, n2, "warn")
+    assert n2.sent == []
+
+
+def test_finding_new_after_baseline_still_alerts():
+    n = FakeNotifier()
+    state = cdc.apply_results([result("goals", ["a"])], {}, n, "warn", baseline=True)
+    n2 = FakeNotifier()
+    cdc.apply_results([result("goals", ["a", "b"])], state, n2, "warn")
+    assert [s[2] for s in n2.sent] == ["b"]
+
+
+def test_failed_check_on_first_run_is_not_folded_into_baseline():
+    n = FakeNotifier()
+    cdc.apply_results([result("deploys", error="boom")], {}, n, "warn", baseline=True)
+    assert len(n.sent) == 1
+    assert "Could not check deploys" in n.sent[0][0]
+
+
+def test_old_overdue_task_is_counted_not_alerted():
+    now = datetime(2026, 11, 4, 12, tzinfo=timezone.utc)
+    recent = (now - timedelta(days=3)).date().isoformat()
+    old = (now - timedelta(days=cdc.TASK_OVERDUE_ALERT_DAYS + 1)).date().isoformat()
+    findings, notes = cdc.check_tasks(pager([task(1, recent), task(2, old)]), now)
+    assert len(findings) == 1 and "3 day(s)" in findings[0].message
+    assert any("1 more than" in n for n in notes)
+
+
+def test_repo_map_makes_a_target_checkable():
+    now = datetime(2026, 11, 4, 12, tzinfo=timezone.utc)
+    conf = {"entity_id": "e1", "snapshot": {"project": "p", "fly_app": "app-x"}}
+    run = fake_run(now - timedelta(days=5), [now - timedelta(days=3)])
+    findings, _ = cdc.check_deploys([conf], run, now, {"app-x": "owner/repo"})
+    assert len(findings) == 1 and "not been deployed" in findings[0].message
+    with pytest.raises(RuntimeError):
+        cdc.check_deploys([conf], run, now, {})
+
+
+def test_repo_map_unreadable_or_malformed_fails_loudly(tmp_path):
+    with pytest.raises(OSError):
+        cdc.load_repo_map({cdc.REPO_MAP_ENV: str(tmp_path / "missing.json")})
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"app": "not a repo"}))
+    with pytest.raises(ValueError):
+        cdc.load_repo_map({cdc.REPO_MAP_ENV: str(bad)})
+    assert cdc.load_repo_map({}) == {}
