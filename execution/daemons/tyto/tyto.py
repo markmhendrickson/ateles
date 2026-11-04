@@ -74,10 +74,10 @@ Environment variables:
   NEOTOMA_RC_DIR            Deployed Neotoma runtime for transcription CLI calls.
                            Must support per-agent key paths; checked before STT.
   TYTO_TRANSCRIBE_SCRIPT    Path to transcribe_audio.py (auto-detected from repo root)
-  ELEVENLABS_API_KEY        Enables ElevenLabs for explicit diarization and
+  ELEVENLABS_API_KEY        Required only for explicitly selected ElevenLabs
                             multi-channel audio; key presence alone does not route.
-  RECORD_MEETING_DIARIZE    Set to 1 for ElevenLabs diarization, 0 for local;
-                            unset routes from the audio channel count.
+  RECORD_MEETING_DIARIZE    Set to 1 for local FluidAudio diarization, 0 for plain local;
+                            unset uses local FluidAudio for meeting captures.
   TYTO_ANALYZE_ENABLED      Set to 0 to disable post-transcription meeting analysis (default: 1)
   TYTO_ANALYZE_MEETING_SKILL  Path to analyze-meeting/SKILL.md (auto-detected from repo root)
   TYTO_ANALYZE_NEOTOMA_SKILL  Path to analyze-neotoma-feedback/SKILL.md (auto-detected)
@@ -627,7 +627,7 @@ class RecordingWatcher:
       "YYYYMMDD HHMM mic.mp4"    — microphone only (you)
 
     On detection: waits for BOTH files to settle (mtime stable for SETTLE_SECS),
-    then runs transcribe_audio.py with --mic-file for a merged [You]/[Speaker_N]
+    then runs transcribe_audio.py with --mic-file for a merged Mic/ and System/ dialogue
     transcript. Falls back to remote-only diarization if mic file is absent or
     ELEVENLABS_API_KEY is not set.
 
@@ -1187,13 +1187,13 @@ class RecordingWatcher:
             not backend_override and diarization_override != "0"
         )
 
-        # Two-file merge path: mic + remote, requires ElevenLabs for word timestamps
+        # Keep both physical tracks; plain paired transcription is unsupported.
         if (
             mic_path is not None
             and mic_path.exists()
             and paired
         ):
-            log.info(f"[{DAEMON_NAME}] Two-file merge mode: [You] + diarized remote.")
+            log.info(f"[{DAEMON_NAME}] Two-file mode: separate Mic/ and System/ speakers.")
             cmd = [
                 python, str(TRANSCRIBE_SCRIPT), str(remote_path),
                 "--mic-file", str(mic_path),
@@ -1209,7 +1209,7 @@ class RecordingWatcher:
                 )
                 self._notifier.send(
                     f"Transcription complete (backend={backend}, "
-                    f"[You]+diarized): {remote_path.name}",
+                    f"Mic/+System/): {remote_path.name}",
                     priority=Priority.INFO,
                     handler=DAEMON_NAME,
                 )
@@ -1221,9 +1221,9 @@ class RecordingWatcher:
             )
             raise RuntimeError("Paired local transcription failed; both tracks retained for retry")
         elif mic_path is not None and mic_path.exists() and not paired:
-            log.info(
-                f"[{DAEMON_NAME}] Explicit backend/diarization override disables "
-                "the paired diarization path; transcribing the system track only."
+            raise RuntimeError(
+                "Paired recording requires local FluidAudio or explicitly selected "
+                "ElevenLabs; both tracks retained. Remove the plain transcription override."
             )
 
         # Single-file fallback: remote only, diarized or plain

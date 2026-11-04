@@ -989,16 +989,16 @@ def test_failed_paired_meeting_keeps_both_tracks_for_retry(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("env_name", "env_value", "expected_flag"),
+    ("env_name", "env_value"),
     [
-        ("TRANSCRIBE_BACKEND", "local", None),
-        ("RECORD_MEETING_DIARIZE", "0", "--no-diarize"),
+        ("TRANSCRIBE_BACKEND", "local"),
+        ("RECORD_MEETING_DIARIZE", "0"),
     ],
 )
 def test_paired_meeting_respects_local_backend_overrides(
-    tmp_path, monkeypatch, env_name, env_value, expected_flag
+    tmp_path, monkeypatch, env_name, env_value
 ):
-    """A mic pair cannot bypass an explicit instruction to keep audio local."""
+    """Unsupported overrides fail without discarding either physical track."""
     remote = _write(tmp_path, "20260908 101500 system.m4a", age_secs=FRESH)
     mic = _write(tmp_path, "20260908 101500 mic.m4a", age_secs=FRESH)
     watcher = _make_watcher(tmp_path, capture_method="audio_hijack_system")
@@ -1016,12 +1016,10 @@ def test_paired_meeting_respects_local_backend_overrides(
     )
 
     with patch.object(tyto.subprocess, "run", return_value=completed) as run:
-        assert watcher._run_transcription(remote, mic) == "ent_test_local"
-
-    command = run.call_args.args[0]
-    assert "--mic-file" not in command
-    if expected_flag:
-        assert expected_flag in command
+        with pytest.raises(RuntimeError, match="both tracks retained"):
+            watcher._run_transcription(remote, mic)
+    run.assert_not_called()
+    assert remote.is_file() and mic.is_file()
 
 
 def test_completion_notification_names_actual_backend(tmp_path):

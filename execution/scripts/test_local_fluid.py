@@ -99,3 +99,73 @@ def test_zero_exit_without_output_is_failure(tmp_path, monkeypatch):
     )
     with pytest.raises(lf.LocalFluidUnavailable, match="failed"):
         lf._run_json("fluid", ["process"], tmp_path / "missing.json")
+
+
+def test_overlapping_channels_keep_whole_utterances():
+    events = [
+        {"start": 0, "end": 0.4, "speaker": "System/A", "text": "I"},
+        {"start": 0.1, "end": 0.5, "speaker": "Mic/B", "text": "Thanks"},
+        {"start": 0.5, "end": 0.9, "speaker": "System/A", "text": "agree"},
+        {"start": 0.6, "end": 1, "speaker": "Mic/B", "text": "everyone"},
+    ]
+    assert lf.format_events(events) == (
+        "[0.00–0.90] [System/A]\nI agree\n\n[0.10–1.00] [Mic/B]\nThanks everyone"
+    )
+    assert events[0]["text"] == "I"
+
+
+def test_speech_without_asr_words_is_failure():
+    with pytest.raises(lf.LocalFluidUnavailable, match="speech.*no words"):
+        lf.align_words(
+            {"text": "", "wordTimings": []},
+            {
+                "segments": [
+                    {"startTimeSeconds": 0, "endTimeSeconds": 1, "speakerId": "A"}
+                ]
+            },
+        )
+
+
+def test_native_multichannel_keeps_both_channel_identities(tmp_path, monkeypatch):
+    audio = tmp_path / "stereo.wav"
+    audio.write_bytes(b"synthetic")
+    monkeypatch.setattr(lf, "resolve_fluid_cli", lambda: "/test/fluid")
+    monkeypatch.setattr(lf.shutil, "which", lambda _: "/test/ffmpeg")
+    commands = []
+
+    def extract(argv, **kwargs):
+        commands.append(argv)
+        Path(argv[-1]).write_bytes(b"channel")
+
+    def model(cli, argv, output):
+        assert Path(argv[1]).is_file()
+        if argv[0] == "process":
+            return {
+                "durationSeconds": 2,
+                "segments": [
+                    {"startTimeSeconds": 0, "endTimeSeconds": 2, "speakerId": "S1"}
+                ],
+            }
+        return {
+            "text": "Hi",
+            "wordTimings": [{"word": "Hi", "startTime": 0.1, "endTime": 0.5}],
+        }
+
+    monkeypatch.setattr(lf.subprocess, "run", extract)
+    monkeypatch.setattr(lf, "_run_json", model)
+    result = lf.transcribe_fluid(audio, channel_count=2)
+    assert [command[command.index("-af") + 1] for command in commands] == [
+        "pan=mono|c0=c0",
+        "pan=mono|c0=c1",
+    ]
+    assert [word["speaker"] for word in result["raw_response"]["aligned_words"]] == [
+        "Channel_0/S1",
+        "Channel_1/S1",
+    ]
+    assert [track["channel"] for track in result["raw_response"]["tracks"]] == [
+        "Channel_0",
+        "Channel_1",
+    ]
+    assert "[Channel_0/S1]" in result["transcription_text"]
+    assert "[Channel_1/S1]" in result["transcription_text"]
+    assert not Path(commands[0][-1]).exists()

@@ -15,6 +15,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from transcript_utterances import group_utterances
+
 BACKEND_FLUID = "fluid"
 ENGINE_FLUID = "local_fluid_audio"
 
@@ -115,25 +117,22 @@ def align_words(
         raise LocalFluidUnavailable(
             "ASR text has no word timestamps; refusing unaligned transcript"
         )
+    if speech and not events:
+        raise LocalFluidUnavailable(
+            "Diarization detected speech but ASR returned no words"
+        )
     return events
 
 
-def format_events(events: list[dict]) -> str:
-    turns: list[dict] = []
-    for event in sorted(events, key=lambda event: (event["start"], event["speaker"])):
-        if (
-            turns
-            and turns[-1]["speaker"] == event["speaker"]
-            and event["start"] - turns[-1]["end"] < 1.0
-        ):
-            turns[-1]["text"] += " " + event["text"]
-            turns[-1]["end"] = max(turns[-1]["end"], event["end"])
-        else:
-            turns.append(dict(event))
+def format_events(events: list[dict], *, gap: float = 1.2, stitch: float = 4.0) -> str:
+    turns = group_utterances(
+        [{**event, "group": event["speaker"]} for event in events],
+        gap=gap,
+        stitch=stitch,
+    )
     return (
         "\n\n".join(
-            f"[{turn['start']:.2f}–{turn['end']:.2f}] "
-            f"[{turn['speaker']}]\n{turn['text']}"
+            f"[{turn['start']:.2f}–{turn['end']:.2f}] [{turn['group']}]\n{turn['text']}"
             for turn in turns
         )
         or "[NO SPEECH DETECTED — local diarization and ASR returned no words.]"

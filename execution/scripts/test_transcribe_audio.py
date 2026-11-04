@@ -340,6 +340,32 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
     assert "Vexcorb" not in combined
 
 
+def test_paired_plain_local_override_is_rejected_before_inference(tmp_path):
+    with patch.object(ta, "transcribe_fluid") as run:
+        with pytest.raises(RuntimeError, match="Paired transcription supports"):
+            ta.transcribe_two_files(tmp_path / "mic.wav", tmp_path / "system.wav", backend="local")
+    run.assert_not_called()
+
+
+def test_paired_default_preserves_system_and_mic_raw_events(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    mic, system = tmp_path / "mic.wav", tmp_path / "system.wav"
+    mic.write_bytes(b"mic")
+    system.write_bytes(b"system")
+    def native(path, **kwargs):
+        return {"raw_response": {"original": path.name, "aligned_words": [
+            {"start": .1, "end": .5, "text": path.stem, "speaker": "S1"}
+        ]}}
+    with patch.object(ta, "transcribe_fluid", side_effect=native) as run, patch.object(ta, "get_audio_duration", return_value=2):
+        result = ta.transcribe_two_files(mic, system)
+    assert [call.args[0] for call in run.call_args_list] == [system, mic]
+    assert result["backend"] == "fluid"
+    assert "[System/S1]" in result["transcription_text"]
+    assert "[Mic/S1]" in result["transcription_text"]
+    assert [track["result"]["original"] for track in result["raw_response"]["tracks"]] == ["system.wav", "mic.wav"]
+    assert [word["speaker"] for word in result["raw_response"]["aligned_words"]] == ["System/S1", "Mic/S1"]
+
+
 def test_transcribe_two_files_delegates_and_preserves_text(tmp_path):
     mic_path = tmp_path / "mic.wav"
     remote_path = tmp_path / "remote.wav"

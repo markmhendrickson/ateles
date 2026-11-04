@@ -71,6 +71,7 @@ if "could not parse statement" in stderr_output.lower():
 
 from ateles.runtime_paths import get_data_dir  # noqa: E402
 from local_fluid import BACKEND_FLUID, transcribe_fluid, format_events  # noqa: E402
+from transcript_utterances import group_utterances  # noqa: E402
 
 try:
     from scripts.local_whisper import (
@@ -629,56 +630,7 @@ def _merge_word_events_by_utterance(
     if not words:
         return None
 
-    gap = _utterance_gap_seconds()
-    stitch = _utterance_stitch_seconds()
-
-    # Segment each speaker independently into utterances on silence gaps.
-    by_group: dict = {}
-    for w in words:
-        by_group.setdefault(w["group"], []).append(w)
-
-    utterances: list[dict] = []
-    for grp, grp_words in by_group.items():
-        grp_words.sort(key=lambda w: w["start"])
-        cur: list[dict] = []
-
-        def emit(run: list[dict]) -> None:
-            utterances.append(
-                {
-                    "group": grp,
-                    "start": run[0]["start"],
-                    "end": run[-1]["end"],
-                    "text": " ".join(x["text"].strip() for x in run).strip(),
-                }
-            )
-
-        for w in grp_words:
-            if cur and (w["start"] - cur[-1]["end"]) > gap:
-                emit(cur)
-                cur = []
-            cur.append(w)
-        if cur:
-            emit(cur)
-
-    if not utterances:
-        return None
-
-    # Order utterances by start time; break ties by group string for determinism.
-    utterances.sort(key=lambda u: (u["start"], str(u["group"])))
-
-    # Stitch consecutive same-speaker utterances separated only by the other
-    # speaker's brief backchannel (or a short pause) back into one turn.
-    merged: list[dict] = []
-    for u in utterances:
-        if (
-            merged
-            and merged[-1]["group"] == u["group"]
-            and (u["start"] - merged[-1]["end"]) < stitch
-        ):
-            merged[-1]["text"] = (merged[-1]["text"] + " " + u["text"]).strip()
-            merged[-1]["end"] = u["end"]
-        else:
-            merged.append(dict(u))
+    merged = group_utterances(words, gap=_utterance_gap_seconds(), stitch=_utterance_stitch_seconds())
 
     parts: list[str] = []
     for u in merged:
@@ -1618,19 +1570,12 @@ def transcribe_two_files(
     backend: str | None = None,
 ) -> dict:
     """
-    Transcribe a mic track + a system/remote track as one 2-speaker dialogue.
+    Transcribe mic and system tracks with deterministic channel prefixes.
 
-    The two mono tracks are combined into a single 2-channel file (system → left
-    / channel 0, mic → right / channel 1 — the order record_meeting also uses)
-    and transcribed via ElevenLabs MULTICHANNEL mode. Speaker identity then comes
-    from the channel number, not
-    from an acoustic diarization guess — deterministic and correct by
-    construction for known-separate tracks. The readable dialogue is built by
-    utterance (see _merge_word_events_by_utterance), so cross-talk stays legible.
-
-    This supersedes the old approach of transcribing each track in a separate API
-    call and interleaving words by timestamp, which shredded overlapping speech
-    and could mis-order words when the two independent calls' clocks drifted.
+    Local FluidAudio processes each original mono track on its original timeline.
+    Speaker IDs remain scoped to their physical track; overlapping utterances
+    stay whole. An explicitly selected ElevenLabs backend combines the tracks
+    into stereo for its multichannel API. Both paths preserve raw model output.
 
     mic_path    — operator microphone track (mono) → labeled [Mic]
     remote_path — system-wide audio track (mono)   → labeled [System]
@@ -1638,7 +1583,7 @@ def transcribe_two_files(
     Returns same shape as transcribe_audio_file().
     """
     selected = resolve_backend(explicit=backend, use_diarization=True)
-    if selected in (BACKEND_FLUID, BACKEND_LOCAL):
+    if selected == BACKEND_FLUID:
         tracks = []
         events = []
         for label, path in (("System", remote_path), ("Mic", mic_path)):
@@ -1647,7 +1592,7 @@ def transcribe_two_files(
             for word in result["raw_response"]["aligned_words"]:
                 events.append({**word, "speaker": f"{label}/{word['speaker']}"})
         return {
-            "transcription_text": format_events(events), "language": language or "auto",
+            "transcription_text": format_events(events, gap=_utterance_gap_seconds(), stitch=_utterance_stitch_seconds()), "language": language or "auto",
             "backend": BACKEND_FLUID, "transcription_engine": "local_fluid_audio",
             "transcription_model": "FluidAudio offline + Parakeet v3",
             "audio_duration_seconds": max(get_audio_duration(mic_path) or 0, get_audio_duration(remote_path) or 0),
@@ -3054,10 +2999,9 @@ def main():
         type=str,
         default=None,
         metavar="PATH",
-        help="Path to mic-only audio file (your voice). When provided alongside "
-        "audio_file (the remote/system file), enables two-file merge: mic is "
-        "transcribed as single speaker [You], remote is diarized as [Speaker_N]. "
-        "Uses local FluidAudio by default and preserves channel identity.",
+        help="Path to mic-only audio file. Together with audio_file (system audio), "
+        "uses local FluidAudio with Mic/ and System/ speaker prefixes. Both original "
+        "tracks and raw output are preserved. Cannot combine with --no-diarize.",
     )
     parser.add_argument(
         "--no-store",
@@ -3115,6 +3059,8 @@ def main():
     try:
         # Two-file merge path (mic + remote)
         if args.mic_file:
+            if args.no_diarize:
+                parser.error("--mic-file requires speaker separation; remove --no-diarize")
             mic_path = Path(args.mic_file)
             if not mic_path.exists():
                 print(f"Error: Mic file not found: {mic_path}", file=sys.stderr)

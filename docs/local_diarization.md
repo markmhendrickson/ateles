@@ -33,6 +33,8 @@ similar voices. This does not infer a human name from a channel.
 
 Cloud backends remain available only by explicit backend selection. Their
 credentials never influence default routing. An explicit plain local backend or
-`RECORD_MEETING_DIARIZE=0` disables automatic diarization. Tyto retries failures
+`RECORD_MEETING_DIARIZE=0` disables automatic diarization for single files.
+Paired recordings reject plain transcription overrides rather than omit a track.
+Tyto retries failures
 as the same requested operation, retaining both tracks instead of dropping a
 microphone track or silently switching to plain ASR.
