@@ -29,7 +29,7 @@ Call `list_entity_types` with keywords `analysis`, `task`, `issue`, `finding`, `
 
 - `analysis` — the overall analysis (one per invocation). Subtype the analysis kind via a `kind` field rather than minting separate top-level types.
 - `task` — Mark-internal follow-up actions extracted from the analysis.
-- `proposed_github_issue` — drafted public issues for repo-touching tasks (same type as used by `/analyze-meeting`).
+- `proposed_github_issue` — drafted public issues for repo-touching tasks (same type as used by `/process-meeting`).
 - `analysis_finding` — discrete findings inside the analysis (one entity per finding so they can be cross-referenced and aggregated independently). Reuse `finding`, `insight`, or similar if already present in the type registry.
 - `repository` — never created here; only retrieved via `retrieve_entities` for the comparative scope.
 
@@ -112,7 +112,7 @@ Before opening any issue, the body MUST pass these redactions. A draft that fail
    - Strip framing language that exposes our positioning ("our wedge", "our differentiation", "our moat").
    - Keep only the *neutral problem statement* and the *acceptance criteria* phrased as a feature/bug request — the issue should read like a fresh user request, not an internal strategy memo.
    - Mark `competitive_content_stripped: true` on the stored `proposed_github_issue` entity when any of the above triggered.
-2. **PII scrubbed** (same rules as `/analyze-meeting` Step 3):
+2. **PII scrubbed** (same rules as `/process-meeting` Phase 14a):
    - Participant / customer names → roles (`an evaluator`, `a customer in <vertical>`).
    - Emails / phone numbers → removed (rewrite the sentence, never `[redacted]` mid-sentence).
    - Internal URLs / dashboards / prod links → removed.
