@@ -178,6 +178,8 @@ Output location: alongside the transcript when the source is a file, otherwise u
 - File source: `<transcript_dir>/<transcript_stem>_meeting_analysis.md`
 - Entity / paste source: `data/imports/audio/<YYYY-MM-DD-HHMMSS>_meeting_analysis.md`
 
+**Never put a participant's personal name in the filename** — see "Transcript and analysis filenames" below.
+
 Template:
 
 ```markdown
@@ -397,6 +399,26 @@ Render the `Neotoma` section per the `[COMMUNICATION & DISPLAY]` display rule, l
 - **Skip silently on empty / non-meeting transcripts.** Short solo voice memos and accidental recordings do not get analysis treatment. The auto-invoke from `/record_meeting` checks for at least one of: ≥2 distinct speakers (when diarization present), ≥200 words, or at least one second-person pronoun followed by a verb of commitment. Otherwise: silent skip.
 - **No claims about side effects you didn't perform.** If Gmail staging failed, say so. If issues were not opened (default), say `drafted` not `opened`. If recap wasn't requested, say `not drafted` — never imply a recap exists. The summary line matches reality.
 - **Retrieve the matter, not just the recording.** Composing a meeting analysis before resolving the meeting's substantive entities (Step 1.6 — the org/counterparty, the dispute/claim/project, the property, prior meetings on the same matter) against Neotoma is forbidden. The source-file dedup and participant lookups do not satisfy this. Writing an analysis that invents generic stand-ins ("the builder", "a contractor") or forks a parallel task/claim when memory already holds the named entity and its tracked follow-ups is the failure this rule prevents.
+- **Filenames are locators, not labels.** Never encode a participant's personal name in any file you write or move — see below.
+
+## Transcript and analysis filenames
+
+A filename is a locator that gets pasted into digests, issues, plans, and commit messages, most of which reach a public surface. A personal name in the path therefore leaks every time the artifact is cited, and it puts the citing author in an impossible position: `review-sessions` forbids private-individual names in any `session_digest` field including `evidence_pointers`, so a digest citing such a file must either carry the name or falsify the locator. A falsified locator is worse — the next reader cannot tell it is wrong.
+
+**Convention for any transcript or analysis file you name or relocate:**
+
+```
+YYYYMMDD-HHMM-<engagement-slug>[-NN]<suffix>
+```
+
+- `YYYYMMDD-HHMM` — date and local start time, so files stay sortable and greppable by prefix.
+- `<engagement-slug>` — the **engagement, project, or workstream**: an existing repo name, a client/brand name, or a matter slug. Never a person.
+- `-NN` — optional counter, only when two meetings start in the same minute.
+- Suffix keeps the pipeline conventions: `.txt` for the transcript, `_meeting_analysis.md` for the analysis companion.
+
+**Do not encode initials, name fragments, or a "short" form of a name.** That shortens the leak rather than removing it. Where a slug would be indistinguishable from a person's name (a sole trader, an individual counterparty), use the matter or the relationship type instead — `20260820-1704-neotoma-onboarding`, not the person.
+
+Participant identity belongs in the `transcription` and `meeting_analysis` entities (`participant_names`, `pii_inventory`) and in `contact` entities — retrievable, access-controlled, and not carried along by every citation. The automated sidecars written by `transcribe_audio.py` and the `piculet`/`cyphorhinus` daemons already comply, because they derive the stem from the audio filename; this rule governs the hand-placed files that skills and agents create.
 
 ## Out of scope
 
