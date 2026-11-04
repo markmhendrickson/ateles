@@ -25,7 +25,9 @@ HOUR_MS = 3600 * 1000
 DAY_MS = 24 * HOUR_MS
 
 
-def make_dbs(tmp_path: Path, threads: list[tuple], goals: list[tuple]) -> tuple[Path, Path]:
+def make_dbs(
+    tmp_path: Path, threads: list[tuple], goals: list[tuple]
+) -> tuple[Path, Path]:
     state = tmp_path / "state_5.sqlite"
     goals_db = tmp_path / "goals_1.sqlite"
     c = sqlite3.connect(state)
@@ -101,11 +103,19 @@ def test_goal_databases_opened_read_only(tmp_path):
 def write_automation(root: Path, auto_id: str, **fields) -> None:
     d = root / auto_id
     d.mkdir(parents=True)
-    base = {"id": auto_id, "name": f"Watch {auto_id}", "rrule": "FREQ=HOURLY;INTERVAL=1",
-            "target_thread_id": "t1", "created_at": NOW_MS - DAY_MS,
-            "updated_at": NOW_MS - HOUR_MS, "status": "ACTIVE"}
+    base = {
+        "id": auto_id,
+        "name": f"Watch {auto_id}",
+        "rrule": "FREQ=HOURLY;INTERVAL=1",
+        "target_thread_id": "t1",
+        "created_at": NOW_MS - DAY_MS,
+        "updated_at": NOW_MS - HOUR_MS,
+        "status": "ACTIVE",
+    }
     base.update(fields)
-    lines = [f'{k} = "{v}"' if isinstance(v, str) else f"{k} = {v}" for k, v in base.items()]
+    lines = [
+        f'{k} = "{v}"' if isinstance(v, str) else f"{k} = {v}" for k, v in base.items()
+    ]
     (d / "automation.toml").write_text("\n".join(lines) + "\n")
 
 
@@ -144,8 +154,15 @@ def test_active_automation_with_missing_thread_alerts(tmp_path):
 
 
 def cfg(**kw):
-    base = {"entity_id": "ent_cfg1", "snapshot": {"project": "Proj", "environment": "prod",
-            "fly_app": "app-x", "repo": "org/repo"}}
+    base = {
+        "entity_id": "ent_cfg1",
+        "snapshot": {
+            "project": "Proj",
+            "environment": "prod",
+            "fly_app": "app-x",
+            "repo": "org/repo",
+        },
+    }
     base["snapshot"].update(kw)
     return base
 
@@ -153,17 +170,28 @@ def cfg(**kw):
 def fake_run(deployed: datetime, commit_dates: list[datetime]):
     def run(argv):
         if argv[0] == "fly":
-            return json.dumps([{"Version": 3, "Status": "complete",
-                                "CreatedAt": deployed.isoformat()}])
+            return json.dumps(
+                [
+                    {
+                        "Version": 3,
+                        "Status": "complete",
+                        "CreatedAt": deployed.isoformat(),
+                    }
+                ]
+            )
         if argv[:2] == ["gh", "api"] and "--jq" in argv:
             return "main\n"
-        return json.dumps([{"commit": {"committer": {"date": d.isoformat()}}}
-                           for d in commit_dates])
+        return json.dumps(
+            [{"commit": {"committer": {"date": d.isoformat()}}} for d in commit_dates]
+        )
+
     return run
 
 
 def test_merge_undeployed_over_24h_alerts():
-    run = fake_run(NOW - timedelta(days=3), [NOW - timedelta(hours=30), NOW - timedelta(hours=2)])
+    run = fake_run(
+        NOW - timedelta(days=3), [NOW - timedelta(hours=30), NOW - timedelta(hours=2)]
+    )
     findings, _ = cdc.check_deploys([cfg()], run, NOW)
     assert len(findings) == 1 and "2 change(s)" in findings[0].message
 
@@ -180,7 +208,9 @@ def test_nothing_after_deploy_does_not_alert():
 
 def test_uncheckable_target_noted_but_others_checked():
     run = fake_run(NOW - timedelta(days=3), [NOW - timedelta(hours=30)])
-    findings, notes = cdc.check_deploys([cfg(fly_app=None), cfg(entity_id="x")], run, NOW)
+    findings, notes = cdc.check_deploys(
+        [cfg(fly_app=None), cfg(entity_id="x")], run, NOW
+    )
     assert any("not checkable" in n for n in notes)
     assert len(findings) == 1
 
@@ -199,8 +229,10 @@ def test_repo_inferred_from_deploy_command():
 
 
 def task(i, due, status="pending", **kw):
-    return {"entity_id": f"ent_{i}", "snapshot": {"title": f"Task {i}", "due_date": due,
-                                                   "status": status, **kw}}
+    return {
+        "entity_id": f"ent_{i}",
+        "snapshot": {"title": f"Task {i}", "due_date": due, "status": status, **kw},
+    }
 
 
 def pager(rows):
@@ -209,16 +241,20 @@ def pager(rows):
 
 def test_task_checks_flag_overdue_and_blocked_soon_only():
     rows = [
-        task(1, "2026-11-01"),                                   # overdue -> alert
-        task(2, "2026-11-01", status="done"),                    # done -> quiet
-        task(3, "2026-11-08", status="blocked"),                 # due soon, blocked -> alert
-        task(4, "2026-11-08", blocked_reason="waiting"),         # blocked_reason -> alert
-        task(5, "2026-11-08"),                                   # due soon, fine -> quiet
-        task(6, "2026-12-30", status="blocked"),                 # far away -> quiet
-        task(7, "2026-11-04"),                                   # due today, not overdue
+        task(1, "2026-11-01"),  # overdue -> alert
+        task(2, "2026-11-01", status="done"),  # done -> quiet
+        task(3, "2026-11-08", status="blocked"),  # due soon, blocked -> alert
+        task(4, "2026-11-08", blocked_reason="waiting"),  # blocked_reason -> alert
+        task(5, "2026-11-08"),  # due soon, fine -> quiet
+        task(6, "2026-12-30", status="blocked"),  # far away -> quiet
+        task(7, "2026-11-04"),  # due today, not overdue
     ]
     findings, _ = cdc.check_tasks(pager(rows), NOW)
-    assert sorted(f.key.rsplit(":", 1)[-1] for f in findings) == ["ent_1", "ent_3", "ent_4"]
+    assert sorted(f.key.rsplit(":", 1)[-1] for f in findings) == [
+        "ent_1",
+        "ent_3",
+        "ent_4",
+    ]
 
 
 def test_task_reads_are_bounded():
@@ -232,17 +268,26 @@ def test_task_reads_are_bounded():
     assert len(calls) == cdc.TASK_MAX_PAGES and notes
 
 
-@pytest.mark.parametrize("url", [
-    "http://example.com", "https://localhost:3000", "https://staging.example.com",
-    "https://dev.example.com", "https://127.0.0.1",
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://example.com",
+        "https://localhost:3000",
+        "https://staging.example.com",
+        "https://dev.example.com",
+        "https://127.0.0.1",
+    ],
+)
 def test_non_prod_target_refused(url):
     with pytest.raises(RuntimeError):
         cdc.assert_prod_target(url)
 
 
 def test_prod_target_accepted_and_missing_env_refused():
-    assert cdc.assert_prod_target("https://neotoma.example.org/x") == "https://neotoma.example.org"
+    assert (
+        cdc.assert_prod_target("https://neotoma.example.org/x")
+        == "https://neotoma.example.org"
+    )
     with pytest.raises(RuntimeError):
         cdc.NeotomaReader({})
 
@@ -266,12 +311,17 @@ def result(name, keys=(), error=None):
 
 
 def test_failed_read_reports_could_not_check(tmp_path):
-    results = cdc.run_checks(now=NOW, home=tmp_path / "missing",
-                             reader_factory=lambda: (_ for _ in ()).throw(RuntimeError("no env")))
+    results = cdc.run_checks(
+        now=NOW,
+        home=tmp_path / "missing",
+        reader_factory=lambda: (_ for _ in ()).throw(RuntimeError("no env")),
+    )
     assert all(not r.ok for r in results)
     n = FakeNotifier()
     cdc.apply_results(results, {}, n, "warn")
-    assert len(n.sent) == 4 and all(m.startswith("Could not check") for m, _, _ in n.sent)
+    assert len(n.sent) == 4 and all(
+        m.startswith("Could not check") for m, _, _ in n.sent
+    )
     assert "COULD NOT CHECK" in cdc.render_report(results)
 
 
@@ -280,31 +330,52 @@ def test_alert_only_on_change_and_clears_resolved_key():
     state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn")
     assert [d for _, _, d in n.sent] == ["k1"]
     state = cdc.apply_results([result("c", ["k1"])], state, n, "warn")
-    assert len(n.sent) == 1 and not n.cleared            # unchanged: silent
+    assert len(n.sent) == 1 and not n.cleared  # unchanged: silent
     state = cdc.apply_results([result("c", [])], state, n, "warn")
-    assert n.cleared == ["k1"]                           # resolved: key cleared
+    assert n.cleared == ["k1"]  # resolved: key cleared
     cdc.apply_results([result("c", ["k1"])], state, n, "warn")
-    assert len(n.sent) == 2                              # recurrence alerts again
+    assert len(n.sent) == 2  # recurrence alerts again
 
 
 def test_failed_check_keeps_prior_keys_and_clears_failure_when_it_recovers():
     n = FakeNotifier()
     state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn")
     state = cdc.apply_results([result("c", error="boom")], state, n, "warn")
-    assert not n.cleared and "k1" in state["c"]          # unknown != resolved
+    assert not n.cleared and "k1" in state["c"]  # unknown != resolved
     state = cdc.apply_results([result("c", error="boom")], state, n, "warn")
-    assert len(n.sent) == 2                              # failure alerts once
+    assert len(n.sent) == 2  # failure alerts once
     cdc.apply_results([result("c", ["k1"])], state, n, "warn")
     assert n.cleared == [cdc.failure_key("c")]
 
 
-def test_new_alerts_per_run_are_capped_and_resume_next_run():
+def test_new_alerts_per_run_are_capped_with_one_summary_then_quiet():
     n = FakeNotifier()
     keys = [f"k{i:02d}" for i in range(14)]
     state = cdc.apply_results([result("c", keys)], {}, n, "warn", max_new=10)
-    assert len(n.sent) == 11                             # 10 findings + one backlog notice
+    assert len(n.sent) == 11 and "4 more" in n.sent[-1][0]  # 10 findings + one summary
     cdc.apply_results([result("c", keys)], state, n, "warn", max_new=10)
-    assert len(n.sent) == 15 and cdc.KEY_PREFIX + ":backlog" in n.cleared
+    assert len(n.sent) == 11  # nothing new: silent
+
+
+def test_one_unreadable_target_does_not_hide_the_others():
+    good = cfg()
+    bad = cfg(entity_id="bad", fly_app="app-bad")
+
+    def run(argv):
+        if "app-bad" in argv:
+            raise RuntimeError("fly exited 1")
+        return fake_run(NOW - timedelta(days=3), [NOW - timedelta(hours=30)])(argv)
+
+    findings, notes = cdc.check_deploys([good, bad], run, NOW)
+    assert len(findings) == 1 and any("could not check" in n for n in notes)
+
+
+def test_every_target_unreadable_is_a_failure():
+    def run(argv):
+        raise RuntimeError("down")
+
+    with pytest.raises(RuntimeError):
+        cdc.check_deploys([cfg()], run, NOW)
 
 
 # ── end to end, read-only, launchd template ──────────────────────────────────
@@ -312,7 +383,9 @@ def test_new_alerts_per_run_are_capped_and_resume_next_run():
 
 def test_run_checks_end_to_end_on_fixtures(tmp_path):
     goals_db, state = make_dbs(
-        tmp_path, [("t1", "Lane", "", 0, NOW_MS)], [("t1", "o", "blocked", NOW_MS - DAY_MS)]
+        tmp_path,
+        [("t1", "Lane", "", 0, NOW_MS)],
+        [("t1", "o", "blocked", NOW_MS - DAY_MS)],
     )
     (tmp_path / "automations").mkdir()
 
@@ -334,5 +407,8 @@ def test_plist_template_is_hourly_and_identity_free():
     assert "/Users/" not in text and "<HOME>" in text
     data = plistlib.loads(text.replace("<HOME>", "/h").encode())
     assert data["StartCalendarInterval"] == {"Minute": 7}
-    assert "--once" in data["ProgramArguments"] and "--dry-run" not in data["ProgramArguments"]
+    assert (
+        "--once" in data["ProgramArguments"]
+        and "--dry-run" not in data["ProgramArguments"]
+    )
     assert "ateles-rc-src" in data["ProgramArguments"][1]

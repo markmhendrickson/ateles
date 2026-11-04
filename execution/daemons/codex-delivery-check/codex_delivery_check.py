@@ -76,7 +76,17 @@ _RRULE_SECONDS = {
     "WEEKLY": 7 * 86400,
 }
 _NON_PROD_LABELS = frozenset(
-    {"dev", "staging", "stage", "test", "qa", "sandbox", "preview", "local", "localhost"}
+    {
+        "dev",
+        "staging",
+        "stage",
+        "test",
+        "qa",
+        "sandbox",
+        "preview",
+        "local",
+        "localhost",
+    }
 )
 
 
@@ -170,7 +180,7 @@ def check_goals(goals_db: Path, state_db: Path, now_ms: int) -> list[Finding]:
             Finding(
                 key=f"{KEY_PREFIX}:goal:{thread_id}:{status}",
                 message=(
-                    f"The goal in Codex session \"{name}\" has been {label} for "
+                    f'The goal in Codex session "{name}" has been {label} for '
                     f"{age}, and nothing will wake it. Open that session and run "
                     "the resume command."
                 ),
@@ -214,12 +224,14 @@ def check_automations(
         if status == "PAUSED":
             created = data.get("created_at")
             if isinstance(created, int) and now_ms - created <= recent_ms:
-                since = humanize((now_ms - int(data.get("updated_at") or created)) / 1000)
+                since = humanize(
+                    (now_ms - int(data.get("updated_at") or created)) / 1000
+                )
                 findings.append(
                     Finding(
                         key=f"{KEY_PREFIX}:automation-paused:{auto_id}",
                         message=(
-                            f"The Codex watcher \"{name}\" was created in the last "
+                            f'The Codex watcher "{name}" was created in the last '
                             f"{RECENT_AUTOMATION_DAYS} days but has been paused for "
                             f"about {since}, so nothing is watching. Re-enable it in "
                             "Codex if the session is still waiting on something."
@@ -238,7 +250,7 @@ def check_automations(
                     Finding(
                         key=f"{KEY_PREFIX}:automation-stale:{auto_id}",
                         message=(
-                            f"The active Codex watcher \"{name}\" points at a session "
+                            f'The active Codex watcher "{name}" points at a session '
                             "that no longer exists, so its checks reach nobody. "
                             "Remove or retarget it in Codex."
                         ),
@@ -251,8 +263,8 @@ def check_automations(
                     Finding(
                         key=f"{KEY_PREFIX}:automation-stale:{auto_id}",
                         message=(
-                            f"The active Codex watcher \"{name}\" runs every "
-                            f"{humanize(period)}, but its session \"{thread['name']}\" "
+                            f'The active Codex watcher "{name}" runs every '
+                            f'{humanize(period)}, but its session "{thread["name"]}" '
                             f"has shown no activity for {humanize(idle)}. The watcher "
                             "may not be firing; open the session and check it."
                         ),
@@ -305,6 +317,52 @@ def _latest_deploy(releases: Any) -> datetime | None:
     return best
 
 
+def _check_one_deploy(
+    ent: dict[str, Any],
+    app: str,
+    repo: str,
+    target: str,
+    run: Callable[[list[str]], str],
+    now: datetime,
+) -> Finding | bool | None:
+    """Finding if undeployed too long, False if fine, None if no release exists."""
+    deployed = _latest_deploy(
+        json.loads(run(["fly", "releases", "--app", app, "--json"]))
+    )
+    if deployed is None:
+        return None
+    branch = run(["gh", "api", f"repos/{repo}", "--jq", ".default_branch"]).strip()
+    since = deployed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    commits = json.loads(
+        run(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/commits?sha={urllib.parse.quote(branch)}"
+                f"&since={since}&per_page=100",
+            ]
+        )
+    )
+    dates = [
+        d
+        for d in (_parse_ts(c["commit"]["committer"]["date"]) for c in commits)
+        if d > deployed
+    ]
+    if not dates:
+        return False
+    waiting = (now - min(dates)).total_seconds()
+    if waiting <= UNDEPLOYED_HOURS * 3600:
+        return False
+    return Finding(
+        key=f"{KEY_PREFIX}:undeployed:{ent.get('entity_id') or app}",
+        message=(
+            f"{len(dates)} change(s) merged for {target} have not been deployed; "
+            f"the oldest has waited {humanize(waiting)}. Deploy it using the "
+            "instance's deployment configuration."
+        ),
+    )
+
+
 def check_deploys(
     configs: list[dict[str, Any]],
     run: Callable[[list[str]], str],
@@ -323,45 +381,24 @@ def check_deploys(
         if not app or not repo:
             notes.append(f"{target}: not checkable (needs a Fly app and a repo)")
             continue
-        checkable += 1
-        deployed = _latest_deploy(json.loads(run(["fly", "releases", "--app", app, "--json"])))
-        if deployed is None:
+        try:
+            outcome = _check_one_deploy(ent, app, repo, target, run, now)
+        except Exception as exc:  # noqa: BLE001 — one target must not hide the rest
+            notes.append(
+                f"{target}: could not check ({type(exc).__name__}: {str(exc)[:80]})"
+            )
+            continue
+        if outcome is None:
             notes.append(f"{target}: not checkable (no completed release found)")
-            checkable -= 1
             continue
-        branch = run(["gh", "api", f"repos/{repo}", "--jq", ".default_branch"]).strip()
-        since = deployed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        commits = json.loads(
-            run(
-                [
-                    "gh",
-                    "api",
-                    f"repos/{repo}/commits?sha={urllib.parse.quote(branch)}"
-                    f"&since={since}&per_page=100",
-                ]
-            )
-        )
-        dates = [
-            _parse_ts(c["commit"]["committer"]["date"])
-            for c in commits
-            if _parse_ts(c["commit"]["committer"]["date"]) > deployed
-        ]
-        if not dates:
-            continue
-        waiting = (now - min(dates)).total_seconds()
-        if waiting > UNDEPLOYED_HOURS * 3600:
-            findings.append(
-                Finding(
-                    key=f"{KEY_PREFIX}:undeployed:{ent.get('entity_id') or app}",
-                    message=(
-                        f"{len(dates)} change(s) merged for {target} have not been "
-                        f"deployed; the oldest has waited {humanize(waiting)}. "
-                        "Deploy it using the instance's deployment configuration."
-                    ),
-                )
-            )
+        checkable += 1
+        if outcome is not False:
+            findings.append(outcome)
     if configs and checkable == 0:
-        raise RuntimeError("no deployment target identifies both a Fly app and a repo")
+        raise RuntimeError(
+            f"none of {len(configs)} deployment targets could be checked "
+            "(each needs a Fly app and a readable repo)"
+        )
     return findings, notes
 
 
@@ -399,15 +436,19 @@ def check_tasks(
             if due is None:
                 continue
             ident = ent.get("entity_id") or snap.get("entity_id") or snap.get("title")
-            title = str(snap.get("title") or ent.get("canonical_name") or "an untitled task")
-            blocked = status == "blocked" or bool(str(snap.get("blocked_reason") or "").strip())
+            title = str(
+                snap.get("title") or ent.get("canonical_name") or "an untitled task"
+            )
+            blocked = status == "blocked" or bool(
+                str(snap.get("blocked_reason") or "").strip()
+            )
             if due < today:
                 days = (today - due).days
                 findings.append(
                     Finding(
                         key=f"{KEY_PREFIX}:task-overdue:{ident}",
                         message=(
-                            f"Task \"{title}\" is {days} day(s) past its due date and "
+                            f'Task "{title}" is {days} day(s) past its due date and '
                             "not done. Finish it, move the date, or close it."
                         ),
                     )
@@ -417,7 +458,7 @@ def check_tasks(
                     Finding(
                         key=f"{KEY_PREFIX}:task-blocked:{ident}",
                         message=(
-                            f"Task \"{title}\" is due {due.date().isoformat()} and is "
+                            f'Task "{title}" is due {due.date().isoformat()} and is '
                             "blocked. Clear the blocker or move the date."
                         ),
                     )
@@ -437,7 +478,9 @@ def assert_prod_target(base_url: str) -> str:
     parsed = urllib.parse.urlparse(base_url.strip())
     host = (parsed.hostname or "").lower()
     if parsed.scheme != "https" or not host:
-        raise RuntimeError("Neotoma target is not an https URL; refusing a non-prod target")
+        raise RuntimeError(
+            "Neotoma target is not an https URL; refusing a non-prod target"
+        )
     labels = set(host.split("."))
     if labels & _NON_PROD_LABELS or host in ("127.0.0.1", "::1"):
         raise RuntimeError("Neotoma target looks like a non-prod instance; refusing")
@@ -477,11 +520,17 @@ class NeotomaReader:
 
     def deployment_configs(self) -> list[dict[str, Any]]:
         res = self.query(
-            {"entity_type": "deployment_configuration", "include_snapshots": True, "limit": 50}
+            {
+                "entity_type": "deployment_configuration",
+                "include_snapshots": True,
+                "limit": 50,
+            }
         )
         return list(res.get("entities") or [])
 
-    def task_page_fetcher(self, now: datetime) -> Callable[[int], tuple[list[dict[str, Any]], bool]]:
+    def task_page_fetcher(
+        self, now: datetime
+    ) -> Callable[[int], tuple[list[dict[str, Any]], bool]]:
         horizon = (now + timedelta(days=TASK_HORIZON_DAYS)).strftime("%Y-%m-%d")
 
         def fetch(offset: int) -> tuple[list[dict[str, Any]], bool]:
@@ -493,7 +542,9 @@ class NeotomaReader:
                     "offset": offset,
                     "sort_by": "snapshot.due_date",
                     "sort_order": "desc",
-                    "snapshot_filters": {"due_date": {"op": "lte", "value": horizon + "T23:59:59"}},
+                    "snapshot_filters": {
+                        "due_date": {"op": "lte", "value": horizon + "T23:59:59"}
+                    },
                 }
             )
             rows = list(res.get("entities") or [])
@@ -555,7 +606,10 @@ def run_checks(
         )
     )
     results.append(
-        _guard("due and blocked tasks", lambda: check_tasks(reader().task_page_fetcher(now), now))
+        _guard(
+            "due and blocked tasks",
+            lambda: check_tasks(reader().task_page_fetcher(now), now),
+        )
     )
     return results
 
@@ -576,7 +630,11 @@ def failure_finding(result: CheckResult) -> Finding:
 
 def default_state_path() -> Path:
     override = os.environ.get("CODEX_DELIVERY_STATE_PATH", "").strip()
-    return Path(override) if override else Path.home() / ".local/state/ateles/codex-delivery-check.json"
+    return (
+        Path(override)
+        if override
+        else Path.home() / ".local/state/ateles/codex-delivery-check.json"
+    )
 
 
 def load_state(path: Path) -> dict[str, list[str]]:
@@ -634,24 +692,18 @@ def apply_results(
                 kept.add(key)
             else:
                 overflow += 1
+                kept.add(key)  # covered by the summary below, not re-sent later
         for resolved in previous - set(current):
             notifier.clear_dedupe(resolved)
         new_state[result.name] = sorted(kept)
-    backlog_key = f"{KEY_PREFIX}:backlog"
-    backlog_open = backlog_key in state.get("_meta", [])
     if overflow:
-        if not backlog_open:
-            notifier.send(
-                f"{overflow} more delivery findings are waiting to be reported; "
-                "they will arrive over the next runs. Run the delivery check with "
-                "--once --dry-run to see them all now.",
-                priority,
-                handler=HANDLER,
-                dedupe_key=backlog_key,
-            )
-        new_state["_meta"] = [backlog_key]
-    elif backlog_open:
-        notifier.clear_dedupe(backlog_key)
+        notifier.send(
+            f"{overflow} more delivery findings were found this run; only the "
+            f"first {max_new} are listed individually. Run the delivery check "
+            "with --once --dry-run to see them all.",
+            priority,
+            handler=HANDLER,
+        )
     return new_state
 
 
@@ -687,7 +739,8 @@ def main(argv: list[str] | None = None) -> int:
 
     state_path = default_state_path()
     os.environ.setdefault(
-        "ATELES_DEDUPE_JOURNAL_PATH", str(state_path.with_name("codex-delivery-dedupe.json"))
+        "ATELES_DEDUPE_JOURNAL_PATH",
+        str(state_path.with_name("codex-delivery-dedupe.json")),
     )
     from lib.notify.notifier import Notifier, Priority
 
