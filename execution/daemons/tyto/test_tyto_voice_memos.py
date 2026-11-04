@@ -958,6 +958,36 @@ def test_single_file_meeting_requests_local_diarization(tmp_path, monkeypatch):
     assert "--backend" not in command
 
 
+def test_failed_meeting_diarization_never_retries_plain_asr(tmp_path, monkeypatch):
+    recording = _write(tmp_path, "20260908 101500 system.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="audio_hijack_system")
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    completed = MagicMock(returncode=1, stdout="", stderr="local model missing")
+    with patch.object(tyto.subprocess, "run", return_value=completed) as run:
+        with pytest.raises(RuntimeError, match="local_fluid_audio.*local model missing"):
+            watcher._run_transcription(recording, None)
+    assert run.call_count == 1
+    assert "--diarize" in run.call_args.args[0]
+
+
+def test_failed_paired_meeting_keeps_both_tracks_for_retry(tmp_path, monkeypatch):
+    remote = _write(tmp_path, "20260908 101500 system.m4a", age_secs=FRESH)
+    mic = _write(tmp_path, "20260908 101500 mic.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="audio_hijack_system")
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    completed = MagicMock(returncode=1, stdout="", stderr="local model missing")
+    with patch.object(tyto.subprocess, "run", return_value=completed) as run:
+        with pytest.raises(RuntimeError, match="both tracks retained"):
+            watcher._run_transcription(remote, mic)
+    assert run.call_count == 1
+    assert "--mic-file" in run.call_args.args[0]
+    assert str(mic) in run.call_args.args[0]
+    assert remote.exists() and mic.exists()
+
+
 @pytest.mark.parametrize(
     ("env_name", "env_value", "expected_flag"),
     [
