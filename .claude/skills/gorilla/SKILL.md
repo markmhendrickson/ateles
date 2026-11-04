@@ -11,6 +11,12 @@ triggers:
   - log my workout
   - track my fitness
 user_invocable: true
+observation_ids:
+  name: d0486c12-a02b-86c2-9995-6d6a9a4aed58
+  description: d0486c12-a02b-86c2-9995-6d6a9a4aed58
+  triggers: d0486c12-a02b-86c2-9995-6d6a9a4aed58
+  user_invocable: d0486c12-a02b-86c2-9995-6d6a9a4aed58
+  prompt_markdown: 26799669-cddf-1663-6c67-c1da52b748b3
 ---
 
 <!-- Claude Code adapter for agent `gorilla`. Canonical file: docs/agents/gorilla.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

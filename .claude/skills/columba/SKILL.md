@@ -5,6 +5,12 @@ entity_id: ent_949454e143e72df5bf833dfd
 entity_type: agent_definition
 name: columba
 description: Constitution keeper and cross-cutting policy authority. Holds canonical record of business goals, founding principles, and operating constraints. Penultimate escalation point — domain agents escalate here before reaching the operator.
+observation_ids:
+  name: 9176fff1-1537-b6c4-56e4-b549209d21b1
+  description: 7551cc1c-cd00-e029-37fb-07a424676adb
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: 4f5f09b1-e574-8fb0-2650-ed937ea3aae1
 ---
 
 <!-- Claude Code adapter for agent `columba`. Canonical file: docs/agents/columba.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

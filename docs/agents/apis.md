@@ -28,6 +28,22 @@ operational_entity_types:
   - task
   - checkpoint_brief
   - daemon_report
+observation_ids:
+  name: 0148dd44-f1cd-e4e9-de9f-0b579571a4c9
+  description: ac6f1a86-151b-81e5-8ba0-c65c0179342f
+  tier: 0148dd44-f1cd-e4e9-de9f-0b579571a4c9
+  genus: 0148dd44-f1cd-e4e9-de9f-0b579571a4c9
+  status: 0148dd44-f1cd-e4e9-de9f-0b579571a4c9
+  aauth_sub: 0148dd44-f1cd-e4e9-de9f-0b579571a4c9
+  agent_grant: 0148dd44-f1cd-e4e9-de9f-0b579571a4c9
+  observation_source_default: 6ad95b88-f25a-8fbc-98bb-107c060dbd1f
+  harness_preferences: 6ad95b88-f25a-8fbc-98bb-107c060dbd1f
+  triggers: unknown
+  tool_allowlist: 6ad95b88-f25a-8fbc-98bb-107c060dbd1f
+  context_entity_types: d555c88f-2cd7-a712-16e3-1dc17b3d2efb
+  operational_entity_types: 60978aea-07a0-2802-f5ca-9ee8d05a0032
+  user_invocable: unknown
+  prompt_markdown: bda95bb9-22ee-6e7b-2258-128d8900ce65
 ---
 
 # apis

@@ -9,6 +9,12 @@ triggers:
   - nucifraga
   - /nucifraga
 user_invocable: true
+observation_ids:
+  name: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  description: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  triggers: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  user_invocable: ded193a0-b719-a93d-2d1e-29189e3f5fca
+  prompt_markdown: 1d962a70-59be-898a-0d50-9d82192a569e
 ---
 
 <!-- Claude Code adapter for agent `nucifraga`. Canonical file: docs/agents/nucifraga.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

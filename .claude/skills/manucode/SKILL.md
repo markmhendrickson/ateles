@@ -8,6 +8,12 @@ description: Copy and positioning agent (formerly Paradisaea; renamed 2026-06-12
 triggers:
   - manucode
   - /manucode
+observation_ids:
+  name: c677f65b-0f4e-dde7-a25f-510ee87f0799
+  description: ed132759-56ae-bfcc-1354-7df02b99fafc
+  triggers: 2a833506-820d-a4f8-0217-aad6952dc712
+  user_invocable: unknown
+  prompt_markdown: dbdc5c44-e228-c331-2ad0-65a40221a291
 ---
 
 <!-- Claude Code adapter for agent `manucode`. Canonical file: docs/agents/manucode.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

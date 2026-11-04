@@ -39,6 +39,22 @@ operational_entity_types:
 canonical_context_entities:
   - operator_profile
   - locale_profile
+observation_ids:
+  name: 957bfe66-8876-b5b1-8bdd-93dde525210e
+  description: 957bfe66-8876-b5b1-8bdd-93dde525210e
+  tier: 957bfe66-8876-b5b1-8bdd-93dde525210e
+  genus: 957bfe66-8876-b5b1-8bdd-93dde525210e
+  status: f2a2ceb9-65de-e5c4-bb49-a6acbcbd7e12
+  aauth_sub: 957bfe66-8876-b5b1-8bdd-93dde525210e
+  agent_grant: 957bfe66-8876-b5b1-8bdd-93dde525210e
+  observation_source_default: 4ead6be3-a34c-ca36-9182-3d5497b4d455
+  harness_preferences: unknown
+  triggers: a9b7fbb6-aa63-6a6f-2775-f5d9dc8f7221
+  tool_allowlist: bb15a1d5-0d94-cb29-f310-20444fb156f1
+  context_entity_types: 183de877-6cad-ed14-6ece-41944f077989
+  operational_entity_types: 3878d9e5-ff46-6981-e3b5-8f94199197a9
+  user_invocable: 4c99a4bf-814e-63a6-4d81-f54c5b48afee
+  prompt_markdown: e6f4b3fb-0870-91c6-27a6-f825a5d37d3a
 ---
 
 # fringilla

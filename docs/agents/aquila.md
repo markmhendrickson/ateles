@@ -38,6 +38,22 @@ context_entity_types:
   - release_result
 operational_entity_types:
   - cofounder_report
+observation_ids:
+  name: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  description: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  tier: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  genus: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  status: a1fc22bf-fdfa-3687-d435-e6824b6d7f8c
+  aauth_sub: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  agent_grant: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  observation_source_default: 0ee902df-a2e2-728f-ba51-36640d956fe4
+  harness_preferences: unknown
+  triggers: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  tool_allowlist: d28d2173-3770-1c77-a9af-378676c11a12
+  context_entity_types: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  operational_entity_types: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  user_invocable: 06804960-e44b-4180-11aa-315cc0ed6f4e
+  prompt_markdown: 73bd3446-e050-b6e4-46b9-7db0d55cc556
 ---
 
 # aquila

@@ -14,6 +14,22 @@ observation_source_default: workflow_state
 tool_allowlist:
   - mcp__mcpsrv_neotoma__retrieve_entities
   - mcp__mcpsrv_neotoma__store
+observation_ids:
+  name: dc32ad1d-7b9d-aea6-210d-0e74086cacd0
+  description: 690a4dac-5b9b-7e12-6d87-efce5f0a307e
+  tier: 690a4dac-5b9b-7e12-6d87-efce5f0a307e
+  genus: 690a4dac-5b9b-7e12-6d87-efce5f0a307e
+  status: a2e6cfe1-2799-2272-9388-1bd3a1fa4fdc
+  aauth_sub: 28dbf6ca-ce9c-4c48-c51a-71abc337a2c7
+  agent_grant: 690a4dac-5b9b-7e12-6d87-efce5f0a307e
+  observation_source_default: 45c455c5-8ad0-5c2a-a706-df5784d4e7e4
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: e02dcec7-5657-2973-7014-2d208f767d45
+  context_entity_types: unknown
+  operational_entity_types: unknown
+  user_invocable: unknown
+  prompt_markdown: 00ba60fe-392a-c7d5-3c08-f06255b0c12e
 ---
 
 # neotoma-agent

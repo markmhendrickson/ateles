@@ -69,6 +69,22 @@ operational_entity_types:
   - strategy_drift_signal
 canonical_context_entities:
   - operator_profile
+observation_ids:
+  name: f28ad480-d297-1eaa-41a1-00ea169f1178
+  description: 57ae5bf1-ef1c-de41-4ba4-25f449946c2d
+  tier: f28ad480-d297-1eaa-41a1-00ea169f1178
+  genus: f28ad480-d297-1eaa-41a1-00ea169f1178
+  status: f28ad480-d297-1eaa-41a1-00ea169f1178
+  aauth_sub: unknown
+  agent_grant: 3e1b388f-5e26-1eb4-d72c-5cfd263156ec
+  observation_source_default: f3412d4f-4ede-7a2a-d343-d0ad39f971b0
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: f3412d4f-4ede-7a2a-d343-d0ad39f971b0
+  context_entity_types: 5535e40d-017c-906a-3a53-2f34ae0c733f
+  operational_entity_types: d3202cb8-0cda-20ac-5369-94f56ad9867a
+  user_invocable: unknown
+  prompt_markdown: b54effb3-bcdd-ddf0-b399-078fe0d9edc4
 ---
 
 # struthio

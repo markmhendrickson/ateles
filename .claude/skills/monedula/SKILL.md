@@ -5,6 +5,12 @@ entity_id: ent_26e45f38f53798eb42961a69
 entity_type: agent_definition
 name: monedula
 description: "Payment execution daemon. Runs once daily via launchd; checks Google Calendar (via gws) for yesterday's sessions that trigger payment obligations, and cross-references Neotoma payment tasks (created by Sylvia, Turdus, or manually). Executes Wise IBAN and BTC transfers for finance-domain tasks. Never auto-executes: every payment raises a blocking PLAN checkpoint and waits for explicit operator approval (confidence_threshold=1.0). Sends Telegram notifications on completion or failure via lib/notify/. Watches Calendar for payment triggers but does not own general task lifecycle — payment executor only."
+observation_ids:
+  name: be5eaaab-1f73-e953-56a6-991324bfa49b
+  description: 1136af2b-4dbb-a516-6cc5-8827b177154c
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: 2cfca23b-88b3-b571-eb27-28a5b2ac757a
 ---
 
 <!-- Claude Code adapter for agent `monedula`. Canonical file: docs/agents/monedula.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

@@ -20,6 +20,22 @@ tool_allowlist:
   - WebFetch
 canonical_context_entities:
   - operator_profile
+observation_ids:
+  name: 795c9b40-02f8-2065-a9fa-de91a4a2575a
+  description: 9515f52b-8810-a360-5578-da8c852704a9
+  tier: 9d8ecb07-db0a-2a66-9d78-595a7fc760b5
+  genus: 9d8ecb07-db0a-2a66-9d78-595a7fc760b5
+  status: 9d8ecb07-db0a-2a66-9d78-595a7fc760b5
+  aauth_sub: unknown
+  agent_grant: 9d8ecb07-db0a-2a66-9d78-595a7fc760b5
+  observation_source_default: 05d459bc-d3cd-9b8a-d6e7-b9ac65b13992
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: 05d459bc-d3cd-9b8a-d6e7-b9ac65b13992
+  context_entity_types: unknown
+  operational_entity_types: unknown
+  user_invocable: unknown
+  prompt_markdown: 0aaca628-68e2-b5e2-790d-17b8b16238b0
 ---
 
 # ciconia

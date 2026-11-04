@@ -57,6 +57,22 @@ operational_entity_types:
   - strategy_drift_signal
 canonical_context_entities:
   - operator_profile
+observation_ids:
+  name: 1941b227-2c48-ddc4-82ae-fa17d8af7968
+  description: 7550f58b-4725-bf80-8061-14aa3b1f88f5
+  tier: 1941b227-2c48-ddc4-82ae-fa17d8af7968
+  genus: 1941b227-2c48-ddc4-82ae-fa17d8af7968
+  status: 1941b227-2c48-ddc4-82ae-fa17d8af7968
+  aauth_sub: unknown
+  agent_grant: 21c5d353-a806-dd85-0206-1af4628ff739
+  observation_source_default: 6d568f1c-7662-0374-0928-8909d2ff050f
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: 6d568f1c-7662-0374-0928-8909d2ff050f
+  context_entity_types: 6b70a082-3ad8-5527-3577-0aa94457c884
+  operational_entity_types: bd341311-2b15-3322-eede-ae05b400eeb8
+  user_invocable: unknown
+  prompt_markdown: c26ea08c-cb9e-7e36-f382-13ec0ac688bc
 ---
 
 # regulus

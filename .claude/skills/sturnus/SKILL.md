@@ -9,6 +9,12 @@ triggers:
   - sturnus
   - /sturnus
 user_invocable: true
+observation_ids:
+  name: 82157fc8-7ab5-c616-6b88-42c7b305902c
+  description: ed100026-57a5-5d20-9a7d-cf1cfb2ccd49
+  triggers: 82157fc8-7ab5-c616-6b88-42c7b305902c
+  user_invocable: 82157fc8-7ab5-c616-6b88-42c7b305902c
+  prompt_markdown: 035f6aff-19fe-40fb-7dcb-e5e4a4223aae
 ---
 
 <!-- Claude Code adapter for agent `sturnus`. Canonical file: docs/agents/sturnus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

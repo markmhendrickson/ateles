@@ -33,6 +33,22 @@ operational_entity_types:
   - escalation
 canonical_context_entities:
   - swarm_roster
+observation_ids:
+  name: 29829eeb-82ce-bc83-5e21-9e272c585b35
+  description: 959573cf-acec-e063-293f-e31c73c870e7
+  tier: 29829eeb-82ce-bc83-5e21-9e272c585b35
+  genus: 29829eeb-82ce-bc83-5e21-9e272c585b35
+  status: 29829eeb-82ce-bc83-5e21-9e272c585b35
+  aauth_sub: 29829eeb-82ce-bc83-5e21-9e272c585b35
+  agent_grant: 29829eeb-82ce-bc83-5e21-9e272c585b35
+  observation_source_default: 61ad2ec5-297d-018d-f1b1-5454ab6af75d
+  harness_preferences: 61ad2ec5-297d-018d-f1b1-5454ab6af75d
+  triggers: unknown
+  tool_allowlist: 61ad2ec5-297d-018d-f1b1-5454ab6af75d
+  context_entity_types: c7590cea-3f18-dc6f-182b-0b948120ba3c
+  operational_entity_types: 244b29b0-5719-e0d5-aaf8-75c5121d1a4f
+  user_invocable: unknown
+  prompt_markdown: d9410fab-550d-9f9c-c2af-6c822c1f7a63
 ---
 
 # anthus

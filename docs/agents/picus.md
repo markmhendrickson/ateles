@@ -47,6 +47,22 @@ canonical_context_entities:
   - vendor_binding
   - tax_profile
   - tax_preparer
+observation_ids:
+  name: 4d6f4bc7-e099-1840-da33-69077905a80f
+  description: 75994133-358a-ba4c-8843-88e3d0005aa7
+  tier: 4d6f4bc7-e099-1840-da33-69077905a80f
+  genus: 4d6f4bc7-e099-1840-da33-69077905a80f
+  status: cccf665e-946a-f4a2-d704-5eb6caaf1dc6
+  aauth_sub: 4d6f4bc7-e099-1840-da33-69077905a80f
+  agent_grant: 4d6f4bc7-e099-1840-da33-69077905a80f
+  observation_source_default: 1bfc2bdd-3a93-689a-6625-ac4160f3cc7f
+  harness_preferences: 4d6f4bc7-e099-1840-da33-69077905a80f
+  triggers: 4d6f4bc7-e099-1840-da33-69077905a80f
+  tool_allowlist: f634e414-47f7-8ce4-0cbc-ad2d1a025714
+  context_entity_types: e155a0ec-1124-04b1-70e7-c4d88d836d08
+  operational_entity_types: 3d8f6bbe-da67-5b36-bfe5-2dd8b307d4f0
+  user_invocable: 4d6f4bc7-e099-1840-da33-69077905a80f
+  prompt_markdown: 0dc6cd0f-1dfe-4498-2aba-0c0aa69e638e
 ---
 
 # picus

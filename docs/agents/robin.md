@@ -55,6 +55,22 @@ operational_entity_types:
 canonical_context_entities:
   - operator_profile
   - constitution
+observation_ids:
+  name: 4c3d7f16-cf76-de98-26a4-f70458d93f99
+  description: 2ca389de-6a33-d252-1cc7-82647f5e0439
+  tier: 2fc140bd-f876-316f-103d-aff7e2c3f14f
+  genus: afe0a4f6-19f3-821c-7997-0ee344b0a481
+  status: 2fc140bd-f876-316f-103d-aff7e2c3f14f
+  aauth_sub: 7ac3f8d4-2dc0-502f-539a-ebcf661bd2c8
+  agent_grant: 884e558e-e290-27c5-3538-732338b41f70
+  observation_source_default: 2c1a366f-7f3a-8d8e-515b-05cc39d1411f
+  harness_preferences: unknown
+  triggers: 95ee82b3-04df-c357-89b8-72d793a471c0
+  tool_allowlist: 2c1a366f-7f3a-8d8e-515b-05cc39d1411f
+  context_entity_types: c03c19f1-eae6-6b0f-cb94-e343d0cc9f04
+  operational_entity_types: e35e5b43-a627-e023-ec08-861d79b9f912
+  user_invocable: unknown
+  prompt_markdown: 4d5f14c8-dd6a-377e-0fe9-8493ba48066c
 ---
 
 # robin

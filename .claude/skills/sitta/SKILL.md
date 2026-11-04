@@ -5,6 +5,12 @@ entity_id: ent_0a092db508311dc817c37df3
 entity_type: agent_definition
 name: sitta
 description: "Neotoma librarian daemon. Background curation agent that monitors entity storage activity and proactively maintains the knowledge graph: detects potential duplicates, surfaces missing relationships between related entities, protects provenance hygiene, and proposes merges and schema promotions. Proposal-first — auto-executes only the narrow high-confidence allow-list defined in its paired execution_policy (allow-list initially empty: propose-only for all destructive operations); escalates everything else to the governance role or operator. Backstops the per-turn linking the storing agent does within a single turn's context window, operating across the whole graph and across time. Off-hot-path: debounced, batched cycles; never reacts to its own writes. Governed by a paired execution_policy."
+observation_ids:
+  name: 90034223-46e1-d679-4646-97f381bff293
+  description: 7b0436b6-116e-10da-4c19-a907d6e7ade7
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: 42ae3bd1-e449-fd38-dd6f-1a4579fb7d61
 ---
 
 <!-- Claude Code adapter for agent `sitta`. Canonical file: docs/agents/sitta.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

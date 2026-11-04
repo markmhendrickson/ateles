@@ -20,6 +20,22 @@ context_entity_types:
   - mirror_profile
 operational_entity_types:
   - daemon_report
+observation_ids:
+  name: 9d9e3f41-e383-090a-1e9b-9403a28c3bf3
+  description: 0057059e-05e9-5fed-0d1b-b974ad961ae0
+  tier: 9d9e3f41-e383-090a-1e9b-9403a28c3bf3
+  genus: unknown
+  status: 9d9e3f41-e383-090a-1e9b-9403a28c3bf3
+  aauth_sub: 9d9e3f41-e383-090a-1e9b-9403a28c3bf3
+  agent_grant: 9d9e3f41-e383-090a-1e9b-9403a28c3bf3
+  observation_source_default: f182fff0-a82d-25e5-7960-dee8778d675c
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: f5079a41-0ba0-44c1-4be4-097bd1e4d80a
+  context_entity_types: 403a2b15-face-2f17-acb1-376e17b3f76c
+  operational_entity_types: 9fb3d941-9516-9c73-900a-241e9860e989
+  user_invocable: unknown
+  prompt_markdown: d7f74a35-7889-1b8b-934b-3c36027c2502
 ---
 
 # apus

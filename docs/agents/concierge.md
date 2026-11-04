@@ -10,6 +10,22 @@ status: planned
 canonical_context_entities:
   - operator_profile
   - locale_profile
+observation_ids:
+  name: c8b37b6e-e626-dcd4-3f25-0a4734644ec4
+  description: c8b37b6e-e626-dcd4-3f25-0a4734644ec4
+  tier: c8b37b6e-e626-dcd4-3f25-0a4734644ec4
+  genus: unknown
+  status: c8b37b6e-e626-dcd4-3f25-0a4734644ec4
+  aauth_sub: unknown
+  agent_grant: unknown
+  observation_source_default: unknown
+  harness_preferences: unknown
+  triggers: unknown
+  tool_allowlist: unknown
+  context_entity_types: unknown
+  operational_entity_types: unknown
+  user_invocable: unknown
+  prompt_markdown: c8b37b6e-e626-dcd4-3f25-0a4734644ec4
 ---
 
 # concierge

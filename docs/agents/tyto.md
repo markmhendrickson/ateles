@@ -27,6 +27,22 @@ operational_entity_types:
   - meeting_analysis
   - task
   - daemon_report
+observation_ids:
+  name: d6add6ba-c6ca-1634-e9d1-fc2a64bf7324
+  description: dc8e0fd9-b525-b715-bd41-630a4505bd1f
+  tier: d6add6ba-c6ca-1634-e9d1-fc2a64bf7324
+  genus: d6add6ba-c6ca-1634-e9d1-fc2a64bf7324
+  status: d6add6ba-c6ca-1634-e9d1-fc2a64bf7324
+  aauth_sub: d6add6ba-c6ca-1634-e9d1-fc2a64bf7324
+  agent_grant: d6add6ba-c6ca-1634-e9d1-fc2a64bf7324
+  observation_source_default: 27e45a56-11a3-946c-47d1-5243186bdc5c
+  harness_preferences: 27e45a56-11a3-946c-47d1-5243186bdc5c
+  triggers: unknown
+  tool_allowlist: 27e45a56-11a3-946c-47d1-5243186bdc5c
+  context_entity_types: 96f983dd-75a9-666f-8505-eba3b061cafe
+  operational_entity_types: 7288ee90-c01f-577a-9475-b186cd962076
+  user_invocable: unknown
+  prompt_markdown: 863bbe2c-0ebb-2b55-21f9-068655c0f90f
 ---
 
 # tyto

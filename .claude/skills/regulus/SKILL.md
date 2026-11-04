@@ -5,6 +5,12 @@ entity_id: ent_46f3385204e51cd91efd1ab3
 entity_type: agent_definition
 name: regulus
 description: Developer relations agent. Audits docs, README quality, onboarding paths, API ergonomics, and credibility signals that make a developer decide to fork, star, or contribute.
+observation_ids:
+  name: 1941b227-2c48-ddc4-82ae-fa17d8af7968
+  description: 7550f58b-4725-bf80-8061-14aa3b1f88f5
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: c26ea08c-cb9e-7e36-f382-13ec0ac688bc
 ---
 
 <!-- Claude Code adapter for agent `regulus`. Canonical file: docs/agents/regulus.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

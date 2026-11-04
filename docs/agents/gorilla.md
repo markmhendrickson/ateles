@@ -37,6 +37,22 @@ operational_entity_types:
   - daemon_report
 canonical_context_entities:
   - vendor_binding
+observation_ids:
+  name: d0486c12-a02b-86c2-9995-6d6a9a4aed58
+  description: d0486c12-a02b-86c2-9995-6d6a9a4aed58
+  tier: d0486c12-a02b-86c2-9995-6d6a9a4aed58
+  genus: d0486c12-a02b-86c2-9995-6d6a9a4aed58
+  status: bcde0a84-d17b-09f5-307f-91c386c5794d
+  aauth_sub: d0486c12-a02b-86c2-9995-6d6a9a4aed58
+  agent_grant: d0486c12-a02b-86c2-9995-6d6a9a4aed58
+  observation_source_default: 11006a77-bf0d-dbff-6c74-7cf0efc710ab
+  harness_preferences: unknown
+  triggers: d0486c12-a02b-86c2-9995-6d6a9a4aed58
+  tool_allowlist: 11006a77-bf0d-dbff-6c74-7cf0efc710ab
+  context_entity_types: c19ac2b1-cba7-6e89-e773-0d778502babf
+  operational_entity_types: b9c007a6-4e4e-6e04-ca4e-bb77237dbc71
+  user_invocable: d0486c12-a02b-86c2-9995-6d6a9a4aed58
+  prompt_markdown: 26799669-cddf-1663-6c67-c1da52b748b3
 ---
 
 # gorilla

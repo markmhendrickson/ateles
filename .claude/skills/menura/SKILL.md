@@ -5,6 +5,12 @@ entity_id: ent_78fa62a9d99fac9ba11fc687
 entity_type: agent_definition
 name: menura
 description: Public-facing personal representative at the operator's public agent endpoint. Read-only, public_read AAuth scope — can only access visibility=public entities. Lyrebird genus (mimics the operator's public voice).
+observation_ids:
+  name: d9c13075-789a-4617-9916-5b1e5c3c65cd
+  description: c85fd2af-d676-c004-b8e8-d2d8b7bbfff7
+  triggers: unknown
+  user_invocable: unknown
+  prompt_markdown: 3662898a-23d6-53a9-4703-26fd4df4419c
 ---
 
 <!-- Claude Code adapter for agent `menura`. Canonical file: docs/agents/menura.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->

@@ -9,6 +9,12 @@ triggers:
   - hirundo
   - /hirundo
 user_invocable: true
+observation_ids:
+  name: 81f2e641-4241-d1ab-c8c7-43d870680d76
+  description: 5db489f7-ea9f-7578-8955-5d0468278d61
+  triggers: 81f2e641-4241-d1ab-c8c7-43d870680d76
+  user_invocable: 81f2e641-4241-d1ab-c8c7-43d870680d76
+  prompt_markdown: 4eba00fc-d536-07a5-60fa-447dfb4228ce
 ---
 
 <!-- Claude Code adapter for agent `hirundo`. Canonical file: docs/agents/hirundo.md (harness-neutral). Both are generated from the same Neotoma agent_definition; daemons load the prompt from Neotoma directly, not from this file. -->
