@@ -83,6 +83,7 @@ def _mirror(description: str, *, triggers: list[str] | None = None) -> str:
         f"description: {description}\n"
         f"slug: build-landing-page\n"
         f"user_invocable: true\n"
+        "side_effect_class: state_changing\n"
         f"triggers:\n{trig_lines}\n"
         f"supported_harnesses:\n  - claude-code\n  - cursor\n"
         f"entity_id: {ENTITY_ID}\n"
@@ -172,6 +173,118 @@ class TestEntityFrontmatterDriftIsDetected:
         )
 
 
+class TestSideEffectClassProjection:
+    def test_fresh_mirror_projects_read_only_class(self, tmp_path: Path) -> None:
+        skill = _skill(side_effect_class="read_only")
+        path = tmp_path / "build-landing-page" / "SKILL.md"
+
+        assert sync_skills.run_write([skill], {ENTITY_ID: path}, {}, "repo", False) == 0
+        out = path.read_text()
+
+        assert "\nside_effect_class: read_only\n" in out
+        assert sync_skills.run_check([skill], {ENTITY_ID: path}, {}, "repo") == 0
+
+    @pytest.mark.parametrize("embedded_class", [None, "state_changing"])
+    def test_fresh_mirror_reconciles_embedded_frontmatter_class(
+        self, tmp_path: Path, embedded_class: str | None
+    ) -> None:
+        """Entity content may already have YAML, with the class absent or stale."""
+        embedded_line = (
+            f"side_effect_class: {embedded_class}\n" if embedded_class else ""
+        )
+        skill = _skill(
+            side_effect_class="read_only",
+            content=(
+                "---\n"
+                "name: build-landing-page\n"
+                "allowed-tools: Bash, Read\n"
+                f"{embedded_line}"
+                "---\n\n"
+                "# build-landing-page\n\nStage 1 — Template.\n"
+            ),
+        )
+        path = tmp_path / "build-landing-page" / "SKILL.md"
+
+        assert sync_skills.run_write([skill], {ENTITY_ID: path}, {}, "repo", False) == 0
+        out = path.read_text()
+
+        assert out.count("\nside_effect_class: read_only\n") == 1
+        assert "\nside_effect_class: state_changing\n" not in out
+        assert "\nallowed-tools: Bash, Read\n" in out
+        assert out.count("\n---\n") == 2  # one opening and one closing fence
+        assert out.count(f"entity_id: {ENTITY_ID}") == 1
+        assert sync_skills.run_check([skill], {ENTITY_ID: path}, {}, "repo") == 0
+
+    def test_existing_mirror_reconciles_entity_class(self) -> None:
+        skill = _skill(side_effect_class="read_only")
+        existing = _mirror("Build a landing page through five explicit staged steps.")
+
+        existing_fm, _ = sync_skills._split_frontmatter(existing)
+        assert "side_effect_class" in sync_skills.frontmatter_drift(skill, existing_fm)
+        assert "\nside_effect_class: read_only\n" in sync_skills.canonical_text(
+            skill, existing
+        )
+
+    @pytest.mark.parametrize("existing_class", [None, "read_only"])
+    def test_absent_class_reconciles_existing_mirror(
+        self, existing_class: str | None
+    ) -> None:
+        skill = _skill()
+        existing = _mirror("Build a landing page through five explicit staged steps.")
+        existing = existing.replace(
+            "side_effect_class: state_changing\n",
+            f"side_effect_class: {existing_class}\n" if existing_class else "",
+        )
+
+        existing_fm, _ = sync_skills._split_frontmatter(existing)
+        assert "side_effect_class" in sync_skills.frontmatter_drift(skill, existing_fm)
+        out = sync_skills.canonical_text(skill, existing)
+        assert "\nside_effect_class: state_changing\n" in out
+        assert "\nside_effect_class: read_only\n" not in out
+
+    def test_absent_class_reconciles_stale_embedded_value(self) -> None:
+        skill = _skill(
+            content=(
+                "---\n"
+                "side_effect_class: read_only\n"
+                "allowed-tools: Bash, Read\n"
+                "---\n\n"
+                "# build-landing-page\n\nStage 1 — Template.\n"
+            )
+        )
+
+        out = sync_skills.canonical_text(skill, None)
+
+        assert "\nside_effect_class: state_changing\n" in out
+        assert "\nside_effect_class: read_only\n" not in out
+        assert "\nallowed-tools: Bash, Read\n" in out
+
+    @pytest.mark.parametrize("raw_class", [None, "", "unknown", " read_only "])
+    def test_missing_or_unsupported_class_defaults_restrictively(
+        self, raw_class: str | None
+    ) -> None:
+        skill = _skill(side_effect_class=raw_class)
+
+        out = sync_skills.canonical_text(skill, None)
+
+        assert "\nside_effect_class: state_changing\n" in out
+        assert "\nside_effect_class: read_only\n" not in out
+
+    def test_matching_embedded_class_preserves_quoted_format(self) -> None:
+        content = _mirror(
+            "Build a landing page through five explicit staged steps."
+        ).removeprefix(sync_skills.DO_NOT_EDIT)
+        content = content.replace(
+            "side_effect_class: state_changing\n",
+            'side_effect_class: "read_only"\n',
+        )
+        skill = _skill(side_effect_class="read_only", content=content)
+
+        out = sync_skills.canonical_text(skill, None)
+
+        assert out == sync_skills.DO_NOT_EDIT + content
+
+
 # ------------------------------------- the opposite failure: churn
 
 class TestFormattingChurnIsNotDrift:
@@ -197,6 +310,7 @@ class TestFormattingChurnIsNotDrift:
             "  and archive no-action emails.\n"
             "slug: build-landing-page\n"
             "user_invocable: true\n"
+            "side_effect_class: state_changing\n"
             "triggers:\n  - build landing page\n  - create landing page\n"
             "supported_harnesses:\n  - claude-code\n  - cursor\n"
             f"entity_id: {ENTITY_ID}\n"
@@ -222,6 +336,7 @@ class TestFormattingChurnIsNotDrift:
             "description: Build a landing page through five explicit staged steps.\n"
             "slug: build-landing-page\n"
             "user_invocable: true\n"
+            "side_effect_class: state_changing\n"
             "triggers: [build landing page, create landing page]\n"
             "supported_harnesses:\n  - claude-code\n  - cursor\n"
             f"entity_id: {ENTITY_ID}\n"
@@ -240,6 +355,7 @@ class TestFormattingChurnIsNotDrift:
             f"entity_id: {ENTITY_ID}\n"
             "triggers:\n  - build landing page\n  - create landing page\n"
             "user_invocable: true\n"
+            "side_effect_class: state_changing\n"
             "supported_harnesses:\n  - claude-code\n  - cursor\n"
             "description: Build a landing page through five explicit staged steps.\n"
             "slug: build-landing-page\n"
@@ -337,7 +453,7 @@ class TestParseFrontmatterValues:
         vals = sync_skills.parse_frontmatter_values(fm)
         assert set(vals) == {
             "name", "description", "slug", "user_invocable",
-            "triggers", "supported_harnesses", "entity_id",
+            "side_effect_class", "triggers", "supported_harnesses", "entity_id",
         }
         assert "# build-landing-page" in body
 

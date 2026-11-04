@@ -66,7 +66,7 @@ DO_NOT_EDIT = (
 # Frontmatter keys we project from the entity (used both when writing a
 # brand-new mirror and when reconciling an existing one's drifted values).
 # `content` is the body.
-FM_SCALAR = ["name", "description", "slug", "user_invocable"]
+FM_SCALAR = ["name", "description", "slug", "user_invocable", "side_effect_class"]
 FM_LIST = ["triggers", "supported_harnesses"]
 
 # The frontmatter keys the ENTITY owns. Drift in any of these is a real defect:
@@ -356,8 +356,9 @@ def _fresh_frontmatter(skill: dict) -> str:
     """Build minimal frontmatter for a brand-new mirror (no existing file)."""
     fm_lines = ["---"]
     for k in FM_SCALAR:
-        if skill.get(k) is not None and skill.get(k) != "":
-            fm_lines.append(f"{k}: {_yaml_scalar(skill[k])}")
+        v = _project_side_effect_class(skill) if k == "side_effect_class" else skill.get(k)
+        if v is not None and v != "":
+            fm_lines.append(f"{k}: {_yaml_scalar(v)}")
     for k in FM_LIST:
         vals = skill.get(k)
         if isinstance(vals, str):
@@ -374,15 +375,21 @@ def _fresh_frontmatter(skill: dict) -> str:
     return "\n".join(fm_lines) + "\n"
 
 
+def _project_side_effect_class(skill: dict) -> str:
+    """Only an explicit canonical read_only value may mark a mirror read-only."""
+    return "read_only" if skill.get("side_effect_class") == "read_only" else "state_changing"
+
+
 def _entity_fm_values(skill: dict) -> dict:
     """The frontmatter values the ENTITY asserts, normalized for comparison.
 
-    Only keys the entity actually carries are returned — a key the entity leaves
-    unset is not drift, it is simply not owned, so the mirror's value stands.
+    Only keys the entity actually carries are returned, except
+    side_effect_class: an absent or unsupported value has the restrictive
+    state_changing default, so a stale read_only mirror must be reconciled.
     """
     vals: dict = {}
     for k in FM_SCALAR:
-        v = skill.get(k)
+        v = _project_side_effect_class(skill) if k == "side_effect_class" else skill.get(k)
         if v is None or v == "":
             continue
         vals[k] = v.strip() if isinstance(v, str) else v
@@ -522,7 +529,8 @@ def canonical_text(skill: dict, existing: str | None) -> str:
     present in it.
 
     "Reconciled" rather than "preserved": the entity owns `description`,
-    `triggers`, `slug`, `user_invocable`, `supported_harnesses` and `name`, so a
+    `triggers`, `slug`, `user_invocable`, `side_effect_class`,
+    `supported_harnesses` and `name`, so a
     change to any of them must reach the mirror — a harness reads `description`
     and `triggers` to decide whether to load the skill at all. Only the keys
     whose parsed VALUE actually differs are rewritten; everything else (header,
@@ -547,7 +555,9 @@ def canonical_text(skill: dict, existing: str | None) -> str:
         # _split_frontmatter); only prepend ours if it doesn't, to avoid stacking
         # two header comments.
         header = "" if content_fm.lstrip().startswith("<!--") else DO_NOT_EDIT
-        fm_block = header + _ensure_entity_id(content_fm, skill["_entity_id"])
+        content_fm = _ensure_entity_id(content_fm, skill["_entity_id"])
+        drifted = frontmatter_drift(skill, content_fm)
+        fm_block = header + _reconcile_frontmatter(content_fm, skill, drifted)
     else:
         fm_block = DO_NOT_EDIT + _fresh_frontmatter(skill)
 
