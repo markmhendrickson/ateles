@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+#
+# DEPRECATED (2026-07): BlackHole local capture is retired. Recording now runs
+# through Audio Hijack, controlled by execution/scripts/audio_hijack_control.sh
+# (driven by the Strix menu-bar toggle and the /record_meeting skill); Audio
+# Hijack's output files are transcribed + analyzed by the Tyto daemon. This
+# script is kept only for reference / fallback and is no longer wired to Strix.
+#
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
