@@ -742,6 +742,35 @@ def _alert(notifier: Any, message: str, priority: Any, key: str | None = None) -
     return False
 
 
+def isolate_notifier_env(state_path: Path) -> Path:
+    """Pin this job's notifier settings; return the job's own held-queue path.
+
+    Assigned directly, never ``setdefault``: the shared dotenv or a global
+    setting must not win. The held queue defaults to a file every daemon's
+    notifier shares and drains on each send, so this job would otherwise email
+    other daemons' held notices. ``ATELES_SWARM_EMAIL`` is blanked so no
+    ``--from`` is passed: the dotenv alias is the operator's own account, whose
+    mail to itself lands in Sent, and without ``--from`` gws sends as the
+    swarm mailbox it is signed in as.
+    """
+    queue = state_path.with_name("codex-delivery-held.json")
+    os.environ["ATELES_DIGEST_QUEUE_PATH"] = str(queue)
+    os.environ["ATELES_SWARM_EMAIL"] = ""
+    return queue
+
+
+def release_held_notices(notifier: Any) -> bool:
+    """Send notices held overnight, once the silence window is over.
+
+    The notifier drains its queue only on a send, and a notice held in silence
+    counts as told, so with no later alert it would never go out. A failed
+    delivery stays queued (``flush_digest`` keeps it).
+    """
+    if notifier.in_silence_window():
+        return False
+    return bool(notifier.flush_digest())
+
+
 def apply_results(
     results: list[CheckResult],
     state: dict[str, list[str]],
@@ -860,13 +889,16 @@ def main(argv: list[str] | None = None) -> int:
         "ATELES_DEDUPE_JOURNAL_PATH",
         str(state_path.with_name("codex-delivery-dedupe.json")),
     )
+    isolate_notifier_env(state_path)
     from lib.notify.notifier import Notifier, Priority
 
     state = load_state(state_path)
+    notifier = Notifier.from_neotoma()
+    release_held_notices(notifier)
     new_state = apply_results(
         results,
         state,
-        Notifier.from_neotoma(),
+        notifier,
         Priority.WARN,
         baseline=not state,
     )
