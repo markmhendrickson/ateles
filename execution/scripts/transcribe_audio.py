@@ -2958,8 +2958,8 @@ def main():
         type=str,
         default=None,
         choices=list(VALID_BACKENDS),
-        help="Transcription backend. Default: 'local' (whisper-cli, free, "
-        "on-device). 'fluid' adds local speaker diarization and timed ASR; 'elevenlabs' "
+        help="Transcription backend. Default: 'local' for mono memos, 'fluid' for "
+        "diarization or separate channels. Both run on-device. 'elevenlabs' "
         "is an explicit cloud opt-in (needs ELEVENLABS_API_KEY); "
         "'openai' is the METERED platform Whisper API and is never selected "
         "automatically.",
@@ -2972,8 +2972,8 @@ def main():
     parser.add_argument(
         "--no-diarize",
         action="store_true",
-        help="Disable automatic diarization. Uses the default local whisper-cli backend "
-        "(use --backend openai for the metered API).",
+        help="Disable automatic diarization for a single-speaker mono file, using "
+        "local whisper-cli. Paired and multichannel recordings reject this override.",
     )
     parser.add_argument(
         "--relate-contact-entity-id",

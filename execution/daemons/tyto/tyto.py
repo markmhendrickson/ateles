@@ -628,8 +628,8 @@ class RecordingWatcher:
 
     On detection: waits for BOTH files to settle (mtime stable for SETTLE_SECS),
     then runs transcribe_audio.py with --mic-file for a merged Mic/ and System/ dialogue
-    transcript. Falls back to remote-only diarization if mic file is absent or
-    ELEVENLABS_API_KEY is not set.
+    transcript. A recording without a paired mic uses its available file;
+    a failed paired transcription retains both tracks for retry.
 
     State: tracks seen file paths + mtimes to avoid double-processing.
     """

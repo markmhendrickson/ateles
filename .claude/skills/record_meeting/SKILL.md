@@ -18,20 +18,11 @@ entity_id: ent_b0976fda824a000ee984a5da
 
 Use this skill when the user wants command-style control of meeting recording.
 
-Recording runs through **Audio Hijack** (local BlackHole capture is retired). The
-`audio_hijack_control.sh` script starts/stops the Audio Hijack session named
-`Tyto` via AppleScript; Audio Hijack writes paired `*remote*`/`*mic*` files into
-its output folder, and the **Tyto daemon** watches that folder and does the
-transcription + `/analyze-meeting` automatically. The same script backs the Strix
-menu-bar toggle, so the chat command and the menu bar share one mechanism.
+Recording runs through **Audio Hijack**. Start and stop the configured recording session in Audio Hijack's UI; the previously documented `execution/scripts/audio_hijack_control.sh` is not present in the supported repository and must not be invoked or described as installed. Audio Hijack writes paired `*remote*`/`*mic*` files into its output folder, and the **Tyto daemon** watches that folder and performs transcription + `/analyze-meeting` automatically. Do not infer a working chat or Strix control integration from this skill.
 
 ## Default (no argument)
 
-When the user invokes `/record_meeting` with no argument (or "toggle"): run
-`bash execution/scripts/audio_hijack_control.sh toggle`. That **starts** the
-Audio Hijack session if stopped, or **stops** it if running. Transcription and
-analysis happen downstream in Tyto when the recording file settles — this skill
-does not transcribe inline.
+When the user invokes `/record_meeting` with no argument (or "toggle"), inspect the configured Audio Hijack recording session and use its visible start/stop control only when supported app control is available. Otherwise report that the recording UI must be operated directly; do not invent a command or substitute another capture mechanism. Transcription and analysis happen downstream in Tyto when the recording file settles — this path does not transcribe inline.
 
 ## Guardrail
 
@@ -63,29 +54,24 @@ This is a reminder, not a blocking prompt — do not gate the start on a confirm
 
 ## Commands
 
-Run from repo root (all via the shared Audio Hijack control surface):
+Audio Hijack capture uses the application's visible recording controls for its configured session. Verify its current state before toggling and read back the resulting recording state. A supported programmatic Audio Hijack entrypoint is not installed in this repository.
+
+An existing, separate local device-capture controller is available at:
 
 ```bash
-bash execution/scripts/audio_hijack_control.sh toggle   # start if stopped, stop if running (default)
-bash execution/scripts/audio_hijack_control.sh start    # begin recording
-bash execution/scripts/audio_hijack_control.sh stop      # end recording
-bash execution/scripts/audio_hijack_control.sh status    # "running" or "stopped"
+bash execution/scripts/meeting-recording-control.sh status
+bash execution/scripts/meeting-recording-control.sh start
+bash execution/scripts/meeting-recording-control.sh stop
 ```
 
-Env:
-- `AUDIO_HIJACK_SESSION` — session name to control (default `Tyto`).
-- `AUDIO_HIJACK_APP` — app name for the AppleScript `tell` (default `Audio Hijack`).
-
-Audio Hijack must be running with a session named `$AUDIO_HIJACK_SESSION` whose
-recorder block writes the `*remote*` (far-end / system) and `*mic*` (you) files
-that Tyto consumes.
+This controller launches `record_meeting_audio.py`; it does not control Audio Hijack. Use it only when that capture path is explicitly selected and the devices/configuration are verified. Do not switch the operator's Audio Hijack capture setup merely because this script exists. This repository has no root `package.json`, so `npm run record_meeting` is not a supported repo-root command.
 
 ## Behavior
 
-- `toggle` (default) — start the Audio Hijack session if stopped; stop it if running.
+- `toggle` (default) — use the verified visible Audio Hijack recording control if supported app control is available.
 - `start` — start the Audio Hijack session (begin recording). Print the consent reminder above.
 - `stop` — stop the Audio Hijack session. Audio Hijack finalizes the `*remote*`/`*mic*` files; the **Tyto daemon** then transcribes (`transcribe_audio.py`, using local FluidAudio diarization under agent_policy `ent_1cf60379aaf1537787e571a5`) and auto-invokes `/analyze-meeting`. This skill does not transcribe inline.
-- `status` — print whether the Audio Hijack session is currently recording.
+- `status` — inspect and report the Audio Hijack session's actual recording state.
 
 ### Downstream (handled by Tyto, not this skill)
 
@@ -95,16 +81,12 @@ that Tyto consumes.
 
 ## Setup (macOS)
 
-1. **Audio Hijack:** Install Audio Hijack, create a session named `Tyto` that captures the meeting app's audio (system/far-end) on one recorder block and your mic on another, writing files whose names contain `remote`/`system` (far end) and `mic` (you). Audio Hijack must expose AppleScript (it does by default) so `audio_hijack_control.sh` can `start`/`stop` the session.
+1. **Audio Hijack:** Install Audio Hijack, create a session named `Tyto` that captures the meeting app's audio (system/far-end) on one recorder block and your mic on another, writing files whose names contain `remote`/`system` (far end) and `mic` (you). Use the application's supported visible controls; do not assume the absent `audio_hijack_control.sh` is available.
 2. **Tyto daemon:** Point `TYTO_RECORDINGS_DIR` at the Audio Hijack output folder (default `$RECORD_MEETING_DIR` or `~/Documents/data/recordings`). Optionally set `TYTO_NATIVE_RECORDINGS_DIR` for platform-native recordings.
 3. **Local transcription:** Install FluidAudio and its diarization/ASR models for supported Apple Silicon machines. Meeting diarization runs locally by default under agent_policy `ent_1cf60379aaf1537787e571a5` (operator ruling 2026-11-04). Preserve raw speaker/timestamp output, source transcript and deterministic channel identities. No provider API key is needed for the local route; do not automatically fall back to paid/cloud transcription or undiarized output when it fails. Diagnose the local error and report any remaining blocker.
 
 ## Implementation detail
 
-Control surface (shared with Strix menu-bar toggle):
+Audio Hijack capture is controlled through the application; downstream processing is implemented by `execution/daemons/tyto/tyto.py` and `execution/scripts/transcribe_audio.py`.
 
-`execution/scripts/audio_hijack_control.sh`  (start | stop | status | toggle)
-
-**Deprecated (retired BlackHole path, kept for reference only):**
-`execution/scripts/meeting-recording-control.sh` and
-`execution/scripts/record_meeting_audio.py` — no longer wired to Strix or this skill.
+The separate device-capture path is implemented by `execution/scripts/meeting-recording-control.sh` and `execution/scripts/record_meeting_audio.py`. Its availability does not establish that it is selected, that its audio devices are configured, or that it controls Strix/Audio Hijack.
