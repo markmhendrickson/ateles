@@ -362,7 +362,7 @@ def test_transcribe_two_files_delegates_and_preserves_text(tmp_path):
         "transcribe_with_elevenlabs_speech_to_text",
         return_value=dict(fake_el_result),
     ) as mock_el, patch.object(ta, "get_audio_duration", return_value=30.0):
-        result = ta.transcribe_two_files(mic_path, remote_path, language="en")
+        result = ta.transcribe_two_files(mic_path, remote_path, language="en", backend="elevenlabs")
 
     assert result["transcription_text"] == "Zolium"
     mock_el.assert_called_once()
@@ -394,7 +394,7 @@ def test_transcribe_two_files_fallback_concatenation_corrected(tmp_path, monkeyp
     ), patch.dict(
         os.environ, {"ELEVENLABS_API_KEY": "fake-key"}
     ):
-        result = ta.transcribe_two_files(mic_path, remote_path, language="en")
+        result = ta.transcribe_two_files(mic_path, remote_path, language="en", backend="elevenlabs")
 
     assert "Vexcorp" in result["transcription_text"]
     assert "Vexcorb" not in result["transcription_text"]
@@ -764,7 +764,7 @@ def test_elevenlabs_without_a_key_raises_rather_than_billing_openai(
     monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 5.0)
 
     with pytest.raises(RuntimeError, match="ELEVENLABS_API_KEY"):
-        ta.transcribe_audio_file(audio, use_diarization=True)
+        ta.transcribe_audio_file(audio, use_diarization=True, backend="elevenlabs")
 
 
 def test_default_routing_uses_the_local_backend(tmp_path, monkeypatch):
@@ -814,21 +814,22 @@ def test_m4a_ffprobe_channel_count_drives_public_backend_routing(tmp_path, monke
     monkeypatch.setattr(ta.shutil, "which", lambda name: "/usr/bin/ffprobe")
     monkeypatch.setattr(ta.subprocess, "run", lambda *args, **kwargs: completed)
 
-    def fake_elevenlabs(path, **kwargs):
+    def fake_fluid(path, **kwargs):
+        assert kwargs["channel_count"] == 2
         return {
             "transcription_text": "Two speakers.",
             "language": "en",
             "audio_duration_seconds": 5.0,
             "file_size_bytes": path.stat().st_size,
-            "transcription_engine": "elevenlabs_stt",
-            "transcription_model": "scribe_v2",
+            "transcription_engine": "local_fluid_audio",
+            "transcription_model": "FluidAudio + Parakeet v3",
         }
 
-    monkeypatch.setattr(ta, "transcribe_with_elevenlabs_speech_to_text", fake_elevenlabs)
+    monkeypatch.setattr(ta, "transcribe_fluid", fake_fluid)
 
     result = ta.transcribe_audio_file(audio)
 
-    assert result["transcription_engine"] == "elevenlabs_stt"
+    assert result["transcription_engine"] == "local_fluid_audio"
 
 
 def test_no_speech_marker_is_not_run_through_stutter_cleanup(tmp_path, monkeypatch):

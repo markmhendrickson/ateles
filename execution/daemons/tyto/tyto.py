@@ -1140,7 +1140,6 @@ class RecordingWatcher:
             NEOTOMA_CLI_SCRIPT=str(Path(NEOTOMA_RC_DIR) / "dist" / "cli" / "bootstrap.js"),
         )
         _verify_transcription_cli_runtime(transcription_env)
-        has_elevenlabs = bool(os.environ.get("ELEVENLABS_API_KEY", "").strip())
 
         def _extract_entity_id(stdout: str) -> str | None:
             for line in stdout.splitlines():
@@ -1151,6 +1150,7 @@ class RecordingWatcher:
         def _extract_backend(stdout: str, fallback: str) -> str:
             backend_to_engine = {
                 "local": "local_whisper_cpp",
+                "fluid": "local_fluid_audio",
                 "elevenlabs": "elevenlabs_stt",
                 "openai": "openai_whisper_api",
             }
@@ -1183,7 +1183,7 @@ class RecordingWatcher:
 
         backend_override = os.environ.get("TRANSCRIBE_BACKEND", "").strip().lower()
         diarization_override = os.environ.get("RECORD_MEETING_DIARIZE", "").strip()
-        paired_elevenlabs = backend_override == "elevenlabs" or (
+        paired = backend_override in ("fluid", "elevenlabs") or (
             not backend_override and diarization_override != "0"
         )
 
@@ -1191,8 +1191,7 @@ class RecordingWatcher:
         if (
             mic_path is not None
             and mic_path.exists()
-            and has_elevenlabs
-            and paired_elevenlabs
+            and paired
         ):
             log.info(f"[{DAEMON_NAME}] Two-file merge mode: [You] + diarized remote.")
             cmd = [
@@ -1200,10 +1199,10 @@ class RecordingWatcher:
                 "--mic-file", str(mic_path),
                 "--capture-method", self._capture_method,
             ]
-            result = _run_command(cmd, "elevenlabs_stt")
+            result = _run_command(cmd, "local_fluid_audio")
             if result.returncode == 0:
                 entity_id = _extract_entity_id(result.stdout)
-                backend = _extract_backend(result.stdout, "elevenlabs_stt")
+                backend = _extract_backend(result.stdout, "local_fluid_audio")
                 log.info(
                     f"[{DAEMON_NAME}] Two-file transcription complete. "
                     f"entity_id={entity_id}"
@@ -1218,12 +1217,13 @@ class RecordingWatcher:
             log.warning(
                 f"[{DAEMON_NAME}] Two-file transcription failed "
                 f"(rc={result.returncode}): {result.stderr.strip()[:300]}"
-                " — falling back to remote-only diarization."
+                " — preserving both tracks for retry."
             )
-        elif mic_path is not None and mic_path.exists() and not paired_elevenlabs:
+            raise RuntimeError("Paired local transcription failed; both tracks retained for retry")
+        elif mic_path is not None and mic_path.exists() and not paired:
             log.info(
                 f"[{DAEMON_NAME}] Explicit backend/diarization override disables "
-                "the two-file ElevenLabs path; transcribing the system track only."
+                "the paired diarization path; transcribing the system track only."
             )
 
         # Single-file fallback: remote only, diarized or plain
@@ -1234,7 +1234,7 @@ class RecordingWatcher:
         if self._capture_method == "voice_memo":
             cmd.extend(["--backend", "local"])
             log.info(f"[{DAEMON_NAME}] Voice Memo local transcription mode.")
-        elif not backend_override and diarization_override == "1":
+        elif not backend_override and diarization_override != "0":
             cmd.append("--diarize")
             log.info(f"[{DAEMON_NAME}] Explicit single-file diarization mode.")
         elif not backend_override and diarization_override == "0":
@@ -1245,11 +1245,12 @@ class RecordingWatcher:
 
         fallback = {
             "local": "local_whisper_cpp",
+            "fluid": "local_fluid_audio",
             "elevenlabs": "elevenlabs_stt",
             "openai": "openai_whisper_api",
         }.get(
             backend_override,
-            "local_whisper_cpp" if self._capture_method == "voice_memo" else "unknown",
+            "local_whisper_cpp" if self._capture_method == "voice_memo" else "local_fluid_audio",
         )
         result = _run_command(cmd, fallback)
         if result.returncode != 0:
@@ -1257,36 +1258,10 @@ class RecordingWatcher:
                 f"[{DAEMON_NAME}] Transcription failed (rc={result.returncode}): "
                 f"{result.stderr.strip()[:300]}"
             )
-            if "--diarize" in cmd:
-                log.info(f"[{DAEMON_NAME}] Retrying without diarization...")
-                cmd_fallback = [
-                    python, str(TRANSCRIBE_SCRIPT), str(remote_path), "--no-diarize",
-                    "--capture-method", self._capture_method,
-                ]
-                result2 = _run_command(cmd_fallback, "local_whisper_cpp")
-                if result2.returncode != 0:
-                    backend = _extract_backend(
-                        result2.stdout, "local_whisper_cpp"
-                    )
-                    raise RuntimeError(
-                        f"backend={backend}: fallback transcription also failed: "
-                        f"{_subprocess_failure_detail(result2.stderr)}"
-                    )
-                entity_id = _extract_entity_id(result2.stdout)
-                backend = _extract_backend(result2.stdout, "local_whisper_cpp")
-                log.info(f"[{DAEMON_NAME}] Fallback transcription succeeded. entity_id={entity_id}")
-                self._notifier.send(
-                    f"Transcription complete (backend={backend}, no diarization): "
-                    f"{remote_path.name}",
-                    priority=Priority.INFO,
-                    handler=DAEMON_NAME,
-                )
-                return entity_id
-            else:
-                backend = _extract_backend(result.stdout, fallback)
-                raise RuntimeError(
-                    f"backend={backend}: {_subprocess_failure_detail(result.stderr)}"
-                )
+            backend = _extract_backend(result.stdout, fallback)
+            raise RuntimeError(
+                f"backend={backend}: {_subprocess_failure_detail(result.stderr)}"
+            )
         else:
             entity_id = _extract_entity_id(result.stdout)
             backend = _extract_backend(result.stdout, fallback)

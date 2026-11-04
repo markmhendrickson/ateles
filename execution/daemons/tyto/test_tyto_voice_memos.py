@@ -937,7 +937,7 @@ def test_voice_memo_uses_local_backend_even_when_elevenlabs_key_exists(tmp_path,
     assert "--diarize" not in command
 
 
-def test_single_file_meeting_defers_routing_to_transcribe_script(tmp_path, monkeypatch):
+def test_single_file_meeting_requests_local_diarization(tmp_path, monkeypatch):
     """Tyto must not reintroduce key-presence routing beside the shared selector."""
     recording = _write(tmp_path, "20260908 101500 system.m4a", age_secs=FRESH)
     watcher = _make_watcher(tmp_path, capture_method="audio_hijack_system")
@@ -953,7 +953,7 @@ def test_single_file_meeting_defers_routing_to_transcribe_script(tmp_path, monke
         assert watcher._run_transcription(recording, None) == "ent_test_auto"
 
     command = run.call_args.args[0]
-    assert "--diarize" not in command
+    assert "--diarize" in command
     assert "--no-diarize" not in command
     assert "--backend" not in command
 

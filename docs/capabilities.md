@@ -107,7 +107,7 @@ GTM/brand (`corvus`, `manucode`, `ciconia`, `aythya`, `accipiter`), customer/rel
 | Category | Skills | Touches |
 | --- | --- | --- |
 | **Engineering workflow** | `commit`, `push`, `pull`, `debug`, `fix-feature-bug`, `create-feature-unit`, `create-prototype`, `run-feature-workflow`, `final-review`, `manage-error-debugging`, `report-error`, `create-release`, `publish`, `verify-deployment`, `report` | Git, test runners, GitHub Actions |
-| **Meetings & audio** | `record_meeting`, `analyze-meeting`, `import-audio` | Audio, Whisper/ElevenLabs, Neotoma, Gmail, Calendar |
+| **Meetings & audio** | `record_meeting`, `analyze-meeting`, `import-audio` | Audio, local Whisper/FluidAudio, Neotoma, Gmail, Calendar |
 | **Email & calendar** | `email-triage`, `email-triage-auto`, `find-technician-slot`, `remember-calendar` | Gmail (`gws`), Google Calendar (`gws`), Neotoma |
 | **Finance** | `run-scorecard`, `extract-amazon-order`, `quarterly-portfolio-review` | Neotoma, parquet, price feeds |
 | **Health** | `scrape-chatgpt-workout` (+ the `gorilla` persona) | ChatGPT scrape, Neotoma |
@@ -129,7 +129,7 @@ GTM/brand (`corvus`, `manucode`, `ciconia`, `aythya`, `accipiter`), customer/rel
 | **Gmail** | Email triage, drafts, run-thread transport | `gws gmail` CLI |
 | **Google Calendar** | Briefings, payment triggers, recurring sync | `gws calendar` CLI |
 | **Wise + Bitcoin** | Recurring payments (fiat + crypto) | Wise API, BTC tooling |
-| **Whisper / ElevenLabs** | Transcription + diarization | `transcribe_audio.py` |
+| **Whisper / FluidAudio** | Local transcription + speaker diarization | `transcribe_audio.py` |
 | **Typefully / X API** | Social scheduling + analysis | `typefully` MCP, X API |
 | **parquet stores** | Bulk finance/transcription/messaging data | `parquet` MCP |
 | **1Password + SOPS/age** | Secret sourcing + offline materialization | `op` CLI, `sops` |
