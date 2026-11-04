@@ -6,9 +6,28 @@ Loads agent_grant entities from Neotoma by aauth_sub and exposes:
   - check_capability(cap) — True if the named capability is active
   - suspend / restore / revoke — write state changes back to Neotoma
 
-If Neotoma is unreachable the checker is permissive (allows all) and logs a
-warning. Grant checks are advisory in Phase 5; hard-blocking enforcement is
-Phase 6 once the PS-layer AAuth integration lands (#30).
+Fail posture (ateles#560). A check that cannot determine an answer must report
+UNKNOWN, not PASS. Three verdicts, not two:
+
+  ALLOW    — an active grant covers the request.
+  DENY     — the store answered and the answer is "no": no grants exist for this
+             sub, or every grant is suspended/revoked, or none covers the
+             capability. A determinate negative; ALWAYS enforced.
+  UNKNOWN  — the store could not be consulted (unreachable, timeout, no bearer
+             token). This is NOT a pass. It resolves by boundary posture:
+             privileged operations fail CLOSED, read-shaped operations degrade
+             OPEN within a bounded staleness window.
+
+The two failures have opposite risk profiles, which is why #560 asks for them to
+be separated rather than flipped together. Absent-grant is a security fact — an
+agent that was never granted anything, or whose grant was deleted (see #533,
+which wiped capabilities on 37 agents), must not be indistinguishable from one
+holding every capability. Store-unreachable is an availability event: hard-
+failing every agent on a Neotoma outage would take the swarm down, and Neotoma
+has run at 8-80s response times (#577).
+
+See ``GrantVerdict`` and ``resolve_unknown`` below for how UNKNOWN is settled.
+The posture vocabulary mirrors ``gating.CheckpointPosture`` from ateles#350.
 
 Grant entity schema (agent_grant in Neotoma):
   {
@@ -28,6 +47,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional
 
 import httpx
@@ -38,6 +58,153 @@ NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
 )
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
+
+# How long a successfully-loaded grant snapshot may be reused to answer an
+# UNKNOWN (store-unreachable) check before the cache is considered too stale to
+# vouch for anything. Beyond this, an unreachable store denies even reads.
+GRANT_CACHE_MAX_STALENESS_SECONDS = int(
+    os.environ.get("ATELES_GRANT_CACHE_MAX_STALENESS_SECONDS", "900")
+)
+
+
+class GrantVerdict(str, Enum):
+    """Outcome of a grant check. Three states, not two (ateles#560).
+
+    UNKNOWN is deliberately not a synonym for either ALLOW or DENY: it records
+    that the store could not answer, so the caller resolves it against the
+    boundary's posture instead of silently inheriting a default.
+    """
+
+    ALLOW = "allow"
+    DENY = "deny"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class GrantDecision:
+    """A verdict plus the reason that produced it.
+
+    ``reason`` is a stable snake_case token intended for logs, audit rows, and
+    call-site branching — never a free-text message. Callers that need to tell
+    absent-grant from store-unreachable read this, not the boolean.
+    """
+
+    verdict: GrantVerdict
+    reason: str
+    detail: str = ""
+    constraints: Optional[dict] = None
+
+    @property
+    def allowed(self) -> bool:
+        """True only for a determinate ALLOW. UNKNOWN is never allowed here.
+
+        Call sites that may degrade open must say so explicitly by calling
+        ``resolve_unknown``; they cannot get an open degrade by accident.
+        """
+        return self.verdict is GrantVerdict.ALLOW
+
+    @property
+    def is_unknown(self) -> bool:
+        return self.verdict is GrantVerdict.UNKNOWN
+
+
+# Operations that must fail CLOSED when the grant store cannot be consulted.
+# These either move money, reach outside the swarm, or mutate shared state that
+# is expensive to unwind — the cases where "we could not check" must not become
+# "we allowed it". Everything else (read-shaped work) may degrade OPEN within
+# the staleness bound so a Neotoma outage does not halt the swarm.
+PRIVILEGED_OPS = frozenset(
+    {
+        "store",
+        "store_structured",
+        "correct",
+        "create_relationship",
+        "delete_entity",
+        "delete_relationship",
+        "merge_entities",
+        "split_entity",
+        "github_harness:write",
+        "a2a:task:create",
+        "payment:send",
+        "email:send",
+        "publish",
+    }
+)
+
+# Servers whose tools are privileged regardless of the specific tool named:
+# anything that can move funds or send outbound comms.
+PRIVILEGED_TOOL_SERVERS = frozenset({"btc-wallet", "gmail", "typefully"})
+
+
+def is_privileged_op(op: str) -> bool:
+    """True if ``op`` must fail closed on an UNKNOWN grant check."""
+    if not op:
+        return True  # unnamed operation: treat as privileged, not as free
+    o = op.strip().lower()
+    if o in PRIVILEGED_OPS:
+        return True
+    # Namespaced write ops, e.g. "github_harness:write", "neotoma:write".
+    if o.endswith(":write") or o.endswith(":send") or o.endswith(":delete"):
+        return True
+    if o.startswith("tool:"):
+        rest = o[len("tool:"):]
+        server = rest.split(":", 1)[0]
+        return server in PRIVILEGED_TOOL_SERVERS
+    return False
+
+
+def resolve_unknown(
+    decision: GrantDecision,
+    *,
+    op: str,
+    privileged: Optional[bool] = None,
+) -> tuple[bool, str]:
+    """Settle a possibly-UNKNOWN decision into (allowed, reason).
+
+    ALLOW and DENY pass through unchanged — a determinate answer is never
+    overridden by posture. Only UNKNOWN consults the posture:
+
+      privileged op  → CLOSED (deny; we could not verify authority to act)
+      read-shaped op → OPEN   (allow, loudly logged, availability degrade)
+
+    The open degrade is bounded: ``GrantChecker`` only reports UNKNOWN with a
+    usable cached snapshot inside ``GRANT_CACHE_MAX_STALENESS_SECONDS``. Past
+    that it reports UNKNOWN with reason ``grant_cache_stale``, which this
+    function denies for every op — a cache old enough to have missed a
+    revocation is not evidence of anything.
+    """
+    if decision.verdict is GrantVerdict.ALLOW:
+        return True, decision.reason
+    if decision.verdict is GrantVerdict.DENY:
+        return False, decision.reason
+
+    if decision.reason == "grant_cache_stale":
+        log.error(
+            "[grant_checker] DENY %s — grant store unreachable and cached "
+            "grants exceed the %ss staleness bound (%s)",
+            op,
+            GRANT_CACHE_MAX_STALENESS_SECONDS,
+            decision.detail,
+        )
+        return False, "grant_cache_stale"
+
+    priv = is_privileged_op(op) if privileged is None else privileged
+    if priv:
+        log.error(
+            "[grant_checker] DENY privileged op %r — grant store unavailable "
+            "(%s); privileged boundary fails CLOSED",
+            op,
+            decision.detail or decision.reason,
+        )
+        return False, "grant_store_unavailable_privileged_denied"
+
+    log.warning(
+        "[grant_checker] ALLOW read-shaped op %r despite unavailable grant "
+        "store (%s) — availability degrade, NOT an authorization",
+        op,
+        decision.detail or decision.reason,
+    )
+    return True, "grant_store_unavailable_read_degraded"
 
 
 @dataclass
@@ -107,8 +274,14 @@ class GrantChecker:
     """
     Load and check agent_grant entities for a given aauth_sub.
 
-    Permissive fallback if Neotoma is unreachable — checks advisory only until
-    PS-layer AAuth enforcement lands (issue #30).
+    Returns tri-state ``GrantDecision``s (ateles#560). A store that answers
+    "this agent has no grants" produces DENY; a store that cannot be reached
+    produces UNKNOWN, which the caller settles via ``resolve_unknown``.
+
+    The legacy boolean methods (``is_active``, ``check_capability``,
+    ``check_tool``) are kept for call-site compatibility and now enforce
+    absent-grant denial. They resolve UNKNOWN through the posture rules, so an
+    unreachable store still degrades open for reads and closed for writes.
     """
 
     def __init__(self, aauth_sub: str) -> None:
@@ -116,12 +289,18 @@ class GrantChecker:
         self._grants: list[AgentGrant] = []
         self._loaded = False
         self._load_error: Optional[str] = None
+        # Wall-clock time of the last SUCCESSFUL load. Bounds how long a cached
+        # snapshot may answer an UNKNOWN check (see GRANT_CACHE_MAX_STALENESS).
+        self._loaded_at: Optional[float] = None
 
     def load(self) -> GrantChecker:
         """Fetch all agent_grant entities for this sub from Neotoma."""
         if not NEOTOMA_BEARER_TOKEN:
             self._load_error = "NEOTOMA_BEARER_TOKEN not set"
-            log.warning(f"[grant_checker:{self.aauth_sub}] {self._load_error} — permissive fallback")
+            log.error(
+                f"[grant_checker:{self.aauth_sub}] {self._load_error} — grant "
+                "state UNKNOWN; privileged operations will be denied"
+            )
             self._loaded = True
             return self
 
@@ -151,25 +330,150 @@ class GrantChecker:
                 for e in entities
                 if self._snapshot_matches_sub(e.get("snapshot") or {})
             ]
-            log.info(
-                f"[grant_checker:{self.aauth_sub}] Loaded {len(self._grants)} grant(s)"
-            )
+            # Determinate answer from the store — clear any prior load error so
+            # a recovered Neotoma stops producing UNKNOWN.
+            self._load_error = None
+            self._loaded_at = time.time()
+            if not self._grants:
+                log.error(
+                    f"[grant_checker:{self.aauth_sub}] Store returned ZERO "
+                    "grants — this agent is NOT authorised. Grant one via: "
+                    "python execution/scripts/manage_grants.py list"
+                )
+            else:
+                log.info(
+                    f"[grant_checker:{self.aauth_sub}] Loaded {len(self._grants)} grant(s)"
+                )
         except Exception as exc:
             self._load_error = str(exc)
-            log.warning(
+            log.error(
                 f"[grant_checker:{self.aauth_sub}] Could not load grants: {exc} — "
-                "permissive fallback"
+                "grant state UNKNOWN; privileged operations will be denied"
             )
         self._loaded = True
         return self
 
-    def is_active(self) -> bool:
-        """True if at least one active grant exists (or Neotoma was unreachable)."""
-        if self._load_error or not self._loaded:
-            return True
+    # ── Tri-state core ──────────────────────────────────────────────────────
+
+    def _unavailable(self) -> Optional[GrantDecision]:
+        """Return an UNKNOWN decision if the store could not be consulted.
+
+        Returns None when the store answered, in which case the caller may
+        reason from ``self._grants`` — including the empty case, which is a
+        determinate "not authorised" rather than an absence of information.
+        """
+        if not self._loaded:
+            return GrantDecision(
+                GrantVerdict.UNKNOWN,
+                "grants_not_loaded",
+                "load() was never called",
+            )
+        if self._load_error:
+            age = None if self._loaded_at is None else time.time() - self._loaded_at
+            if self._loaded_at is None or age > GRANT_CACHE_MAX_STALENESS_SECONDS:
+                return GrantDecision(
+                    GrantVerdict.UNKNOWN,
+                    "grant_cache_stale",
+                    f"{self._load_error}; no usable cached snapshot"
+                    + ("" if age is None else f" (age {age:.0f}s)"),
+                )
+            return GrantDecision(
+                GrantVerdict.UNKNOWN,
+                "grant_store_unreachable",
+                f"{self._load_error} (cached snapshot {age:.0f}s old)",
+            )
+        return None
+
+    def decide_active(self) -> GrantDecision:
+        """Tri-state form of ``is_active``."""
+        unavailable = self._unavailable()
+        if unavailable is not None:
+            return unavailable
         if not self._grants:
-            return True  # no grants recorded = permissive
-        return any(g.is_active for g in self._grants)
+            return GrantDecision(
+                GrantVerdict.DENY,
+                "no_grant",
+                f"no agent_grant exists for {self.aauth_sub}",
+            )
+        if any(g.is_active for g in self._grants):
+            return GrantDecision(GrantVerdict.ALLOW, "active_grant")
+        return GrantDecision(
+            GrantVerdict.DENY,
+            "no_active_grant",
+            "every grant is suspended or revoked",
+        )
+
+    def decide_capability(self, capability: str) -> GrantDecision:
+        """Tri-state form of ``check_capability``."""
+        unavailable = self._unavailable()
+        if unavailable is not None:
+            return unavailable
+        if not self._grants:
+            return GrantDecision(
+                GrantVerdict.DENY,
+                "no_grant",
+                f"no agent_grant exists for {self.aauth_sub}",
+            )
+        if any(g.is_active and g.has_capability(capability) for g in self._grants):
+            return GrantDecision(GrantVerdict.ALLOW, "capability_granted")
+        return GrantDecision(
+            GrantVerdict.DENY,
+            "capability_not_granted",
+            f"no active grant covers {capability!r}",
+        )
+
+    def decide_tool(self, server: str, tool: str) -> GrantDecision:
+        """Tri-state form of ``check_tool``.
+
+        The un-migrated-agent fallback (a grant exists but declares no
+        ``tool:``-prefixed capabilities) is preserved deliberately and kept
+        DISTINCT from absent-grant: #560 scopes that migration separately. It
+        reports its own reason so it is visible in audit rows rather than
+        blending into a generic allow.
+        """
+        unavailable = self._unavailable()
+        if unavailable is not None:
+            return unavailable
+        if not self._grants:
+            return GrantDecision(
+                GrantVerdict.DENY,
+                "no_grant",
+                f"no agent_grant exists for {self.aauth_sub}",
+            )
+        if not any(g.tool_grants for g in self._grants):
+            return GrantDecision(
+                GrantVerdict.ALLOW,
+                "tool_grants_not_declared_unmigrated",
+                "grant exists but declares no tool capabilities",
+            )
+        for g in self._grants:
+            if not g.is_active:
+                continue
+            constraints = g.tool_constraints(server, tool)
+            if constraints is not None:
+                return GrantDecision(
+                    GrantVerdict.ALLOW, "tool_granted", constraints=constraints
+                )
+        return GrantDecision(
+            GrantVerdict.DENY,
+            "tool_not_granted",
+            f"no active grant covers {server}:{tool}",
+        )
+
+    # ── Boolean compatibility layer ─────────────────────────────────────────
+    #
+    # These settle UNKNOWN through resolve_unknown() so existing call sites get
+    # the posture behaviour without change. An absent grant now DENIES (#560).
+
+    def is_active(self, *, op: str = "") -> bool:
+        """True if an active grant exists. Absent grant is False, not True.
+
+        ``op`` names the operation being gated so an UNKNOWN verdict can be
+        settled by privilege. Callers that omit it get the conservative
+        reading — an unnamed operation is treated as privileged.
+        """
+        allowed, _ = resolve_unknown(self.decide_active(), op=op)
+        return allowed
 
     def is_suspended(self) -> bool:
         """True if ALL grants are suspended (not just one)."""
@@ -183,14 +487,25 @@ class GrantChecker:
             return False
         return all(g.is_revoked for g in self._grants)
 
+    def has_no_grant(self) -> bool:
+        """True when the store answered and holds ZERO grants for this sub.
+
+        Distinct from ``is_revoked``: a revoked grant is a decision someone
+        made, an absent grant is an agent that was never authorised (or whose
+        grant was wiped — see #533). Startup paths report these differently.
+        """
+        return self._loaded and not self._load_error and not self._grants
+
     def check_capability(self, capability: str) -> bool:
+        """True if an active grant covers ``capability``.
+
+        Absent grant → False. Unreachable store → posture-resolved on whether
+        ``capability`` is privileged.
         """
-        True if the agent has an active grant covering the named capability.
-        Permissive if Neotoma was unreachable.
-        """
-        if self._load_error or not self._grants:
-            return True
-        return any(g.is_active and g.has_capability(capability) for g in self._grants)
+        allowed, _ = resolve_unknown(
+            self.decide_capability(capability), op=capability
+        )
+        return allowed
 
     def check_tool(self, server: str, tool: str) -> tuple[bool, Optional[dict]]:
         """
@@ -201,25 +516,15 @@ class GrantChecker:
           - constraints: the param-constraint dict to enforce (may be empty),
             or None when denied.
 
-        Permissive fallback (allowed=True, constraints=None) when Neotoma was
-        unreachable or no grants are recorded — enforcement is advisory until
-        the proxy and grant tightening land for all agents.
+        Absent grant → (False, None). An unreachable store resolves by posture:
+        privileged servers (funds, outbound comms) deny; reads degrade open
+        within the staleness bound.
         """
-        if self._load_error or not self._grants:
-            return True, None
-        # If NO grant declares any tool_grants at all, fall back to permissive —
-        # tool-level enforcement only kicks in once an agent has been migrated
-        # to declare its tool capabilities (avoids breaking un-migrated agents).
-        any_tool_grants = any(g.tool_grants for g in self._grants)
-        if not any_tool_grants:
-            return True, None
-        for g in self._grants:
-            if not g.is_active:
-                continue
-            constraints = g.tool_constraints(server, tool)
-            if constraints is not None:
-                return True, constraints
-        return False, None
+        decision = self.decide_tool(server, tool)
+        allowed, _ = resolve_unknown(decision, op=f"tool:{server}:{tool}")
+        if not allowed:
+            return False, None
+        return True, decision.constraints
 
     @property
     def grants(self) -> list[AgentGrant]:
