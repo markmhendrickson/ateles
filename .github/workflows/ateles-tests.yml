@@ -21,6 +21,8 @@ on:
       - "deploy/cloud/**"
       - "execution/local_llm/**"
       - "execution/daemons/test_*.py"
+      - "execution/daemons/codex-delivery-check/**"
+      - "lib/notify/**"
       - "execution/daemons/cotinga/**"
       - "execution/daemons/cyphorhinus/**"
       - "execution/daemons/phoenicurus-release/**"
@@ -112,6 +114,8 @@ jobs:
       # execution/daemons/apis/** changes.
       - name: Run swarm daemon (apis) tests
         run: uv run --extra dev python -m pytest execution/daemons/apis/ -q
+      - name: Run Codex delivery check tests
+        run: uv run --extra dev python -m pytest execution/daemons/codex-delivery-check/ -q
       # The Fly runner's repository delivery, run for real as root with the
       # agent as uid 10001, in a container from the runner image's base (the
       # same Python and git). Skipped in the step above, which is not root.

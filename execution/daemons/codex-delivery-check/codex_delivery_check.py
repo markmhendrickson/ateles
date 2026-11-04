@@ -604,21 +604,23 @@ class NeotomaReader:
 # ── orchestration ────────────────────────────────────────────────────────────
 
 
-def _gh_env(argv: list[str]) -> dict[str, str] | None:
-    """A short-lived App token for a ``gh api repos/<owner>/<name>`` read.
+def _child_env(argv: list[str]) -> dict[str, str]:
+    """The environment for a child read: no App keys, plus a token where needed.
 
-    The ambient token from the daemon's dotenv cannot see private repos, and a
+    A ``gh api repos/<owner>/<name>`` read gets a short-lived App token. The
+    ambient token from the daemon's dotenv cannot see private repos, and a
     private repo answers it with an error that used to read as a failed check.
     """
+    from lib.github_app_token import token_env, without_app_keys
+
+    env = without_app_keys(dict(os.environ))
     if argv[0] != "gh":
-        return None
+        return env
     for arg in argv:
         match = re.match(r"repos/([\w.-]+/[\w.-]+)", arg)
         if match:
-            from lib.github_app_token import token_env
-
-            return {**os.environ, **token_env(match.group(1))}
-    return None
+            return {**env, **token_env(match.group(1))}
+    return env
 
 
 def run_command(argv: list[str]) -> str:
@@ -628,7 +630,7 @@ def run_command(argv: list[str]) -> str:
         text=True,
         timeout=SUBPROCESS_TIMEOUT,
         check=False,
-        env=_gh_env(argv),
+        env=_child_env(argv),
     )
     if proc.returncode != 0:
         raise RuntimeError(f"{argv[0]} exited {proc.returncode}")
@@ -722,6 +724,24 @@ def save_state(path: Path, state: dict[str, list[str]]) -> None:
     tmp.replace(path)
 
 
+def _alert(notifier: Any, message: str, priority: Any, key: str | None = None) -> bool:
+    """Send one alert. False means the operator did not get it and will not.
+
+    ``send()`` records a dedupe key before routing and returns False for a
+    notice held through the silence window and for a failed delivery alike. A
+    held notice goes out later, so it counts as told. A failed one has its key
+    cleared, and the caller keeps it out of state so the next run tries again.
+    """
+    if notifier.send(message, priority, handler=HANDLER, dedupe_key=key):
+        return True
+    if notifier.in_silence_window():
+        return True
+    if key:
+        notifier.clear_dedupe(key)
+    print(f"ALERT NOT DELIVERED, will retry: {message[:200]}", file=sys.stderr)
+    return False
+
+
 def apply_results(
     results: list[CheckResult],
     state: dict[str, list[str]],
@@ -737,20 +757,25 @@ def apply_results(
 
     On the first run (``baseline``) everything already open is reported in one
     message and recorded, so later runs alert only on change. A failed check
-    still alerts: a failure is never folded into a baseline.
+    still alerts: a failure is never folded into a baseline. If that message
+    cannot be delivered the returned state is empty, so the next run is a first
+    run again.
+
+    An alert that could not be delivered is left out of the returned state, so
+    it is retried on the next run.
     """
     new_state: dict[str, list[str]] = {}
     sent = 0
-    overflow = 0
+    overflow: dict[str, set[str]] = {}
     summary: list[str] = []
     for result in results:
         previous = set(state.get(result.name, []))
         fail_key = failure_key(result.name)
         if not result.ok:
-            if fail_key not in previous:
-                f = failure_finding(result)
-                notifier.send(f.message, priority, handler=HANDLER, dedupe_key=f.key)
-            new_state[result.name] = sorted(previous | {fail_key})
+            told = fail_key in previous or _alert(
+                notifier, failure_finding(result).message, priority, fail_key
+            )
+            new_state[result.name] = sorted(previous | ({fail_key} if told else set()))
             continue
         if baseline:
             new_state[result.name] = sorted(f.key for f in result.findings)
@@ -771,33 +796,32 @@ def apply_results(
             if key in previous:
                 kept.add(key)
             elif sent < max_new:
-                notifier.send(
-                    current[key].message, priority, handler=HANDLER, dedupe_key=key
-                )
                 sent += 1
-                kept.add(key)
+                if _alert(notifier, current[key].message, priority, key):
+                    kept.add(key)
             else:
-                overflow += 1
-                kept.add(key)  # covered by the summary below, not re-sent later
+                overflow.setdefault(result.name, set()).add(key)
         for resolved in previous - set(current):
             notifier.clear_dedupe(resolved)
         new_state[result.name] = sorted(kept)
-    if summary:
-        notifier.send(
-            "Delivery check started. Already open:\n"
-            + "\n".join(summary)
-            + "\nYou will hear again only when something changes.",
-            priority,
-            handler=HANDLER,
-        )
-    if overflow:
-        notifier.send(
-            f"{overflow} more delivery findings were found this run; only the "
-            f"first {max_new} are listed individually. Run the delivery check "
-            "with --once --dry-run to see them all.",
-            priority,
-            handler=HANDLER,
-        )
+    if summary and not _alert(
+        notifier,
+        "Delivery check started. Already open:\n"
+        + "\n".join(summary)
+        + "\nYou will hear again only when something changes.",
+        priority,
+    ):
+        return {}
+    if overflow and _alert(
+        notifier,
+        f"{sum(len(keys) for keys in overflow.values())} more delivery findings "
+        f"were found this run; only the first {max_new} are listed individually. "
+        "Run the delivery check with --once --dry-run to see them all.",
+        priority,
+    ):
+        # Told by the summary, so these are not sent again on later runs.
+        for name, keys in overflow.items():
+            new_state[name] = sorted(set(new_state[name]) | keys)
     return new_state
 
 
@@ -838,12 +862,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     from lib.notify.notifier import Notifier, Priority
 
+    state = load_state(state_path)
     new_state = apply_results(
         results,
-        load_state(state_path),
+        state,
         Notifier.from_neotoma(),
         Priority.WARN,
-        baseline=not state_path.exists(),
+        baseline=not state,
     )
     save_state(state_path, new_state)
     return 1 if failed else 0

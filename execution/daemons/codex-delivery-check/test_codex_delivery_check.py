@@ -16,8 +16,10 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import codex_delivery_check as cdc  # noqa: E402
+from lib.github_app_token import without_app_keys as _real_without_app_keys  # noqa: E402
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
 NOW_MS = int(NOW.timestamp() * 1000)
@@ -296,11 +298,16 @@ def test_prod_target_accepted_and_missing_env_refused():
 
 
 class FakeNotifier:
-    def __init__(self):
+    def __init__(self, deliver=True, silence=False):
         self.sent, self.cleared = [], []
+        self.deliver, self.silence = deliver, silence
 
     def send(self, message, priority, handler="", dedupe_key=None, **kw):
         self.sent.append((message, priority, dedupe_key))
+        return self.deliver
+
+    def in_silence_window(self):
+        return self.silence
 
     def clear_dedupe(self, key):
         self.cleared.append(key)
@@ -388,15 +395,126 @@ def test_gh_reads_use_an_app_token_for_that_repo(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "lib.github_app_token",
-        type("M", (), {"token_env": staticmethod(fake_token_env)}),
+        type(
+            "M",
+            (),
+            {
+                "token_env": staticmethod(fake_token_env),
+                "without_app_keys": staticmethod(_real_without_app_keys),
+            },
+        ),
     )
+    monkeypatch.setenv("ATELES_REVIEWER_APP_PRIVATE_KEY", "placeholder")
+    monkeypatch.setenv("ATELES_APP_PR_OPENER_PRIVATE_KEY_PATH", "/placeholder")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.setattr(cdc.subprocess, "run", fake_subprocess_run)
     assert cdc.run_command(["gh", "api", "repos/o/r/commits?sha=main"]) == "ok"
     assert seen["repo"] == "o/r" and seen["env"]["GH_TOKEN"] == "t"
     seen.clear()
     assert cdc.run_command(["gh", "api", "repos/o/r", "--jq", ".x"]) == "ok"
     assert seen["repo"] == "o/r" and seen["env"]["GH_TOKEN"] == "t"
-    assert cdc._gh_env(["fly", "releases"]) is None
+    fly_env = cdc._child_env(["fly", "releases"])
+    assert "GH_TOKEN" not in fly_env
+    for env in (seen["env"], fly_env):
+        assert "ATELES_REVIEWER_APP_PRIVATE_KEY" not in env
+        assert "ATELES_APP_PR_OPENER_PRIVATE_KEY_PATH" not in env
+
+
+# ── an alert that did not reach the operator ─────────────────────────────────
+
+
+def test_undelivered_alert_is_retried_next_run():
+    n = FakeNotifier(deliver=False)
+    state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn")
+    assert state["c"] == [] and n.cleared == ["k1"]
+    n2 = FakeNotifier()
+    state = cdc.apply_results([result("c", ["k1"])], state, n2, "warn")
+    assert [s[2] for s in n2.sent] == ["k1"] and state["c"] == ["k1"]
+
+
+def test_alert_held_through_silence_is_not_retried():
+    n = FakeNotifier(deliver=False, silence=True)
+    state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn")
+    assert state["c"] == ["k1"] and n.cleared == []
+    n2 = FakeNotifier()
+    cdc.apply_results([result("c", ["k1"])], state, n2, "warn")
+    assert n2.sent == []
+
+
+def test_undelivered_could_not_check_alert_is_retried():
+    n = FakeNotifier(deliver=False)
+    state = cdc.apply_results([result("c", error="boom")], {}, n, "warn")
+    assert cdc.failure_key("c") not in state["c"]
+    n2 = FakeNotifier()
+    state = cdc.apply_results([result("c", error="boom")], state, n2, "warn")
+    assert len(n2.sent) == 1 and cdc.failure_key("c") in state["c"]
+
+
+def test_undelivered_first_run_summary_leaves_the_first_run_open():
+    n = FakeNotifier(deliver=False)
+    state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn", baseline=True)
+    assert state == {}
+
+
+def test_undelivered_overflow_summary_is_retried():
+    keys = [f"k{i:02d}" for i in range(4)]
+    delivered = iter([True, True, False])
+    n = FakeNotifier()
+    n.send = lambda *a, **kw: next(delivered)
+    state = cdc.apply_results([result("c", keys)], {}, n, "warn", max_new=2)
+    assert state["c"] == keys[:2]
+    n2 = FakeNotifier()
+    state = cdc.apply_results([result("c", keys)], state, n2, "warn", max_new=2)
+    assert state["c"] == keys and [s[2] for s in n2.sent] == keys[2:]
+
+
+def test_run_after_undelivered_first_summary_is_a_first_run_again(
+    monkeypatch, tmp_path
+):
+    from lib.notify.notifier import Notifier
+
+    notifiers = iter([FakeNotifier(deliver=False), FakeNotifier()])
+    used = []
+
+    def from_neotoma():
+        used.append(next(notifiers))
+        return used[-1]
+
+    monkeypatch.setitem(sys.modules, "lib.daemon_runtime", type("M", (), {}))
+    monkeypatch.setattr(Notifier, "from_neotoma", staticmethod(from_neotoma))
+    monkeypatch.setattr(cdc, "run_checks", lambda **kw: [result("c", ["k1", "k2"])])
+    monkeypatch.setenv("CODEX_DELIVERY_STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    assert cdc.main(["--once"]) == 0
+    assert (tmp_path / "state.json").exists()
+    assert cdc.main(["--once"]) == 0
+    assert len(used[1].sent) == 1 and "Already open" in used[1].sent[0][0]
+
+
+def _real_notifier(monkeypatch, tmp_path, silence):
+    from lib.notify.notifier import Notifier
+
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(tmp_path / "held.json"))
+    monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "0")
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.setattr(Notifier, "_in_silence_window", lambda self: silence)
+    return Notifier(rubric={"timezone": "UTC", "digest_times": ""})
+
+
+def test_real_notifier_failed_delivery_is_retried(monkeypatch, tmp_path):
+    n = _real_notifier(monkeypatch, tmp_path, silence=False)
+    state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn")
+    assert state["c"] == []  # no transport configured: not delivered
+    assert "k1" not in n._dedupe_journal  # so the retry is not suppressed
+
+
+def test_real_notifier_held_notice_counts_as_told(monkeypatch, tmp_path):
+    n = _real_notifier(monkeypatch, tmp_path, silence=True)
+    state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn")
+    assert state["c"] == ["k1"] and "k1" in n._dedupe_journal
+    assert len(n._digest_queue) == 1
 
 
 def test_every_target_unreadable_is_a_failure():
