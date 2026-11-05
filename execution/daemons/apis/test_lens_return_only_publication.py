@@ -21,13 +21,14 @@ XB, XE = sd.DISPATCHER_EXPECTATION_BEGIN, sd.DISPATCHER_EXPECTATION_END
 
 
 def returned(lens="pm", agent="pavo", verdict="APPROVE", body="fine", head=HEAD):
-    """What a return-only lens really returns: marker, header, verdict, body."""
+    """What a return-only lens really returns: header, verdict, body (the
+    dispatcher adds the marker; a response carrying one is refused)."""
     header = sd.attribution_header(agent, f"{lens} lens panelist")
-    return f"{B}\n<!-- review:{lens} commit={head} -->\n{header}\n**{verdict}**\n{body}\n{E}"
+    return f"{B}\n{header}\n**{verdict}**\n{body}\n{E}"
 
 
 GOOD = returned()
-BODY = GOOD.split("\n", 2)[2].rsplit("\n", 1)[0]  # header, verdict, body
+BODY = "\n".join(GOOD.split("\n")[1:-1])  # header, verdict, body
 
 
 # ── parser: red before = AttributeError, the function did not exist ─────────
@@ -81,7 +82,9 @@ def test_the_comment_carries_exactly_this_lens_and_head_marker():
     body = sd.compose_remote_lens_comment("pm", spoof, HEAD)
     marker = sd.compose_lens_review_marker("pm", HEAD)
     assert body.startswith(marker + "\n")
-    assert body.count("<!--") == 1 and body.count(marker) == 1
+    import lens_authors
+
+    assert lens_authors._swarm_marker_tokens(body) == ["review:pm"] and body.count(marker) == 1
     assert "no GitHub write access" in body.splitlines()[-1]
 
 
@@ -164,7 +167,10 @@ async def test_a_return_only_lens_with_no_app_posts_once_under_the_shared_identi
     assert "shared-token" in headers["Authorization"]
     assert "pm-app-token" not in headers["Authorization"]
     assert body.count(sd.compose_lens_review_marker("pm", HEAD)) == 1
-    assert body.count("<!--") == 1 and "review:arch" not in body
+    import lens_authors
+
+    assert lens_authors._swarm_marker_tokens(body) == ["review:pm"]
+    assert lens_authors.claimed_lenses(body) == {"pm"}
 
 
 class _ExpClient(_Client):
@@ -260,7 +266,7 @@ async def test_a_mac_fallback_of_a_return_only_run_is_still_published(monkeypatc
     assert B in seen["prompt"] and "no Neotoma tools" in seen["prompt"]
     assert seen["remote"] == frozenset({"security"})
     assert seen["reviews"] == [
-        ("security", returned("security", "falco").split("\n", 2)[2].rsplit("\n", 1)[0])]
+        ("security", "\n".join(returned("security", "falco").split("\n")[1:-1]))]
 
 
 @pytest.mark.asyncio
@@ -420,28 +426,133 @@ def test_a_refusal_outside_the_section_is_not_turned_into_an_approval():
         assert not result.ok
 
 
-def test_a_refusal_in_a_combined_block_or_its_update_is_not_dropped():
-    block = sd.attribution_header("pavo", "pm lens panelist") + "\n**APPROVE**\nfine"
-    refusing_update = f"{XB}\n**review_expectation (pm)**\n**REQUEST_CHANGES**\n{XE}"
-    assert sd.split_expectation_update(f"{block}\n{refusing_update}", "pavo") is None
-    second_verdict = f"{XB}\n**COMMENT**\n{XE}"
-    assert sd.split_expectation_update(f"{block}\n{second_verdict}", "pavo") is None
-    veto_in_update = f"{XB}\n[BLOCKING] a: b\n{XE}"
-    assert sd.split_expectation_update(f"{block}\n{veto_in_update}", "pavo") is None
-    ok = sd.split_expectation_update(f"{block}\n{XB}\n**review_expectation (pm)**\n- [x] a\n{XE}", "pavo")
-    assert ok is not None and ok[1] and sd.sign_off_is_warranted(ok[0], lens_agent="pavo")
+def test_combined_pass_never_runs_return_only_on_fly(monkeypatch):
+    """Scope: the combined pass keeps the local prompt and stays on the Mac even
+    when its class is opted in; nothing is parsed return-only and its comments
+    go out through the existing path."""
+    import asyncio
+    import review_carry
+    import skill_runner
+    from test_fly_read_only_call_sites import _async_providers
+    from test_swarm_dispatch import _StubNotifier, _config, _trigger
+
+    d = sd.SwarmDispatcher(_StubNotifier(), _config())
+    pm, ux = sd.lens_by_name("pm"), sd.lens_by_name("ux")
+    monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", True)
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "lens_review:pm,lens_review:ux")
+    assert sd._lens_return_only_on_fly(pm)  # the individual path would go return-only
+    monkeypatch.setattr(d, "_lens_agent_prompt", lambda agent: "own prompt")
+    monkeypatch.setattr(sd, "usable_providers_async", lambda: _async_providers())
+    monkeypatch.setattr(sd, "resolve_lens_provider", lambda *a, **k: "claude")
+
+    def no_parse(*a, **k):
+        raise AssertionError("a combined pass must not parse a return-only response")
+
+    monkeypatch.setattr(sd, "parse_returned_lens_review", no_parse)
+    monkeypatch.setattr(sd, "unwrap_returned_review", no_parse)
+    seen: dict = {}
+    reply = "\n".join(
+        f"{review_carry.combined_delimiter(x.lens)}\n"
+        f"{sd.attribution_header(x.agent, f'{x.lens} lens panelist')}\n**APPROVE**\nfine"
+        for x in (pm, ux))
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        seen.update(prompt=prompt, kwargs=kwargs)
+        return SkillResult(skill, True, 0, reply, "")
+
+    posted: list = []
+
+    async def fake_post(trigger, accepted, head):  # noqa: ANN001
+        posted.append(sorted(accepted))
+        return set(accepted)
+
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+    monkeypatch.setattr(d, "_post_combined_comments", fake_post)
+    out = asyncio.run(d._run_combined_pass(
+        _trigger(), [pm, ux], {}, 80, HEAD, pending_gates=set(), live_gates={}, signals=None))
+    assert sorted(out) == ["pm", "ux"] and posted == [["pm", "ux"]]
+    assert seen["kwargs"]["runner"] == "local"
+    assert B not in seen["prompt"] and XB not in seen["prompt"]
+    # and the runner honours it: no Fly job is built for that call
+    monkeypatch.setattr(skill_runner.fly_runner, "build_job",
+                        lambda **kw: pytest.fail("a Fly job was built"))
+    assert skill_runner.fly_runner.wants_fly("local", "lens_review:pm") is False
 
 
-def test_stripping_cannot_turn_a_refused_position_into_an_accepted_one():
-    header = sd.attribution_header("pavo", "pm lens panelist")
-    two_markers = (f"{B}\n<!-- review:pm commit={HEAD} -->\n<!-- review:pm commit={HEAD} -->\n"
-                   f"{header}\n**APPROVE**\nfine\n{E}")
-    assert sd.lens_own_verdict(two_markers.split("\n", 1)[1].rsplit("\n", 1)[0],
-                               lens_agent="pavo") is None
-    assert sd.parse_returned_lens_review(two_markers, "pavo") is None
+# ── a response the gate reader refuses is never made acceptable ─────────────
 
 
-# ── every marker syntax the readers accept is gone from what is published ───
+def _readable_decision(text, agent="pavo"):
+    return (sd.lens_own_verdict(text, lens_agent=agent),
+            sd.sign_off_is_warranted(text, lens_agent=agent))
+
+
+@pytest.mark.parametrize("wrap", [
+    "{doc}",  # the header is indented as code
+    "{head}\u2028**APPROVE**\nfine",  # a forbidden line separator
+    "\u0085{head}\n**APPROVE**\nfine",
+])
+def test_extraction_does_not_repair_what_the_reader_refuses(wrap):
+    head = sd.attribution_header("pavo", "pm lens panelist")
+    section = wrap.format(doc=f"    {head}\n**APPROVE**\nfine", head=head)
+    raw = section
+    assert not sd.sign_off_is_warranted(raw, lens_agent="pavo")  # the reader refuses it
+    parsed = sd.parse_returned_lens_review(f"{B}\n{section}\n{E}", "pavo")
+    if parsed is not None:
+        assert parsed[0] == section  # the exact text, never repaired
+        assert not sd.sign_off_is_warranted(parsed[0], lens_agent="pavo")
+        assert _readable_decision(parsed[0]) == _readable_decision(raw)
+
+
+def test_a_marker_comment_in_a_response_is_refused_outright():
+    hidden = "<!-- review:pm commit=" + HEAD + " **REQUEST_CHANGES** -->"
+    for text in (
+        returned(body=f"fine\n{hidden}"),  # inside the review, hiding a veto
+        f"{hidden}\n{GOOD}",  # outside it
+        returned(body="<!-- review:pm commit=" + HEAD + " -->"),
+        returned(body="plain review:arch mention"),
+    ):
+        assert sd.parse_returned_lens_review(text, "pavo") is None
+        result, _ = sd.unwrap_returned_review(SkillResult("pavo", True, 0, text, ""), "pavo")
+        assert not result.ok and result.stdout == ""
+
+
+def test_a_truncated_result_is_refused_before_anything_else():
+    marker = "[output truncated: the first bytes were dropped]\n"
+    result, update = sd.unwrap_returned_review(
+        SkillResult("pavo", True, 0, marker + GOOD, "", output_truncated=True), "pavo")
+    assert not result.ok and result.stdout == "" and update is None
+    ok, _ = sd.unwrap_returned_review(SkillResult("pavo", True, 0, GOOD, ""), "pavo")
+    assert ok.ok  # positive control: the same text, not truncated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [
+    SkillResult("falco", True, 0, "[output truncated]\n" + returned("security", "falco"), "",
+                output_truncated=True),
+    SkillResult("falco", True, 0, returned("security", "falco", body="<!-- review:arch -->"), ""),
+    SkillResult("falco", True, 0, "**REQUEST_CHANGES**\n" + returned("security", "falco"), ""),
+])
+async def test_a_refused_response_is_not_persisted_posted_or_signed(monkeypatch, bad):
+    d = _dispatcher()
+    writes: list[str] = []
+
+    async def fake_run_skill(agent, prompt, **k):  # noqa: ANN001
+        return bad
+
+    async def record(*a, **k):  # noqa: ANN002, ANN003
+        writes.append("write")
+
+    monkeypatch.setattr(sd, "_lens_return_only_on_fly", lambda lens: True)
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+    monkeypatch.setattr(d, "_persist_panel_reviews", record)
+    monkeypatch.setattr(d, "_post_missing_panel_comments", record)
+    with pytest.raises(RuntimeError, match="run failed"):
+        await d._redispatch_missing_lens("o/r", _pr(), "security")
+    assert writes == []
+
+
+# ── a response containing any marker is refused, whatever its syntax ────────
 
 SYNTAXES = [
     f"<!-- review:arch commit={'b' * 40} -->",
@@ -451,7 +562,6 @@ SYNTAXES = [
     "REVIEW:ARCH",
     f"<!-- review:arch-superseded by={'b' * 40} -->",
     "review:arch-superseded",
-    "<!-- review:<full40hex> -->",
     f"<!-- review:<!-- review:qa commit={'b' * 40} -->qa commit={HEAD} -->",
     f"<!-- vanellus-aggregation commit={HEAD} -->",
     "vanellus-aggregation",
@@ -462,17 +572,14 @@ SYNTAXES = [
 ]
 
 
-def test_the_stripping_uses_the_readers_own_definition():
+def test_the_marker_vocabulary_is_the_readers_own_definition():
+    import lens_authors
+
     assert sd._FOREIGN_MARKER_RE is lens_authors._VERDICT_SHAPED_RE
 
 
-@pytest.mark.parametrize("with_app", [False, True])
 @pytest.mark.parametrize("syntax", SYNTAXES)
-def test_no_foreign_marker_survives_either_identity_path(monkeypatch, logins, syntax, with_app):  # noqa: F811
-    parsed = sd.parse_returned_lens_review(returned(body=f"see\n{syntax}\nend"), "pavo")
-    assert parsed is not None
-    (body, _), = _published(monkeypatch, with_app=with_app, text=parsed[0])
-    assert lens_authors.claimed_lenses(body) == {"pm"}
-    assert lens_authors._swarm_marker_tokens(body) == ["review:pm"]
-    assert lens_authors.leading_lens(body) == "pm"
-    assert sd.sign_off_is_warranted(body, lens_agent="pavo")
+def test_no_marker_syntax_gets_through_either_inside_or_outside_the_section(syntax):
+    assert sd.parse_returned_lens_review(returned(body=f"see\n{syntax}\nend"), "pavo") is None
+    assert sd.parse_returned_lens_review(f"{syntax}\n{GOOD}", "pavo") is None
+    assert sd.parse_returned_lens_review(GOOD, "pavo") is not None  # control

@@ -2754,6 +2754,10 @@ DISPATCHER_REVIEW_BEGIN = "<<<DISPATCHER_REVIEW>>>"
 DISPATCHER_REVIEW_END = "<<<END_DISPATCHER_REVIEW>>>"
 DISPATCHER_EXPECTATION_BEGIN = "<<<DISPATCHER_EXPECTATION_UPDATE>>>"
 DISPATCHER_EXPECTATION_END = "<<<END_DISPATCHER_EXPECTATION_UPDATE>>>"
+_RETURNED_DELIM_RE = re.compile(
+    r"^[ \t\r]*(?P<d><<<(?:END_)?DISPATCHER_(?:REVIEW|EXPECTATION_UPDATE)>>>)[ \t\r]*$",
+    re.M,
+)
 _RETURNED_KINDS = {
     DISPATCHER_REVIEW_BEGIN: ("review", True),
     DISPATCHER_REVIEW_END: ("review", False),
@@ -2762,29 +2766,9 @@ _RETURNED_KINDS = {
 }
 # What the readers accept as swarm state is `lens_authors._VERDICT_SHAPED_RE`
 # (any `review:<name>` form, aggregation, deferral and notice markers, found
-# anywhere in a body). Returned text is stripped with that same object, never
-# a second hand-kept list.
+# anywhere in a body). A returned response containing any of it is refused,
+# never cleaned: the dispatcher adds the one marker itself.
 _FOREIGN_MARKER_RE = lens_authors._VERDICT_SHAPED_RE
-
-
-def _drop_marker_comments(text: str) -> str:
-    """Remove each single-line HTML comment that holds a swarm marker (a linear
-    scan: no backtracking pattern runs over adversarial text)."""
-    out = []
-    for line in text.split("\n"):
-        pos = 0
-        while True:
-            i = line.find("<!--", pos)
-            j = line.find("-->", i + 4) if i >= 0 else -1
-            if j < 0:
-                break
-            if _FOREIGN_MARKER_RE.search(line[i:j + 3]):
-                line = line[:i] + line[j + 3:]
-                pos = i
-            else:
-                pos = j + 3
-        out.append(line)
-    return "\n".join(out)
 _MAX_RETURNED_TEXT = 60_000
 _NO_NEOTOMA_NOTE = (
     "You have no Neotoma tools on this run: do not try to retrieve or store "
@@ -2802,38 +2786,37 @@ def _no_neotoma_note_if_on_fly(lens: str) -> str:
 
 
 def _returned_sections(text: str) -> tuple[dict[str, list[str]], str] | None:
-    """Split *text* into its delimited sections (delimiters alone on a line).
-    None when a delimiter is unmatched, nested, or ends the wrong section."""
+    """Locate the delimited sections by offset, so no line is re-split or
+    re-joined: each section is the exact substring between its delimiter lines.
+    Returns (bodies by kind, the text outside every section), or None when a
+    delimiter is unmatched, nested, or ends the wrong section."""
     found: dict[str, list[str]] = {"review": [], "expectation": []}
-    rest: list[str] = []
-    open_kind, buf = "", []
-    for line in (text or "").splitlines():
-        kind = _RETURNED_KINDS.get(line.strip())
-        if kind is None:
-            (buf if open_kind else rest).append(line)
-        elif kind[1] and not open_kind:
-            open_kind, buf = kind[0], []
-        elif not kind[1] and open_kind == kind[0]:
-            found[open_kind].append("\n".join(buf).strip())
-            open_kind = ""
+    outside: list[str] = []
+    open_kind, body_start, cursor = "", 0, 0
+    for m in _RETURNED_DELIM_RE.finditer(text):
+        kind, is_begin = _RETURNED_KINDS[m.group("d")]
+        if is_begin and not open_kind:
+            outside.append(text[cursor:m.start()])
+            open_kind, body_start = kind, m.end() + 1
+        elif not is_begin and open_kind == kind:
+            found[kind].append(text[body_start:m.start()])
+            open_kind, cursor = "", m.end() + 1
         else:
             return None
     if open_kind:
         return None
-    return found, "\n".join(rest)
+    outside.append(text[cursor:])
+    return found, "\n".join(outside)
 
 
 def strip_lens_review_markers(text: str) -> str:
-    """*text* with every swarm marker the readers accept removed. A PR under
-    review can influence a review's text, so none is ever published. An HTML
-    comment that holds one goes whole; any other occurrence is defused (its
-    `:` and `-` become spaces). Repeated until stable, so removing one can
-    never assemble another."""
+    """*text* with every swarm marker the readers accept defused (its `:` and
+    `-` become spaces), repeated until stable. Defence in depth only: a
+    returned response holding any is refused before this runs."""
     text = text or ""
     while True:
-        cleaned = _drop_marker_comments(text)
         cleaned = _FOREIGN_MARKER_RE.sub(
-            lambda m: m.group(0).replace(":", " ").replace("-", " "), cleaned
+            lambda m: m.group(0).replace(":", " ").replace("-", " "), text
         )
         if cleaned == text:
             return text.strip()
@@ -2842,6 +2825,16 @@ def strip_lens_review_markers(text: str) -> str:
 
 def _has_veto(text: str) -> bool:
     return output_has_blocking_verdict(text) or body_has_blocking_findings(text)
+
+
+def _reader_view(text: str, lens_agent: str) -> tuple:
+    """Everything the gate reader decides about *text*, from its own readers."""
+    return (
+        lens_own_verdict(text, lens_agent=lens_agent),
+        output_has_blocking_verdict(text),
+        body_has_blocking_findings(text),
+        sign_off_is_warranted(text, lens_agent=lens_agent),
+    )
 
 
 def _outside_is_ambiguous(outside: str) -> bool:
@@ -2856,79 +2849,56 @@ def _outside_is_ambiguous(outside: str) -> bool:
     )
 
 
-def _strip_keeps_verdict(raw: str, stripped: str, lens_agent: str) -> bool:
-    """Stripping must not change how the fixed-position reader sees the
-    review: a verdict it refuses must not become one it accepts."""
-    return lens_own_verdict(raw, lens_agent=lens_agent) == lens_own_verdict(
-        stripped, lens_agent=lens_agent
-    )
-
-
 def parse_returned_lens_review(
     stdout: str, lens_agent: str = ""
 ) -> tuple[str, str | None] | None:
     """The review and optional expectation update a return-only lens returned.
 
-    Strict: exactly one well-formed review section and at most one expectation
-    section, never nested. Judged on the COMPLETE output before anything is
-    removed: text outside the section may not hold a second verdict or header,
-    a veto anywhere in the output must also be in the review, and stripping
-    markers must not change the verdict the fixed-position reader sees. Any
-    failure is None and the lens run counts as failed."""
+    Invariant: a response the gate reader would refuse never becomes one it
+    accepts because a later step changed it. So the response is judged as it
+    arrived, with the existing readers: it must carry no swarm marker at all,
+    exactly one well-formed review section and at most one expectation section
+    (never nested), nothing outside them that reads as a second verdict or
+    header, and any veto in the whole response must be in the review itself.
+    The review is the exact substring between its delimiter lines (outer
+    newlines only are dropped), and the reader must decide the same about it
+    after that as before. Anything else is None and the lens run is failed."""
+    if _FOREIGN_MARKER_RE.search(stdout or ""):
+        return None
     parsed = _returned_sections(stdout)
     if parsed is None:
         return None
-    found, rest = parsed
-    if len(found["review"]) != 1 or not found["review"][0]:
-        return None
-    if len(found["expectation"]) > 1:
+    found, outside = parsed
+    if len(found["review"]) != 1 or len(found["expectation"]) > 1:
         return None
     raw_review = found["review"][0]
     raw_update = found["expectation"][0] if found["expectation"] else ""
-    if _outside_is_ambiguous(rest + "\n" + raw_update):
+    if _outside_is_ambiguous(outside + "\n" + raw_update):
         return None
     if _has_veto(stdout) and not _has_veto(raw_review):
         return None
-    review = strip_lens_review_markers(raw_review)
-    update = strip_lens_review_markers(raw_update)
-    if not review or len(review) > _MAX_RETURNED_TEXT or len(update) > _MAX_RETURNED_TEXT:
+    review = raw_review.strip("\r\n")
+    update = raw_update.strip("\r\n")
+    if not review.strip() or len(review) > _MAX_RETURNED_TEXT or len(update) > _MAX_RETURNED_TEXT:
         return None
-    if not _strip_keeps_verdict(raw_review, review, lens_agent):
+    if _reader_view(raw_review, lens_agent) != _reader_view(review, lens_agent):
         return None
-    return review, (update or None)
-
-
-def split_expectation_update(
-    block: str, lens_agent: str = ""
-) -> tuple[str, str | None] | None:
-    """One combined-pass lens block without its expectation section, and that
-    section. None when the block's delimiters are malformed or repeated, the
-    section holds a second verdict, a veto in the block would be lost, or
-    stripping changes the verdict reading."""
-    parsed = _returned_sections(block)
-    if parsed is None or parsed[0]["review"] or len(parsed[0]["expectation"]) > 1:
-        return None
-    found, rest = parsed
-    raw_update = found["expectation"][0] if found["expectation"] else ""
-    if _outside_is_ambiguous(raw_update):
-        return None
-    if _has_veto(block) and not _has_veto(rest):
-        return None
-    clean = strip_lens_review_markers(rest)
-    if not _strip_keeps_verdict(rest, clean, lens_agent):
-        return None
-    return clean, (strip_lens_review_markers(raw_update) or None)
+    return review, (update if update.strip() else None)
 
 
 def unwrap_returned_review(
     result: SkillResult, lens_agent: str = ""
 ) -> tuple[SkillResult, str | None]:
     """A return-only lens's result with its stdout reduced to the extracted
-    review text, plus its expectation update. A run whose output does not
-    parse is a failed run with no stdout (fail closed, nothing is posted)."""
+    review text, plus its expectation update. A truncated output (the tail
+    only, so an earlier objection may be lost) or one that does not parse is a
+    failed run with no stdout: nothing is persisted, posted or signed."""
     if not result.ok:
         return result, None
-    parsed = parse_returned_lens_review(result.stdout, lens_agent)
+    parsed = (
+        None if getattr(result, "output_truncated", False)
+        else parse_returned_lens_review(result.stdout, lens_agent)
+    )
     if parsed is None:
         return dataclasses.replace(
             result, ok=False, stdout="",
@@ -8013,7 +7983,6 @@ class SwarmDispatcher:
                 pending_gates=pending_gates,
                 live_gates=live_gates,
                 signals=panel_signals,
-                expectation_updates=expectation_updates,
             )
         for lens in panel:
             if lens.lens not in combined_results and await self._hold_panel_until_checks_green(
@@ -13260,20 +13229,24 @@ class SwarmDispatcher:
             "you if your gh call fails)."
         )
         if read_only:
-            _position = _position.replace(
-                "in the comment and in your reply", "in the returned review"
+            _ro_start = "\n".join(
+                line for line in (_header_line, "**<VERDICT>**") if line
             )
             comment_identity_block = (
                 "Return your complete review in your final message between "
                 "`<<<DISPATCHER_REVIEW>>>` and `<<<END_DISPATCHER_REVIEW>>>`. "
-                "The dispatcher publishes it. Start the review with these "
-                "lines, and nothing before them inside the section:\n\n"
-                f"```\n{_start_lines}\n```\n\n"
+                "The dispatcher publishes it and adds the head marker itself. "
+                "Start the review with these lines, and nothing before them "
+                "inside the section:\n\n"
+                f"```\n{_ro_start}\n```\n\n"
                 "Replace `**<VERDICT>**` with your bold verdict token. "
-                + _position
-                + " If the SHA is not supplied above, fetch the PR's current "
-                "`headRefOid` and substitute the full 40-hex SHA in the marker. "
-                "Write the rest of your review after the verdict line. "
+                + (
+                    f"{GATE_VERDICT_POSITION_RULE}. " if _header_line else ""
+                )
+                + "Write no `<!-- review:... -->` marker and never write the "
+                "text `review:` followed by a name anywhere in your reply: a "
+                "reply containing one is refused. Write the rest of your "
+                "review after the verdict line. "
                 "Make no GitHub write; return all publication content here. "
                 + _NO_NEOTOMA_NOTE
             )
@@ -13976,7 +13949,6 @@ class SwarmDispatcher:
         pending_gates: set[str],
         live_gates,
         signals,
-        expectation_updates: dict[str, str] | None = None,
     ) -> dict[str, SkillResult]:
         """Review the panel's pm/qa/ux lenses in one mid-tier dispatch.
 
@@ -13990,7 +13962,6 @@ class SwarmDispatcher:
             return {}
         try:
             first = combinable[0]
-            return_only = _lens_return_only_on_fly(first)
             if not all(self._lens_agent_prompt(item.agent) for item in combinable):
                 # A lens whose own prompt cannot be loaded cannot be reviewed
                 # in a pass that promises its full duties: run them one by one.
@@ -14000,7 +13971,6 @@ class SwarmDispatcher:
                 self._combined_prompt(
                     trigger, combinable, expectations, review_head, parent,
                     changed_files,
-                    read_only=return_only,
                 ),
                 github_token=_token_for_agent_on_repo(first.agent, trigger.repository),
                 include_github_contract=True,
@@ -14017,6 +13987,9 @@ class SwarmDispatcher:
                 seated_reviewer=True,
                 # Read-only on Fly: a lens reviews and never delivers.
                 github_read_only=True,
+                # The combined pass keeps the local prompt, which has the lens
+                # post its own comments: it never runs return-only on Fly.
+                runner="local",
                 action_class=model_tiering.lens_review_class(first.lens),
                 escalation_signals=signals,
             )
@@ -14028,15 +14001,6 @@ class SwarmDispatcher:
             accepted: dict[str, SkillResult] = {}
             for item in combinable:
                 block = blocks.get(item.lens)
-                if block is not None and return_only:
-                    # A return-only block may carry that lens's expectation
-                    # update: split it off, and never post a marker it holds.
-                    split = split_expectation_update(block, item.agent)
-                    if split is None:
-                        continue
-                    block, update = split
-                    if update and expectation_updates is not None:
-                        expectation_updates[item.lens] = update
                 if block is None or lens_own_verdict(block, lens_agent=item.agent) is None:
                     continue
                 accepted[item.lens] = dataclasses.replace(result, stdout=block)

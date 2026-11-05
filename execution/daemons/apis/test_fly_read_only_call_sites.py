@@ -217,9 +217,11 @@ def test_combined_lens_entrance_keeps_local_prompt_and_read_only_runner_contract
         pending_gates=set(), live_gates={}, signals=None,
     ))
     assert len(captured) == 1
-    assert "<<<DISPATCHER_EXPECTATION_UPDATE>>>" in captured[0][0]
-    assert "only write you make" not in captured[0][0]
-    assert "Post a PR comment with gh" not in captured[0][0]
+    # The combined pass is out of scope for Fly: even opted in it keeps the
+    # local prompt and is pinned to the Mac.
+    assert "<<<DISPATCHER_EXPECTATION_UPDATE>>>" not in captured[0][0]
+    assert "only write you make" in captured[0][0]
+    assert captured[0][1]["runner"] == "local"
 
 
 async def _async_providers():
