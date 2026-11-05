@@ -261,3 +261,155 @@ def test_request_changes_outcome_unchanged(monkeypatch, capsys):
     assert "REQUEST_CHANGES" in posted[0]
     assert len(filed) == 1
     assert "::warning " not in capsys.readouterr().out
+
+
+# ── cooled_until alone is not proof nothing ran ─────────────────────────────
+
+
+def test_attempted_provider_failure_with_cooling_still_fails(monkeypatch, capsys):
+    # A provider was launched and failed, and the pool was then cooled, so
+    # cooled_until is set. Something ran: this must fail the job, not warn.
+    _skill_runner_returning(
+        monkeypatch,
+        error="all eligible subscription-backed harness providers were exhausted after attempts: claude",
+        provider="claude",
+        attempted_providers=("claude",),
+        cooled_until="2026-11-05T22:00:00+01:00",
+    )
+    posted = []
+    monkeypatch.setattr(lx, "DRY_RUN", False)
+    monkeypatch.setattr(lx, "post_github_comment", lambda body, marker=None: posted.append(body))
+    code, captured = _run_main(monkeypatch, capsys)
+    assert code == 1
+    assert "Review could not run" in posted[0]
+    assert "The check fails" in posted[0]
+    assert "::warning " not in captured.out
+
+
+def test_main_capacity_refusal_exit_zero_warning_comment_no_approval(monkeypatch, capsys):
+    _skill_runner_returning(
+        monkeypatch, error="usage gate refused", cooled_until="2026-11-05T22:00:00+01:00",
+    )
+    posted, filed = [], []
+    monkeypatch.setattr(lx, "DRY_RUN", False)
+    monkeypatch.setattr(lx, "post_github_comment", lambda body, marker=None: posted.append(body))
+    monkeypatch.setattr(lx, "file_neotoma_issue", lambda **kw: filed.append(kw))
+    code, captured = _run_main(monkeypatch, capsys)
+    assert code == 0
+    assert "::warning " in captured.out
+    assert len(posted) == 1
+    body = posted[0]
+    assert "NOT an approval" in body
+    assert "opportunity, not proof of recovery" in body
+    assert "credentials" in body and "waiting alone will not fix" in body
+    assert "APPROVE" not in body
+    assert filed == []
+
+
+def test_main_completed_request_changes_posts_review_and_exits_zero(monkeypatch, capsys):
+    # Pins current behaviour: a completed REQUEST_CHANGES review is posted and
+    # filed but does NOT fail the job. Only a review that could not run does.
+    _skill_runner_returning(
+        monkeypatch, ok=True, stdout="## Loxia Review 🪶\nVerdict: REQUEST_CHANGES",
+        provider="codex", attempted_providers=("codex",),
+    )
+    posted, filed = [], []
+    monkeypatch.setattr(lx, "DRY_RUN", False)
+    monkeypatch.setattr(lx, "post_github_comment", lambda body, marker=None: posted.append(body))
+    monkeypatch.setattr(lx, "file_neotoma_issue", lambda **kw: filed.append(kw))
+    code, captured = _run_main(monkeypatch, capsys)
+    assert code == 0
+    assert "REQUEST_CHANGES" in posted[0]
+    assert len(filed) == 1
+    assert "::warning " not in captured.out
+
+
+# ── The real producer: skill_runner's attempt path, provider launches stubbed ─
+
+
+def _daemon_modules():
+    daemon_dir = str(Path(lx.__file__).resolve().parents[1] / "daemons" / "apis")
+    if daemon_dir not in sys.path:
+        sys.path.insert(0, daemon_dir)
+    import harness_router
+    import skill_runner
+
+    return skill_runner, harness_router
+
+
+def _producer_result(monkeypatch, *, candidates, gates, attempt):
+    """Drive the real skill_runner._run_provider_attempts, stubbing only the
+    selection inputs and the provider launch, and return its SkillResult."""
+    import asyncio
+    import time as _time
+
+    sr, _hr = _daemon_modules()
+    cooled = {}
+    monkeypatch.setattr(sr, "_refresh_usage_snapshot", lambda b: None)
+    monkeypatch.setattr(sr, "provider_candidates", lambda *a, **k: list(candidates))
+    monkeypatch.setattr(sr, "usage_gate_refusals_all", lambda *a, **k: gates)
+    monkeypatch.setattr(sr, "provider_exclusion_reasons", lambda *a, **k: {})
+    monkeypatch.setattr(sr, "cooled_until_all", lambda *a, **k: dict(cooled))
+    monkeypatch.setattr(sr, "cooling_providers", lambda *a, **k: set(cooled))
+    monkeypatch.setattr(sr, "notify_dispatch_failure", lambda *a, **k: None)
+
+    def fake_cool(provider, *a, **k):
+        cooled[provider] = {"until": _time.time() + 3600, "reason": "session limit"}
+
+    monkeypatch.setattr(sr, "cool_down", fake_cool)
+    monkeypatch.setattr(sr, "_cool_after_capacity_failure", lambda p, r: fake_cool(p))
+    return asyncio.run(
+        sr._run_provider_attempts(
+            "loxia", attempt, binaries={"claude": "/bin/claude"}, role="loxia", retry_safe=True,
+        )
+    )
+
+
+def _through_call_review(monkeypatch, result):
+    import types
+
+    async def run(**kwargs):
+        return result
+
+    monkeypatch.setitem(sys.modules, "skill_runner", types.SimpleNamespace(run_review_prompt=run))
+    return lx.call_review("input", role="loxia")
+
+
+def test_real_producer_usage_gate_refusal_has_no_attempts_and_is_capacity_refusal(monkeypatch):
+    import time as _time
+
+    _sr, hr = _daemon_modules()
+
+    async def never(selected, **kw):  # pragma: no cover
+        raise AssertionError("provider launched despite a pre-launch refusal")
+
+    # Unknown capacity (stale reading) is a usage-gate refusal too.
+    gate = hr.UsageGate(
+        provider="claude", allowed=False, code="stale",
+        message="usage reading unknown (stale); capacity cannot be established",
+        returns_at=_time.time() + 3600,
+    )
+    result = _producer_result(monkeypatch, candidates=[], gates={"claude": gate}, attempt=never)
+    assert not result.ok
+    assert result.cooled_until
+    assert tuple(result.attempted_providers) == ()
+    with pytest.raises(lx.ReviewCapacityRefused):
+        _through_call_review(monkeypatch, result)
+
+
+def test_real_producer_launched_capacity_failure_has_attempts_and_is_plain_failure(monkeypatch):
+    sr, _hr = _daemon_modules()
+
+    async def attempt(selected, **kw):
+        return sr.SkillResult(
+            "loxia", False, 1, "", "You've hit your usage limit. Try again later.",
+            error="usage limit reached", provider=selected,
+        )
+
+    result = _producer_result(monkeypatch, candidates=["claude"], gates=None, attempt=attempt)
+    assert not result.ok
+    assert result.cooled_until, "the producer sets cooled_until after cooling the pool"
+    assert tuple(result.attempted_providers) == ("claude",)
+    with pytest.raises(lx.ReviewError) as info:
+        _through_call_review(monkeypatch, result)
+    assert not isinstance(info.value, lx.ReviewCapacityRefused)
