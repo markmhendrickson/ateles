@@ -637,3 +637,54 @@ def test_direct_normalizer_rejects_oversized_record_without_false_completeness()
         ]
     )
     assert not result["complete"] and result["issues"][0]["code"] == "invalid_record"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"null",
+        b"false",
+        b"1",
+        b'"bad"',
+        b"[]",
+        b'{"entities":null}',
+        b'{"entities":[]}',
+        b'{"entities":{"ent_fixture_a":null}}',
+        b"{",
+        b"\xff",
+        b"[" * 10000 + b"0" + b"]" * 10000,
+    ],
+    ids=lambda raw: "state-" + str(len(raw)) + "-" + raw[:12].hex(),
+)
+def test_actual_malformed_state_files_keep_receipt_and_recover_after_host_restore(
+    tmp_path, raw
+):
+    store = store_at(tmp_path / "ws")
+    before = store.state_path.read_bytes()
+    store.state_path.write_bytes(raw)
+    result = server.observe_tool_call(
+        store, "retrieve_entity_snapshot", {"entity_id": "ent_fixture_a"}
+    )
+    assert result.get("error")
+    assert store.state_path.read_bytes() == raw
+    trace = e.read_trace(store.log_path)
+    # A malformed row still has a bounded observable JSON state. Fully observing
+    # its refusal is not graph validation. Broken file/container state cannot
+    # supply the producer's capture contract and must remain incomplete.
+    captured = raw == b'{"entities":{"ent_fixture_a":null}}'
+    assert trace["complete"] == captured and len(trace["attempts"]) == 1
+    assert trace["attempts"][0]["receipt_observed"]
+    assert trace["attempts"][0]["handler_outcome"] == "refused"
+    assert trace["attempts"][0]["result"] == result
+    if captured:
+        assert trace["attempts"][0]["planning_sha256"] is None
+    store.state_path.write_bytes(before)  # test-owned restoration, no handler replay
+    assert (
+        server.observe_tool_call(
+            store, "retrieve_entity_snapshot", {"entity_id": "ent_fixture_a"}
+        )["snapshot"]["status"]
+        == "open"
+    )
+    trace = e.read_trace(store.log_path)
+    assert trace["complete"] == captured and len(trace["attempts"]) == 2
+    assert trace["attempts"][1]["complete"]
