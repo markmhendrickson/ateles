@@ -985,7 +985,7 @@
       "scorer": "family_continuation",
       "case_id": "ordinary-single-lane",
       "invoked_skill": "continue-session",
-      "prompt": "/continue-session ent_fixture_task_A. Continue only this assigned unit. Preserve its owning parent and unrelated work.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "prompt": "/continue-session ent_fixture_task_A. Continue only this assigned unit. Preserve its owning parent and unrelated work.",
       "evidence_class": "fixture_only",
       "requires_external_native_evidence": null
     },
@@ -993,7 +993,7 @@
       "scorer": "family_continuation",
       "case_id": "recursive-paginated-family",
       "invoked_skill": "continue-session",
-      "prompt": "/continue-session ent_fixture_family_root. Recover the accepted unfinished family from its current records, including delegated descendants.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "prompt": "/continue-session ent_fixture_family_root. Recover the accepted unfinished family from its current records, including delegated descendants.",
       "evidence_class": "fixture_only",
       "requires_external_native_evidence": null
     },
@@ -1001,7 +1001,7 @@
       "scorer": "family_continuation",
       "case_id": "pagination-or-source-gap",
       "invoked_skill": "continue-session",
-      "prompt": "/continue-session ent_fixture_family_root. Recover the available family and account for unavailable evidence without assuming missing work is gone.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "prompt": "/continue-session ent_fixture_family_root. Recover the available family and account for unavailable evidence without assuming missing work is gone.",
       "evidence_class": "fixture_only",
       "requires_external_native_evidence": null
     },
@@ -1009,7 +1009,7 @@
       "scorer": "family_continuation",
       "case_id": "changed-ascent-after-checkpoint",
       "invoked_skill": "continue-session",
-      "prompt": "/continue-session ent_fixture_task_A. Reconcile the current source after the prior checkpoint before continuing.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "prompt": "/continue-session ent_fixture_task_A. Reconcile the current source after the prior checkpoint before continuing.",
       "evidence_class": "fixture_only",
       "requires_external_native_evidence": null
     },
@@ -1017,7 +1017,7 @@
       "scorer": "family_continuation",
       "case_id": "direct-late-answer-during-handoff",
       "invoked_skill": "continue-session",
-      "prompt": "/continue-session ent_fixture_family_root. Reconcile the handoff with the latest human inputs and preserve other owned work.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "prompt": "/continue-session ent_fixture_family_root. Reconcile the handoff with the latest human inputs and preserve other owned work.",
       "evidence_class": "fixture_only",
       "requires_external_native_evidence": null
     },
@@ -1025,7 +1025,7 @@
       "scorer": "family_continuation",
       "case_id": "origin-checkpoint-answer-sibling-open",
       "invoked_skill": "digest",
-      "prompt": "/digest family ent_fixture_family_root. Reconcile the explicit human answer to ent_fixture_q_A for ent_fixture_task_A through its original recipient.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "prompt": "/digest family ent_fixture_family_root. Reconcile the explicit human answer to ent_fixture_q_A for ent_fixture_task_A through its original recipient.",
       "evidence_class": "fixture_only",
       "requires_external_native_evidence": null
     },
@@ -1033,7 +1033,7 @@
       "scorer": "family_continuation",
       "case_id": "digest-report-only",
       "invoked_skill": "digest",
-      "prompt": "/digest --report-only family ent_fixture_family_root. Report verified progress, open inputs and evidence gaps without taking actions.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "prompt": "/digest --report-only family ent_fixture_family_root. Report verified progress, open inputs and evidence gaps without taking actions.",
       "evidence_class": "fixture_only",
       "requires_external_native_evidence": null
     },
@@ -1041,19 +1041,19 @@
       "scorer": "family_continuation",
       "case_id": "digest-default-history",
       "invoked_skill": "digest",
-      "prompt": "/digest family ent_fixture_family_root. Verify current progress, preserve cumulative history and perform the already assigned local fixture unit through its existing owner.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "prompt": "/digest family ent_fixture_family_root. Verify current progress, preserve cumulative history and perform the already assigned local fixture unit through its existing owner.",
       "evidence_class": "fixture_only",
       "requires_external_native_evidence": null,
       "prompts": [
-        "/digest family ent_fixture_family_root. Verify current progress, preserve cumulative history and perform the already assigned local fixture unit through its existing owner.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
-        "/digest family ent_fixture_family_root again. Preserve the same cumulative identity and all existing obligations.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer."
+        "/digest family ent_fixture_family_root. Verify current progress, preserve cumulative history and perform the already assigned local fixture unit through its existing owner.",
+        "/digest family ent_fixture_family_root again. Preserve the same cumulative identity and all existing obligations."
       ]
     },
     "inherited-event-attribution": {
       "scorer": "family_continuation",
       "case_id": "inherited-event-attribution",
       "invoked_skill": "digest",
-      "prompt": "/digest --report-only exact session_D. Report this child unit from its own source and linked work.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "prompt": "/digest --report-only exact session_D. Report this child unit from its own source and linked work.",
       "evidence_class": "fixture_only",
       "requires_external_native_evidence": null
     },
@@ -1061,7 +1061,7 @@
       "scorer": "family_continuation",
       "case_id": "positive-ack-qualified-custody",
       "invoked_skill": "continue-session",
-      "prompt": "/continue-session planned session_successor. Recover the accepted scope using the receiver and current custody evidence.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "prompt": "/continue-session planned session_successor. Recover the accepted scope using the receiver and current custody evidence.",
       "evidence_class": "fixture_only",
       "requires_external_native_evidence": null
     },
@@ -1069,7 +1069,7 @@
       "scorer": "family_continuation",
       "case_id": "negative-ack-or-custody",
       "invoked_skill": "continue-session",
-      "prompt": "/continue-session planned session_successor. Recover the accepted scope using the receiver and current custody evidence.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "prompt": "/continue-session planned session_successor. Recover the accepted scope using the receiver and current custody evidence.",
       "evidence_class": "fixture_only",
       "requires_external_native_evidence": null
     },
@@ -1077,7 +1077,7 @@
       "scorer": "family_continuation",
       "case_id": "actual-native-compaction",
       "invoked_skill": "continue-session",
-      "prompt": "/continue-session ent_fixture_family_root. Report the qualification supported by current evidence; do not substitute fixture data for an observed native transition.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "prompt": "/continue-session ent_fixture_family_root. Report the qualification supported by current evidence; do not substitute fixture data for an observed native transition.",
       "evidence_class": "fixture_only",
       "requires_external_native_evidence": "compaction"
     },
@@ -1085,7 +1085,7 @@
       "scorer": "family_continuation",
       "case_id": "planned-and-abrupt-cross-harness",
       "invoked_skill": "continue-session",
-      "prompt": "/continue-session ent_fixture_family_root. Report the qualification supported by current evidence; do not substitute fixture data for an observed native transition.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "prompt": "/continue-session ent_fixture_family_root. Report the qualification supported by current evidence; do not substitute fixture data for an observed native transition.",
       "evidence_class": "fixture_only",
       "requires_external_native_evidence": "cross_harness"
     }
@@ -2239,5 +2239,6 @@
     "artifacts": {
       "artifacts/evidence_A.txt": "head: fixture-head\nchecks: unit-passed\nintegration: pending\n"
     }
-  }
+  },
+  "family_audit_contract": "Return a short human-readable report, then one fenced JSON audit object. Types: source_session_id is a nonempty string; tasks is an array of objects with task_id (nonempty string), session_id and parent_session_id (nonempty string or null), plan_chain (array of nonempty strings), disposition (owned, continuing, result_awaiting_integration, fixture_action_complete, awaiting_input, or unresolved), and optional lease_held (boolean). coverage has complete (boolean) and unresolved_sources (array of nonempty strings). questions is an array with question_id, task_id, checkpoint_id (nonempty strings), state (open or answered), source_answer_id (nonempty string for answered, null for open). verification is an array with artifact (nonempty string), verdict (confirmed, refuted, unverifiable, blocked_on_tooling), mutability (immutable or perishable). scorecard has claims, confirmed, refuted, unverifiable, blocked_on_tooling (nonnegative integers). When assessing a successor, include successor with session_id, predecessor_id (nonempty strings) and qualified (boolean). When attributing a child's own events, include credited_event_ids (array of nonempty strings). These conditional fields must be derived from the observed source, not guessed. State fixture-only and unavailable evidence explicitly. This is an output interface, not an answer key."
 }

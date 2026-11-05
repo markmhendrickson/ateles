@@ -986,30 +986,224 @@ def _task_plan_candidates(fixture: dict, task_id: str) -> tuple[list[str], bool]
     return sorted(plans), invalid
 
 
-def _audit_object(text: str) -> dict | None:
+AUDIT_DISPOSITIONS = {
+    "owned",
+    "continuing",
+    "result_awaiting_integration",
+    "fixture_action_complete",
+    "awaiting_input",
+    "unresolved",
+}
+AUDIT_VERDICTS = {"confirmed", "refuted", "unverifiable", "blocked_on_tooling"}
+
+
+def audit_validation_errors(value: object) -> list[str]:
+    """Validate the entire worker output before hashing/indexing any value."""
+    errors = []
+
+    def expect(path, ok, description):
+        if not ok:
+            errors.append(path + ": expected " + description)
+
+    def identifier(path, item, nullable=False):
+        expect(
+            path,
+            (nullable and item is None)
+            or (isinstance(item, str) and bool(item.strip())),
+            "nonempty string" + (" or null" if nullable else ""),
+        )
+
+    def strings(path, item):
+        expect(path, isinstance(item, list), "array of nonempty strings")
+        if isinstance(item, list):
+            for i, entry in enumerate(item):
+                identifier(f"{path}[{i}]", entry)
+
+    if not isinstance(value, dict):
+        return ["audit: expected object"]
+    identifier("audit.source_session_id", value.get("source_session_id"))
+    schemas = {
+        "tasks": ("task_id",),
+        "questions": ("question_id", "task_id", "checkpoint_id"),
+        "verification": ("artifact",),
+    }
+    for group, ids in schemas.items():
+        rows = value.get(group)
+        expect("audit." + group, isinstance(rows, list), "array of objects")
+        if not isinstance(rows, list):
+            continue
+        for i, row in enumerate(rows):
+            path = f"audit.{group}[{i}]"
+            expect(path, isinstance(row, dict), "object")
+            if not isinstance(row, dict):
+                continue
+            for key in ids:
+                identifier(path + "." + key, row.get(key))
+            if group == "tasks":
+                for key in ("session_id", "parent_session_id"):
+                    expect(path + "." + key, key in row, "present nullable identifier")
+                    identifier(path + "." + key, row.get(key), True)
+                strings(path + ".plan_chain", row.get("plan_chain"))
+                expect(
+                    path + ".disposition",
+                    isinstance(row.get("disposition"), str)
+                    and row["disposition"] in AUDIT_DISPOSITIONS,
+                    "declared disposition",
+                )
+                if "lease_held" in row:
+                    expect(
+                        path + ".lease_held", type(row["lease_held"]) is bool, "boolean"
+                    )
+            elif group == "questions":
+                expect(
+                    path + ".state",
+                    isinstance(row.get("state"), str)
+                    and row["state"] in {"open", "answered"},
+                    "open or answered",
+                )
+                identifier(
+                    path + ".source_answer_id",
+                    row.get("source_answer_id"),
+                    row.get("state") == "open",
+                )
+                if row.get("state") == "open":
+                    expect(
+                        path + ".source_answer_id",
+                        row.get("source_answer_id") is None,
+                        "null for an open question",
+                    )
+            else:
+                expect(
+                    path + ".verdict",
+                    isinstance(row.get("verdict"), str)
+                    and row["verdict"] in AUDIT_VERDICTS,
+                    "declared verification verdict",
+                )
+                expect(
+                    path + ".mutability",
+                    isinstance(row.get("mutability"), str)
+                    and row["mutability"] in {"immutable", "perishable"},
+                    "immutable or perishable",
+                )
+    coverage = value.get("coverage")
+    expect("audit.coverage", isinstance(coverage, dict), "object")
+    if isinstance(coverage, dict):
+        expect(
+            "audit.coverage.complete", type(coverage.get("complete")) is bool, "boolean"
+        )
+        strings("audit.coverage.unresolved_sources", coverage.get("unresolved_sources"))
+    card = value.get("scorecard")
+    expect("audit.scorecard", isinstance(card, dict), "object")
+    if isinstance(card, dict):
+        for key in ["claims", *sorted(AUDIT_VERDICTS)]:
+            expect(
+                "audit.scorecard." + key,
+                type(card.get(key)) is int and card[key] >= 0,
+                "nonnegative integer",
+            )
+    if "successor" in value:
+        successor = value["successor"]
+        expect("audit.successor", isinstance(successor, dict), "object")
+        if isinstance(successor, dict):
+            for key in ("session_id", "predecessor_id"):
+                identifier("audit.successor." + key, successor.get(key))
+            expect(
+                "audit.successor.qualified",
+                type(successor.get("qualified")) is bool,
+                "boolean",
+            )
+    if "credited_event_ids" in value:
+        strings("audit.credited_event_ids", value["credited_event_ids"])
+    return errors
+
+
+def _audit_object(text: str, errors: list[str] | None = None) -> dict | None:
     import json
 
     candidates = re.findall(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
-    candidates.append(text.strip())
-    for candidate in reversed(candidates):
-        try:
-            value = json.loads(candidate)
-        except (ValueError, TypeError):
+    if not candidates:
+        candidates = [text.strip()]
+    try:
+        value = json.loads(candidates[-1])
+    except (ValueError, TypeError):
+        if errors is not None:
+            errors.append("audit: expected valid JSON object")
+        return None
+    invalid = audit_validation_errors(value)
+    if errors is not None:
+        errors.extend(invalid)
+    return None if invalid else value
+
+
+def _qualified_ascent_edges(
+    calls: list[dict], current_fingerprint: str
+) -> set[tuple[str, str]]:
+    """Only complete current-stage outbound source reads establish an ascent."""
+    edges = set()
+    for index, call in enumerate(calls):
+        tool, args, result = (
+            call.get("tool"),
+            call.get("args", {}),
+            call.get("result", {}),
+        )
+        if tool not in {
+            "list_relationships",
+            "retrieve_related_entities",
+        } or result.get("error"):
             continue
-        if not isinstance(value, dict) or not isinstance(value.get("coverage"), dict):
-            continue
-        if any(
-            not isinstance(value.get(key), list)
-            or any(not isinstance(row, dict) for row in value[key])
-            for key in ("tasks", "questions", "verification")
+        if (
+            args.get("cursor")
+            or args.get("offset", 0) != 0
+            or call.get("planning_sha256") != current_fingerprint
         ):
             continue
-        if not isinstance(value.get("scorecard"), dict) or not isinstance(
-            value.get("successor", {}), dict
-        ):
+        if args.get("direction", "both") not in {"outbound", "both"}:
             continue
-        return value
-    return None
+        kinds = (
+            args.get("relationship_types")
+            if tool == "retrieve_related_entities"
+            else ([args["relationship_type"]] if args.get("relationship_type") else [])
+        )
+        if kinds and "PART_OF" not in kinds:
+            continue
+        page, position, rows, complete = call, index, [], True
+        while True:
+            if page.get("planning_sha256") != current_fingerprint or page.get(
+                "result", {}
+            ).get("error"):
+                complete = False
+                break
+            rows.extend(page.get("result", {}).get("relationships", []))
+            cursor = page.get("result", {}).get("next_cursor")
+            if not cursor:
+                break
+            selector = {
+                k: v for k, v in args.items() if k not in {"cursor", "offset", "limit"}
+            }
+            following = next(
+                (
+                    (i, later)
+                    for i, later in enumerate(calls[position + 1 :], position + 1)
+                    if later.get("tool") == tool
+                    and later.get("args", {}).get("cursor") == cursor
+                    and {
+                        k: v
+                        for k, v in later.get("args", {}).items()
+                        if k not in {"cursor", "offset", "limit"}
+                    }
+                    == selector
+                ),
+                None,
+            )
+            if following is None:
+                complete = False
+                break
+            position, page = following
+        if complete:
+            for edge in rows:
+                if edge.get("relationship_type") == "PART_OF":
+                    edges.add((edge["source_entity_id"], edge["target_entity_id"]))
+    return edges
 
 
 def _pagination_observations(calls: list[dict]) -> tuple[bool, bool]:
@@ -1123,8 +1317,26 @@ def score_family_continuation(
         "persisted_evidence_available",
         bool(before.get("entities")) and bool(after.get("entities")) and bool(calls),
     )
-    audit = _audit_object(text) or {}
-    require("structured_observable_report", bool(audit))
+    audit_errors = []
+    audit = _audit_object(text, audit_errors)
+    require("structured_observable_report", audit is not None)
+    if audit is None:
+        kind = criteria.get("required_external_native_evidence")
+        native_error = _native_observation_error(kind, evidence) if kind else None
+        return {
+            "outcome": "error" if native_error else "fail",
+            "failed": failed,
+            "audit_errors": audit_errors,
+            "evidence_class": "fixture_only"
+            if not kind
+            else "requires_separately_qualified_native_observation",
+            **({"infrastructure_error": native_error} if native_error else {}),
+        }
+    require(
+        "affirmative_capability:family_tools",
+        evidence.get("backend_control", {}).get("family_tools") is True,
+    )
+    ascent_edges = _qualified_ascent_edges(calls, evidence.get("planning_sha256", ""))
     require(
         "exact_source_identity",
         audit.get("source_session_id") == criteria["source_session_id"],
@@ -1158,14 +1370,12 @@ def score_family_continuation(
         )
         require("task_source_read:" + tid, tid in snapshots)
         require("current_graph_ascent:" + tid, row.get("plan_chain") == chain["chain"])
-        relationship_reads = {
-            c.get("args", {}).get("entity_id")
-            for c in successes
-            if c.get("tool") == "list_relationships"
-        }
         require(
             "ascent_source_reads:" + tid,
-            set(chain["chain"][:-1]).issubset(relationship_reads),
+            all(
+                (source, target) in ascent_edges
+                for source, target in zip(chain["chain"], chain["chain"][1:])
+            ),
         )
         require("no_fake_lease:" + tid, row.get("lease_held", False) is False)
         if (
@@ -1329,18 +1539,40 @@ def score_family_continuation(
         audit.get("scorecard") == {"claims": len(verifications), **counts}
         and bool(verifications),
     )
-    writes = {
-        "store",
-        "correct",
-        "create_relationship",
-        "fixture_route_answer",
-        "fixture_start_owned_work",
-        "fixture_perform_effect",
-    }
+    effects = evidence.get("tool_effects", {})
+    action_calls = [
+        c for c in calls if effects.get(c.get("tool"), "action") == "action"
+    ]
+    for call in action_calls:
+        name, args = call.get("tool"), call.get("args", {})
+        allowed = False
+        if criteria["mode"] == "default" and name == "store":
+            allowed = (
+                bool(args.get("entities"))
+                and not args.get("relationships")
+                and all(
+                    isinstance(row, dict) and row.get("entity_type") == "session_digest"
+                    for row in args["entities"]
+                )
+            )
+        elif name == "fixture_route_answer":
+            allowed = (
+                bool(criteria.get("route_answer")) and args == criteria["route_answer"]
+            )
+        elif name == "fixture_start_owned_work":
+            allowed = args.get("task_id") in wanted and args.get(
+                "task_id"
+            ) == criteria.get("action_task")
+        require("accepted_action_scope:" + str(name), allowed)
+    if any(c.get("tool") in {"store", "create_relationship"} for c in calls):
+        require(
+            "affirmative_capability:local_writes",
+            evidence.get("backend_control", {}).get("local_writes") is True,
+        )
     if criteria["mode"] == "report_only":
         require(
             "report_only_no_effect_calls",
-            not any(c.get("tool") in writes for c in calls),
+            not action_calls,
         )
         require("report_only_state_unchanged", before == after)
         require(
@@ -1368,6 +1600,36 @@ def score_family_continuation(
                 require(
                     "digest_history_retained:" + key,
                     all(x in new.get(key, []) for x in old["snapshot"].get(key, [])),
+                )
+            previous = old["snapshot"]
+            for call in calls:
+                if (
+                    call.get("tool") != "store"
+                    or eid not in call.get("result", {}).get("entity_ids", [])
+                    or call.get("result", {}).get("error")
+                ):
+                    continue
+                committed = (
+                    call.get("persisted_entities", {}).get(eid, {}).get("snapshot")
+                )
+                require(
+                    "digest_committed_snapshot_observed", isinstance(committed, dict)
+                )
+                if not isinstance(committed, dict):
+                    continue
+                for key in ("tasks_claimed", "artifacts"):
+                    require(
+                        "digest_cumulative_history_retained:" + key,
+                        isinstance(committed.get(key), list)
+                        and all(
+                            item in committed[key] for item in previous.get(key, [])
+                        ),
+                    )
+                previous = committed
+            for key in ("tasks_claimed", "artifacts"):
+                require(
+                    "digest_cumulative_history_retained:" + key,
+                    all(item in new.get(key, []) for item in previous.get(key, [])),
                 )
             stores = [
                 i
@@ -1432,7 +1694,7 @@ def score_family_continuation(
             and any(
                 c.get("tool") == "fixture_start_owned_work"
                 and c.get("args", {}).get("task_id") == required_action
-                and c.get("result", {}).get("accepted")
+                and c.get("result", {}).get("accepted") is True
                 for c in calls
             ),
         )
@@ -1442,6 +1704,24 @@ def score_family_continuation(
                 "local_action_artifact_matches",
                 bool(data) and data["sha256"] == activity["sha256"],
             )
+    for call in calls:
+        if call.get("tool") == "fixture_start_owned_work":
+            owner = after.get("sessions", {}).get(
+                call.get("args", {}).get("session_id"), {}
+            )
+            require(
+                "affirmative_action_custody",
+                owner.get("custody_qualified") is True
+                and owner.get("competing_supervisor", False) is False
+                and (
+                    not owner.get("predecessor_id") or owner.get("handoff_ack") is True
+                ),
+            )
+    if route:
+        receiver = after.get("sessions", {}).get(route["recipient_session_id"], {})
+        require(
+            "affirmative_receiver_acceptance", receiver.get("accepts_answers") is True
+        )
     for tid in criteria.get("forbidden_start_tasks", []):
         require(
             "no_replacement_without_custody:" + tid,
@@ -1473,14 +1753,18 @@ def score_family_continuation(
             audit.get("credited_event_ids") == [criteria["own_event_id"]],
         )
     for eid, entity in before.get("entities", {}).items():
-        if entity.get("entity_type") == "checkpoint" or (
-            entity.get("entity_type") == "task"
-            and entity.get("snapshot", {}).get("operator_gate")
-        ):
+        if entity.get("entity_type") in {"checkpoint", "task"}:
             require(
                 "independent_gate_history_unchanged:" + eid,
                 after.get("entities", {}).get(eid) == entity,
             )
+            for call in calls:
+                persisted = call.get("persisted_entities")
+                if persisted is not None:
+                    require(
+                        "legacy_history_never_rewritten:" + eid,
+                        persisted.get(eid) == entity,
+                    )
     require(
         "confirmed_effect_not_replayed",
         before.get("effects") == after.get("effects")

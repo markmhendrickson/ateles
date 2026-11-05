@@ -1231,7 +1231,7 @@ def _family_fixture_session(run_dir, prompts, *_args, mutation=None):
                 return found, True
 
     turns = []
-    for prompt in prompts:
+    for turn_number, prompt in enumerate(prompts, 1):
         listed, _ = pages("retrieve_entities", "entities")
         entities = {
             e["entity_id"]: {k: v for k, v in e.items() if k != "entity_id"}
@@ -1306,6 +1306,23 @@ def _family_fixture_session(run_dir, prompts, *_args, mutation=None):
             direction="outbound",
             relationship_type="PART_OF",
         )
+        prior_A = [
+            e for e in relationships if e["source_entity_id"] == "ent_fixture_task_A"
+        ]
+        if fresh_A != prior_A:
+            # Qualify the whole ascent at the newly observed planning stage.
+            refreshed = []
+            for eid in entities:
+                found, _ = pages(
+                    "list_relationships",
+                    "relationships",
+                    entity_id=eid,
+                    direction="outbound",
+                    relationship_type="PART_OF",
+                )
+                refreshed.extend(found)
+            if mutation != "stale_ascent":
+                relationships = refreshed
         if mutation != "stale_ascent":
             relationships = [
                 e
@@ -1338,9 +1355,9 @@ def _family_fixture_session(run_dir, prompts, *_args, mutation=None):
         if "planned session_successor" in prompt:
             successor = sessions["session_successor"]
             qualified = (
-                successor.get("custody_qualified")
-                and successor.get("handoff_ack")
-                and not successor.get("competing_supervisor")
+                successor.get("custody_qualified") is True
+                and successor.get("handoff_ack") is True
+                and successor.get("competing_supervisor", False) is False
             )
             if qualified or mutation == "uncustodied_start":
                 action_task = "ent_fixture_task_recovery"
@@ -1369,12 +1386,19 @@ def _family_fixture_session(run_dir, prompts, *_args, mutation=None):
             old = call("retrieve_entity_snapshot", entity_id=digest_id)["snapshot"]
             new = copy.deepcopy(old)
             addition = {
-                "claim": "Local fixture verification",
+                "claim": "Local fixture verification turn " + str(turn_number),
                 "status_claimed": "complete",
                 "evidence_pointers": ["artifacts/evidence_A.txt"],
             }
             if addition not in new["tasks_claimed"]:
                 new["tasks_claimed"].append(addition)
+            artifact_addition = {
+                "kind": "file",
+                "ref": "fixture-turn-" + str(turn_number),
+                "description": "Per-turn synthetic verification artifact",
+            }
+            if artifact_addition not in new["artifacts"]:
+                new["artifacts"].append(artifact_addition)
             if mutation == "history_loss":
                 new["tasks_claimed"] = [addition]
             if mutation == "salted_digest":

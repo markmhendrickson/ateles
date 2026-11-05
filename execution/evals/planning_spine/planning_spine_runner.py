@@ -46,6 +46,7 @@ def _load_rule_eval_runner():
 
 
 RULE_RUNNER = _load_rule_eval_runner()
+import fixture_mcp_server as fixture_backend  # noqa: E402
 
 
 def _fixture_overlay(base: dict, patch: dict) -> dict:
@@ -72,6 +73,14 @@ def load_fixture() -> dict:
             parent.pop(path[-1], None)
         case.clear()
         case.update(expanded)
+    contract = fixture.get("family_audit_contract", "")
+    for scenario in fixture["scenarios"].values():
+        if scenario.get("scorer") == "family_continuation" and contract:
+            scenario["prompt"] += "\n" + contract
+            if "prompts" in scenario:
+                scenario["prompts"] = [
+                    prompt + "\n" + contract for prompt in scenario["prompts"]
+                ]
     return fixture
 
 
@@ -228,6 +237,13 @@ def collect_evidence(run_dir: Path) -> dict:
         if log.is_file()
         else [],
         "guard_blocks": guard.read_text().splitlines() if guard.is_file() else [],
+        "backend_control": json.loads((run_dir / "fixture_control.json").read_text())
+        if (run_dir / "fixture_control.json").is_file()
+        else {},
+        "tool_effects": fixture_backend.TOOL_EFFECTS,
+        "planning_sha256": fixture_backend.planning_fingerprint(
+            json.loads((ws / "neotoma_state.json").read_text())
+        ),
     }
 
 
