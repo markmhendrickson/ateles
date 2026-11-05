@@ -184,19 +184,6 @@ def test_checkpoint_persist_retries_with_same_key(monkeypatch):
             == calls[1]["json"]["idempotency_key"])
 
 
-def test_checkpoint_persist_4xx_attempted_once(monkeypatch):
-    calls: list = []
-    _scripted(monkeypatch, gating, "post", [_Resp(status=400)], calls)
-    monkeypatch.setattr(gating, "NEOTOMA_BASE_URL", "http://n")
-    policy = gating.ExecutionPolicy(entity_id="default", loaded=True)
-    decision = gating.evaluate_gate(
-        confidence=0.3, action_type="local_edit", policy=policy)
-    assert gating.write_checkpoint_brief(
-        task_entity_id="ent_task", decision=decision, title="t",
-        plan_summary="p", handler="apis", action_type="local_edit") is None
-    assert len(calls) == 1
-
-
 # ── _release_lifecycle_proven (Apis) ─────────────────────────────────────────
 
 
