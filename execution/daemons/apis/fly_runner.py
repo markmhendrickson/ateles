@@ -546,9 +546,7 @@ class FlyConfig:
             ledger_path=Path(ledger).expanduser() if ledger else cls.ledger_path,
             login_machines=login,
             local_fallback=env.get("APIS_FLY_LOCAL_FALLBACK", "1").strip() != "0",
-            github_app_prefix=(
-                env.get("APIS_FLY_GITHUB_APP_PREFIX", "").strip() or "ATELES_REVIEWER_APP"
-            ),
+            github_app_prefix=review_github_app_prefix(),
             extra_probe_env_names=tuple(_csv(env.get("APIS_FLY_PROBE_ENV_NAMES", ""))),
             cursor_login_dirs=tuple(
                 _csv(env.get("APIS_FLY_CURSOR_LOGIN_DIRS", "")) or (".cursor", ".config/cursor")
@@ -1493,6 +1491,13 @@ def _github_request(method: str, path: str, bearer: str, body: dict | None = Non
 # (``check_read_token_response``); a token that comes back broader is revoked.
 READ_TOKEN_PERMISSIONS: dict[str, str] = {"contents": "read", "pull_requests": "read"}
 READ_TOKEN_IMPLICIT_PERMISSIONS: dict[str, str] = {"metadata": "read"}
+
+
+def review_github_app_prefix() -> str:
+    """The App the read-class job token is minted from: the Fly jobs' and,
+    for a local seated review run with no identity of its own, the Mac's
+    (``skill_runner``). One setting, so the two cannot drift apart."""
+    return os.environ.get("APIS_FLY_GITHUB_APP_PREFIX", "").strip() or "ATELES_REVIEWER_APP"
 
 
 def mint_job_github_token(

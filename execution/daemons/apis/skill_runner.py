@@ -46,6 +46,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import urllib.request
@@ -78,6 +79,7 @@ from foundation import (  # noqa: E402
 import local_provider  # noqa: E402
 import model_tiering  # noqa: E402
 import fly_runner  # noqa: E402
+import review_panel  # noqa: E402
 from harness_router import (  # noqa: E402
     FRONTIER_PROVIDERS,
     MAC_READING_SOURCES,
@@ -2884,6 +2886,81 @@ def _dispatch_succeeded(
 DISPATCHER_LENS_PUBLICATION_READY = True
 
 
+# ── Read-scoped GitHub token for a local seated review run ───────────────────
+#
+# A seated lens run (``run_skill(seated_reviewer=True, github_read_only=True)``)
+# whose agent has no GitHub identity of its own would otherwise get the
+# dispatcher's shared per-repo token, which can write. It needs only to read:
+# the dispatcher publishes its verdict from the returned text. So, for a LOCAL
+# run, the caller's token is replaced by the same read-class token a Fly job
+# gets (``fly_runner.mint_job_github_token``: contents and pull requests read,
+# one repository, a broader grant refused and revoked), minted for this run
+# alone, never cached, and revoked when the run ends. Minted and revoked off
+# the event loop. A failed mint keeps the caller's token, as before.
+
+# The agents that act as the PR-opener App; held equal to
+# ``swarm_dispatch._PR_OPENER_AGENTS`` by a test.
+_PR_OPENER_AGENTS = frozenset({"cicada"})
+
+
+def _agent_has_own_github_identity(agent: str) -> bool:
+    """True when *agent* has a GitHub identity of its own, which then wins.
+
+    The same tiers ``swarm_dispatch._token_for_agent_on_repo`` puts first: its
+    own App (the PR-opener App, or a lens's App declared here or expected by
+    the roster, for which the caller already refuses rather than substitute)
+    and its own ``<AGENT>_AGENT_PAT``.
+    """
+    name = (agent or "").strip().lower()
+    if not name:
+        return True  # nothing to decide on: leave the caller's token alone
+    if os.environ.get(f"{name.upper()}_AGENT_PAT", ""):
+        return True
+    if name in _PR_OPENER_AGENTS and _github_app_token.identity_declared(
+        _github_app_token.PR_OPENER_IDENTITY
+    ):
+        return True
+    return any(
+        lens.agent == name and _github_app_token.lens_has_own_app(lens.lens)
+        for lens in review_panel.LENSES
+    )
+
+
+def _revoke_review_token_quietly(token: str) -> None:
+    try:
+        fly_runner.revoke_job_github_token(token)
+    except Exception as exc:  # noqa: BLE001 — never the token; it expires in an hour
+        log.warning(f"[apis] read-scoped review token revocation failed ({type(exc).__name__})")
+
+
+async def _mint_review_token(repository: str) -> str | None:
+    """A fresh read-class token for *repository*, or None (logged, one line,
+    no token) when it cannot be minted. Minted in a worker thread; a token
+    whose mint finishes after this coroutine was cancelled is revoked then."""
+    fut = asyncio.ensure_future(asyncio.to_thread(
+        fly_runner.mint_job_github_token, repository, fly_runner.review_github_app_prefix()))
+    try:
+        return await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        def _revoke_late(done: "asyncio.Future[str]") -> None:
+            if not done.cancelled() and done.exception() is None:
+                threading.Thread(target=_revoke_review_token_quietly,
+                                 args=(done.result(),), daemon=True).start()
+        fut.add_done_callback(_revoke_late)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        reason = str(exc)[:200] if isinstance(exc, fly_runner.FlyIneligible) else type(exc).__name__
+        log.warning(f"[apis] no read-scoped review token for {repository} ({reason}); "
+                    "the run keeps the token its caller passed")
+        return None
+
+
+async def _revoke_review_token(token: str) -> None:
+    """Revoke in a worker thread; a cancellation does not stop it."""
+    fut = asyncio.ensure_future(asyncio.to_thread(_revoke_review_token_quietly, token))
+    await asyncio.shield(fut)
+
+
 async def _run_skill_once(
     skill: str,
     prompt: str,
@@ -2914,9 +2991,16 @@ async def _run_skill_once(
     repository: str = "",
     local_fallback_check=None,
     fly_delivery: dict | None = None,
+    review_token_repository: str = "",
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
+
+    ``review_token_repository``: set by ``run_skill`` for a seated read-only
+    review run whose agent has no GitHub identity of its own. A LOCAL run
+    then takes a read-class token minted for this repository and revoked when
+    the run ends, instead of ``github_token`` (see ``_mint_review_token``).
+    The Fly path is unchanged: it mints its own.
 
     ``runner`` / ``repository`` (ateles#1456): which executor runs the CLI.
     ``None`` (every call site that predates this) runs locally unless the
@@ -4031,25 +4115,36 @@ async def _run_skill_once(
             subprocess_env.update(_isolated_home.env)
             log.info(f"[apis] {provider} child for {_role!r} runs in an isolated harness "
                      f"home; MCP servers: {list(_isolated_home.servers) or 'none'}")  # fmt: skip
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=subprocess_env,
-                cwd=spawn_cwd,  # QE3: qa lens runs in a PR-branch worktree
-                start_new_session=True,
-            )
-        except OSError as exc:
-            raise _LocalSpawnError(str(exc)) from exc
-        out, err = await asyncio.wait_for(
-            proc.communicate(
-                input=stdin_payload if stdin_payload is not None else prompt.encode()
-            ),
-            timeout=timeout,
+        review_token = (
+            await _mint_review_token(review_token_repository)
+            if review_token_repository else None
         )
-        return proc.returncode, out, err
+        if review_token:
+            subprocess_env["GITHUB_TOKEN"] = review_token
+            subprocess_env["GH_TOKEN"] = review_token
+        try:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=subprocess_env,
+                    cwd=spawn_cwd,  # QE3: qa lens runs in a PR-branch worktree
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                raise _LocalSpawnError(str(exc)) from exc
+            out, err = await asyncio.wait_for(
+                proc.communicate(
+                    input=stdin_payload if stdin_payload is not None else prompt.encode()
+                ),
+                timeout=timeout,
+            )
+            return proc.returncode, out, err
+        finally:
+            if review_token:
+                await _revoke_review_token(review_token)
 
     def _report_fly_capability(message: str) -> None:
         log.warning("[apis] %s: %s", skill, message)
@@ -4652,11 +4747,20 @@ async def run_skill(
     runner: str | None = None,
     repository: str = "",
     fly_delivery: dict | None = None,
+    github_token_repository: str = "",
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
     ``runner`` / ``repository``: forwarded to every ``_run_skill_once``
     attempt; see that function (ateles#1456, the Fly executor).
+
+    ``github_token_repository``: the repository ``github_token`` was resolved
+    for (``repository`` when empty). Naming it does not route the run to Fly.
+    For a run with ``github_read_only`` and ``seated_reviewer`` whose agent has
+    neither its own App nor its own ``<AGENT>_AGENT_PAT``, a local run takes a
+    read-class token for that repository instead of ``github_token``, minted
+    and revoked per run off the event loop; a failed mint keeps
+    ``github_token``. Every other run is unchanged.
 
     ``github_read_only``: On the Fly runner, take the read-class GitHub token
     (contents and pull requests, read-only) and never the delivery contract,
@@ -4770,6 +4874,20 @@ async def run_skill(
     if fly_delivery is not None:
         runner = "fly"  # a delivery runs on Fly or the builder runs it locally
     fly_bound, fly_extra = _fly_routing(runner, action_class)
+    _token_repo = github_token_repository or repository
+    review_token_repository = (
+        _token_repo
+        if github_read_only
+        and seated_reviewer
+        and not local_review
+        and fly_delivery is None
+        # An empty token is the caller refusing (a lens whose App is expected
+        # but missing): that refusal stands, nothing is minted in its place.
+        and github_token
+        and "/" in _token_repo
+        and not _agent_has_own_github_identity(role or skill)
+        else ""
+    )
 
     async def attempt(selected: str, fallback_model: str | None = None) -> SkillResult:
         result = await _run_skill_once(
@@ -4800,6 +4918,7 @@ async def run_skill(
             runner=runner,
             repository=repository,
             fly_delivery=fly_delivery,
+            review_token_repository=review_token_repository,
             local_fallback_check=(
                 (lambda name: _local_fallback_refusal(name, pinned=provider is not None))
                 if selected in fly_bound else None

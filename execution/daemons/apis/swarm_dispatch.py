@@ -2387,7 +2387,7 @@ def is_provisioned(agent: str) -> bool:
 
 
 def _token_for_agent_on_repo(agent: str, repo: str) -> str:
-    """Five-tier GitHub token resolution for a specific agent + repo.
+    """Four-tier GitHub token resolution for a specific agent + repo.
 
     Tier 0 — the agent's own GitHub App (operator ruling 2026-10-14): the
               PR-opener App for the builder, ``reviewer_<lens>``'s App for a
@@ -2397,20 +2397,13 @@ def _token_for_agent_on_repo(agent: str, repo: str) -> str:
     Tier 1 — ``<AGENT>_AGENT_PAT`` (e.g. ``PAVO_AGENT_PAT``): the agent's own
               account.  Present only when the machine account has been created
               and the PAT stored.
-    Tier 2 — the shared swarm App's short-lived installation token
-              (``_REVIEWER_APP_ENV_PREFIX``), when that App is configured and
-              installed on *repo*: the same credential the dispatcher's own
-              writes prefer (`_resolve_github_write_token`, ateles#1381), so an
-              expired long-lived PAT below no longer leaves the agent unable to
-              read GitHub. Unconfigured, not installed, or a failed mint (logged
-              as a WARNING) falls through to Tier 3 exactly as before.
-    Tier 3 — per-repo identity: ``NEOTOMA_AGENT_PAT`` for ``*/neotoma`` repos,
+    Tier 2 — per-repo identity: ``NEOTOMA_AGENT_PAT`` for ``*/neotoma`` repos,
               else ``ATELES_AGENT_PAT``.  This is the existing #95 behaviour,
               delegated to ``_token_for_repo``.
-    Tier 4 — ``GITHUB_TOKEN`` (daemon-level fallback).
+    Tier 3 — ``GITHUB_TOKEN`` (daemon-level fallback).
 
-    Like Tier 0, Tier 2 may mint over the network synchronously; async callers
-    go through ``asyncio.to_thread``.
+    The fallback when Tier 1 is absent is the per-repo shared account (Tier 2),
+    NOT a hardcoded ateles-agent.  This preserves the #95 contract exactly.
 
     Args:
         agent: lowercase agent genus name (e.g. "pavo").
@@ -2449,15 +2442,7 @@ def _token_for_agent_on_repo(agent: str, repo: str) -> str:
     agent_pat = os.environ.get(f"{agent.upper()}_AGENT_PAT", "")
     if agent_pat:
         return agent_pat
-    if repo and _app_write_configured():
-        # Tier 2: the shared swarm App, reusing the dispatcher's write-token
-        # cache and its mint (which logs a WARNING naming the PAT fallback on
-        # failure and throttles retries). None means fall through.
-        cached = _app_write_token_cached(repo)
-        shared_token = cached[0] if cached else _mint_app_write_token_blocking(repo)
-        if shared_token:
-            return shared_token
-    # Tier 3 → 4 already implemented by _token_for_repo.
+    # Tier 2 → 3 already implemented by _token_for_repo.
     return _token_for_repo(repo)
 
 
@@ -5791,6 +5776,7 @@ class SwarmDispatcher:
                 action_class=model_tiering.lens_review_class(lens.lens),
                 escalation_signals=review_signals,
                 github_token=_token_for_agent_on_repo(lens.agent, repository),
+                github_token_repository=repository,
                 include_github_contract=True,
                 notifier=self.notifier,
                 cwd=worktree,
@@ -6499,6 +6485,7 @@ class SwarmDispatcher:
                 github_token=_token_for_agent_on_repo(
                     section.agent, trigger.repository
                 ),
+                github_token_repository=trigger.repository,
                 include_github_contract=True,
                 notifier=self.notifier,
                 # ateles#795, Falco's REQUEST_CHANGES on PR #1181 (amended
@@ -8038,6 +8025,7 @@ class SwarmDispatcher:
                     github_token=_token_for_agent_on_repo(
                         lens.agent, trigger.repository
                     ),
+                    github_token_repository=trigger.repository,
                     include_github_contract=True,
                     notifier=self.notifier,
                     cwd=qa_worktree,
@@ -9353,6 +9341,7 @@ class SwarmDispatcher:
                 self._fix_guidance_prompt(trigger, lens, agent, findings_text)
                 + _no_neotoma_note_if_on_fly(lens),
                 github_token=_token_for_agent_on_repo(agent, trigger.repository),
+                github_token_repository=trigger.repository,
                 include_github_contract=True,
                 notifier=self.notifier,
                 owns_pending_gate=gate_owner_tool_deny(gate_by_lens[lens], live_gates),
@@ -13990,6 +13979,7 @@ class SwarmDispatcher:
                     changed_files,
                 ),
                 github_token=_token_for_agent_on_repo(first.agent, trigger.repository),
+                github_token_repository=trigger.repository,
                 include_github_contract=True,
                 notifier=self.notifier,
                 preferred_provider=resolve_lens_provider(
