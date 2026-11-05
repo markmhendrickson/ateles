@@ -1796,8 +1796,14 @@ def _replay_family_driver(
             config = store.control()
             control(config)
             store.control_path.write_text(json.dumps(config))
+        cursors = {}
         for entry in recorded:
             name, args = entry["tool"], copy.deepcopy(entry["args"])
+            if args.get("cursor") in cursors:
+                replacement = cursors[args["cursor"]]
+                if replacement is None:
+                    continue
+                args["cursor"] = replacement
             if transform:
                 transformed = transform(name, args)
                 if transformed is None:
@@ -1805,6 +1811,15 @@ def _replay_family_driver(
                 name, args = transformed
             response = fixture_mcp_server.call_tool(store, name, args)
             store.log(name, args, response)
+            prior_cursor = entry["result"].get(
+                "nextCursor", entry["result"].get("next_cursor")
+            )
+            if prior_cursor:
+                # Source variants change cursor populations. Follow the newly
+                # returned token rather than testing an unrelated stale cursor.
+                cursors[prior_cursor] = response.get(
+                    "nextCursor", response.get("next_cursor")
+                )
         for name, args in extra or []:
             response = fixture_mcp_server.call_tool(store, name, args)
             store.log(name, args, response)
@@ -2134,6 +2149,18 @@ def test_r2_affirmative_source_fields_require_literal_true_through_real_runner(
     )
     assert result["outcome"] == "fail", result
     evidence = runner.collect_evidence(target)
+    expected_failure = {
+        "custody_qualified": "affirmative_action_custody",
+        "handoff_ack": "affirmative_action_custody",
+        "accepts_answers": "affirmative_receiver_acceptance",
+        "local_writes": "affirmative_capability:local_writes",
+        "family_tools": "affirmative_capability:family_tools",
+    }[field]
+    assert expected_failure in result["failed"]
+    assert not any(
+        "pagination" in str(call["result"].get("error", ""))
+        for call in evidence["calls"]
+    )
     if field in {"custody_qualified", "handoff_ack", "family_tools"}:
         assert "ent_fixture_task_recovery" not in evidence["after_state"].get(
             "activity", {}
