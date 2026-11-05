@@ -253,7 +253,9 @@ from lib.daemon_runtime import (  # noqa: E402
 )
 from lib.daemon_runtime.action_type import (  # noqa: E402
     AGENT_ACTION_TYPE_PRIOR,
+    SOURCE_AGENT_PRIOR,
     ResolvedActionType,
+    infer_action_type_from_text,
     resolve_gate_action_type,
 )
 from lib.daemon_runtime.gating import (  # noqa: E402
@@ -1989,6 +1991,69 @@ def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
         return None
 
 
+# Statuses that mean "filed, nothing has happened to it yet". An allow-list: a
+# status the lifecycle does not know, or any started one (routed, executing,
+# failed, blocked, ...), keeps its normal dispatch path. `open` is what some
+# producers write for a new task.
+_NOT_STARTED_STATUSES = frozenset({"", TaskStatus.PENDING.value, "open"})
+
+
+def _never_started(status) -> bool:
+    """True only for a task that has not entered the lifecycle yet."""
+    return normalize_status(status) in _NOT_STARTED_STATUSES
+
+
+def _guessed_owner_is_low_stakes(skill: str, snapshot: dict) -> bool:
+    """True only when leaving a guessed-owner task as filed is safe.
+
+    An allow-list on the gate's own verdict, not a list of actions to refuse:
+    the policy resolved here is the one the execution gate resolves for this
+    skill, and the action is the gate's resolved action, so the two cannot
+    disagree about what is reserved. Two things qualify:
+
+      1. The gate classifies the action LOW blast.
+      2. The guessed owner is the builder, the task declares no action and its
+         text escalates nothing, so the action is only the builder's own prior
+         (`open_or_merge_pr`) and nothing about this task. That label comes from
+         the guess alone, so holding on it asks the operator to approve work
+         nobody owns. A declared `open_or_merge_pr`, a text-escalated action and
+         every other specialist's prior (payment, send, publish) do not qualify.
+
+    Anything else (HIGH, NEVER, unrecognised), an empty action, a policy that
+    cannot be read, or any exception returns False and keeps today's hold.
+    """
+    try:
+        policy = resolve_policy_for_agent(skill)
+        resolved = _resolve_gate_action_type(skill, snapshot, policy)
+        action = (resolved.value or "").strip().lower()
+        if not action:
+            return False
+        if policy.blast_radius_for(action) == BlastRadius.LOW:
+            return True
+        key = (skill or "").strip().lower()
+        if not (
+            key in build_delivery.BUILDER_SKILLS
+            and resolved.source == SOURCE_AGENT_PRIOR
+            and action == (_AGENT_ACTION_TYPE.get(key) or "").strip().lower()
+        ):
+            return False
+        # The resolver only escalates text that is STRICTER than the prior, and
+        # the builder's prior is already high blast, so it never reports text
+        # naming a payment, send or publish. Ask the text directly: any outward
+        # action named there means this is not just the builder's default.
+        return (
+            infer_action_type_from_text(
+                snapshot.get("title"),
+                snapshot.get("body"),
+                snapshot.get("description"),
+                verdict=lambda at: policy.blast_radius_for(at).value,
+            )
+            is None
+        )
+    except Exception:  # noqa: BLE001 — undeterminable means keep today's hold
+        return False
+
+
 async def dispatch_task(
     entity_id: str,
     snapshot: dict,
@@ -2102,6 +2167,30 @@ async def dispatch_task(
         )
         return
 
+    # ── Already held: a held task is not gated a second time ─────────────────
+    # `task.created` is redelivered by Neotoma (including after corrections) and
+    # `_seen_created` dedupes only within one process. Without this guard a task
+    # already at AWAITING_APPROVAL was re-routed, re-held and re-briefed on every
+    # redelivery: the previous signed envelope went stale and the operator's
+    # queue gained another brief for a decision already waiting on them (about
+    # half of 2,030 gate decisions over 974 tasks, 22 Oct to 5 Nov 2026).
+    #
+    # `gate_override` DOES pass: that flag is the operator's approval releasing
+    # this very hold, the one path that must still reach the ROUTED write below.
+    # Nothing is written here — no status, no brief, no notification — because
+    # the existing hold and its checkpoint are already the record. Re-issuing a
+    # lost or stale checkpoint is the job of `reissue_held_task_checkpoint`,
+    # which does not enter dispatch_task.
+    if (
+        not gate_override
+        and normalize_status(current_status) == TaskStatus.AWAITING_APPROVAL.value
+    ):
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} is already held for operator "
+            f"approval (trigger={trigger}) — not gating it again"
+        )
+        return
+
     # The snapshot read fine, so any prior unreadable streak for this task is
     # over; forget it so a later blip starts counting from zero rather than
     # inheriting an old streak and reporting prematurely.
@@ -2117,6 +2206,9 @@ async def dispatch_task(
             existing_tags = _json.loads(existing_tags)
         except (ValueError, TypeError):
             existing_tags = []
+
+    # What the task itself carried, before inference adds guesses (guard B below).
+    stored_routable_tag = any(tag in _DOMAIN_ROUTES for tag in existing_tags)
 
     # Fall back to local inference when the tags we have cannot route.
     #
@@ -2184,6 +2276,49 @@ async def dispatch_task(
             f"  assigned_to={assigned_to} task={entity_id}",
             priority=Priority.OPERATOR_DECISION,
             handler=DAEMON_NAME,
+        )
+        return
+
+    # ── A guessed owner is not an owner: leave the task as filed ─────────────
+    # With no real `assigned_to` and no STORED tag that routes, the skill above
+    # came only from `_infer_tags_from_text` — a guess from the task's words. Of
+    # 974 first gate decisions (22 Oct to 5 Nov 2026) about 54% were such tasks,
+    # nearly all held and a few run on that guess. Holding asks the operator to
+    # approve work nobody owns; running it hands the task to an agent chosen by
+    # keyword. Neither is warranted, so the task is left exactly as filed: no
+    # status write, no ROUTED, no gate, no brief, no notification, no spawn.
+    #
+    # This only ever REDUCES what holds or runs. It applies where the gate's own
+    # classification of the task's action is LOW blast, with one exception: a
+    # guessed BUILDER whose only action is the builder's own default
+    # (`open_or_merge_pr`, no declared action, nothing in the text escalating it)
+    # is also left as filed, because that label comes from the guess and nothing
+    # about the task. A declared or text-escalated action, and the payment, send
+    # and publish defaults of the other specialists, keep today's hold, as does
+    # every other tier and any action or tier that cannot be determined.
+    #
+    # Scoped to tasks that have not started (a task already routed, failed or
+    # executing was dispatched on purpose and belongs to the watchdog), to
+    # hydrated snapshots (an unread snapshot keeps its deferral below), and not
+    # to `existing_pr_correction` tasks or a `build_released` re-dispatch, whose
+    # lifecycles own their own handling. `gate_override` is not consulted: an
+    # approved release is of a task that was already routed to a real owner and
+    # held, and guard A has already let it through.
+    if (
+        skill is not None
+        and not assigned_to
+        and not stored_routable_tag
+        and snapshot_hydrated is not False
+        and trigger != "build_released"
+        and snapshot.get("task_type") != "existing_pr_correction"
+        and _never_started(current_status)
+        and _guessed_owner_is_low_stakes(skill, snapshot)
+    ):
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} left as filed: no assignee and "
+            f"no stored routable tag, so the owner {skill!r} would only be a "
+            f"guess from its text (trigger={trigger}) — not routing, gating or "
+            "notifying"
         )
         return
 
