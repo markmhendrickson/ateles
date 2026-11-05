@@ -1989,42 +1989,34 @@ def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
         return None
 
 
-# Actions whose hold must survive a guessed owner: they send, spend, publish,
-# delete or release. Spelled as the gate's vocabulary spells them; "correspondence"
-# is not a vocabulary member and resolves to never-tier anyway, but is named so
-# the intent does not rest on that fallback.
-_EFFECT_ACTION_TYPES = frozenset({
-    "payment", "send_external_comms", "publish", "delete_entity_or_data",
-    "external_api_write", "release", "correspondence",
-})
+# Statuses that mean "filed, nothing has happened to it yet". An allow-list: a
+# status the lifecycle does not know, or any started one (routed, executing,
+# failed, blocked, ...), keeps its normal dispatch path. `open` is what some
+# producers write for a new task.
+_NOT_STARTED_STATUSES = frozenset({"", TaskStatus.PENDING.value, "open"})
 
 
 def _never_started(status) -> bool:
-    """True for a task that has not entered the lifecycle yet.
-
-    Pending, absent, or a spelling the lifecycle does not know (producers write
-    `open`). Routed, executing, failed, blocked and the rest were dispatched on
-    purpose and are never "left as filed".
-    """
-    normalized = normalize_status(status)
-    return normalized in ("", TaskStatus.PENDING.value) or normalized not in {
-        s.value for s in TaskStatus
-    }
+    """True only for a task that has not entered the lifecycle yet."""
+    return normalize_status(status) in _NOT_STARTED_STATUSES
 
 
 def _guessed_owner_is_low_stakes(skill: str, snapshot: dict) -> bool:
-    """True only when the action the gate would judge is clearly not reserved.
+    """True only when the gate itself classifies the task's action as LOW blast.
 
-    Fail closed: any failure to resolve the policy, action or tier, an empty
-    action, an operator-only or effect action, or a never-tier verdict returns
-    False, which keeps today's behaviour (the gate holds).
+    An allow-list on the gate's own verdict, not a list of actions to refuse:
+    the policy resolved here is the one the execution gate resolves for this
+    skill, and the action is the gate's resolved action, so the two cannot
+    disagree about what is reserved. Anything but LOW (HIGH, NEVER, an
+    unrecognised action) keeps today's hold. An empty action, a policy that
+    cannot be read, or any exception also returns False.
     """
     try:
         policy = resolve_policy_for_agent(skill)
         action = (_resolve_gate_action_type(skill, snapshot, policy).value or "").strip().lower()
-        if not action or action == "operator_only" or action in _EFFECT_ACTION_TYPES:
+        if not action:
             return False
-        return policy.blast_radius_for(action) != BlastRadius.NEVER
+        return policy.blast_radius_for(action) == BlastRadius.LOW
     except Exception:  # noqa: BLE001 — undeterminable means keep today's hold
         return False
 
@@ -2263,11 +2255,10 @@ async def dispatch_task(
     # keyword. Neither is warranted, so the task is left exactly as filed: no
     # status write, no ROUTED, no gate, no brief, no notification, no spawn.
     #
-    # This only ever REDUCES what holds or runs. It does not apply where the hold
-    # is the fail-closed branch: an operator-only or never-tier action, or any
-    # effect action (payment, external send, publish, delete, external API write,
-    # release, correspondence) keeps today's hold. An action or tier that cannot
-    # be determined also keeps today's behaviour.
+    # This only ever REDUCES what holds or runs. It applies only where the gate's
+    # own classification of the task's action is LOW blast; every other tier
+    # (HIGH, never-tier, unrecognised) and any action or tier that cannot be
+    # determined keeps today's hold.
     #
     # Scoped to tasks that have not started (a task already routed, failed or
     # executing was dispatched on purpose and belongs to the watchdog), to

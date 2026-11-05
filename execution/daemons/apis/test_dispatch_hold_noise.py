@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import apis  # noqa: E402
 import test_producer_confidence_on_dispatch as _w  # noqa: E402
+from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
 from lib.daemon_runtime.task_lifecycle import TaskStatus  # noqa: E402
 
 world = _w.world  # the stubbed dispatch world (fixture)
@@ -149,25 +150,66 @@ def test_guessed_owner_left_as_filed_even_when_unscored(world):
     _nothing_happened(world, notifier)
 
 
-@pytest.mark.parametrize(
-    "action",
-    [
-        "payment",
-        "send_external_comms",
-        "publish",
-        "delete_entity_or_data",
-        "external_api_write",
-        "release",
-        "correspondence",
-        "operator_only",  # operator-reserved
-        "not_a_known_action",  # unclassified -> never-tier, fail closed
-    ],
-)
-def test_guessed_owner_with_effect_or_never_action_still_holds(world, action):
+# The gate's own vocabulary, read from the policy source the dispatch world
+# installs rather than copied here, so a new high-blast action is covered the
+# moment the policy gains it.
+_POLICY = ExecutionPolicy(entity_id="fallback", loaded=False)
+_HIGH_BLAST = sorted(_POLICY.high_blast_action_types)
+_RESERVED = ["operator_only", "not_a_known_action", "correspondence"]
+
+
+def test_high_blast_set_is_not_empty():
+    # Instrument check: the parametrization below must actually cover something.
+    assert {"payment", "wage", "git_push", "open_or_merge_pr"} <= set(_HIGH_BLAST)
+
+
+@pytest.mark.parametrize("action", _HIGH_BLAST + _RESERVED)
+def test_guessed_owner_with_any_non_low_action_still_reaches_the_gate(world, action):
     _run(_guessed(action_type=action))
     assert [s for _i, s, _r in world["statuses"]][-1] == TaskStatus.AWAITING_APPROVAL
     assert len(world["briefs"]) == 1
     assert world["spawns"] == []
+
+
+@pytest.mark.parametrize("action", sorted(_POLICY.low_blast_action_types))
+def test_guessed_owner_with_any_low_action_is_left_as_filed(world, action):
+    notifier = _run(_guessed(action_type=action))
+    _nothing_happened(world, notifier)
+
+
+def test_guard_fails_closed_on_policy_read_failure(monkeypatch):
+    def boom(_skill):
+        raise RuntimeError("policy unreadable")
+
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", boom)
+    assert apis._guessed_owner_is_low_stakes("fringilla", {}) is False
+
+
+def test_guard_fails_closed_on_empty_action(monkeypatch):
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda _s: _POLICY)
+
+    class _Empty:
+        value = ""
+
+    monkeypatch.setattr(apis, "_resolve_gate_action_type", lambda *_a: _Empty())
+    assert apis._guessed_owner_is_low_stakes("fringilla", {}) is False
+
+
+def test_guard_fails_closed_on_resolver_exception(monkeypatch):
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda _s: _POLICY)
+
+    def boom(*_a):
+        raise ValueError("bad snapshot")
+
+    monkeypatch.setattr(apis, "_resolve_gate_action_type", boom)
+    assert apis._guessed_owner_is_low_stakes("fringilla", {}) is False
+
+
+@pytest.mark.parametrize("status", ["bogus_status", "approved", "ready", "blocked"])
+def test_unknown_or_other_status_is_not_left_as_filed(world, status):
+    # Allow-list of not-started statuses: anything else keeps its normal path.
+    _run(_guessed(status=status))
+    assert world["statuses"], "must reach routing/gating, not be left as filed"
 
 
 def test_guessed_owner_with_effect_action_inferred_from_text_still_holds(world):
