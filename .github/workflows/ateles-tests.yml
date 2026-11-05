@@ -22,6 +22,9 @@ on:
       - "execution/local_llm/**"
       - "execution/daemons/test_*.py"
       - "execution/daemons/codex-delivery-check/**"
+      - "execution/daemons/decision-queue-reading/**"
+      - "execution/scripts/decision_queue.py"
+      - "execution/scripts/metrics/**"
       - "lib/notify/**"
       - "execution/daemons/cotinga/**"
       - "execution/daemons/cyphorhinus/**"
@@ -116,6 +119,8 @@ jobs:
         run: uv run --extra dev python -m pytest execution/daemons/apis/ -q
       - name: Run Codex delivery check tests
         run: uv run --extra dev python -m pytest execution/daemons/codex-delivery-check/ -q
+      - name: Run decision queue reading tests
+        run: uv run --extra dev python -m pytest execution/daemons/decision-queue-reading/ execution/scripts/test_decision_queue.py execution/scripts/metrics/ -q
       # The Fly runner's repository delivery, run for real as root with the
       # agent as uid 10001, in a container from the runner image's base (the
       # same Python and git). Skipped in the step above, which is not root.
