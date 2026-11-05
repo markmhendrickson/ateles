@@ -146,10 +146,78 @@ async def test_an_empty_app_token_posts_nothing_and_never_the_shared_identity(
 
 
 @pytest.mark.asyncio
-async def test_a_lens_with_no_declared_app_is_not_posted_as_the_shared_identity(
+async def test_a_return_only_lens_with_no_app_posts_once_under_the_shared_identity(
     monkeypatch, logins,  # noqa: F811
 ):
-    assert await _publish(monkeypatch, token="pm-app-token") == []
+    posted = await _publish(monkeypatch, token="pm-app-token")
+    assert len(posted) == 1
+    body, headers = posted[0]
+    assert "shared-token" in headers["Authorization"]
+    assert "pm-app-token" not in headers["Authorization"]
+    assert body.count(sd.compose_lens_review_marker("pm", HEAD)) == 1
+    assert body.count("<!--") == 1 and "review:arch" not in body
+
+
+class _ExpClient(_Client):
+    HEADER = "**review_expectation (pm)**"
+    patched: list = []
+
+    async def get(self, url, headers=None, params=None):
+        class _R:
+            def raise_for_status(s):
+                pass
+
+            def json(s):
+                return [{"id": 7, "body": _ExpClient.HEADER + "\n- [ ] a",
+                         "user": {"login": "swarm-lens-account"}}]
+
+        return _R()
+
+    async def patch(self, url, json=None, headers=None):
+        self.posted.append((url, json["body"], headers))
+
+        class _R:
+            def raise_for_status(s):
+                pass
+
+        return _R()
+
+
+async def _expectation(monkeypatch, *, with_app):
+    import httpx
+    from test_gate_sign_off_dispatch import _StubNotifier, _config, _trigger
+
+    patched: list = []
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _ExpClient(patched))
+    monkeypatch.setattr(sd, "_token_for_repo", lambda repo: "shared-token")
+    monkeypatch.setattr(sd, "_token_for_agent_on_repo",
+                        lambda agent, repo: "pm-app-token" if agent == "pavo" else "shared-token")
+    monkeypatch.setattr(sd, "lens_comment_authors",
+                        lambda: frozenset({"swarm-lens-account", PM_APP}))
+    d = sd.SwarmDispatcher(_StubNotifier(), _config())
+    await d._publish_expectation_updates(
+        _trigger(), 80, {"pm": _ExpClient.HEADER + "\n- [x] a"}, {"pm": "pavo"})
+    return patched
+
+
+@pytest.mark.asyncio
+async def test_an_expectation_update_with_no_app_uses_the_shared_headers(
+    monkeypatch, logins,  # noqa: F811
+):
+    patched = await _expectation(monkeypatch, with_app=False)
+    assert len(patched) == 1
+    url, body, headers = patched[0]
+    assert url.endswith("/issues/comments/7") and "- [x] a" in body
+    assert "shared-token" in headers["Authorization"]
+
+
+@pytest.mark.asyncio
+async def test_an_expectation_update_uses_the_lens_app_when_it_has_one(
+    monkeypatch, logins,  # noqa: F811
+):
+    _declare(monkeypatch, "reviewer_pm")
+    patched = await _expectation(monkeypatch, with_app=True)
+    assert patched and patched[0][2]["Authorization"] == "Bearer pm-app-token"
 
 
 # ── publication keys on the prompt, not on the remote run ───────────────────

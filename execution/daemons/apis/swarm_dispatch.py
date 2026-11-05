@@ -2774,6 +2774,13 @@ _NO_NEOTOMA_NOTE = (
 )
 
 
+def _no_neotoma_note_if_on_fly(lens: str) -> str:
+    """The no-Neotoma-tools note, only for a run that will go to Fly."""
+    if fly_runner.wants_fly(None, model_tiering.lens_review_class(lens)):
+        return "\n\n" + _NO_NEOTOMA_NOTE
+    return ""
+
+
 def _returned_sections(text: str) -> tuple[dict[str, list[str]], str] | None:
     """Split *text* into its delimited sections (delimiters alone on a line).
     None when a delimiter is unmatched, nested, or ends the wrong section."""
@@ -6426,7 +6433,8 @@ class SwarmDispatcher:
                     section,
                     spec_so_far,
                     design_basis=(state.sections or {}).get(DESIGN_BASIS.field),
-                ),
+                )
+                + _no_neotoma_note_if_on_fly(section.lens),
                 github_token=_token_for_agent_on_repo(
                     section.agent, trigger.repository
                 ),
@@ -9280,7 +9288,8 @@ class SwarmDispatcher:
             )
             result = await run_skill(
                 agent,
-                self._fix_guidance_prompt(trigger, lens, agent, findings_text),
+                self._fix_guidance_prompt(trigger, lens, agent, findings_text)
+                + _no_neotoma_note_if_on_fly(lens),
                 github_token=_token_for_agent_on_repo(agent, trigger.repository),
                 include_github_contract=True,
                 notifier=self.notifier,
@@ -14894,7 +14903,9 @@ class SwarmDispatcher:
 
         ``remote_lenses``: lenses whose prompt was return-only (they hold no
         GitHub write access, on Fly or after a Mac fallback). Their review is
-        posted from here as the lens's own App, never as the shared identity.
+        posted from here as the lens's own App when it has one (never the
+        shared identity then); a lens with no App takes the ordinary fallback
+        post below, under the shared identity.
 
         Headless `claude --print` panelists cannot answer permission prompts,
         so their `gh` comment step often fails silently; Vanellus aggregates
@@ -14941,7 +14952,7 @@ class SwarmDispatcher:
                 for lens in lenses_missing_comments(
                     bodies, list(captured), head_sha=head_sha
                 ):
-                    if lens in remote_lenses:
+                    if lens in remote_lenses and _github_app_token.lens_has_own_app(lens):
                         try:
                             await self._post_remote_lens_verdict(
                                 client, url, t, lens, agents.get(lens, ""),
@@ -14966,7 +14977,9 @@ class SwarmDispatcher:
                         )
                         continue
                     body = compose_fallback_comment(
-                        lens, agents.get(lens, "unknown panelist"), captured[lens],
+                        lens, agents.get(lens, "unknown panelist"),
+                        strip_lens_review_markers(captured[lens])
+                        if lens in remote_lenses else captured[lens],
                         head_sha,
                     )
                     post = await client.post(
@@ -15033,7 +15046,8 @@ class SwarmDispatcher:
     ) -> None:
         """Edit each return-only lens's own expectation checklist on the parent
         issue, as that lens's App, the way a local lens edits it with `gh`.
-        Best effort and never raises: a missed update leaves boxes unchecked."""
+        A lens with no App of its own edits under the shared identity. Best
+        effort and never raises: a missed update leaves boxes unchecked."""
         if not parent or not updates:
             return
         url = f"https://api.github.com/repos/{t.repository}/issues/{parent}/comments"
@@ -15046,11 +15060,16 @@ class SwarmDispatcher:
                         "its header: not published"
                     )
                     continue
-                token = await self._lens_app_token(
-                    lens, agents_by_lens.get(lens, ""), t.repository
-                )
-                if not token:
-                    continue
+                if _github_app_token.lens_has_own_app(lens):
+                    token = await self._lens_app_token(
+                        lens, agents_by_lens.get(lens, ""), t.repository
+                    )
+                    if not token:
+                        continue  # an App with no token never falls back
+                    write_headers = {"Accept": "application/vnd.github+json",
+                                     "Authorization": f"Bearer {token}"}
+                else:
+                    write_headers = self._github_headers(t.repository)
                 async with httpx.AsyncClient(timeout=30) as client:
                     resp = await client.get(
                         url, params={"per_page": 100},
@@ -15069,8 +15088,7 @@ class SwarmDispatcher:
                         f"https://api.github.com/repos/{t.repository}/issues/comments/"
                         f"{own[-1]['id']}",
                         json={"body": text.strip()},
-                        headers={"Accept": "application/vnd.github+json",
-                                 "Authorization": f"Bearer {token}"},
+                        headers=write_headers,
                     )
                     patch.raise_for_status()
             except Exception as exc:  # noqa: BLE001 — best effort
