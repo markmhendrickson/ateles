@@ -691,3 +691,302 @@ def test_drive_session_sees_a_result_that_shares_a_chunk(tmp_path, monkeypatch):
         "ok",
         "ok",
     ]
+
+
+# Local family/evidence capabilities are opt-in; legacy rule scenarios stay inert.
+def _family_store(tmp_path, state=None, control=None):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "neotoma_state.json").write_text(
+        json.dumps(state or {"entities": {}, "relationships": []})
+    )
+    (tmp_path / "fixture_control.json").write_text(
+        json.dumps(
+            {
+                "family_tools": True,
+                "local_writes": True,
+                "page_size": 2,
+                **(control or {}),
+            }
+        )
+    )
+    return fixture_mcp_server.Store(ws)
+
+
+def _fixture_call(store, tool, args):
+    result = fixture_mcp_server.call_tool(store, tool, args)
+    store.log(tool, args, result)
+    return result
+
+
+def test_local_entity_pagination_requires_all_pages_and_stable_filters(tmp_path):
+    entities = {
+        f"ent_fixture_{i}": {"entity_type": "task", "snapshot": {"title": "task"}}
+        for i in range(5)
+    }
+    store = _family_store(tmp_path, {"entities": entities, "relationships": []})
+    first = _fixture_call(
+        store, "retrieve_entities", {"entity_type": "task", "limit": 99}
+    )
+    assert len(first["entities"]) == 2 and first["total"] == 5
+    second = _fixture_call(
+        store,
+        "retrieve_entities",
+        {"entity_type": "task", "cursor": first["next_cursor"]},
+    )
+    last = _fixture_call(
+        store,
+        "retrieve_entities",
+        {"entity_type": "task", "cursor": second["next_cursor"]},
+    )
+    assert [
+        x["entity_id"] for page in [first, second, last] for x in page["entities"]
+    ] == sorted(entities)
+    assert last["next_cursor"] is None
+    wrong = _fixture_call(
+        store,
+        "retrieve_entities",
+        {"entity_type": "plan", "cursor": first["next_cursor"]},
+    )
+    assert "error" in wrong
+    assert "error" in _fixture_call(
+        store, "retrieve_entities", {"cursor": "not-a-cursor"}
+    )
+
+
+def test_fixture_relationship_event_changes_authoritative_second_read(tmp_path):
+    old = [
+        {
+            "source_entity_id": "task",
+            "target_entity_id": "plan_old",
+            "relationship_type": "PART_OF",
+        }
+    ]
+    new = [{**old[0], "target_entity_id": "plan_new"}]
+    store = _family_store(
+        tmp_path,
+        {"entities": {}, "relationships": old},
+        {
+            "events": [
+                {
+                    "id": "replan",
+                    "tool": "list_relationships",
+                    "match": {"entity_id": "task"},
+                    "on_match": 2,
+                    "relationships": new,
+                }
+            ]
+        },
+    )
+    args = {
+        "entity_id": "task",
+        "direction": "outbound",
+        "relationship_type": "PART_OF",
+    }
+    assert _fixture_call(store, "list_relationships", args)["relationships"] == old
+    assert _fixture_call(store, "list_relationships", args)["relationships"] == new
+    assert _fixture_call(store, "list_relationships", args)["relationships"] == new
+    assert json.loads((tmp_path / "fixture_events_applied.json").read_text()) == [
+        "replan"
+    ]
+
+
+def test_local_digest_persists_stable_identity_and_exact_readback(tmp_path):
+    store = _family_store(tmp_path)
+    row = {
+        "entity_type": "session_digest",
+        "schema_version": "1.6.0",
+        "session_key": "codex:fixture_root",
+        "tasks_claimed": [{"claim": "old", "status_claimed": "complete"}],
+        "artifacts": [{"ref": "old"}],
+    }
+    result = _fixture_call(store, "store", {"entities": [row]})
+    eid = result["entity_ids"][0]
+    fetched = _fixture_call(store, "retrieve_entity_snapshot", {"entity_id": eid})
+    assert fetched["snapshot"]["tasks_claimed"] == row["tasks_claimed"]
+    updated = {**row, "tasks_claimed": row["tasks_claimed"] + [{"claim": "new"}]}
+    again = _fixture_call(store, "store", {"entities": [updated]})
+    assert again["entity_ids"] == [eid]
+    assert len(store.load()["entities"]) == 1
+    assert _fixture_call(store, "retrieve_entity_snapshot", {"entity_id": eid})[
+        "snapshot"
+    ]["artifacts"] == [{"ref": "old"}]
+    schema = _fixture_call(
+        store, "describe_entity_type", {"entity_type": "session_digest"}
+    )
+    assert "session_key" in schema["required_fields"]
+    before = store.state_path.read_bytes()
+    assert "error" in _fixture_call(
+        store, "store", {"entities": [{**row, "made_up": True}]}
+    )
+    assert store.state_path.read_bytes() == before
+
+
+def test_local_store_relationships_are_real_idempotent_edges_not_success_echo(tmp_path):
+    store = _family_store(tmp_path)
+    result = _fixture_call(
+        store,
+        "store",
+        {
+            "entities": [
+                {
+                    "entity_type": "conversation",
+                    "entity_id": "conversation",
+                    "conversation_id": "fixture",
+                },
+                {"entity_type": "task", "entity_id": "task", "title": "fixture task"},
+            ],
+            "relationships": [
+                {"source_index": 0, "target_index": 1, "relationship_type": "REFERS_TO"}
+            ],
+        },
+    )
+    assert result["success"] and result["entity_ids"] == ["conversation", "task"]
+    edge = {
+        "source_entity_id": "conversation",
+        "target_entity_id": "task",
+        "relationship_type": "REFERS_TO",
+    }
+    assert _fixture_call(store, "create_relationship", edge)["success"]
+    assert _fixture_call(store, "list_relationships", {"entity_id": "conversation"})[
+        "relationships"
+    ] == [edge]
+    assert "error" in _fixture_call(
+        store, "create_relationship", {**edge, "target_entity_id": "missing"}
+    )
+
+
+def test_synthetic_answer_acceptance_and_consumption_are_distinct(tmp_path):
+    entities = {
+        "q_A": {
+            "entity_type": "conversation_message",
+            "snapshot": {
+                "task_id": "task_A",
+                "checkpoint_id": "cp_A",
+                "recipient_session_id": "receiver",
+            },
+        },
+        "answer_A": {
+            "entity_type": "conversation_message",
+            "snapshot": {
+                "sender_kind": "human",
+                "question_id": "q_A",
+                "task_id": "task_A",
+            },
+        },
+        "cp_B": {
+            "entity_type": "checkpoint",
+            "snapshot": {"status": "awaiting_operator"},
+        },
+    }
+    store = _family_store(
+        tmp_path,
+        {
+            "entities": entities,
+            "relationships": [],
+            "sessions": {"receiver": {"accepts_answers": True, "items": []}},
+        },
+    )
+    args = {
+        "question_id": "q_A",
+        "task_id": "task_A",
+        "checkpoint_id": "cp_A",
+        "answer_id": "answer_A",
+        "recipient_session_id": "receiver",
+    }
+    accepted = _fixture_call(store, "fixture_route_answer", args)
+    assert accepted["status"] == "queued"
+    assert (
+        _fixture_call(store, "fixture_route_answer", args)["receipt_id"]
+        == accepted["receipt_id"]
+    )
+    assert len(store.load()["answer_receipts"]) == 1
+    observed = _fixture_call(store, "fixture_read_session", {"session_id": "receiver"})
+    assert observed["answer_receipts"][0]["status"] == "consumed"
+    assert observed["answer_receipts"][0]["consumer_session_id"] == "receiver"
+    assert store.load()["entities"]["cp_B"] == entities["cp_B"]
+    assert "error" in _fixture_call(
+        store, "fixture_route_answer", {**args, "checkpoint_id": "cp_B"}
+    )
+
+
+def test_local_owned_action_writes_artifact_once_and_preserves_held_task(tmp_path):
+    task = {
+        "entity_type": "task",
+        "snapshot": {"owner_session_id": "receiver", "status": "blocked"},
+    }
+    store = _family_store(
+        tmp_path,
+        {
+            "entities": {"task": task},
+            "relationships": [],
+            "sessions": {
+                "receiver": {
+                    "custody_qualified": True,
+                    "handoff_ack": True,
+                    "predecessor_id": "old",
+                }
+            },
+        },
+        {
+            "local_actions": {
+                "task": {
+                    "path": "artifacts/result.json",
+                    "content": '{"result":"complete"}',
+                }
+            }
+        },
+    )
+    args = {"task_id": "task", "session_id": "receiver"}
+    assert _fixture_call(store, "fixture_start_owned_work", args)["accepted"]
+    assert (
+        json.loads((store.state_path.parent / "artifacts/result.json").read_text())[
+            "result"
+        ]
+        == "complete"
+    )
+    assert _fixture_call(store, "fixture_start_owned_work", args)["accepted"]
+    assert len(store.load()["activity"]) == 1
+    assert store.load()["entities"]["task"] == task
+    assert "error" in _fixture_call(
+        store, "fixture_start_owned_work", {**args, "session_id": "wrong"}
+    )
+    assert "error" in _fixture_call(
+        store, "fixture_perform_effect", {"effect_id": "confirmed"}
+    )
+
+
+def test_family_capability_rpc_calls_are_recorded_and_paginated(tmp_path):
+    store = _family_store(
+        tmp_path,
+        {
+            "entities": {},
+            "relationships": [],
+            "sessions": {
+                f"session_{i}": {
+                    "source_kind": "subAgent",
+                    "parent_session_id": "root",
+                    "items": [],
+                }
+                for i in range(3)
+            },
+        },
+    )
+    replies = _rpc(
+        store.state_path.parent,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "fixture_list_sessions",
+                    "arguments": {"source_kinds": ["subAgent"], "limit": 2},
+                },
+            }
+        ],
+    )
+    result = json.loads(replies[0]["result"]["content"][0]["text"])
+    assert len(result["threads"]) == 2 and result["nextCursor"]
+    logged = json.loads(store.log_path.read_text().splitlines()[0])
+    assert logged["tool"] == "fixture_list_sessions" and logged["state_sha256"]
