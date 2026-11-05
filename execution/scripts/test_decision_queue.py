@@ -61,25 +61,47 @@ def klass(b, t, newer=False):
         (brief(checkpoint_name="DESIGN"), task(), dq.RAISED_BY_PERSON_OR_SESSION),
         (brief(handler="cicada"), task(), dq.RAISED_BY_PERSON_OR_SESSION),
         (brief(handler=None), task(), dq.RAISED_BY_PERSON_OR_SESSION),
-        (brief(gate_action="operator_decision_brief"), task(), dq.RAISED_BY_PERSON_OR_SESSION),
-        (brief(reason="Eight decisions a design must assume."), task(), dq.RAISED_BY_PERSON_OR_SESSION),
         (
-            brief(reason=OP_ONLY, blast_radius="never", plan_summary="Action: operator_only."),
+            brief(gate_action="operator_decision_brief"),
+            task(),
+            dq.RAISED_BY_PERSON_OR_SESSION,
+        ),
+        (
+            brief(reason="Eight decisions a design must assume."),
+            task(),
+            dq.RAISED_BY_PERSON_OR_SESSION,
+        ),
+        (
+            brief(
+                reason=OP_ONLY,
+                blast_radius="never",
+                plan_summary="Action: operator_only.",
+            ),
             task(blocked_reason=OP_ONLY),
             dq.OPERATOR_ONLY,
         ),
         (
-            brief(reason=OP_ONLY, blast_radius="never", plan_summary="Action: decision."),
+            brief(
+                reason=OP_ONLY, blast_radius="never", plan_summary="Action: decision."
+            ),
             task(blocked_reason=OP_ONLY),
             dq.OPERATOR_ONLY,
         ),
         (
-            brief(reason=OP_ONLY, blast_radius="never", plan_summary="Action: code_review."),
+            brief(
+                reason=OP_ONLY,
+                blast_radius="never",
+                plan_summary="Action: code_review.",
+            ),
             task(blocked_reason=OP_ONLY),
             dq.OPERATOR_ONLY_LABEL,
         ),
         (
-            brief(reason=OP_ONLY, blast_radius="never", plan_summary="Action: code_review."),
+            brief(
+                reason=OP_ONLY,
+                blast_radius="never",
+                plan_summary="Action: code_review.",
+            ),
             task(status="done"),
             dq.OPERATOR_ONLY_TASK_FINISHED,
         ),
@@ -90,25 +112,53 @@ def klass(b, t, newer=False):
         (brief(), task(status="cancelled"), dq.TASK_FINISHED),
         (brief(), task(status="in_progress"), dq.TASK_MOVED_ON),
         (brief(), task(status="pending", blocked_reason=""), dq.TASK_MOVED_ON),
-        (brief(), task(blocked_reason="Draft staged; a person reviews before any send."), dq.SESSION_WROTE_HOLD),
+        (
+            brief(),
+            task(blocked_reason="Draft staged; a person reviews before any send."),
+            dq.SESSION_WROTE_HOLD,
+        ),
         (brief(), task(blocked_reason=""), dq.SESSION_WROTE_HOLD),
         (brief(), task(owner="codex:01a17dee"), dq.LIVE_SESSION_OWNED),
-        (brief(), task(owner="coordinator: a Claude Code session"), dq.LIVE_SESSION_OWNED),
+        (
+            brief(),
+            task(owner="coordinator: a Claude Code session"),
+            dq.LIVE_SESSION_OWNED,
+        ),
         (brief(), task(owner="root01a18247 sole coordinator"), dq.LIVE_SESSION_OWNED),
         (
-            brief(reason=UNSCORED_HIGH, blast_radius="high", plan_summary="Action: payment."),
+            brief(
+                reason=UNSCORED_HIGH,
+                blast_radius="high",
+                plan_summary="Action: payment.",
+            ),
             task(blocked_reason=UNSCORED_HIGH),
             dq.LIVE_EFFECT,
         ),
         (
-            brief(reason=UNSCORED_HIGH, blast_radius="high", plan_summary="Action: send_external_comms."),
+            brief(
+                reason=UNSCORED_HIGH,
+                blast_radius="high",
+                plan_summary="Action: send_external_comms.",
+            ),
             task(blocked_reason=UNSCORED_HIGH),
             dq.LIVE_EFFECT,
         ),
-        (brief(), task(title="Decide the retention rule for call transcripts"), dq.LIVE_ASKS_FOR_DECISION),
-        (brief(), task(title="Operator: send the guide link"), dq.LIVE_ASKS_FOR_DECISION),
         (
-            brief(reason=UNSCORED_HIGH, blast_radius="high", plan_summary="Action: open_or_merge_pr."),
+            brief(),
+            task(title="Decide the retention rule for call transcripts"),
+            dq.LIVE_ASKS_FOR_DECISION,
+        ),
+        (
+            brief(),
+            task(title="Operator: send the guide link"),
+            dq.LIVE_ASKS_FOR_DECISION,
+        ),
+        (
+            brief(
+                reason=UNSCORED_HIGH,
+                blast_radius="high",
+                plan_summary="Action: open_or_merge_pr.",
+            ),
             task(blocked_reason=UNSCORED_HIGH),
             dq.LIVE_CODE,
         ),
@@ -131,7 +181,9 @@ def test_a_duplicate_is_the_older_of_two_on_a_live_task():
 # ── The order of the checks is the safety property ───────────────────────────
 
 
-@pytest.mark.parametrize("status", ["done", "in_progress", "pending", "awaiting_approval"])
+@pytest.mark.parametrize(
+    "status", ["done", "in_progress", "pending", "awaiting_approval"]
+)
 @pytest.mark.parametrize("newer", [True, False])
 def test_a_raised_hold_is_kept_whatever_became_of_the_task(status, newer):
     held = klass(brief(checkpoint_name="DESIGN"), task(status=status), newer=newer)
@@ -143,7 +195,9 @@ def test_a_raised_hold_is_kept_whatever_became_of_the_task(status, newer):
 @pytest.mark.parametrize("newer", [True, False])
 def test_an_operator_only_hold_is_kept_on_any_live_task(status, newer):
     held = klass(
-        brief(reason=OP_ONLY, blast_radius="never", plan_summary="Action: operator_only."),
+        brief(
+            reason=OP_ONLY, blast_radius="never", plan_summary="Action: operator_only."
+        ),
         task(status=status),
         newer=newer,
     )
@@ -194,7 +248,9 @@ def test_only_open_checkpoints_are_placed():
         record("ent_b", brief(status="superseded")),
         record("ent_c", brief(status="approved")),
     ]
-    placed = dq.classify_queue(briefs, {"ent_t": record("ent_t", task())}, now=NOW, person_owners=PEOPLE)
+    placed = dq.classify_queue(
+        briefs, {"ent_t": record("ent_t", task())}, now=NOW, person_owners=PEOPLE
+    )
     assert [p.checkpoint_id for p in placed] == ["ent_a"]
 
 
@@ -205,23 +261,35 @@ def test_the_newest_of_several_on_one_task_keeps_its_class():
     ]
     placed = {
         p.checkpoint_id: p.klass
-        for p in dq.classify_queue(briefs, {"ent_t": record("ent_t", task())}, now=NOW, person_owners=PEOPLE)
+        for p in dq.classify_queue(
+            briefs, {"ent_t": record("ent_t", task())}, now=NOW, person_owners=PEOPLE
+        )
     }
     assert placed == {"ent_old": dq.OLDER_DUPLICATE, "ent_new": dq.LIVE_LOW}
 
 
 def test_the_reading_counts_only_real_decisions_and_their_age():
     briefs = [
-        record("ent_real", brief(checkpoint_name="DESIGN"), at=NOW - timedelta(hours=100)),
-        record("ent_fresh", brief(checkpoint_name="DESIGN", task_entity_id="ent_u"), at=NOW - timedelta(hours=10)),
-        record("ent_noise", brief(task_entity_id="ent_v"), at=NOW - timedelta(hours=900)),
+        record(
+            "ent_real", brief(checkpoint_name="DESIGN"), at=NOW - timedelta(hours=100)
+        ),
+        record(
+            "ent_fresh",
+            brief(checkpoint_name="DESIGN", task_entity_id="ent_u"),
+            at=NOW - timedelta(hours=10),
+        ),
+        record(
+            "ent_noise", brief(task_entity_id="ent_v"), at=NOW - timedelta(hours=900)
+        ),
     ]
     tasks = {
         "ent_t": record("ent_t", task()),
         "ent_u": record("ent_u", task()),
         "ent_v": record("ent_v", task()),
     }
-    summary = dq.summarize(dq.classify_queue(briefs, tasks, now=NOW, person_owners=PEOPLE))
+    summary = dq.summarize(
+        dq.classify_queue(briefs, tasks, now=NOW, person_owners=PEOPLE)
+    )
     assert summary["total_open"] == 3
     assert summary["real_decisions"] == 2
     assert summary["real_decisions_over_limit"] == 1
@@ -234,7 +302,9 @@ def test_a_real_decision_counts_once_per_task_in_the_reading():
         record("ent_2", brief(checkpoint_name="DESIGN"), at=NOW - timedelta(hours=100)),
     ]
     summary = dq.summarize(
-        dq.classify_queue(briefs, {"ent_t": record("ent_t", task())}, now=NOW, person_owners=PEOPLE)
+        dq.classify_queue(
+            briefs, {"ent_t": record("ent_t", task())}, now=NOW, person_owners=PEOPLE
+        )
     )
     assert summary["real_decisions"] == 1
     assert summary["real_decisions_oldest_hours"] == 200.0
@@ -287,8 +357,14 @@ def test_approval_cannot_release_in_these_cases(b, t):
 def test_person_names_come_from_the_environment(monkeypatch):
     monkeypatch.setenv("ATELES_OPERATOR_NAMES", "Sam, Sam Doe")
     monkeypatch.delenv("APIS_OPERATOR_LOGIN", raising=False)
-    assert dq.classify_one(brief(), task(owner="sam doe"), has_newer_open=False) == dq.OWNED_BY_PERSON
-    assert dq.classify_one(brief(), task(owner="someone else"), has_newer_open=False) == dq.LIVE_LOW
+    assert (
+        dq.classify_one(brief(), task(owner="sam doe"), has_newer_open=False)
+        == dq.OWNED_BY_PERSON
+    )
+    assert (
+        dq.classify_one(brief(), task(owner="someone else"), has_newer_open=False)
+        == dq.LIVE_LOW
+    )
 
 
 # ── copies must not drift from the code that owns them ──────────────────────
@@ -318,7 +394,9 @@ def test_every_automatic_prefix_has_a_named_owner_and_nothing_extra():
 @pytest.mark.parametrize("prefix,owner", sorted(_PREFIX_OWNERS.items()))
 def test_automatic_prefix_is_still_composed_by_its_owner(prefix, owner):
     """Fails when the gating code rewords a reason the classifier calls automatic."""
-    assert prefix in (_REPO / owner).read_text(), f"{owner} no longer composes {prefix!r}"
+    assert prefix in (_REPO / owner).read_text(), (
+        f"{owner} no longer composes {prefix!r}"
+    )
 
 
 def test_effect_action_types_match_the_gates_own_high_blast_set():
@@ -332,6 +410,12 @@ def test_effect_action_types_match_the_gates_own_high_blast_set():
         "an effect type the gate does not list as high blast"
     )
     # safe direction: the gate's outward types must all be kept as real
-    outward = {"payment", "send_external_comms", "publish", "release",
-               "delete_entity_or_data", "external_api_write"}
+    outward = {
+        "payment",
+        "send_external_comms",
+        "publish",
+        "release",
+        "delete_entity_or_data",
+        "external_api_write",
+    }
     assert outward <= owned and outward <= dq.EFFECT_ACTION_TYPES

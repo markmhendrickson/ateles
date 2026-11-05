@@ -58,7 +58,9 @@ METRIC_OVER_LIMIT = "Q1_real_decisions_waiting_over_72h"
 METRIC_AUTOMATIC = "Q2_automatic_holds_added_24h"
 #: The live record type that holds the operator's open holds. Its name is retired in the
 #: foundation vocabulary but the records are still written under it until migration.md runs.
-CHECKPOINT_RECORD_TYPE = "checkpoint_brief"  # vocab-ok: live record type, retired name pending migration
+CHECKPOINT_RECORD_TYPE = (
+    "checkpoint_brief"  # vocab-ok: live record type, retired name pending migration
+)
 STORABLE_TYPES = frozenset({"metric_definition", "metric_reading"})
 WAIT_LIMIT_HOURS = 72.0
 NEW_HOLD_HOURS = 24.0
@@ -81,7 +83,9 @@ NOTICE = (
     "than 36 hours old, the job has stopped: tell the operator it needs looking at."
 )
 
-_NON_PROD_LABELS = frozenset({"dev", "staging", "stage", "test", "qa", "sandbox", "preview", "local"})
+_NON_PROD_LABELS = frozenset(
+    {"dev", "staging", "stage", "test", "qa", "sandbox", "preview", "local"}
+)
 
 
 class ReadFailure(RuntimeError):
@@ -95,10 +99,13 @@ class ReadFailure(RuntimeError):
 
 # ── write guard ──────────────────────────────────────────────────────────────
 
+
 def guarded_request(inner: Requester) -> Requester:
     """Wrap a requester so the only write it can make is a metric ``/store``."""
 
-    def call(method: str, path: str, body: dict[str, Any] | None = None, **kw: Any) -> dict[str, Any]:
+    def call(
+        method: str, path: str, body: dict[str, Any] | None = None, **kw: Any
+    ) -> dict[str, Any]:
         verb = method.upper()
         if verb == "GET":
             return inner(method, path, body, **kw)
@@ -116,6 +123,7 @@ def guarded_request(inner: Requester) -> Requester:
 
 
 # ── reading ──────────────────────────────────────────────────────────────────
+
 
 def read_all_by_cursor(
     entity_type: str,
@@ -137,7 +145,11 @@ def read_all_by_cursor(
     cursor: str | None = None
     total: int | None = None
     for page_no in range(max_pages):
-        body: dict[str, Any] = {"entity_type": entity_type, "include_snapshots": True, "limit": page}
+        body: dict[str, Any] = {
+            "entity_type": entity_type,
+            "include_snapshots": True,
+            "limit": page,
+        }
         if cursor:
             body["cursor"] = cursor
         try:
@@ -163,7 +175,11 @@ def read_all_by_cursor(
 
 def _category(exc: BaseException) -> str:
     status = getattr(exc, "status", None)
-    return f"{type(exc).__name__}:{status}" if isinstance(status, int) else type(exc).__name__
+    return (
+        f"{type(exc).__name__}:{status}"
+        if isinstance(status, int)
+        else type(exc).__name__
+    )
 
 
 def server_open_total(requester: Requester) -> int:
@@ -176,7 +192,9 @@ def server_open_total(requester: Requester) -> int:
                 "entity_type": CHECKPOINT_RECORD_TYPE,
                 "include_snapshots": False,
                 "limit": 1,
-                "snapshot_filters": {"status": {"op": "eq", "value": "awaiting_operator"}},
+                "snapshot_filters": {
+                    "status": {"op": "eq", "value": "awaiting_operator"}
+                },
             },
         )
     except Exception as exc:  # noqa: BLE001
@@ -219,6 +237,7 @@ def operator_names(requester: Requester) -> tuple[frozenset[str], str | None]:
 
 # ── numbers ──────────────────────────────────────────────────────────────────
 
+
 def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -248,7 +267,9 @@ def real_decision_list(
     for key, p in best.items():
         candidates = [t for t in (dq._parse_time(p.raised_at), previous.get(key)) if t]
         first_seen = min(candidates) if candidates else None
-        age = round((now - first_seen).total_seconds() / 3600, 1) if first_seen else None
+        age = (
+            round((now - first_seen).total_seconds() / 3600, 1) if first_seen else None
+        )
         rows.append(
             {
                 "task_id": key,
@@ -269,7 +290,11 @@ def compute_reading(
     limit_hours: float = WAIT_LIMIT_HOURS,
 ) -> dict[str, Any]:
     summary = dq.summarize(placements, wait_limit_hours=limit_hours)
-    new = [p for p in placements if p.age_hours is not None and p.age_hours <= NEW_HOLD_HOURS]
+    new = [
+        p
+        for p in placements
+        if p.age_hours is not None and p.age_hours <= NEW_HOLD_HOURS
+    ]
     new_real = [p for p in new if p.klass in dq.REAL_DECISION_CLASSES]
     listing = real_decision_list(placements, now, previous_first_seen)
     if len(listing) != summary["real_decisions"]:
@@ -327,7 +352,11 @@ def load_previous_first_seen(path: Path) -> tuple[dict[str, datetime], str | Non
 
 
 def build_metric_readings(
-    numbers: dict[str, Any], now: datetime, *, note: str | None = None, coverage_ratio: float = 1.0
+    numbers: dict[str, Any],
+    now: datetime,
+    *,
+    note: str | None = None,
+    coverage_ratio: float = 1.0,
 ) -> list[dict[str, Any]]:
     end = now.astimezone(timezone.utc).date()
     window_end = end.isoformat()
@@ -347,7 +376,9 @@ def build_metric_readings(
     return [
         schemas.build_record(
             "metric_reading",
-            reading_key=schemas.reading_key(METRIC_OVER_LIMIT, ARTIFACT_REF, window_end),
+            reading_key=schemas.reading_key(
+                METRIC_OVER_LIMIT, ARTIFACT_REF, window_end
+            ),
             metric_ref=METRIC_OVER_LIMIT,
             value=numbers["real_decisions_over_limit"],
             unit="decisions",
@@ -377,14 +408,21 @@ def build_metric_readings(
 
 
 def own_definitions() -> list[dict[str, Any]]:
-    return [d for d in definitions.build_definitions() if d.get("collector") == COLLECTOR]
+    return [
+        d for d in definitions.build_definitions() if d.get("collector") == COLLECTOR
+    ]
 
 
 # ── publishing ───────────────────────────────────────────────────────────────
 
+
 def default_path() -> Path:
     override = os.environ.get("DECISION_QUEUE_READING_PATH", "").strip()
-    return Path(override) if override else Path.home() / ".local/state/ateles/decision-queue-reading.json"
+    return (
+        Path(override)
+        if override
+        else Path.home() / ".local/state/ateles/decision-queue-reading.json"
+    )
 
 
 def write_document(path: Path, document: dict[str, Any]) -> None:
@@ -432,12 +470,17 @@ def assert_prod_target() -> None:
     from lib.capabilities import neotoma_http
 
     host = (urllib.parse.urlparse(neotoma_http.base_url()).hostname or "").lower()
-    if set(host.split(".")) & _NON_PROD_LABELS or host in ("localhost", "127.0.0.1", "::1"):
+    if set(host.split(".")) & _NON_PROD_LABELS or host in (
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    ):
         raise ReadFailure("target", "non_prod_target")
     neotoma_http.bearer_token()
 
 
 # ── orchestration ────────────────────────────────────────────────────────────
+
 
 def run(
     requester: Requester,
@@ -453,7 +496,9 @@ def run(
     instrument: dict[str, Any] | None = None
     previous, why_prev = load_previous_first_seen(path or default_path())
 
-    def finish(status: str, numbers: dict[str, Any] | None, code: int) -> tuple[int, dict[str, Any]]:
+    def finish(
+        status: str, numbers: dict[str, Any] | None, code: int
+    ) -> tuple[int, dict[str, Any]]:
         if numbers is not None and status in ("ok", "partial"):
             carry = {
                 r["task_id"]: t
@@ -464,7 +509,10 @@ def run(
             carry = previous  # an invalid run must not lose the clock
         if why_prev:
             failed.append(
-                {"check": "previous_reading", "reason": why_prev + "; aged from raised_at"}
+                {
+                    "check": "previous_reading",
+                    "reason": why_prev + "; aged from raised_at",
+                }
             )
         doc = build_document(
             status=status,
@@ -478,7 +526,10 @@ def run(
             try:
                 write_document(path or default_path(), doc)
             except (OSError, TypeError, ValueError) as exc:
-                print(f"COULD NOT WRITE READING FILE: {type(exc).__name__}", file=sys.stderr)
+                print(
+                    f"COULD NOT WRITE READING FILE: {type(exc).__name__}",
+                    file=sys.stderr,
+                )
                 return 1, doc
         return code, doc
 
@@ -486,7 +537,9 @@ def run(
         briefs = read_all_by_cursor(CHECKPOINT_RECORD_TYPE, requester, pause=pause)
         tasks = read_all_by_cursor("task", requester, pause=pause)
         client_open = sum(
-            1 for r in briefs if (r.get("snapshot") or {}).get("status") == "awaiting_operator"
+            1
+            for r in briefs
+            if (r.get("snapshot") or {}).get("status") == "awaiting_operator"
         )
         server_total = server_open_total(requester)
     except ReadFailure as exc:
@@ -507,7 +560,9 @@ def run(
 
     names, why = operator_names(requester)
     if why:
-        failed.append({"check": "operator_profile", "reason": why + "; classifier default used"})
+        failed.append(
+            {"check": "operator_profile", "reason": why + "; classifier default used"}
+        )
     people = dq._person_owners() | names
     tasks_by_id = {r["entity_id"]: r for r in tasks if r.get("entity_id")}
     placements = dq.classify_queue(briefs, tasks_by_id, now=now, person_owners=people)
@@ -537,7 +592,10 @@ def run(
     problems: list[str] = []
     try:
         problems += neotoma_io.store_and_verify(
-            own_definitions(), "decision-queue-definitions", "metric_id", requester=requester
+            own_definitions(),
+            "decision-queue-definitions",
+            "metric_id",
+            requester=requester,
         )
         problems += neotoma_io.store_and_verify(
             records, "decision-queue-readings", "reading_key", requester=requester
@@ -557,8 +615,12 @@ def main(
     now: datetime | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--once", action="store_true", help="run one reading (the default)")
-    parser.add_argument("--dry-run", action="store_true", help="read and print; write nothing")
+    parser.add_argument(
+        "--once", action="store_true", help="run one reading (the default)"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="read and print; write nothing"
+    )
     args = parser.parse_args(argv)
 
     if requester is None:
@@ -569,7 +631,10 @@ def main(
         try:
             assert_prod_target()
         except Exception as exc:  # noqa: BLE001
-            print(f"REFUSED: {getattr(exc, 'reason', type(exc).__name__)}", file=sys.stderr)
+            print(
+                f"REFUSED: {getattr(exc, 'reason', type(exc).__name__)}",
+                file=sys.stderr,
+            )
             return 2
         requester = neotoma_io.request
     code, doc = run(requester, now or datetime.now(timezone.utc), dry_run=args.dry_run)

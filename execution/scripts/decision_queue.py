@@ -191,9 +191,9 @@ def approval_could_release(brief: dict, task_record: dict | None) -> bool:
     record and one bound to a different revision of the task, and files a fresh
     checkpoint instead.
     """
-    if not task_record or normalize((task_record.get("snapshot") or {}).get("status")) != (
-        "awaiting_approval"
-    ):
+    if not task_record or normalize(
+        (task_record.get("snapshot") or {}).get("status")
+    ) != ("awaiting_approval"):
         return False
     if str(brief.get("blast_radius") or "").strip().lower() not in {"low", "high"}:
         return False
@@ -207,8 +207,10 @@ def approval_could_release(brief: dict, task_record: dict | None) -> bool:
     return (
         isinstance(envelope, dict)
         and envelope.get("task_entity_id") == task_record.get("entity_id")
-        and envelope.get("task_observation_count") == task_record.get("observation_count")
-        and envelope.get("task_last_observation_at") == task_record.get("last_observation_at")
+        and envelope.get("task_observation_count")
+        == task_record.get("observation_count")
+        and envelope.get("task_last_observation_at")
+        == task_record.get("last_observation_at")
     )
 
 
@@ -237,10 +239,16 @@ def classify_one(
     owner = str(task.get("owner") or "").strip().lower()
     status = task.get("status")
     task_reason = str(task.get("blocked_reason") or "").strip()
-    if reason.startswith(OPERATOR_ONLY_PREFIX) or task_reason.startswith(OPERATOR_ONLY_PREFIX):
+    if reason.startswith(OPERATOR_ONLY_PREFIX) or task_reason.startswith(
+        OPERATOR_ONLY_PREFIX
+    ):
         if is_terminal(status):
             return OPERATOR_ONLY_TASK_FINISHED
-        return OPERATOR_ONLY if action_type in OPERATOR_ACTION_TYPES else OPERATOR_ONLY_LABEL
+        return (
+            OPERATOR_ONLY
+            if action_type in OPERATOR_ACTION_TYPES
+            else OPERATOR_ONLY_LABEL
+        )
 
     # 3. A person owns it.
     if not is_terminal(status) and (assigned in people or owner in people):
@@ -324,7 +332,9 @@ def classify_queue(
                 blast_radius=brief.get("blast_radius"),
                 raised_at=record.get("last_observation_at"),
                 age_hours=(
-                    round((moment - raised).total_seconds() / 3600, 1) if raised else None
+                    round((moment - raised).total_seconds() / 3600, 1)
+                    if raised
+                    else None
                 ),
                 task_status=(task or {}).get("status"),
                 approval_could_release=approval_could_release(brief, task_record),
@@ -370,9 +380,15 @@ def _load_ndjson(path: Path) -> list[dict]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--briefs", type=Path, required=True, help="NDJSON of checkpoint records")
-    parser.add_argument("--tasks", type=Path, required=True, help="NDJSON of task records")
-    parser.add_argument("--placements", type=Path, help="write every placement here as NDJSON")
+    parser.add_argument(
+        "--briefs", type=Path, required=True, help="NDJSON of checkpoint records"
+    )
+    parser.add_argument(
+        "--tasks", type=Path, required=True, help="NDJSON of task records"
+    )
+    parser.add_argument(
+        "--placements", type=Path, help="write every placement here as NDJSON"
+    )
     args = parser.parse_args(argv)
 
     tasks = {record["entity_id"]: record for record in _load_ndjson(args.tasks)}
