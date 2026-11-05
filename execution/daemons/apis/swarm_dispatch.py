@@ -2809,20 +2809,6 @@ def _returned_sections(text: str) -> tuple[dict[str, list[str]], str] | None:
     return found, "\n".join(outside)
 
 
-def strip_lens_review_markers(text: str) -> str:
-    """*text* with every swarm marker the readers accept defused (its `:` and
-    `-` become spaces), repeated until stable. Defence in depth only: a
-    returned response holding any is refused before this runs."""
-    text = text or ""
-    while True:
-        cleaned = _FOREIGN_MARKER_RE.sub(
-            lambda m: m.group(0).replace(":", " ").replace("-", " "), text
-        )
-        if cleaned == text:
-            return text.strip()
-        text = cleaned
-
-
 def _has_veto(text: str) -> bool:
     return output_has_blocking_verdict(text) or body_has_blocking_findings(text)
 
@@ -2861,8 +2847,9 @@ def parse_returned_lens_review(
     (never nested), nothing outside them that reads as a second verdict or
     header, and any veto in the whole response must be in the review itself.
     The review is the exact substring between its delimiter lines (outer
-    newlines only are dropped), and the reader must decide the same about it
-    after that as before. Anything else is None and the lens run is failed."""
+    newlines only are dropped), the reader must decide the same about it after
+    that as before, and it must carry a readable own verdict. Anything else is
+    None and the lens run is failed."""
     if _FOREIGN_MARKER_RE.search(stdout or ""):
         return None
     parsed = _returned_sections(stdout)
@@ -2883,11 +2870,22 @@ def parse_returned_lens_review(
         return None
     if _reader_view(raw_review, lens_agent) != _reader_view(review, lens_agent):
         return None
+    if lens_own_verdict(review, lens_agent=lens_agent) is None:
+        return None  # agreeing on "unreadable" is not acceptance
     return review, (update if update.strip() else None)
 
 
+def verified_remote_comment(lens: str, agent: str, review: str, head_sha: str) -> str | None:
+    """The final comment body for a returned review, or None when the readers
+    decide anything different about the body than about the judged review.
+    Run when the review is accepted and again immediately before it is posted,
+    on every publishing path."""
+    body = compose_remote_lens_comment(lens, review, head_sha)
+    return body if _reader_view(body, agent) == _reader_view(review, agent) else None
+
+
 def unwrap_returned_review(
-    result: SkillResult, lens_agent: str = ""
+    result: SkillResult, lens_agent: str = "", lens: str = "", head_sha: str = ""
 ) -> tuple[SkillResult, str | None]:
     """A return-only lens's result with its stdout reduced to the extracted
     review text, plus its expectation update. A truncated output (the tail
@@ -2899,6 +2897,10 @@ def unwrap_returned_review(
         None if getattr(result, "output_truncated", False)
         else parse_returned_lens_review(result.stdout, lens_agent)
     )
+    if parsed is not None and lens and (
+        verified_remote_comment(lens, lens_agent, parsed[0], head_sha) is None
+    ):
+        parsed = None  # the final comment would be read differently
     if parsed is None:
         return dataclasses.replace(
             result, ok=False, stdout="",
@@ -2908,14 +2910,10 @@ def unwrap_returned_review(
 
 
 def compose_remote_lens_comment(lens: str, text: str, commit_sha: str) -> str:
-    """The comment the dispatcher posts for a return-only lens: this lens's
-    head marker first and the only marker in it."""
-    return (
-        f"{compose_lens_review_marker(lens, commit_sha)}\n"
-        f"{strip_lens_review_markers(text)}\n\n"
-        "_Posted by the Apis dispatcher from a lens run that had no GitHub "
-        "write access._"
-    )
+    """The comment posted for a return-only lens: this lens's head marker, a
+    newline, then the reviewed bytes unchanged (no normalising, no footer: any
+    marker was refused before this point)."""
+    return f"{compose_lens_review_marker(lens, commit_sha)}\n{text}"
 
 
 # Stable marker embedded in every Vanellus aggregation comment so the
@@ -5793,7 +5791,9 @@ class SwarmDispatcher:
             await cleanup_pr_worktree(worktree)
 
         if return_only:
-            result, _ = unwrap_returned_review(result, lens.agent)
+            result, _ = unwrap_returned_review(
+                result, lens.agent, lens.lens, reviewed_head
+            )
         if not result.ok:
             raise RuntimeError(
                 f"lens '{lens_name}' run failed: "
@@ -8052,7 +8052,9 @@ class SwarmDispatcher:
             finally:
                 await cleanup_pr_worktree(qa_worktree)
             if return_only and lens.lens not in combined_results:
-                result, returned_update = unwrap_returned_review(result, lens.agent)
+                result, returned_update = unwrap_returned_review(
+                    result, lens.agent, lens.lens, review_head
+                )
                 if result.ok:
                     remote_lenses.add(lens.lens)
                     if returned_update:
@@ -15016,14 +15018,21 @@ class SwarmDispatcher:
                             f"#{t.number}; the lens stays pending until its App posts"
                         )
                         continue
-                    body = (
-                        compose_remote_lens_comment(lens, captured[lens], head_sha)
-                        if lens in remote_lenses
-                        else compose_fallback_comment(
+                    if lens in remote_lenses:
+                        body = verified_remote_comment(
+                            lens, agents.get(lens, ""), captured[lens], head_sha
+                        )
+                        if body is None:
+                            log.error(
+                                f"[{DAEMON_NAME}] review:{lens} final comment would be "
+                                f"read differently on {t.repository}#{t.number}: not posted"
+                            )
+                            continue
+                    else:
+                        body = compose_fallback_comment(
                             lens, agents.get(lens, "unknown panelist"),
                             captured[lens], head_sha,
                         )
-                    )
                     post = await client.post(
                         url, json={"body": body}, headers=self._github_headers(t.repository)
                     )
@@ -15069,9 +15078,16 @@ class SwarmDispatcher:
                 f"{t.repository}#{t.number}: the lens stays pending"
             )
             return False
+        body = verified_remote_comment(lens, agent, text, head_sha)
+        if body is None:
+            log.error(
+                f"[{DAEMON_NAME}] review:{lens} final comment would be read "
+                f"differently on {t.repository}#{t.number}: not posted"
+            )
+            return False
         resp = await client.post(
             url,
-            json={"body": compose_remote_lens_comment(lens, text, head_sha)},
+            json={"body": body},
             headers={"Accept": "application/vnd.github+json",
                      "Authorization": f"Bearer {token}"},
         )
