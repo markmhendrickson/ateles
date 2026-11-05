@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for the daily decision queue reading. Render by substituting <HOME>
+  (install.sh does this through render_daemon_plist.py). Read-only against
+  checkpoints and tasks: no model calls, no mail, no notifier. It writes one
+  reading file under ~/.local/state/ateles/ and two metric_reading records.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ateles.decision-queue-reading</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string><HOME>/ateles-rc-src/.venv/bin/python3</string>
+        <string><HOME>/ateles-rc-src/execution/daemons/decision-queue-reading/decision_queue_reading.py</string>
+        <string>--once</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string><HOME>/ateles-rc-src</string>
+
+    <!-- Daily at 07:30 local time. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string><HOME>/Library/Logs/ateles/decision-queue-reading.log</string>
+    <key>StandardErrorPath</key>
+    <string><HOME>/Library/Logs/ateles/decision-queue-reading.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string><HOME></string>
+        <key>PATH</key>
+        <string><HOME>/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
