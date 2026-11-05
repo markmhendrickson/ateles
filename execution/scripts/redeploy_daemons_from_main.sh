@@ -57,7 +57,22 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   log "another redeploy is in progress; skipping."
   exit 0
 fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+# The Fly admission holder (see below), if one is running. Released on every
+# exit path, so a deferred or failed run never leaves admission blocked.
+HOLDER_PID=""
+HOLDER_DIR=""
+release_admission() {
+  if [ -n "$HOLDER_PID" ]; then
+    kill "$HOLDER_PID" 2>/dev/null || true
+    wait "$HOLDER_PID" 2>/dev/null || true
+    HOLDER_PID=""
+  fi
+  if [ -n "$HOLDER_DIR" ]; then
+    rm -rf "$HOLDER_DIR" 2>/dev/null || true
+    HOLDER_DIR=""
+  fi
+}
+trap 'release_admission; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 cd "$RC_DIR" || { log "ERROR: RC_DIR $RC_DIR missing"; exit 1; }
 
@@ -73,14 +88,41 @@ fi
 
 # Defer while a Fly job is in flight. Apis awaits each Fly job it starts, so a
 # restart below would orphan the job (nothing left to read its result; the task
-# stays `executing`). Checked before the checkout is fast-forwarded, so the
-# checkout stays behind and the next scheduled run (StartInterval) deploys once
-# the job is done. The helper fails OPEN: any error, or no live reservation,
-# means deploy. Only exit 0 means "defer", and it prints only the count.
-if IN_FLIGHT="$(python3 "$SCRIPT_DIR/fly_jobs_in_flight.py" 2>/dev/null)"; then
-  log "DEFERRED: ${IN_FLIGHT} Fly job(s) in flight; leaving deploy checkout and daemons unchanged until the next run."
-  exit 0
+# stays `executing`). The helper takes the Fly runner's own admission lock
+# (the cross-process flock every reservation is made under), counts live
+# reservations while holding it, and keeps holding it until the restarts below
+# finish, so no new job can be reserved between this check and the restart;
+# launches that try meanwhile simply wait. The lock dies with the holder, which
+# also exits if this script dies, and after 15 minutes at most.
+#   busy  -> the lock is held (admission or the reaper at work): defer.
+#   ok N  -> N live reservations: defer if N > 0, else deploy holding the lock.
+#   anything else (the holder could not start or answer): fail OPEN and deploy,
+#   so a broken check still cannot stop fixes from deploying.
+# Checked before the checkout is fast-forwarded, so a deferred run leaves the
+# checkout behind and the next scheduled run (StartInterval) retries.
+HOLDER_REPLY=""
+if HOLDER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ateles-fly-hold.XXXXXX" 2>/dev/null)" \
+   && mkfifo "$HOLDER_DIR/reply" 2>/dev/null; then
+  python3 "$SCRIPT_DIR/fly_jobs_in_flight.py" --hold "$$" \
+    >"$HOLDER_DIR/reply" 2>/dev/null </dev/null &
+  HOLDER_PID=$!
+  # The background child opens the fifo for writing before it execs python, so
+  # this open always pairs; read -t bounds the wait for the answer.
+  read -r -t 90 HOLDER_REPLY <"$HOLDER_DIR/reply" || HOLDER_REPLY=""
 fi
+case "$HOLDER_REPLY" in
+  busy)
+    log "DEFERRED: Fly admission lock busy; leaving deploy checkout and daemons unchanged until the next run."
+    exit 0 ;;
+  "ok 0")
+    : ;;  # nothing in flight; keep the lock through the restarts
+  ok\ [1-9]*)
+    log "DEFERRED: ${HOLDER_REPLY#ok } Fly job(s) in flight; leaving deploy checkout and daemons unchanged until the next run."
+    exit 0 ;;
+  *)
+    log "WARNING: Fly in-flight check unavailable; deploying without it."
+    release_admission ;;
+esac
 
 # Refuse to deploy if HEAD has diverged from origin/main (not a fast-forward).
 # The deploy checkout must only ever fast-forward; a divergence means someone
@@ -135,6 +177,9 @@ for label in "${DAEMON_LABELS[@]}"; do
     fi
   fi
 done
+
+# Restarts done: let Fly admission resume.
+release_admission
 
 if [ "$rc" -eq 0 ]; then
   log "DEPLOYED: all daemons restarted at $(git rev-parse --short HEAD)."
