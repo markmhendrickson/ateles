@@ -1431,7 +1431,7 @@ def _existing_pr(sha=OLD_HEAD, **over):
 def _with_existing_pr_reads(monkeypatch, reads):
     """The repository read, then each PR read in turn (the last repeats); a
     fake clock that moves only when the wait sleeps, so tests take no time."""
-    pr_reads, sleeps, now = [], [], [1000.0]
+    pr_reads, sleeps, now = [], [], [time.time()]
 
     def fake(method, path, token, body=None):
         assert method == "GET"
@@ -1490,7 +1490,8 @@ def test_pre_push_read_does_not_wait(monkeypatch):
     with pytest.raises(rd.RepoWorkError) as exc:
         _require()
     assert exc.value.category == rd.PR_FAILED and len(reads) == 1 and sleeps == []
-    assert _require(head=OLD_HEAD).number == 12
+    _with_existing_pr_reads(monkeypatch, [_existing_pr(OLD_HEAD)])
+    assert _require(head=OLD_HEAD).number == 12  # an exact head still passes
 
 
 def test_existing_pr_wait_stays_within_the_delivery_deadline(monkeypatch):
