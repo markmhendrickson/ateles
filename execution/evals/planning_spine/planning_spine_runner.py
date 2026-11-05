@@ -16,6 +16,7 @@ model budget.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import importlib.util
 import json
@@ -45,10 +46,42 @@ def _load_rule_eval_runner():
 
 
 RULE_RUNNER = _load_rule_eval_runner()
+import fixture_mcp_server as fixture_backend  # noqa: E402
+
+
+def _fixture_overlay(base: dict, patch: dict) -> dict:
+    """Expand compact fixture variants, not production state or a policy store."""
+    result = copy.deepcopy(base)
+    for key, value in patch.items():
+        result[key] = (
+            _fixture_overlay(result[key], value)
+            if isinstance(value, dict) and isinstance(result.get(key), dict)
+            else copy.deepcopy(value)
+        )
+    return result
 
 
 def load_fixture() -> dict:
-    return json.loads((FIXTURES / "context.json").read_text())
+    fixture = json.loads((FIXTURES / "context.json").read_text())
+    base = fixture.get("family_base", {})
+    for case in fixture.get("family_cases", {}).values():
+        expanded = _fixture_overlay(base, case)
+        for path in expanded.pop("remove_paths", []):
+            parent = expanded
+            for key in path[:-1]:
+                parent = parent[key]
+            parent.pop(path[-1], None)
+        case.clear()
+        case.update(expanded)
+    contract = fixture.get("family_audit_contract", "")
+    for scenario in fixture["scenarios"].values():
+        if scenario.get("scorer") == "family_continuation" and contract:
+            scenario["prompt"] += "\n" + contract
+            if "prompts" in scenario:
+                scenario["prompts"] = [
+                    prompt + "\n" + contract for prompt in scenario["prompts"]
+                ]
+    return fixture
 
 
 def verify_review_bundle() -> list[str]:
@@ -110,10 +143,30 @@ def prepare_run(run_dir: Path, scenario: str) -> None:
         target.mkdir(parents=True)
         shutil.copy2(REPO_ROOT / row["path"], target / "SKILL.md")
 
-    state = {
-        "entities": fixture["entities"],
-        "relationships": fixture["relationships"],
-    }
+    case = fixture.get("family_cases", {}).get(scenario_data.get("case_id"))
+    state = (
+        copy.deepcopy(case["state"])
+        if case
+        else {
+            "entities": fixture["entities"],
+            "relationships": fixture["relationships"],
+        }
+    )
+    if case:
+        # Controls and scoring expectations are host inputs, never worker context.
+        (run_dir / "fixture_control.json").write_text(
+            json.dumps(case["control"], indent=2) + "\n"
+        )
+        for relative, content in case.get("artifacts", {}).items():
+            target = ws / relative
+            if not target.resolve().is_relative_to(ws.resolve()):
+                raise ValueError("fixture artifact escapes workspace")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+    (run_dir / "before_state.json").write_text(json.dumps(state, indent=2) + "\n")
+    (run_dir / "before_artifacts.json").write_text(
+        json.dumps(artifact_evidence(ws), indent=2) + "\n"
+    )
     (ws / "neotoma_state.json").write_text(json.dumps(state, indent=2) + "\n")
     hooks = {
         "PreToolUse": [
@@ -152,10 +205,102 @@ def prepare_run(run_dir: Path, scenario: str) -> None:
     (run_dir / "prompt.txt").write_text(scenario_data["prompt"] + "\n")
 
 
-def score_scenario_report(report: str, fixture: dict, scenario: str) -> dict:
+def artifact_evidence(ws: Path) -> dict:
+    """Capture only local artifact bytes; exclude fixture state and tool logs."""
+    root = ws / "artifacts"
+    return (
+        {
+            p.relative_to(ws).as_posix(): {
+                "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+                "bytes": p.stat().st_size,
+            }
+            for p in sorted(root.rglob("*"))
+            if p.is_file()
+            and not p.is_symlink()
+            and p.resolve().is_relative_to(root.resolve())
+        }
+        if root.is_dir()
+        else {}
+    )
+
+
+def collect_evidence(run_dir: Path) -> dict:
+    """Read accepted producer observations, retaining facts and their limits."""
+    ws = run_dir / "ws"
+    errors, infrastructure_errors = [], []
+    reader = fixture_backend.evidence
+
+    def read_json(path, label):
+        try:
+            return reader.read_json_file(path, label)[0]
+        except reader.EvidenceError as exc:
+            errors.append(str(exc))
+        except OSError as exc:
+            infrastructure_errors.append(label + ": " + type(exc).__name__)
+        return None
+
+    trace = reader.read_trace(ws / "mcp_calls.jsonl")
+    guard_path = ws / "guard_blocks.jsonl"
+    guard_blocks = []
+    if guard_path.exists():
+        try:
+            with guard_path.open("rb") as handle:
+                for raw, error in reader.read_frames(
+                    handle,
+                    byte_limit=reader.MAX_TRACE_BYTES,
+                    row_limit=reader.MAX_TRACE_RECORDS,
+                ):
+                    if error:
+                        infrastructure_errors.append("guard evidence: " + error)
+                    elif raw:
+                        guard_blocks.append(raw.decode("utf-8"))
+        except (OSError, UnicodeError) as exc:
+            infrastructure_errors.append("guard evidence: " + type(exc).__name__)
+    try:
+        artifacts = artifact_evidence(ws)
+    except OSError as exc:
+        artifacts = {}
+        infrastructure_errors.append("artifact evidence: " + type(exc).__name__)
+    evidence = {
+        "before_state": read_json(run_dir / "before_state.json", "before_state"),
+        "after_state": read_json(ws / "neotoma_state.json", "after_state"),
+        "before_artifacts": read_json(
+            run_dir / "before_artifacts.json", "before_artifacts"
+        ),
+        "artifacts": artifacts,
+        "calls": trace["attempts"],
+        "trace_evidence": {
+            key: trace[key] for key in ("complete", "issues", "provenance")
+        },
+        "guard_blocks": guard_blocks,
+        "backend_control": read_json(
+            run_dir / "fixture_control.json", "backend_control"
+        )
+        if (run_dir / "fixture_control.json").is_file()
+        else {},
+        "tool_effects": fixture_backend.TOOL_EFFECTS,
+        "registered_entity_types": sorted(fixture_backend.REGISTERED_TYPES),
+    }
+    evidence["state_errors"] = errors
+    evidence["infrastructure_errors"] = infrastructure_errors
+    evidence["planning_sha256"] = (
+        fixture_backend.planning_fingerprint(evidence["after_state"])
+        if not errors
+        else None
+    )
+    return evidence
+
+
+def score_scenario_report(
+    report: str, fixture: dict, scenario: str, evidence: dict | None = None
+) -> dict:
     """Select the scenario's effect scorer for one final report."""
     scenario_data = fixture["scenarios"][scenario]
     scorer = scenario_data.get("scorer", "planning_spine")
+    if scorer == "family_continuation":
+        return checks.score_family_continuation(
+            report, fixture, scenario_data, evidence
+        )
     if scorer == "source_session_resume":
         return checks.score_source_session_resume(report, fixture, scenario_data)
     if scorer == "planning_spine":
@@ -176,7 +321,7 @@ def run_scenario(
     prompt = (run_dir / "prompt.txt").read_text().strip()
     session = RULE_RUNNER.drive_session(
         run_dir,
-        [prompt],
+        load_fixture()["scenarios"][scenario].get("prompts", [prompt]),
         model,
         max_budget_usd,
         turn_timeout,
@@ -185,18 +330,40 @@ def run_scenario(
     result = RULE_RUNNER.result_event(turn)
     report = result.get("result") or ""
     transport_error = session["error"]
-    if report.startswith("API Error:"):
+    if isinstance(report, str) and report.startswith("API Error:"):
         transport_error = report
     fixture = load_fixture()
+    try:
+        evidence = collect_evidence(run_dir)
+    except OSError as exc:
+        evidence = {}
+        transport_error = (
+            transport_error or "fixture evidence unavailable: " + type(exc).__name__
+        )
+    evidence["turn_count"] = len(session["turns"])
+    is_family = fixture["scenarios"][scenario].get("scorer") == "family_continuation"
     scored = (
-        {
+        score_scenario_report(report, fixture, scenario, evidence)
+        if result and (is_family or not transport_error)
+        else {
             "outcome": "error",
             "failed": [],
             "infrastructure_error": transport_error or "no harness result",
         }
-        if transport_error or not result
-        else score_scenario_report(report, fixture, scenario)
     )
+    if is_family and (transport_error or not result):
+        criteria = fixture["family_cases"][fixture["scenarios"][scenario]["case_id"]][
+            "criteria"
+        ]
+        scored.update(
+            outcome="error", infrastructure_error=transport_error or "no harness result"
+        )
+        scored["failed"] = list(
+            dict.fromkeys(
+                scored.get("failed", [])
+                + checks.known_attempt_failures(criteria, evidence)
+            )
+        )
     output = {
         "scenario": scenario,
         "model": model,
@@ -217,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
             "continue-session-missing-session,continue-session-ambiguous-session,"
             "continue-session-empty-session,continue-session-unreadable-session,digest"
         ),
-        help="comma-separated scenario names",
+        help="comma-separated scenario names, or all",
     )
     parser.add_argument("--model", default="sonnet")
     parser.add_argument("--max-run-usd", type=float, default=2.0)
@@ -231,7 +398,11 @@ def main(argv: list[str] | None = None) -> int:
         for error in bundle_errors:
             print(f"ERROR {error}", file=sys.stderr)
         return 1
-    scenarios = [item.strip() for item in args.scenarios.split(",") if item.strip()]
+    scenarios = (
+        list(load_fixture()["scenarios"])
+        if args.scenarios == "all"
+        else [item.strip() for item in args.scenarios.split(",") if item.strip()]
+    )
     bad = [item for item in scenarios if item not in load_fixture()["scenarios"]]
     if bad:
         parser.error(f"unknown scenarios: {', '.join(bad)}")
