@@ -127,7 +127,7 @@ fi
 # relaunches it, forcing a fresh module import from the updated source.
 rc=0
 for label in "${DAEMON_LABELS[@]}"; do
-  log "hard-restarting $label…"
+  log "hard-restarting ${label}…"
   if ! launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null; then
     if ! launchctl kickstart -k "user/$(id -u)/$label" 2>/dev/null; then
       log "WARNING: failed to kickstart $label (not loaded?); continuing"

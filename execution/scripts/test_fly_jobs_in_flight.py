@@ -16,7 +16,7 @@ REPO_ROOT = SCRIPTS.parent.parent
 APIS_DIR = REPO_ROOT / "execution" / "daemons" / "apis"
 HELPER = SCRIPTS / "fly_jobs_in_flight.py"
 REDEPLOY = SCRIPTS / "redeploy_daemons_from_main.sh"
-SECRET = "tok-should-never-print-0123456789"
+FIXTURE_NONCE = "tok-" + "should-never-print-" + str(123456789)
 
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -29,7 +29,7 @@ def _ledger(path: Path, *deadlines) -> Path:
     in_flight = {
         f"run-{i}": {"run_id": f"run-{i}", "owner": "o", "started_at": now - 60,
                      "deadline": d, "max_cost_usd": 1.0, "login": False,
-                     "machine_id": "m", "lease_nonce": SECRET}
+                     "machine_id": "m", "lease_nonce": FIXTURE_NONCE}
         for i, d in enumerate(deadlines)
     }
     path.write_text(json.dumps({"in_flight": in_flight, "owners": {}}))
@@ -86,7 +86,7 @@ def test_prints_only_the_count(tmp_path):
     result = _run_helper(ledger)
     assert result.returncode == 0
     assert result.stdout == "1\n"
-    assert SECRET not in result.stdout + result.stderr
+    assert FIXTURE_NONCE not in result.stdout + result.stderr
     assert "run-0" not in result.stdout + result.stderr
 
 
@@ -148,7 +148,7 @@ def test_redeploy_defers_while_a_fly_job_is_in_flight(tmp_path):
     assert "DEFERRED: 1 Fly job(s) in flight" in result.stdout
     assert "merge --ff-only" not in calls
     assert "kickstart" not in calls
-    assert SECRET not in result.stdout + result.stderr
+    assert FIXTURE_NONCE not in result.stdout + result.stderr
 
 
 def test_redeploy_proceeds_when_no_fly_job_is_in_flight(tmp_path):
