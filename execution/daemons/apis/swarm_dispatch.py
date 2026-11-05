@@ -2748,6 +2748,123 @@ def compose_fallback_comment(
     )
 
 
+# A lens run on Fly returns its review in delimited sections: it holds a
+# read-only GitHub token and no Neotoma tools, so the dispatcher publishes.
+DISPATCHER_REVIEW_BEGIN = "<<<DISPATCHER_REVIEW>>>"
+DISPATCHER_REVIEW_END = "<<<END_DISPATCHER_REVIEW>>>"
+DISPATCHER_EXPECTATION_BEGIN = "<<<DISPATCHER_EXPECTATION_UPDATE>>>"
+DISPATCHER_EXPECTATION_END = "<<<END_DISPATCHER_EXPECTATION_UPDATE>>>"
+_RETURNED_KINDS = {
+    DISPATCHER_REVIEW_BEGIN: ("review", True),
+    DISPATCHER_REVIEW_END: ("review", False),
+    DISPATCHER_EXPECTATION_BEGIN: ("expectation", True),
+    DISPATCHER_EXPECTATION_END: ("expectation", False),
+}
+# Any review or aggregation marker, of any lens and any commit, or the
+# unfilled `<full40hex>` placeholder the prompt shows.
+_ANY_LENS_MARKER_RE = re.compile(
+    r"<!--\s*(?:review:|vanellus-aggregation)[^>]*?-->", re.IGNORECASE
+)
+_MAX_RETURNED_TEXT = 60_000
+_NO_NEOTOMA_NOTE = (
+    "You have no Neotoma tools on this run: do not try to retrieve or store "
+    "anything. Everything you need (your pre-registered expectations, the "
+    "gate and verdict rules) is in this prompt, and the dispatcher records "
+    "your review and any gate result."
+)
+
+
+def _returned_sections(text: str) -> tuple[dict[str, list[str]], str] | None:
+    """Split *text* into its delimited sections (delimiters alone on a line).
+    None when a delimiter is unmatched, nested, or ends the wrong section."""
+    found: dict[str, list[str]] = {"review": [], "expectation": []}
+    rest: list[str] = []
+    open_kind, buf = "", []
+    for line in (text or "").splitlines():
+        kind = _RETURNED_KINDS.get(line.strip())
+        if kind is None:
+            (buf if open_kind else rest).append(line)
+        elif kind[1] and not open_kind:
+            open_kind, buf = kind[0], []
+        elif not kind[1] and open_kind == kind[0]:
+            found[open_kind].append("\n".join(buf).strip())
+            open_kind = ""
+        else:
+            return None
+    if open_kind:
+        return None
+    return found, "\n".join(rest)
+
+
+def strip_lens_review_markers(text: str) -> str:
+    """*text* with every lens review marker removed, repeated until none is
+    left (removing one must not assemble another). A PR under review can
+    influence a review's text, so no marker in it is ever published."""
+    text = text or ""
+    while True:
+        cleaned = _ANY_LENS_MARKER_RE.sub("", text)
+        if cleaned == text:
+            return text.strip()
+        text = cleaned
+
+
+def parse_returned_lens_review(stdout: str) -> tuple[str, str | None] | None:
+    """The review and optional expectation update a return-only lens returned.
+
+    Strict: exactly one well-formed review section and at most one expectation
+    section, never nested; otherwise None and the lens run counts as failed."""
+    parsed = _returned_sections(stdout)
+    if parsed is None:
+        return None
+    found, _ = parsed
+    if len(found["review"]) != 1 or not found["review"][0]:
+        return None
+    if len(found["expectation"]) > 1:
+        return None
+    review = strip_lens_review_markers(found["review"][0])
+    update = strip_lens_review_markers(found["expectation"][0]) if found["expectation"] else ""
+    if not review or len(review) > _MAX_RETURNED_TEXT or len(update) > _MAX_RETURNED_TEXT:
+        return None
+    return review, (update or None)
+
+
+def split_expectation_update(block: str) -> tuple[str, str | None] | None:
+    """One combined-pass lens block without its expectation section, and that
+    section. None when the block's delimiters are malformed or repeated."""
+    parsed = _returned_sections(block)
+    if parsed is None or parsed[0]["review"] or len(parsed[0]["expectation"]) > 1:
+        return None
+    found, rest = parsed
+    update = strip_lens_review_markers(found["expectation"][0]) if found["expectation"] else ""
+    return strip_lens_review_markers(rest), (update or None)
+
+
+def unwrap_returned_review(result: SkillResult) -> tuple[SkillResult, str | None]:
+    """A return-only lens's result with its stdout reduced to the extracted
+    review text, plus its expectation update. A run whose output does not
+    parse is a failed run with no stdout (fail closed, nothing is posted)."""
+    if not result.ok:
+        return result, None
+    parsed = parse_returned_lens_review(result.stdout)
+    if parsed is None:
+        return dataclasses.replace(
+            result, ok=False, stdout="",
+            error="the lens did not return exactly one well-formed review block",
+        ), None
+    return dataclasses.replace(result, stdout=parsed[0]), parsed[1]
+
+
+def compose_remote_lens_comment(lens: str, text: str, commit_sha: str) -> str:
+    """The comment the dispatcher posts for a return-only lens: this lens's
+    head marker first and the only marker in it."""
+    return (
+        f"{compose_lens_review_marker(lens, commit_sha)}\n"
+        f"{strip_lens_review_markers(text)}\n\n"
+        "_Posted by the Apis dispatcher from a lens run that had no GitHub "
+        "write access._"
+    )
+
+
 # Stable marker embedded in every Vanellus aggregation comment so the
 # dispatcher can detect whether the comment landed (dedup / missing-check).
 _VANELLUS_COMMENT_MARKER = "<!-- vanellus-aggregation -->"
@@ -5590,6 +5707,7 @@ class SwarmDispatcher:
         review_signals = await self._review_signals(
             trigger, changed_files=changed_files
         )
+        return_only = _lens_return_only_on_fly(lens)
         try:
             result = await run_skill(
                 lens.agent,
@@ -5600,6 +5718,7 @@ class SwarmDispatcher:
                     None,
                     has_worktree=bool(worktree),
                     changed_files=changed_files,
+                    read_only=return_only,
                 ),
                 # Read-only on Fly: a lens reviews and never delivers.
                 github_read_only=True,
@@ -5620,6 +5739,8 @@ class SwarmDispatcher:
         finally:
             await cleanup_pr_worktree(worktree)
 
+        if return_only:
+            result, _ = unwrap_returned_review(result)
         if not result.ok:
             raise RuntimeError(
                 f"lens '{lens_name}' run failed: "
@@ -5645,6 +5766,7 @@ class SwarmDispatcher:
             captured,
             agents_by_lens,
             reviewed_head=reviewed_head,
+            remote_lenses=frozenset({lens.lens}) if return_only else frozenset(),
         )
 
     async def resume_missing_lens_reviews(self, repositories: list[str]) -> dict:
@@ -7787,6 +7909,11 @@ class SwarmDispatcher:
         # A lens whose block is missing or unreadable is simply absent here and
         # runs alone below, so the combined pass can only save work.
         combined_results: dict[str, SkillResult] = {}
+        # Lenses whose prompt was return-only (decided before the run, so a
+        # Mac fallback of a Fly launch is still published by the dispatcher),
+        # and the expectation updates they returned.
+        remote_lenses: set[str] = set()
+        expectation_updates: dict[str, str] = {}
         if self.config.combined_review_pass:
             if await self._hold_panel_until_checks_green(
                 trigger, source="combined_review_pass"
@@ -7802,6 +7929,7 @@ class SwarmDispatcher:
                 pending_gates=pending_gates,
                 live_gates=live_gates,
                 signals=panel_signals,
+                expectation_updates=expectation_updates,
             )
         for lens in panel:
             if lens.lens not in combined_results and await self._hold_panel_until_checks_green(
@@ -7824,6 +7952,7 @@ class SwarmDispatcher:
                 qa_worktree = await prepare_pr_worktree(
                     trigger.repository, trigger.number, lens.agent
                 )
+            return_only = _lens_return_only_on_fly(lens)
             try:
                 result = combined_results.get(lens.lens) or await run_skill(
                     lens.agent,
@@ -7836,7 +7965,7 @@ class SwarmDispatcher:
                         owns_pending_gate=lens.lens in pending_gates,
                         changed_files=changed_files,
                         reviewed_head=review_head,
-                        read_only=_lens_return_only_on_fly(lens),
+                        read_only=return_only,
                     ),
                     github_token=_token_for_agent_on_repo(
                         lens.agent, trigger.repository
@@ -7869,6 +7998,12 @@ class SwarmDispatcher:
                 )
             finally:
                 await cleanup_pr_worktree(qa_worktree)
+            if return_only and lens.lens not in combined_results:
+                result, returned_update = unwrap_returned_review(result)
+                if result.ok:
+                    remote_lenses.add(lens.lens)
+                    if returned_update:
+                        expectation_updates[lens.lens] = returned_update
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
                 # ateles#795 amended ADR: the dispatcher — not the lens's own
@@ -8014,6 +8149,10 @@ class SwarmDispatcher:
                 reviews,
                 agents_by_lens,
                 reviewed_head=review_head,
+                remote_lenses=frozenset(remote_lenses),
+            )
+            await self._publish_expectation_updates(
+                trigger, parent, expectation_updates, agents_by_lens
             )
 
         if failed_lenses:
@@ -13050,7 +13189,8 @@ class SwarmDispatcher:
                 + " If the SHA is not supplied above, fetch the PR's current "
                 "`headRefOid` and substitute the full 40-hex SHA in the marker. "
                 "Write the rest of your review after the verdict line. "
-                "Make no GitHub write; return all publication content here."
+                "Make no GitHub write; return all publication content here. "
+                + _NO_NEOTOMA_NOTE
             )
         return (
             f"Invoke the {lens.agent} agent per your appended system prompt.\n\n"
@@ -13717,7 +13857,7 @@ class SwarmDispatcher:
             + (
                 "Make no GitHub write. Return any expectation checklist "
                 "updates in the delimited sections requested below; the "
-                "dispatcher publishes them.\n\n"
+                "dispatcher publishes them. " + _NO_NEOTOMA_NOTE + "\n\n"
                 if read_only
                 else "Editing your pre-registered expectation checklist on the "
                 "parent issue, where a lens below asks for it, is the only "
@@ -13751,6 +13891,7 @@ class SwarmDispatcher:
         pending_gates: set[str],
         live_gates,
         signals,
+        expectation_updates: dict[str, str] | None = None,
     ) -> dict[str, SkillResult]:
         """Review the panel's pm/qa/ux lenses in one mid-tier dispatch.
 
@@ -13764,6 +13905,7 @@ class SwarmDispatcher:
             return {}
         try:
             first = combinable[0]
+            return_only = _lens_return_only_on_fly(first)
             if not all(self._lens_agent_prompt(item.agent) for item in combinable):
                 # A lens whose own prompt cannot be loaded cannot be reviewed
                 # in a pass that promises its full duties: run them one by one.
@@ -13773,7 +13915,7 @@ class SwarmDispatcher:
                 self._combined_prompt(
                     trigger, combinable, expectations, review_head, parent,
                     changed_files,
-                    read_only=_lens_return_only_on_fly(first),
+                    read_only=return_only,
                 ),
                 github_token=_token_for_agent_on_repo(first.agent, trigger.repository),
                 include_github_contract=True,
@@ -13801,6 +13943,15 @@ class SwarmDispatcher:
             accepted: dict[str, SkillResult] = {}
             for item in combinable:
                 block = blocks.get(item.lens)
+                if block is not None and return_only:
+                    # A return-only block may carry that lens's expectation
+                    # update: split it off, and never post a marker it holds.
+                    split = split_expectation_update(block)
+                    if split is None:
+                        continue
+                    block, update = split
+                    if update and expectation_updates is not None:
+                        expectation_updates[item.lens] = update
                 if block is None or lens_own_verdict(block, lens_agent=item.agent) is None:
                     continue
                 accepted[item.lens] = dataclasses.replace(result, stdout=block)
@@ -14737,8 +14888,13 @@ class SwarmDispatcher:
         agents_by_lens: dict[str, str] | None = None,
         *,
         reviewed_head: str = "",
+        remote_lenses: frozenset[str] = frozenset(),
     ) -> None:
         """Backfill `review:<lens>` PR comments the panelists failed to post.
+
+        ``remote_lenses``: lenses whose prompt was return-only (they hold no
+        GitHub write access, on Fly or after a Mac fallback). Their review is
+        posted from here as the lens's own App, never as the shared identity.
 
         Headless `claude --print` panelists cannot answer permission prompts,
         so their `gh` comment step often fails silently; Vanellus aggregates
@@ -14785,6 +14941,18 @@ class SwarmDispatcher:
                 for lens in lenses_missing_comments(
                     bodies, list(captured), head_sha=head_sha
                 ):
+                    if lens in remote_lenses:
+                        try:
+                            await self._post_remote_lens_verdict(
+                                client, url, t, lens, agents.get(lens, ""),
+                                captured[lens], head_sha,
+                            )
+                        except Exception as exc:  # noqa: BLE001 — lens stays pending
+                            log.error(
+                                f"[{DAEMON_NAME}] review:{lens} post failed on "
+                                f"{t.repository}#{t.number}: {type(exc).__name__}"
+                            )
+                        continue
                     if _github_app_token.lens_has_own_app(lens):
                         # A comment posted with the dispatcher's shared token is
                         # never read as this lens's verdict (the lens is read only
@@ -14814,6 +14982,102 @@ class SwarmDispatcher:
                 f"[{DAEMON_NAME}] fallback review comments failed for "
                 f"{t.repository}#{t.number}: {exc}"
             )
+
+    @staticmethod
+    async def _lens_app_token(lens: str, agent: str, repository: str) -> str:
+        """The lens's own App token for *repository*, or "" (never another
+        identity). The agent must act as exactly this lens's declared App."""
+        identity = _app_identity_for_agent(agent)
+        if (
+            not identity
+            or identity != _github_app_token.reviewer_identity(lens)
+            or not _github_app_token.identity_declared(identity)
+        ):
+            log.error(
+                f"[{DAEMON_NAME}] the {lens} lens has no declared App identity; "
+                "its returned output is not published"
+            )
+            return ""
+        return await asyncio.to_thread(_token_for_agent_on_repo, agent, repository)
+
+    async def _post_remote_lens_verdict(
+        self, client, url: str, t: SwarmTrigger, lens: str, agent: str,
+        text: str, head_sha: str,
+    ) -> bool:
+        """Post a return-only lens's review as that lens's own App. Fails
+        closed: no declared App, no token, or a failed post leaves the lens
+        pending. Never uses the shared identity and never logs the token."""
+        token = await self._lens_app_token(lens, agent, t.repository)
+        if not token:
+            log.error(
+                f"[{DAEMON_NAME}] no App token for the {lens} lens on "
+                f"{t.repository}#{t.number}: the lens stays pending"
+            )
+            return False
+        resp = await client.post(
+            url,
+            json={"body": compose_remote_lens_comment(lens, text, head_sha)},
+            headers={"Accept": "application/vnd.github+json",
+                     "Authorization": f"Bearer {token}"},
+        )
+        resp.raise_for_status()
+        log.info(
+            f"[{DAEMON_NAME}] posted review:{lens} for {t.repository}#{t.number} "
+            "as the lens's own App"
+        )
+        return True
+
+    async def _publish_expectation_updates(
+        self, t: SwarmTrigger, parent: int | None, updates: dict[str, str],
+        agents_by_lens: dict[str, str],
+    ) -> None:
+        """Edit each return-only lens's own expectation checklist on the parent
+        issue, as that lens's App, the way a local lens edits it with `gh`.
+        Best effort and never raises: a missed update leaves boxes unchecked."""
+        if not parent or not updates:
+            return
+        url = f"https://api.github.com/repos/{t.repository}/issues/{parent}/comments"
+        for lens, text in updates.items():
+            header = f"**{EXPECTATION_MARKER} ({lens})**"
+            try:
+                if not text.lstrip().startswith(header):
+                    log.warning(
+                        f"[{DAEMON_NAME}] {lens} expectation update does not keep "
+                        "its header: not published"
+                    )
+                    continue
+                token = await self._lens_app_token(
+                    lens, agents_by_lens.get(lens, ""), t.repository
+                )
+                if not token:
+                    continue
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(
+                        url, params={"per_page": 100},
+                        headers=self._github_headers(t.repository),
+                    )
+                    resp.raise_for_status()
+                    own = [
+                        c for c in lens_authors.scope_lens_comments(
+                            resp.json(), await asyncio.to_thread(lens_comment_authors)
+                        )
+                        if str(c.get("body", "")).lstrip().startswith(header)
+                    ]
+                    if not own:
+                        continue
+                    patch = await client.patch(
+                        f"https://api.github.com/repos/{t.repository}/issues/comments/"
+                        f"{own[-1]['id']}",
+                        json={"body": text.strip()},
+                        headers={"Accept": "application/vnd.github+json",
+                                 "Authorization": f"Bearer {token}"},
+                    )
+                    patch.raise_for_status()
+            except Exception as exc:  # noqa: BLE001 — best effort
+                log.warning(
+                    f"[{DAEMON_NAME}] {lens} expectation update on "
+                    f"{t.repository}#{parent} failed: {type(exc).__name__}"
+                )
 
     async def _post_gate_block(
         self, t: SwarmTrigger, parent: int | None, pending: set[str]
