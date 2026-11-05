@@ -216,8 +216,23 @@ def operator_names(requester: Requester) -> tuple[frozenset[str], str | None]:
 
 # ── numbers ──────────────────────────────────────────────────────────────────
 
-def real_decision_list(placements: list[dq.Placement]) -> list[dict[str, Any]]:
-    """One row per real decision (task), aged from its oldest open hold. No titles."""
+def _iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def real_decision_list(
+    placements: list[dq.Placement],
+    now: datetime,
+    previous_first_seen: dict[str, datetime] | None = None,
+) -> list[dict[str, Any]]:
+    """One row per real decision (task). No titles.
+
+    A task is aged from the earlier of its previous ``first_seen`` and the
+    oldest open hold's own ``raised_at``, so a re-filed or touched hold does not
+    restart its clock. ``previous_first_seen`` holds only tasks that were on the
+    previous real list: a task that left it starts again from its hold's time.
+    """
+    previous = previous_first_seen or {}
     best: dict[str, dq.Placement] = {}
     for p in placements:
         if p.klass not in dq.REAL_DECISION_CLASSES:
@@ -226,29 +241,44 @@ def real_decision_list(placements: list[dq.Placement]) -> list[dict[str, Any]]:
         held = best.get(key)
         if held is None or (p.age_hours or 0) > (held.age_hours or 0):
             best[key] = p
-    rows = [
-        {"task_id": key, "class": p.klass, "age_hours": p.age_hours}
-        for key, p in best.items()
-    ]
+    rows = []
+    for key, p in best.items():
+        candidates = [t for t in (dq._parse_time(p.raised_at), previous.get(key)) if t]
+        first_seen = min(candidates) if candidates else None
+        age = round((now - first_seen).total_seconds() / 3600, 1) if first_seen else None
+        rows.append(
+            {
+                "task_id": key,
+                "class": p.klass,
+                "age_hours": age,
+                "first_seen": _iso(first_seen) if first_seen else None,
+            }
+        )
     rows.sort(key=lambda r: -(r["age_hours"] or 0))
     return rows
 
 
 def compute_reading(
-    placements: list[dq.Placement], *, limit_hours: float = WAIT_LIMIT_HOURS
+    placements: list[dq.Placement],
+    *,
+    now: datetime,
+    previous_first_seen: dict[str, datetime] | None = None,
+    limit_hours: float = WAIT_LIMIT_HOURS,
 ) -> dict[str, Any]:
     summary = dq.summarize(placements, wait_limit_hours=limit_hours)
     new = [p for p in placements if p.age_hours is not None and p.age_hours <= NEW_HOLD_HOURS]
     new_real = [p for p in new if p.klass in dq.REAL_DECISION_CLASSES]
-    listing = real_decision_list(placements)
+    listing = real_decision_list(placements, now, previous_first_seen)
     if len(listing) != summary["real_decisions"]:
         raise ValueError("real decision list disagrees with the summary")
+    ages = sorted(r["age_hours"] for r in listing if r["age_hours"] is not None)
     return {
         "real_decisions": summary["real_decisions"],
-        "real_decisions_over_limit": summary["real_decisions_over_limit"],
+        "real_decisions_over_limit": sum(1 for age in ages if age > limit_hours),
         "wait_limit_hours": summary["wait_limit_hours"],
-        "oldest_hours": summary["real_decisions_oldest_hours"],
-        "median_hours": summary["real_decisions_median_hours"],
+        "oldest_hours": ages[-1] if ages else None,
+        "median_hours": ages[len(ages) // 2] if ages else None,
+        "age_basis": "first_seen",
         "total_open": summary["total_open"],
         "by_class": summary["by_class"],
         "new_holds_24h": len(new),
@@ -256,6 +286,26 @@ def compute_reading(
         "new_holds_24h_not_real": len(new) - len(new_real),
         "real_decision_list": listing,
     }
+
+
+def load_previous_first_seen(path: Path) -> tuple[dict[str, datetime], str | None]:
+    """first_seen per task from the previous file; (empty, reason) if unusable."""
+    try:
+        doc = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}, "missing"
+    except (OSError, ValueError):
+        return {}, "unreadable"
+    rows = doc.get("real_decision_list") if isinstance(doc, dict) else None
+    if not isinstance(rows, list):
+        return {}, "no_list"
+    out: dict[str, datetime] = {}
+    for row in rows:
+        if isinstance(row, dict) and row.get("task_id"):
+            seen = dq._parse_time(row.get("first_seen"))
+            if seen:
+                out[str(row["task_id"])] = seen
+    return out, None
 
 
 def build_metric_readings(
@@ -288,6 +338,8 @@ def build_metric_readings(
                 "oldest_hours": numbers["oldest_hours"],
                 "median_hours": numbers["median_hours"],
                 "by_class": numbers["by_class"],
+                "age_basis": "first_seen: age runs from the earlier of the task's first appearance "
+                "on the real list and its hold's own time; a re-filed hold does not restart it",
             },
             **common,
         ),
@@ -420,8 +472,13 @@ def run(
     people = dq._person_owners() | names
     tasks_by_id = {r["entity_id"]: r for r in tasks if r.get("entity_id")}
     placements = dq.classify_queue(briefs, tasks_by_id, now=now, person_owners=people)
+    previous, why_prev = load_previous_first_seen(path or default_path())
+    if why_prev:
+        failed.append(
+            {"check": "previous_reading", "reason": why_prev + "; aged from raised_at"}
+        )
     try:
-        numbers = compute_reading(placements)
+        numbers = compute_reading(placements, now=now, previous_first_seen=previous)
     except ValueError:
         failed.append({"check": "classification", "reason": "list_summary_mismatch"})
         return finish("invalid", None, 1)

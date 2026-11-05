@@ -147,7 +147,7 @@ def test_summary_numbers():
     assert doc["new_holds_24h_real"] == 1 and doc["new_holds_24h_not_real"] == 2
     assert doc["instrument"]["passed"] and doc["instrument"]["tasks_read"] == 6
     assert {r["task_id"] for r in doc["real_decision_list"]} == {"t1", "t2"}
-    assert set(doc["real_decision_list"][0]) == {"task_id", "class", "age_hours"}
+    assert set(doc["real_decision_list"][0]) == {"task_id", "class", "age_hours", "first_seen"}
     on_disk = json.loads(out_path().read_text())
     assert on_disk == json.loads(json.dumps(doc))
     assert "Routine edit" not in out_path().read_text()
@@ -285,13 +285,13 @@ def test_operator_profile_absent_degrades():
     tasks[2] = task("t3", assigned_to="zed")  # owned by a person once the name is known
     with_profile = FakeNeotoma(briefs, tasks, profile={"first_name": "Zed"})
     _, doc = run(with_profile)
-    assert doc["by_class"].get("owned_by_person") == 1 and doc["failed_checks"] == []
+    assert doc["by_class"].get("owned_by_person") == 1 and "operator_profile" not in [c["check"] for c in doc["failed_checks"]]
 
     without = FakeNeotoma(briefs, tasks, profile=None)
     code, doc = run(without)
     assert code == 0 and doc["status"] == "ok"
     assert doc["by_class"].get("owned_by_person") is None
-    assert doc["failed_checks"][0]["check"] == "operator_profile"
+    assert "operator_profile" in [c["check"] for c in doc["failed_checks"]]
     assert doc["real_decisions"] == 2  # person-owned is not real either way
     reading = next(iter(without.stored["metric_reading"].values()))
     assert "classifier default" in reading["coverage_note"]
@@ -317,3 +317,79 @@ def test_cursor_reader_stops_on_repeated_cursor():
     with pytest.raises(dqr.ReadFailure) as exc:
         dqr.read_all_by_cursor("task", loop, pause=0)
     assert exc.value.reason == "cursor_repeated"
+
+
+def _real_ages(doc):
+    return {r["task_id"]: r["age_hours"] for r in doc["real_decision_list"]}
+
+
+def test_refiled_hold_keeps_its_old_age():
+    briefs, tasks = corpus()
+    _, first = run(FakeNeotoma(briefs, tasks, profile={"first_name": "Zed"}))
+    assert _real_ages(first)["t2"] == 10.0
+    # a day later t2's hold is re-filed (fresh timestamp); t1 is untouched
+    later = NOW + timedelta(hours=24)
+    refiled = [dict(b) for b in briefs]
+    refiled[1] = checkpoint("c2b", "t2", 0.5, reason="please look", handler="human")
+    refiled[1]["last_observation_at"] = (later - timedelta(hours=0.5)).isoformat()
+    for i in (0, 2, 3, 4):
+        refiled[i] = dict(refiled[i])
+    # touch t1 as well: its observation time is now recent
+    refiled[0] = checkpoint("c1", "t1", 0, reason="please decide this one", handler="human")
+    refiled[0]["last_observation_at"] = later.isoformat()
+    code, doc = dqr.run(FakeNeotoma(refiled, tasks, profile={"first_name": "Zed"}), later,
+                        dry_run=False, pause=0)
+    ages = _real_ages(doc)
+    assert ages["t2"] == 34.0 and ages["t1"] == 124.0  # old clocks carried, not restarted
+    assert doc["real_decisions_over_limit"] == 1 and doc["oldest_hours"] == 124.0
+    assert doc["age_basis"] == "first_seen"
+    assert doc["failed_checks"] == []
+
+
+def test_task_that_leaves_the_real_list_restarts_when_it_returns():
+    briefs, tasks = corpus()
+    run(FakeNeotoma(briefs, tasks, profile={"first_name": "Zed"}))
+    gone = [b for b in briefs if b["entity_id"] != "c1"]
+    t1 = NOW + timedelta(hours=1)
+    _, doc = dqr.run(FakeNeotoma(gone, tasks, profile={"first_name": "Zed"}), t1, dry_run=False, pause=0)
+    assert "t1" not in _real_ages(doc)
+    back = list(gone) + [checkpoint("c1x", "t1", 0.0, reason="please decide this one", handler="human")]
+    back[-1]["last_observation_at"] = (t1 + timedelta(hours=2)).isoformat()
+    _, doc = dqr.run(FakeNeotoma(back, tasks, profile={"first_name": "Zed"}), t1 + timedelta(hours=3),
+                     dry_run=False, pause=0)
+    assert _real_ages(doc)["t1"] == 1.0
+
+
+@pytest.mark.parametrize("content", [None, "{not json", "[]", '{"status": "invalid"}'])
+def test_previous_file_unusable_is_recorded_not_fatal(content):
+    if content is not None:
+        out_path().parent.mkdir(parents=True)
+        out_path().write_text(content)
+    code, doc = run(FakeNeotoma(*corpus(), profile={"first_name": "Zed"}))
+    assert code == 0 and doc["status"] == "ok"
+    assert any(c["check"] == "previous_reading" for c in doc["failed_checks"])
+    assert _real_ages(doc)["t1"] == 100.0
+
+
+def test_dry_run_reads_previous_but_writes_nothing():
+    briefs, tasks = corpus()
+    run(FakeNeotoma(briefs, tasks, profile={"first_name": "Zed"}))
+    before = out_path().read_text()
+    refiled = list(briefs)
+    refiled[0] = checkpoint("c1", "t1", 0, reason="please decide this one", handler="human")
+    later = NOW + timedelta(hours=24)
+    refiled[0]["last_observation_at"] = later.isoformat()
+    _, doc = dqr.run(FakeNeotoma(refiled, tasks, profile={"first_name": "Zed"}), later, dry_run=True, pause=0)
+    assert _real_ages(doc)["t1"] == 124.0
+    assert out_path().read_text() == before
+
+
+def test_metric_ids_match_the_stored_definitions():
+    defs = {d["metric_id"]: d for d in dqr.own_definitions()}
+    assert set(defs) == {dqr.METRIC_OVER_LIMIT, dqr.METRIC_AUTOMATIC}
+    assert dqr.METRIC_OVER_LIMIT.startswith("Q1_") and dqr.METRIC_AUTOMATIC.startswith("Q2_")
+    assert all(d["cadence"] == "daily" and d["status"] == "proposed" for d in defs.values())
+    fake = FakeNeotoma(*corpus(), profile={"first_name": "Zed"})
+    run(fake)
+    refs = {r["metric_ref"] for r in fake.stored["metric_reading"].values()}
+    assert refs == set(defs) == set(fake.stored["metric_definition"])
