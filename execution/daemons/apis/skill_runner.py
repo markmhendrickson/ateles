@@ -2878,10 +2878,10 @@ def _dispatch_succeeded(
 
 # ── Single-provider runner ─────────────────────────────────────────────────────
 
-# The dispatcher must publish both the verdict and parent-issue checklist as
-# the lens App before a read-only lens may run remotely. Flip this only when
-# that dispatcher-owned path exists and is covered by an end-to-end test.
-DISPATCHER_LENS_PUBLICATION_READY = False
+# The dispatcher publishes both the verdict and parent-issue checklist as the
+# lens App before a read-only lens may run remotely (swarm_dispatch
+# `_publish_returned_lens_reviews`). Set False to refuse every remote lens.
+DISPATCHER_LENS_PUBLICATION_READY = True
 
 
 async def _run_skill_once(
@@ -3918,6 +3918,8 @@ async def _run_skill_once(
                 # read-class Fly token: the delivery contract would make
                 # build_job refuse it (no delivery plan) and send it home.
                 github_delivery_contract=include_github_contract and not github_read_only,
+                # Lets a seated read-only run go to Fly with no Neotoma tools.
+                github_read_only=github_read_only,
             )
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
