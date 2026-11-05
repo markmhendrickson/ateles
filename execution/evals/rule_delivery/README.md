@@ -52,13 +52,21 @@ entry point. Dependent evaluators import this implementation rather than copy it
 | `structure_errors(value, path)` | Iterative JSON-compatible shape/depth/node validation for already constructed values; return a list of diagnostics. Domain-specific validation stays with the caller. |
 | `encode_json(value, path="record", limit=MAX_INPUT_BYTES)` | Deterministic compact UTF-8 bytes; raise `EvidenceError` on unsupported representation, nonfinite numbers or bounds. |
 | `read_json_file(path, label="state")` | Return `(value, raw_bytes)` after a bounded read and decode; raise `EvidenceError` or the actual I/O exception. |
-| `read_frames(binary_stream, limit=MAX_INPUT_BYTES)` | Yield `(payload_bytes_or_none, framing_error_or_none)` for LF-separated frames. Drain oversized frames without retaining their contents. The LF is outside the payload budget. |
+| `read_frames(binary_stream, limit=MAX_INPUT_BYTES, byte_limit=None, row_limit=None)` | Yield `(payload_bytes_or_none, framing_error_or_none)` for LF-separated frames. Optional total limits stop before another stream read, including reads used to drain oversized frames. LF is outside the payload budget but inside the total byte budget. |
 | `normalize_records(records, exclude_correlation=None, initial_issues=None)` | Normalize already decoded rows into the result described below. |
 | `read_trace(path, exclude_correlation=None)` | Bounded trace reading plus normalization, with explicit unreadable/truncated/invalid diagnostics. |
 
 Default budgets are 1 MiB per payload/file/serialized record, 64 nesting levels
 and 1,000,000 visited JSON nodes. Trace reading stops at 100,000 rows or its
-64 MiB aggregate budget, preserving an explicit limit diagnostic. These are
+64 MiB actual stream-consumption budget, including delimiters and discarded or
+drained bytes, preserving an explicit limit diagnostic. Exhausted byte/row
+budgets prevent fetching another frame; an exhausted byte budget also prevents
+further draining of the current frame. Known earlier attempts survive, while
+the remaining input stays unqualified. No EOF lookahead is performed after a
+budget is exhausted, even if it happens to coincide with the file's end.
+Ongoing stdio uses the same frame reader without a total trace budget so a
+malformed frame can drain to its delimiter and a later healthy request can run.
+These are
 synthetic instrument resource bounds, not changes to worker authority. Invalid
 UTF-8, unsupported numbers, deep JSON and malformed envelopes never dispatch a
 handler. A final valid JSON row without LF may retain known facts, but its

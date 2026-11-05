@@ -688,3 +688,133 @@ def test_actual_malformed_state_files_keep_receipt_and_recover_after_host_restor
     trace = e.read_trace(store.log_path)
     assert trace["complete"] == captured and len(trace["attempts"]) == 2
     assert trace["attempts"][1]["complete"]
+
+
+def counted_trace_reads(monkeypatch, target):
+    """Count actual bytes returned by every read, including frame draining."""
+    original = Path.open
+    counts = {"bytes": 0, "calls": 0}
+
+    class Counted:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __enter__(self):
+            self.inner.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.inner.__exit__(*args)
+
+        def readline(self, limit=-1):
+            raw = self.inner.readline(limit)
+            counts["bytes"] += len(raw)
+            counts["calls"] += 1
+            return raw
+
+    def opened(path, *args, **kwargs):
+        inner = original(path, *args, **kwargs)
+        return Counted(inner) if path == target and args and args[0] == "rb" else inner
+
+    monkeypatch.setattr(Path, "open", opened)
+    return counts
+
+
+@pytest.mark.parametrize("shape", ["many_discarded_frames", "single_long_drain"])
+def test_trace_consumption_budget_includes_discarded_bytes(
+    tmp_path, monkeypatch, shape
+):
+    observed_records(tmp_path)
+    path = tmp_path / "ws" / "mcp_calls.jsonl"
+    known = path.read_bytes()
+    oversized = (
+        (b"x" * (e.MAX_INPUT_BYTES + 1) + b"\n") * 5
+        if shape == "many_discarded_frames"
+        else b"x" * (5 * e.MAX_INPUT_BYTES) + b"\n"
+    )
+    # A known completed request must survive; later frames must not be fetched
+    # through an exhausted budget, even when discarded rather than decoded.
+    path.write_bytes(known + oversized + known)
+    budget = len(known) + 2 * e.MAX_INPUT_BYTES
+    monkeypatch.setattr(e, "MAX_TRACE_BYTES", budget)
+    counts = counted_trace_reads(monkeypatch, path)
+    result = e.read_trace(path)
+    assert counts["bytes"] <= budget
+    assert not result["complete"] and any(
+        x["code"] == "trace_limit" for x in result["issues"]
+    )
+    assert len(result["attempts"]) == 1
+    assert result["attempts"][0]["result"]["snapshot"]["status"] == "open"
+
+
+def test_trace_row_limit_stops_before_fetching_next_frame(tmp_path, monkeypatch):
+    observed_records(tmp_path)
+    path = tmp_path / "ws" / "mcp_calls.jsonl"
+    known = path.read_bytes()
+    path.write_bytes(known + b"x" * (5 * e.MAX_INPUT_BYTES) + b"\n")
+    monkeypatch.setattr(e, "MAX_TRACE_RECORDS", 3)
+    counts = counted_trace_reads(monkeypatch, path)
+    result = e.read_trace(path)
+    assert counts["bytes"] == len(known) and counts["calls"] == 3
+    assert not result["complete"] and any(
+        x["code"] == "trace_limit" for x in result["issues"]
+    )
+    assert len(result["attempts"]) == 1
+    assert result["attempts"][0]["result"]["snapshot"]["status"] == "open"
+
+
+def test_real_trace_within_consumption_budget_is_complete(tmp_path, monkeypatch):
+    observed_records(tmp_path)
+    path = tmp_path / "ws" / "mcp_calls.jsonl"
+    size = path.stat().st_size
+    monkeypatch.setattr(e, "MAX_TRACE_BYTES", size + 1)
+    monkeypatch.setattr(e, "MAX_TRACE_RECORDS", 4)
+    counts = counted_trace_reads(monkeypatch, path)
+    result = e.read_trace(path)
+    assert result["complete"] and result["issues"] == []
+    assert counts["bytes"] == size
+    assert len(result["attempts"]) == 1
+    assert result["attempts"][0]["result"]["snapshot"]["status"] == "open"
+
+
+@pytest.mark.parametrize("byte_limit,row_limit", [(0, None), (None, 0)])
+def test_frame_exhaustion_never_fetches_from_stream(byte_limit, row_limit):
+    class ForbiddenRead:
+        def readline(self, _limit):
+            pytest.fail("exhausted budget fetched a new frame")
+
+    assert list(
+        e.read_frames(ForbiddenRead(), byte_limit=byte_limit, row_limit=row_limit)
+    ) == [(None, "trace_limit")]
+
+
+def test_frame_total_budget_counts_lf_and_partial_discard():
+    stream = io.BytesIO(b"x" * 9 + b"\n" + b"x" * 9 + b"\n" + b"{}\n")
+    frames = list(e.read_frames(stream, limit=8, byte_limit=17))
+    assert stream.tell() == 17
+    assert frames == [(None, "oversized_frame"), (None, "trace_limit")]
+
+
+def test_frame_reader_without_total_budget_retains_healthy_followup():
+    stream = io.BytesIO(b"x" * 33 + b"\n" + b"{}\n")
+    assert list(e.read_frames(stream, limit=8)) == [
+        (None, "oversized_frame"),
+        (b"{}", None),
+    ]
+
+
+def test_direct_normalizer_row_limit_precedes_next_generator_fetch(
+    tmp_path, monkeypatch
+):
+    records = observed_records(tmp_path)
+
+    def rows():
+        yield from records
+        pytest.fail("normalizer fetched past its row budget")
+
+    monkeypatch.setattr(e, "MAX_TRACE_RECORDS", 3)
+    result = e.normalize_records(rows())
+    assert not result["complete"] and any(
+        x["code"] == "trace_limit" for x in result["issues"]
+    )
+    assert result["attempts"][0]["result"]["snapshot"]["status"] == "open"

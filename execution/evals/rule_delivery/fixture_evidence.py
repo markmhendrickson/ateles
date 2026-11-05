@@ -131,22 +131,56 @@ def encode_json(value, path="record", *, limit=MAX_INPUT_BYTES):
     return b"".join(output)
 
 
-def read_frames(stream, *, limit=MAX_INPUT_BYTES):
-    """Bound LF-delimited payload bytes (the delimiter is not payload)."""
+def read_frames(stream, *, limit=MAX_INPUT_BYTES, byte_limit=None, row_limit=None):
+    """Bound frames and optional total consumption, including discarded bytes.
+
+    LF is outside the payload limit but inside the total byte limit. Trace
+    limits stop before the next read, including a read used only for draining.
+    Without total limits an ongoing stdio service can drain to the next frame.
+    """
+    consumed, rows = 0, 0
+
+    def read_chunk():
+        nonlocal consumed
+        size = limit + 2
+        if byte_limit is not None:
+            size = min(size, byte_limit - consumed)
+        raw = stream.readline(size)
+        consumed += len(raw)
+        return raw
+
+    def bytes_exhausted():
+        return byte_limit is not None and consumed >= byte_limit
+
     while True:
-        raw = stream.readline(limit + 2)
+        if bytes_exhausted() or row_limit is not None and rows >= row_limit:
+            yield None, "trace_limit"
+            return
+        raw = read_chunk()
         if not raw:
             return
+        rows += 1
         if raw.endswith(b"\n"):
             yield (
                 (None, "oversized_frame") if len(raw) - 1 > limit else (raw[:-1], None)
             )
         elif len(raw) <= limit:
-            yield raw, "truncated_frame"
+            yield (
+                (None, "trace_limit")
+                if bytes_exhausted()
+                else (
+                    raw,
+                    "truncated_frame",
+                )
+            )
             return
         else:
             while raw and not raw.endswith(b"\n"):
-                raw = stream.readline(limit + 2)
+                if bytes_exhausted():
+                    yield None, "oversized_frame"
+                    yield None, "trace_limit"
+                    return
+                raw = read_chunk()
             yield None, "oversized_frame"
             if not raw:
                 return
@@ -186,11 +220,16 @@ def normalize_records(records, *, exclude_correlation=None, initial_issues=None)
             }
         )
 
-    total = 0
-    for index, row in enumerate(records):
-        if index >= MAX_TRACE_RECORDS:
-            issue("trace_limit", index=index)
+    total, index, iterator = 0, -1, iter(records)
+    while True:
+        if index + 1 >= MAX_TRACE_RECORDS or total >= MAX_TRACE_BYTES:
+            issue("trace_limit", index=index + 1)
             break
+        try:
+            row = next(iterator)
+        except StopIteration:
+            break
+        index += 1
         if _structure_errors(row, f"records[{index}]") or not isinstance(row, dict):
             issue("invalid_record", index=index)
             continue
@@ -439,22 +478,19 @@ def normalize_records(records, *, exclude_correlation=None, initial_issues=None)
 
 
 def read_trace(path, *, exclude_correlation=None):
-    records, issues, total = [], [], 0
+    records, issues = [], []
     try:
         with Path(path).open("rb") as handle:
-            for index, (raw, error) in enumerate(read_frames(handle)):
-                if index >= MAX_TRACE_RECORDS:
-                    issues.append({"code": "trace_limit"})
-                    break
+            for index, (raw, error) in enumerate(
+                read_frames(
+                    handle, byte_limit=MAX_TRACE_BYTES, row_limit=MAX_TRACE_RECORDS
+                )
+            ):
                 frame_issue = {"code": error, "index": index} if error else None
                 if frame_issue:
                     issues.append(frame_issue)
                     if raw is None:
                         continue
-                total += len(raw)
-                if total > MAX_TRACE_BYTES:
-                    issues.append({"code": "trace_limit", "index": index})
-                    break
                 if not raw.strip():
                     continue
                 errors = []
