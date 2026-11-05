@@ -11,6 +11,12 @@ the runner and points the agent's MCP configuration at it. The signing
 function closes over the key, so the key never enters this module's state
 and never reaches the agent process.
 
+The agents' MCP clients take only a TCP URL, so the forwarder cannot use a
+Unix socket. Instead it reads the connecting peer's uid from
+``/proc/net/tcp`` and refuses every uid but the agent's, so no other process
+on the machine can borrow the role's signature. ``health_check`` confirms,
+before a job starts, that Neotoma admits the key on ``/mcp``.
+
 Standard library only. Logs method, path, status and byte counts; never
 headers, bodies or key material.
 """
@@ -18,10 +24,12 @@ headers, bodies or key material.
 from __future__ import annotations
 
 import http.client
+import ipaddress
+import json
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable, Mapping, Optional
+from typing import Callable, Mapping, Optional, Sequence
 from urllib.parse import urlsplit
 
 log = logging.getLogger("neotoma_proxy")
@@ -52,6 +60,172 @@ FORWARDED_RESPONSE_HEADERS = (
 
 Signer = Callable[[str, str, Optional[bytes], str], Mapping[str, str]]
 
+PROC_NET_TCP_PATHS = ("/proc/net/tcp", "/proc/net/tcp6")
+SESSION_PATH = "/session"
+HEALTH_INITIALIZE_BODY = json.dumps(
+    {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "ateles-fly-runner-health", "version": "1"},
+        },
+    },
+    separators=(",", ":"),
+).encode()
+HEALTH_ACCEPT = "application/json, text/event-stream"
+MAX_HEALTH_BODY_BYTES = 65536
+MAX_REASON_CHARS = 200
+
+
+def _parse_upstream_base(upstream_base: str):
+    parts = urlsplit(upstream_base)
+    if (
+        parts.scheme != "https"
+        or not parts.hostname
+        or parts.path
+        or parts.query
+        or parts.fragment
+        or upstream_base.endswith("/")
+    ):
+        raise ValueError("upstream_base must be an https:// origin with no path or trailing slash")
+    return parts
+
+
+def _proc_net_is_loopback(hex_address: str) -> bool:
+    """Whether a ``/proc/net/tcp`` address (host-order hex words) is loopback."""
+    try:
+        raw = bytes.fromhex(hex_address)
+    except ValueError:
+        return False
+    if len(raw) not in (4, 16):
+        return False
+    # The kernel prints each 32-bit word in host (little-endian) byte order.
+    packed = b"".join(raw[i : i + 4][::-1] for i in range(0, len(raw), 4))
+    if len(packed) == 4:
+        return ipaddress.IPv4Address(packed).is_loopback
+    address = ipaddress.IPv6Address(packed)
+    mapped = address.ipv4_mapped
+    return address.is_loopback or (mapped is not None and mapped.is_loopback)
+
+
+def proc_net_peer_uid(
+    client_port: int,
+    server_port: int,
+    *,
+    paths: Sequence[str] = PROC_NET_TCP_PATHS,
+) -> Optional[int]:
+    """Return the uid owning the client end of a loopback TCP connection.
+
+    The client's socket appears in ``/proc/net/tcp`` (or ``tcp6``) with its
+    own port as the local port and the server's port as the remote port;
+    column 8 of that row is the owning uid. Only rows whose two addresses are
+    loopback count. Returns None when no row matches, when matching rows
+    disagree on the uid, or when no table can be read; the caller treats
+    None as a refusal.
+    """
+    uids = set()
+    for path in paths:
+        try:
+            with open(path, encoding="ascii", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            continue
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) < 8:
+                continue
+            local_host, _, local_port = fields[1].rpartition(":")
+            remote_host, _, remote_port = fields[2].rpartition(":")
+            try:
+                if int(local_port, 16) != client_port or int(remote_port, 16) != server_port:
+                    continue
+                uid = int(fields[7])
+            except ValueError:
+                continue
+            if _proc_net_is_loopback(local_host) and _proc_net_is_loopback(remote_host):
+                uids.add(uid)
+    return uids.pop() if len(uids) == 1 else None
+
+
+def health_check(
+    upstream_base: str,
+    sign: Signer,
+    *,
+    connect: Optional[Callable[[], http.client.HTTPConnection]] = None,
+    timeout: float = 20.0,
+) -> Optional[str]:
+    """Return None when Neotoma admits the signing key on ``/mcp``, else a reason.
+
+    Every request is signed. The reason never contains a header, body or key
+    material beyond the server's own ``admission_reason`` label.
+    """
+    parts = _parse_upstream_base(upstream_base)
+    if connect is None:
+        host, port = parts.hostname, parts.port
+
+        def connect() -> http.client.HTTPConnection:
+            return http.client.HTTPSConnection(host, port, timeout=timeout)
+
+    def request(method: str, path: str, body: Optional[bytes], headers: Mapping[str, str]):
+        content_type = headers.get("content-type", DEFAULT_CONTENT_TYPE)
+        all_headers = dict(headers)
+        all_headers.update(sign(method, upstream_base + path, body, content_type))
+        conn = connect()
+        conn.timeout = timeout
+        try:
+            conn.request(method, path, body=body, headers=all_headers)
+            resp = conn.getresponse()
+            status = resp.status
+            session_id = resp.getheader("mcp-session-id")
+            # A 200 from /mcp may be an event stream; only its status matters.
+            read_body = not (method == "POST" and status == 200) and method != "DELETE"
+            payload = resp.read(MAX_HEALTH_BODY_BYTES) if read_body else b""
+        finally:
+            conn.close()
+        return status, session_id, payload
+
+    try:
+        status, _, payload = request("GET", SESSION_PATH, None, {"accept": DEFAULT_CONTENT_TYPE})
+        admitted, reason = False, None
+        if status == 200:
+            try:
+                data = json.loads(payload)
+            except ValueError:
+                data = None
+            aauth = data.get("aauth") if isinstance(data, dict) else None
+            if isinstance(aauth, dict):
+                admitted = aauth.get("admitted") is True
+                reason = aauth.get("admission_reason")
+            if reason is None and isinstance(data, dict):
+                reason = data.get("admission_reason")
+        if not admitted:
+            if reason is not None:
+                reason = str(reason)[:MAX_REASON_CHARS]
+            return f"no active agent_grant admits this key (admission_reason={reason})"
+
+        status, session_id, payload = request(
+            "POST",
+            MCP_PATH,
+            HEALTH_INITIALIZE_BODY,
+            {"content-type": DEFAULT_CONTENT_TYPE, "accept": HEALTH_ACCEPT},
+        )
+        if status == 401 and b"Encryption is enabled" in payload:
+            return "Neotoma has encryption on; it refuses AAuth on /mcp"
+        if status != 200:
+            return f"Neotoma /mcp answered {status}"
+    except (OSError, http.client.HTTPException):
+        return "Neotoma unreachable"
+
+    if session_id:
+        try:
+            request("DELETE", MCP_PATH, None, {"mcp-session-id": session_id})
+        except (OSError, http.client.HTTPException):
+            log.info("neotoma health check could not close its MCP session")
+    return None
+
 
 class NeotomaSigningProxy:
     """Forward ``/mcp`` on a loopback port to ``upstream_base + "/mcp"``."""
@@ -65,22 +239,12 @@ class NeotomaSigningProxy:
         allowed_peer_uid: Optional[int] = None,
         allow_any_peer_for_tests: bool = False,
     ) -> None:
-        parts = urlsplit(upstream_base)
-        if (
-            parts.scheme != "https"
-            or not parts.hostname
-            or parts.path
-            or parts.query
-            or parts.fragment
-            or upstream_base.endswith("/")
-        ):
-            raise ValueError("upstream_base must be an https:// origin with no path or trailing slash")
+        parts = _parse_upstream_base(upstream_base)
         if allowed_peer_uid is None and not allow_any_peer_for_tests:
             raise ValueError("allowed_peer_uid is required")
         self.upstream_base = upstream_base
         self.upstream_url = upstream_base + MCP_PATH
         self._sign = sign
-        # Stored for the slice that enforces the peer check; not enforced here.
         self.allowed_peer_uid = allowed_peer_uid
         if connect is None:
             host, port = parts.hostname, parts.port
@@ -151,6 +315,14 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     def _handle(self) -> None:
         method = self.command
         path, sep, _query = self.path.partition("?")
+        allowed_uid = self.proxy.allowed_peer_uid
+        if allowed_uid is not None:
+            # Checked before anything else, the body included: a refused peer
+            # learns nothing and costs no upstream call.
+            peer_uid = proc_net_peer_uid(self.client_address[1], self.server.server_address[1])
+            if peer_uid != allowed_uid:
+                log.warning("neotoma proxy refused a connection from uid %s", peer_uid)
+                return self._reject(403, method, path)
         if path != MCP_PATH:
             return self._reject(404, method, path)
         if sep:

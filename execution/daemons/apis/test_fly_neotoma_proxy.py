@@ -9,8 +9,10 @@ from __future__ import annotations
 import http.client
 import importlib.util
 import io
+import json
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -356,3 +358,242 @@ class _Refusing(http.client.HTTPConnection):
 
     def connect(self):
         raise ConnectionRefusedError("no upstream")
+
+
+# --- Peer uid check -------------------------------------------------------
+
+_PROC_NET_TCP = """\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1001 1 0 100 0 0 10 0
+   1: 0100007F:1F90 0100007F:D431 01 00000000:00000000 00:00000000 00000000     0        0 1002 1 0 20 4 30 10 -1
+   2: 0100007F:D431 0100007F:1F90 01 00000000:00000000 00:00000000 00000000 10001        0 1003 1 0 20 4 30 10 -1
+"""
+_PROC_NET_TCP6 = """\
+  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000001000000:C350 00000000000000000000000001000000:1F90 01 00000000:00000000 00:00000000 00000000  4242        0 2001 1 0 20 4 30 10 -1
+"""
+
+
+def test_proc_net_peer_uid_reads_the_client_row(tmp_path):
+    tcp = tmp_path / "tcp"
+    tcp.write_text(_PROC_NET_TCP)
+    tcp6 = tmp_path / "tcp6"
+    tcp6.write_text(_PROC_NET_TCP6)
+    paths = (str(tcp), str(tcp6))
+    # 0xD431 = 54321 is the client's port, 0x1F90 = 8080 the proxy's. The
+    # server-side row (uid 0) has the ports the other way round.
+    assert neotoma_proxy.proc_net_peer_uid(54321, 8080, paths=paths) == 10001
+    assert neotoma_proxy.proc_net_peer_uid(8080, 54321, paths=paths) == 0
+    assert neotoma_proxy.proc_net_peer_uid(50000, 8080, paths=paths) == 4242
+    assert neotoma_proxy.proc_net_peer_uid(54322, 8080, paths=paths) is None
+    assert neotoma_proxy.proc_net_peer_uid(54321, 8080, paths=(str(tmp_path / "missing"),)) is None
+
+
+def test_proc_net_peer_uid_ignores_non_loopback_rows_and_refuses_ambiguity(tmp_path):
+    tcp = tmp_path / "tcp"
+    # Row 0 reuses the agent's port pair on a non-loopback address (10.0.0.5)
+    # under another uid; only the loopback row 1 may answer.
+    tcp.write_text(
+        _PROC_NET_TCP.splitlines()[0]
+        + "\n   0: 0500000A:D431 0500000A:1F90 01 00000000:00000000 00:00000000 00000000  1000 0 1 1 0 20 4 30 10 -1"
+        + "\n   1: 0100007F:D431 0100007F:1F90 01 00000000:00000000 00:00000000 00000000 10001 0 2 1 0 20 4 30 10 -1\n"
+    )
+    assert neotoma_proxy.proc_net_peer_uid(54321, 8080, paths=(str(tcp),)) == 10001
+    # An IPv4-mapped loopback row under a different uid makes the answer ambiguous.
+    tcp6 = tmp_path / "tcp6"
+    tcp6.write_text(
+        _PROC_NET_TCP6.splitlines()[0]
+        + "\n   0: 0000000000000000FFFF00000100007F:D431 0000000000000000FFFF00000100007F:1F90 01"
+        " 00000000:00000000 00:00000000 00000000  1000 0 3 1 0 20 4 30 10 -1\n"
+    )
+    assert neotoma_proxy.proc_net_peer_uid(54321, 8080, paths=(str(tcp6),)) == 1000
+    assert neotoma_proxy.proc_net_peer_uid(54321, 8080, paths=(str(tcp), str(tcp6))) is None
+
+
+@pytest.fixture
+def uid_checked_proxy_port(upstream, sign_calls):
+    def sign(method, url, body, content_type):
+        sign_calls.append((method, url, body, content_type))
+        return dict(SIGNATURE)
+
+    proxy = neotoma_proxy.NeotomaSigningProxy(
+        UPSTREAM_BASE,
+        sign,
+        connect=lambda: http.client.HTTPConnection("127.0.0.1", upstream.port, timeout=10),
+        allowed_peer_uid=4242,
+    )
+    port = proxy.start()
+    yield port
+    proxy.stop()
+
+
+@pytest.mark.parametrize(("peer_uid", "status"), [(1000, 403), (None, 403), (4242, 200)])
+def test_only_the_allowed_peer_uid_is_forwarded(
+    peer_uid, status, monkeypatch, upstream, sign_calls, uid_checked_proxy_port
+):
+    lookups = []
+
+    def fake_peer_uid(client_port, server_port):
+        lookups.append((client_port, server_port))
+        return peer_uid
+
+    monkeypatch.setattr(neotoma_proxy, "proc_net_peer_uid", fake_peer_uid)
+    conn = _client(uid_checked_proxy_port)
+    conn.connect()
+    client_port = conn.sock.getsockname()[1]
+    conn.request("POST", "/mcp", body=b"{}", headers={"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == status
+    assert lookups == [(client_port, uid_checked_proxy_port)]
+    if status == 403:
+        assert upstream.requests == [] and sign_calls == []
+    else:
+        assert len(upstream.requests) == 1 and len(sign_calls) == 1
+
+
+# --- Health check ---------------------------------------------------------
+
+
+class _HealthUpstream:
+    """A fake Neotoma answering /session and /mcp with configured responses."""
+
+    def __init__(self, session=(200, b""), mcp=(200, b"{}"), hang=False):
+        self.requests = []
+        self.session = session
+        self.mcp = mcp
+        self.stop_hanging = threading.Event()
+        upstream = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                return
+
+            def _serve(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
+                upstream.requests.append(
+                    {"method": self.command, "path": self.path, "headers": _lower(dict(self.headers.items())), "body": body}
+                )
+                if hang:
+                    upstream.stop_hanging.wait(timeout=10)
+                    return
+                if self.path == "/session":
+                    status, payload = upstream.session
+                elif self.command == "DELETE":
+                    status, payload = 200, b""
+                else:
+                    status, payload = upstream.mcp
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Mcp-Session-Id", "health-session")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = do_POST = do_DELETE = _serve
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.stop_hanging.set()
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def _admitted(admitted=True, reason=None):
+    aauth = {"admitted": admitted}
+    if reason is not None:
+        aauth["admission_reason"] = reason
+    return json.dumps({"aauth": aauth}).encode()
+
+
+def _run_health(upstream, timeout=5.0):
+    calls = []
+
+    def sign(method, url, body, content_type):
+        calls.append((method, url, body, content_type))
+        return dict(SIGNATURE)
+
+    result = neotoma_proxy.health_check(
+        UPSTREAM_BASE,
+        sign,
+        connect=lambda: http.client.HTTPConnection("127.0.0.1", upstream.port),
+        timeout=timeout,
+    )
+    return result, calls
+
+
+def test_health_check_passes_when_admitted_and_mcp_initializes():
+    upstream = _HealthUpstream(session=(200, _admitted()))
+    try:
+        result, calls = _run_health(upstream)
+    finally:
+        upstream.close()
+    assert result is None
+    assert [(r["method"], r["path"]) for r in upstream.requests] == [
+        ("GET", "/session"),
+        ("POST", "/mcp"),
+        ("DELETE", "/mcp"),
+    ]
+    for seen in upstream.requests:
+        assert seen["headers"]["signature"] == SIGNATURE["signature"]
+    initialize = json.loads(upstream.requests[1]["body"])
+    assert initialize["method"] == "initialize"
+    assert initialize["params"]["protocolVersion"] == "2025-06-18"
+    assert upstream.requests[1]["headers"]["accept"] == "application/json, text/event-stream"
+    assert upstream.requests[2]["headers"]["mcp-session-id"] == "health-session"
+    assert [(m, u) for m, u, _, _ in calls] == [
+        ("GET", UPSTREAM_BASE + "/session"),
+        ("POST", UPSTREAM_BASE + "/mcp"),
+        ("DELETE", UPSTREAM_BASE + "/mcp"),
+    ]
+    assert calls[1][2] == upstream.requests[1]["body"]
+
+
+def test_health_check_reports_an_unadmitted_key():
+    upstream = _HealthUpstream(session=(200, _admitted(False, "no_match")))
+    try:
+        result, _ = _run_health(upstream)
+    finally:
+        upstream.close()
+    assert result is not None and "no_match" in result
+    assert result.startswith("no active agent_grant admits this key")
+    assert [r["path"] for r in upstream.requests] == ["/session"]
+
+
+def test_health_check_reports_encryption_refusing_aauth():
+    upstream = _HealthUpstream(
+        session=(200, _admitted()), mcp=(401, b'{"error":"Encryption is enabled; use a bearer token"}')
+    )
+    try:
+        result, _ = _run_health(upstream)
+    finally:
+        upstream.close()
+    assert result == "Neotoma has encryption on; it refuses AAuth on /mcp"
+
+
+def test_health_check_reports_other_mcp_failures():
+    upstream = _HealthUpstream(session=(200, _admitted()), mcp=(500, b"boom"))
+    try:
+        result, _ = _run_health(upstream)
+    finally:
+        upstream.close()
+    assert result == "Neotoma /mcp answered 500"
+
+
+def test_health_check_reports_an_upstream_that_never_answers():
+    upstream = _HealthUpstream(hang=True)
+    started = time.monotonic()
+    try:
+        result, _ = _run_health(upstream, timeout=0.5)
+    finally:
+        upstream.close()
+    assert result == "Neotoma unreachable"
+    assert time.monotonic() - started < 5
