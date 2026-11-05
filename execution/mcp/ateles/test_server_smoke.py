@@ -23,23 +23,51 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 SERVER = _HERE / "server.py"
 
-TIMEOUT_SECONDS = 10.0
+# The reply to the first `initialize` also covers process startup (interpreter
+# start, imports, and the server's agent_policy reachability probe), so it gets
+# a separate, realistic allowance. Every later request stays under the request
+# limit, so a slow or wedged request still fails fast.
+STARTUP_TIMEOUT_SECONDS = 60.0
+REQUEST_TIMEOUT_SECONDS = 10.0
 
 
-def _send_and_collect(proc: subprocess.Popen, messages: list[dict], expect_ids: set[int]) -> dict[int, dict]:
+def _closed_local_url() -> str:
+    """A loopback URL nothing listens on, so connections are refused at once.
+
+    server.py probes Neotoma for agent_policy before it answers `initialize`.
+    Left at its default it reaches the hosted instance over the network, and a
+    slow or unresponsive host holds the first reply for as long as the probe's
+    own timeouts and retries allow. A refused loopback connection keeps that
+    probe on its existing failure path without depending on the network.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    return f"http://127.0.0.1:{port}"
+
+
+def _send_and_collect(
+    proc: subprocess.Popen,
+    messages: list[dict],
+    expect_ids: set[int],
+    timeout: float = REQUEST_TIMEOUT_SECONDS,
+) -> dict[int, dict]:
     """Write messages, then read responses with a wall-clock timeout.
 
     A plain readline() loop can hang forever if the server wedges — this
     kills the process and gives up rather than blocking the test run.
+    Pass `timeout=STARTUP_TIMEOUT_SECONDS` only for the first `initialize`.
     """
     for msg in messages:
         proc.stdin.write(json.dumps(msg) + "\n")
@@ -47,7 +75,7 @@ def _send_and_collect(proc: subprocess.Popen, messages: list[dict], expect_ids: 
 
     responses: dict[int, dict] = {}
     timed_out = threading.Event()
-    timer = threading.Timer(TIMEOUT_SECONDS, lambda: (timed_out.set(), proc.kill()))
+    timer = threading.Timer(timeout, lambda: (timed_out.set(), proc.kill()))
     timer.start()
     try:
         while len(responses) < len(expect_ids):
@@ -67,18 +95,22 @@ def _send_and_collect(proc: subprocess.Popen, messages: list[dict], expect_ids: 
     finally:
         timer.cancel()
     if timed_out.is_set():
-        raise AssertionError(f"timed out after {TIMEOUT_SECONDS}s waiting for responses {expect_ids}")
+        raise AssertionError(f"timed out after {timeout}s waiting for responses {expect_ids}")
     return responses
 
 
-def _stderr_tail(proc: subprocess.Popen) -> str:
-    """Best-effort stderr read for diagnostics — never blocks on a live pipe."""
-    if proc.poll() is None:
-        return "(process still running, stderr not read to avoid blocking)"
+def _drain_stderr(proc: subprocess.Popen) -> None:
+    """Read stderr continuously so the server can never block on a full pipe."""
     try:
-        return proc.stderr.read()
-    except Exception:
-        return "(stderr unavailable)"
+        for line in proc.stderr:
+            proc._stderr_lines.append(line)
+    except Exception:  # noqa: BLE001 — diagnostics only
+        pass
+
+
+def _stderr_tail(proc: subprocess.Popen) -> str:
+    """The server's stderr collected so far — never blocks on a live pipe."""
+    return "".join(proc._stderr_lines[-50:]) or "(no stderr output)"
 
 
 def _start_server() -> subprocess.Popen:
@@ -87,6 +119,7 @@ def _start_server() -> subprocess.Popen:
         **os.environ,
         "NEOTOMA_BEARER_TOKEN": "",
         "APIS_CHECKPOINT_DENIAL_DIR": denial_store.name,
+        "NEOTOMA_BASE_URL": _closed_local_url(),
     }
     proc = subprocess.Popen(
         [sys.executable, str(SERVER)],
@@ -98,6 +131,8 @@ def _start_server() -> subprocess.Popen:
         bufsize=1,
     )
     proc._checkpoint_denial_store = denial_store
+    proc._stderr_lines = []
+    threading.Thread(target=_drain_stderr, args=(proc,), daemon=True).start()
     return proc
 
 
@@ -126,6 +161,7 @@ def test_initialize_and_tools_list():
                 },
             ],
             expect_ids={1},
+            timeout=STARTUP_TIMEOUT_SECONDS,
         )
         assert 1 in responses, f"no initialize response, stderr={_stderr_tail(proc)}"
         result = responses[1].get("result", {})
@@ -171,6 +207,7 @@ def test_tool_call_degrades_gracefully_without_token():
                 },
             ],
             expect_ids={1},
+            timeout=STARTUP_TIMEOUT_SECONDS,
         )
         proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}) + "\n")
         proc.stdin.flush()
@@ -189,6 +226,54 @@ def test_tool_call_degrades_gracefully_without_token():
         content = responses[2]["result"]["content"][0]["text"]
         payload = json.loads(content)
         assert "error" in payload, f"expected graceful error, got {payload}"
+    finally:
+        _stop_server(proc)
+
+
+def test_startup_allowance_does_not_widen_request_limit():
+    """A later request that never answers fails at the request limit.
+
+    The startup allowance is for the first `initialize` only. If it leaked
+    into later requests, a wedged request would hang for the full allowance
+    instead of failing at REQUEST_TIMEOUT_SECONDS.
+    """
+    proc = _start_server()
+    try:
+        responses = _send_and_collect(
+            proc,
+            [
+                {
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "smoke-test", "version": "0.0.1"},
+                    },
+                },
+            ],
+            expect_ids={1},
+            timeout=STARTUP_TIMEOUT_SECONDS,
+        )
+        assert 1 in responses, f"no initialize response, stderr={_stderr_tail(proc)}"
+
+        # A notification gets no reply, so waiting for id 3 after it is a
+        # request that never answers.
+        started = time.monotonic()
+        try:
+            _send_and_collect(
+                proc,
+                [{"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}],
+                expect_ids={3},
+            )
+        except AssertionError as exc:
+            elapsed = time.monotonic() - started
+            assert f"timed out after {REQUEST_TIMEOUT_SECONDS}s" in str(exc), str(exc)
+        else:
+            raise AssertionError("a request that never answers did not time out")
+        assert REQUEST_TIMEOUT_SECONDS <= elapsed < STARTUP_TIMEOUT_SECONDS, (
+            f"unanswered request failed after {elapsed:.1f}s, expected about "
+            f"{REQUEST_TIMEOUT_SECONDS}s and well under {STARTUP_TIMEOUT_SECONDS}s"
+        )
     finally:
         _stop_server(proc)
 
