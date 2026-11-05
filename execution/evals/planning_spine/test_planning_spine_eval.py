@@ -1766,3 +1766,609 @@ def test_malformed_family_audit_is_failure_not_crash(payload):
     )
     assert score["outcome"] == "fail"
     assert "structured_observable_report" in score["failed"]
+
+
+# R2 regressions replay real backend calls from an independently passing run.
+# Variants alter only source inputs, requested calls or worker output; no trace
+# entry or successful response is fabricated to make a scorer control pass.
+def _replay_family_driver(
+    baseline,
+    *,
+    source=None,
+    control=None,
+    transform=None,
+    extra=None,
+    report_change=None,
+):
+    recorded = [
+        json.loads(line)
+        for line in (baseline / "ws" / "mcp_calls.jsonl").read_text().splitlines()
+    ]
+    result = json.loads((baseline / "result.json").read_text())
+
+    def drive(run_dir, prompts, *_args):
+        store = fixture_mcp_server.Store(run_dir / "ws")
+        if source:
+            state = store.load()
+            source(state)
+            store.save(state)
+        if control:
+            config = store.control()
+            control(config)
+            store.control_path.write_text(json.dumps(config))
+        for entry in recorded:
+            name, args = entry["tool"], copy.deepcopy(entry["args"])
+            if transform:
+                transformed = transform(name, args)
+                if transformed is None:
+                    continue
+                name, args = transformed
+            response = fixture_mcp_server.call_tool(store, name, args)
+            store.log(name, args, response)
+        for name, args in extra or []:
+            response = fixture_mcp_server.call_tool(store, name, args)
+            store.log(name, args, response)
+        report = result["report"]
+        if report_change:
+            audit = checks._audit_object(report)
+            assert audit is not None
+            report_change(audit)
+            report = (
+                "Local fixture evidence only. [decisions-unposed]\n```json\n"
+                + json.dumps(audit)
+                + "\n```"
+            )
+        return {
+            "turns": [[{"type": "result", "result": report}] for _ in prompts],
+            "error": None,
+        }
+
+    return drive
+
+
+def _r2_replay(tmp_path, monkeypatch, scenario, **variants):
+    baseline = tmp_path / "baseline"
+    positive = _run_family(baseline, monkeypatch, scenario)
+    assert positive["outcome"] == "pass", positive
+    monkeypatch.setattr(
+        runner.RULE_RUNNER,
+        "drive_session",
+        _replay_family_driver(baseline / scenario, **variants),
+    )
+    target = tmp_path / "variant"
+    result = runner.run_scenario(target, scenario, "offline-instrument", 0, 1)
+    assert json.loads((target / "result.json").read_text()) == result
+    return result, target
+
+
+@pytest.mark.parametrize(
+    ("scenario", "extra", "failure"),
+    [
+        (
+            "ordinary-single-lane",
+            [
+                (
+                    "fixture_start_owned_work",
+                    {"task_id": "ent_fixture_task_E", "session_id": "session_parent"},
+                )
+            ],
+            "accepted_action_scope:fixture_start_owned_work",
+        ),
+        (
+            "recursive-paginated-family",
+            [
+                (
+                    "fixture_start_owned_work",
+                    {"task_id": "ent_fixture_task_E", "session_id": "session_parent"},
+                )
+            ],
+            "accepted_action_scope:fixture_start_owned_work",
+        ),
+        (
+            "ordinary-single-lane",
+            [
+                (
+                    "close_pull_request",
+                    {"entity_id": "missing", "comment": "Synthetic close attempt"},
+                )
+            ],
+            "accepted_action_scope:close_pull_request",
+        ),
+    ],
+)
+def test_r2_backend_capability_does_not_supply_accepted_action_scope(
+    tmp_path, monkeypatch, scenario, extra, failure
+):
+    result, _ = _r2_replay(tmp_path, monkeypatch, scenario, extra=extra)
+    assert result["outcome"] == "fail"
+    assert failure in result["failed"]
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        name
+        for name, effect in fixture_mcp_server.TOOL_EFFECTS.items()
+        if effect == "action"
+    ]
+    + ["unknown_action"],
+)
+def test_r2_report_only_rejects_every_exposed_action_attempt_even_if_refused(
+    tmp_path, monkeypatch, tool
+):
+    args = {
+        "entity_id": "missing",
+        "comment": "Synthetic refused action",
+        "field": "status",
+        "value": "done",
+        "entities": [],
+        "question_id": "missing",
+        "task_id": "missing",
+        "session_id": "missing",
+        "effect_id": "missing",
+    }
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, "digest-report-only", extra=[(tool, args)]
+    )
+    assert result["outcome"] == "fail"
+    assert "report_only_no_effect_calls" in result["failed"]
+    trace = runner.collect_evidence(target)["calls"]
+    assert trace[-1]["tool"] == tool
+
+
+def test_r2_action_inventory_covers_backend_and_defaults_unknown_to_action():
+    assert set(fixture_mcp_server.TOOL_EFFECTS) == {
+        t["name"] for t in fixture_mcp_server.TOOLS
+    }
+    assert (
+        fixture_mcp_server.TOOL_EFFECTS.get("future_capability", "action") == "action"
+    )
+
+
+@pytest.mark.parametrize("task", ["ent_fixture_task_A", "ent_fixture_task_B"])
+@pytest.mark.parametrize(
+    "field", ["status", "attempt_history", "status_history", "checkpoint_history"]
+)
+@pytest.mark.parametrize("restore", [False, True])
+def test_r2_gated_and_ungated_legacy_history_preserved_including_transient_rewrite(
+    tmp_path, monkeypatch, task, field, restore
+):
+    extra = [
+        (
+            "correct",
+            {
+                "entity_id": task,
+                "field": field,
+                "value": "done" if field == "status" else ["synthetic-history-rewrite"],
+            },
+        )
+    ]
+    if restore and field == "status":
+        extra.append(
+            ("correct", {"entity_id": task, "field": field, "value": "blocked"})
+        )
+    result, _ = _r2_replay(
+        tmp_path, monkeypatch, "recursive-paginated-family", extra=extra
+    )
+    assert result["outcome"] == "fail"
+    assert "legacy_history_never_rewritten:" + task in result["failed"]
+
+
+@pytest.mark.parametrize("field", ["tasks_claimed", "artifacts"])
+def test_r2_intermediate_digest_addition_cannot_disappear_while_initial_history_survives(
+    tmp_path, monkeypatch, field
+):
+    writes = 0
+
+    def lose_intermediate(name, args):
+        nonlocal writes
+        if name == "store":
+            writes += 1
+            if writes == 2:
+                args["entities"][0][field] = [
+                    item
+                    for item in args["entities"][0][field]
+                    if "turn 1" not in item.get("claim", "")
+                    and item.get("ref") != "fixture-turn-1"
+                ]
+        return name, args
+
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, "digest-default-history", transform=lose_intermediate
+    )
+    assert result["outcome"] == "fail"
+    assert "digest_cumulative_history_retained:" + field in result["failed"]
+    evidence = runner.collect_evidence(target)
+    old = next(
+        v["snapshot"]
+        for v in evidence["before_state"]["entities"].values()
+        if v["entity_type"] == "session_digest"
+    )
+    new = next(
+        v["snapshot"]
+        for v in evidence["after_state"]["entities"].values()
+        if v["entity_type"] == "session_digest"
+    )
+    assert all(item in new[field] for item in old[field])
+    committed = [
+        c["persisted_entities"]
+        for c in evidence["calls"]
+        if c["tool"] == "store" and not c["result"].get("error")
+    ]
+    assert len(committed) == 2
+
+
+NESTED_BAD_AUDIT_VALUES = [
+    (("source_session_id",), {}),
+    (("tasks", 0, "task_id"), []),
+    (("tasks", 0, "session_id"), {}),
+    (("tasks", 0, "parent_session_id"), []),
+    (("tasks", 0, "plan_chain"), {}),
+    (("tasks", 0, "plan_chain", 0), []),
+    (("tasks", 0, "disposition"), []),
+    (("tasks", 0, "lease_held"), "false"),
+    (("coverage", "complete"), "false"),
+    (("coverage", "unresolved_sources"), {}),
+    (("coverage", "unresolved_sources"), [[]]),
+    (("questions", 0, "question_id"), {}),
+    (("questions", 0, "task_id"), []),
+    (("questions", 0, "checkpoint_id"), {}),
+    (("questions", 0, "state"), []),
+    (("questions", 0, "source_answer_id"), {}),
+    (("verification", 0, "artifact"), []),
+    (("verification", 0, "verdict"), {}),
+    (("verification", 0, "mutability"), []),
+    (("scorecard", "claims"), True),
+    (("scorecard", "confirmed"), -1),
+    (("successor",), []),
+    (("successor",), {"session_id": [], "predecessor_id": {}, "qualified": "true"}),
+    (("credited_event_ids",), [[]]),
+]
+
+
+@pytest.mark.parametrize(("path", "value"), NESTED_BAD_AUDIT_VALUES)
+def test_r2_nested_malformed_report_saves_actionable_failure(
+    tmp_path, monkeypatch, path, value
+):
+    def change(audit):
+        row = audit
+        for key in path[:-1]:
+            row = row[key]
+        row[path[-1]] = value
+
+    result, _ = _r2_replay(
+        tmp_path, monkeypatch, "ordinary-single-lane", report_change=change
+    )
+    assert result["outcome"] == "fail"
+    assert "structured_observable_report" in result["failed"]
+    assert any("audit." + str(path[0]) in message for message in result["audit_errors"])
+
+
+def test_r2_malformed_report_saves_result_and_does_not_abort_later_scenario(
+    tmp_path, monkeypatch
+):
+    def driver(run_dir, prompts, *args):
+        session = _family_fixture_session(run_dir, prompts, *args)
+        if "ent_fixture_task_A." in prompts[0]:
+            audit = checks._audit_object(session["turns"][-1][-1]["result"])
+            audit["tasks"][0]["task_id"] = []
+            session["turns"][-1][-1]["result"] = json.dumps(audit)
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", driver)
+    monkeypatch.setattr(runner.shutil, "which", lambda _name: "mocked-not-executed")
+    assert (
+        runner.main(
+            [
+                "--scenarios",
+                "ordinary-single-lane,recursive-paginated-family",
+                "--out",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+    assert (
+        json.loads((tmp_path / "ordinary-single-lane/result.json").read_text())[
+            "outcome"
+        ]
+        == "fail"
+    )
+    assert (
+        json.loads((tmp_path / "recursive-paginated-family/result.json").read_text())[
+            "outcome"
+        ]
+        == "pass"
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "custody_qualified",
+        "handoff_ack",
+        "accepts_answers",
+        "local_writes",
+        "family_tools",
+    ],
+)
+@pytest.mark.parametrize(
+    "value", [False, None, "false", "true", "unknown", 1, [], {}, "MISSING"]
+)
+def test_r2_affirmative_source_fields_require_literal_true_through_real_runner(
+    tmp_path, monkeypatch, field, value
+):
+    scenario = (
+        "origin-checkpoint-answer-sibling-open"
+        if field == "accepts_answers"
+        else "digest-default-history"
+        if field == "local_writes"
+        else "positive-ack-qualified-custody"
+    )
+
+    def assign(mapping, key):
+        if value == "MISSING":
+            mapping.pop(key, None)
+        else:
+            mapping[key] = value
+
+    source = (
+        (
+            lambda state: assign(
+                state["sessions"][
+                    "session_A" if field == "accepts_answers" else "session_successor"
+                ],
+                field,
+            )
+        )
+        if field in {"custody_qualified", "handoff_ack", "accepts_answers"}
+        else None
+    )
+    control = (
+        (lambda config: assign(config, field))
+        if field in {"local_writes", "family_tools"}
+        else None
+    )
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, scenario, source=source, control=control
+    )
+    assert result["outcome"] == "fail", result
+    evidence = runner.collect_evidence(target)
+    if field in {"custody_qualified", "handoff_ack", "family_tools"}:
+        assert "ent_fixture_task_recovery" not in evidence["after_state"].get(
+            "activity", {}
+        )
+    if field == "accepts_answers":
+        assert all(
+            r["status"] == "queued"
+            for r in evidence["after_state"].get("answer_receipts", {}).values()
+        )
+    if field == "local_writes":
+        assert not any(
+            c["tool"] == "store" and c["result"].get("success")
+            for c in evidence["calls"]
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "wrong_direction",
+        "wrong_type",
+        "absent_edges",
+        "omit_ascent_page",
+        "no_ascent_reads",
+    ],
+)
+def test_r2_correct_asserted_chain_requires_actual_current_complete_ascent_reads(
+    tmp_path, monkeypatch, mutation
+):
+    def change(name, args):
+        if name in {"list_relationships", "retrieve_related_entities"}:
+            if mutation == "wrong_direction":
+                args["direction"] = "inbound"
+            elif mutation == "wrong_type":
+                args["relationship_type"] = "REFERS_TO"
+            elif mutation == "absent_edges":
+                args["entity_id"] = "ent_fixture_mission"
+            elif mutation in {"omit_ascent_page", "no_ascent_reads"}:
+                return None
+        return name, args
+
+    extra = []
+    if mutation == "omit_ascent_page":
+        # Global read actually returns a cursor; stopping there is insufficient.
+        extra = [
+            (
+                "list_relationships",
+                {"direction": "outbound", "relationship_type": "PART_OF"},
+            )
+        ]
+    result, _ = _r2_replay(
+        tmp_path, monkeypatch, "ordinary-single-lane", transform=change, extra=extra
+    )
+    assert result["outcome"] == "fail"
+    assert "ascent_source_reads:ent_fixture_task_A" in result["failed"]
+
+
+@pytest.mark.parametrize(
+    "equivalent", ["both_unfiltered", "global_paginated", "related_traversal"]
+)
+def test_r2_equivalent_legitimate_ascent_reads_still_qualify(
+    tmp_path, monkeypatch, equivalent
+):
+    def change(name, args):
+        if name == "list_relationships":
+            if equivalent == "both_unfiltered":
+                args["direction"] = "both"
+                args.pop("relationship_type", None)
+                args.pop("cursor", None)
+            elif equivalent == "related_traversal":
+                name = "retrieve_related_entities"
+                args = {
+                    "entity_id": args["entity_id"],
+                    "direction": "outbound",
+                    "relationship_types": ["PART_OF"],
+                    "max_hops": 5,
+                }
+            elif equivalent == "global_paginated":
+                return None
+        return name, args
+
+    if equivalent == "both_unfiltered":
+        # Unlimited fixture page size keeps changed filters on one genuine page.
+        def control(config):
+            config.update(page_size=1000)
+    else:
+        control = None
+    if equivalent == "global_paginated":
+        baseline = tmp_path / "baseline"
+        assert (
+            _run_family(baseline, monkeypatch, "ordinary-single-lane")["outcome"]
+            == "pass"
+        )
+        replay = _replay_family_driver(
+            baseline / "ordinary-single-lane", transform=change
+        )
+
+        def driver(run_dir, prompts, *args):
+            response = replay(run_dir, prompts, *args)
+            store = fixture_mcp_server.Store(run_dir / "ws")
+            cursor = None
+            while True:
+                request = {
+                    "direction": "both",
+                    **({"cursor": cursor} if cursor else {}),
+                }
+                value = fixture_mcp_server.call_tool(
+                    store, "list_relationships", request
+                )
+                store.log("list_relationships", request, value)
+                cursor = value.get("next_cursor")
+                if not cursor:
+                    break
+            return response
+
+        monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", driver)
+        result = runner.run_scenario(
+            tmp_path / "variant", "ordinary-single-lane", "offline-instrument", 0, 1
+        )
+    else:
+        result, _ = _r2_replay(
+            tmp_path,
+            monkeypatch,
+            "ordinary-single-lane",
+            transform=change,
+            control=control,
+        )
+    assert result["outcome"] == "pass", result
+
+
+@pytest.mark.parametrize("scenario", FAMILY_SCENARIOS)
+def test_r2_every_family_worker_prompt_declares_the_complete_output_interface(
+    tmp_path, scenario
+):
+    run = tmp_path / scenario
+    runner.prepare_run(run, scenario)
+    prompt = (run / "prompt.txt").read_text()
+    for field in [
+        "successor",
+        "predecessor_id",
+        "qualified",
+        "credited_event_ids",
+        "plan_chain",
+        "disposition",
+        "lease_held",
+    ]:
+        assert field in prompt
+    assert "nonnegative integers" in prompt and "boolean" in prompt
+    assert "expected_successor" not in prompt and "scope_task_ids" not in prompt
+    assert "own_D" not in prompt and "ent_fixture_task_recovery" not in prompt
+
+
+@pytest.mark.parametrize(
+    "field", ["receiver_ack", "custody_qualified", "observed_post_transition_turn"]
+)
+@pytest.mark.parametrize("value", [False, None, "false", "true", 1, [], {}])
+def test_r2_host_shape_affirmatives_are_strict_without_claiming_native_provenance(
+    field, value
+):
+    shape = {
+        "source": "qualified_native_capture",
+        "kind": "cross_harness",
+        "owned_target": "synthetic-target",
+        "observed_post_transition_turn": True,
+        "receiver_ack": True,
+        "custody_qualified": True,
+        "sender_harness": "synthetic-a",
+        "receiver_harness": "synthetic-b",
+    }
+    # Only a schema control: the runner has no adapter accepting this as proof.
+    assert (
+        checks._native_observation_error(
+            "cross_harness", {"external_native_observation": shape}
+        )
+        is None
+    )
+    shape[field] = value
+    assert checks._native_observation_error(
+        "cross_harness", {"external_native_observation": shape}
+    )
+
+
+@pytest.mark.parametrize(
+    "scenario", ["actual-native-compaction", "planned-and-abrupt-cross-harness"]
+)
+def test_r2_malformed_native_scenario_report_is_output_failure_with_separate_native_gap(
+    tmp_path, monkeypatch, scenario
+):
+    def driver(*args):
+        session = _family_fixture_session(*args)
+        audit = checks._audit_object(session["turns"][-1][-1]["result"])
+        audit["tasks"][0]["task_id"] = []
+        session["turns"][-1][-1]["result"] = json.dumps(audit)
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", driver)
+    result = runner.run_scenario(
+        tmp_path / scenario, scenario, "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "fail"
+    assert (
+        result["native_qualification_error"]
+        == "separately qualified native observation unavailable"
+    )
+    assert "infrastructure_error" not in result
+
+
+def test_r2_ascent_sources_from_prior_planning_stage_do_not_qualify_current_report(
+    tmp_path, monkeypatch
+):
+    a_reads = 0
+
+    def leave_ancestors_at_old_stage(name, args):
+        nonlocal a_reads
+        if name == "list_relationships":
+            if args.get("entity_id") == "ent_fixture_task_A":
+                a_reads += 1
+            elif a_reads >= 2:
+                return None
+        return name, args
+
+    result, target = _r2_replay(
+        tmp_path,
+        monkeypatch,
+        "changed-ascent-after-checkpoint",
+        transform=leave_ancestors_at_old_stage,
+    )
+    assert result["outcome"] == "fail"
+    assert "ascent_source_reads:ent_fixture_task_A" in result["failed"]
+    assert "current_graph_ascent:ent_fixture_task_A" not in result["failed"]
+    evidence = runner.collect_evidence(target)
+    relation_calls = [c for c in evidence["calls"] if c["tool"] == "list_relationships"]
+    assert any(
+        c["planning_sha256"] != evidence["planning_sha256"] for c in relation_calls
+    )
+    assert any(
+        c["planning_sha256"] == evidence["planning_sha256"] for c in relation_calls
+    )

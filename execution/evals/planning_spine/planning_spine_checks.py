@@ -1056,6 +1056,11 @@ def audit_validation_errors(value: object) -> list[str]:
                     )
             elif group == "questions":
                 expect(
+                    path + ".source_answer_id",
+                    "source_answer_id" in row,
+                    "present nullable answer identifier",
+                )
+                expect(
                     path + ".state",
                     isinstance(row.get("state"), str)
                     and row["state"] in {"open", "answered"},
@@ -1262,8 +1267,9 @@ def _native_observation_error(kind: str, evidence: dict) -> str | None:
         return "separately qualified native observation unavailable"
     if (
         observed.get("kind") != kind
-        or not observed.get("owned_target")
-        or not observed.get("observed_post_transition_turn")
+        or not isinstance(observed.get("owned_target"), str)
+        or not observed["owned_target"].strip()
+        or observed.get("observed_post_transition_turn") is not True
     ):
         return "native transition target or observed execution is incomplete"
     if kind == "compaction":
@@ -1286,11 +1292,13 @@ def _native_observation_error(kind: str, evidence: dict) -> str | None:
             return "completed and persisted contextCompaction evidence does not match"
     elif kind == "cross_harness":
         if (
-            not observed.get("receiver_ack")
-            or not observed.get("custody_qualified")
+            observed.get("receiver_ack") is not True
+            or observed.get("custody_qualified") is not True
             or observed.get("sender_harness") == observed.get("receiver_harness")
-            or not observed.get("sender_harness")
-            or not observed.get("receiver_harness")
+            or not isinstance(observed.get("sender_harness"), str)
+            or not isinstance(observed.get("receiver_harness"), str)
+            or not observed["sender_harness"].strip()
+            or not observed["receiver_harness"].strip()
         ):
             return (
                 "distinct receiving harness, acknowledgment or custody evidence missing"
@@ -1324,13 +1332,13 @@ def score_family_continuation(
         kind = criteria.get("required_external_native_evidence")
         native_error = _native_observation_error(kind, evidence) if kind else None
         return {
-            "outcome": "error" if native_error else "fail",
+            "outcome": "fail",
             "failed": failed,
             "audit_errors": audit_errors,
             "evidence_class": "fixture_only"
             if not kind
             else "requires_separately_qualified_native_observation",
-            **({"infrastructure_error": native_error} if native_error else {}),
+            **({"native_qualification_error": native_error} if native_error else {}),
         }
     require(
         "affirmative_capability:family_tools",
@@ -1741,6 +1749,25 @@ def score_family_continuation(
             )
     if "successor_qualified" in criteria:
         value = audit.get("successor", {})
+        source_successor = after.get("sessions", {}).get("session_successor", {})
+        require(
+            "successor_source_identity",
+            source_successor.get("predecessor_id") == "session_root",
+        )
+        require(
+            "successor_source_flags_valid",
+            all(
+                type(source_successor.get(key)) is bool
+                for key in ("custody_qualified", "handoff_ack")
+            ),
+        )
+        if criteria["successor_qualified"]:
+            require(
+                "successor_source_affirmative",
+                source_successor.get("custody_qualified") is True
+                and source_successor.get("handoff_ack") is True
+                and source_successor.get("competing_supervisor", False) is False,
+            )
         require(
             "successor_identity_and_qualification",
             value.get("session_id") == "session_successor"

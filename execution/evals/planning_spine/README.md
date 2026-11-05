@@ -159,3 +159,36 @@ This evaluator support does not finish the broader preparation plan. Full
 baseline coverage, canonical policy adoption, real model/instruction tests,
 actual compaction and complete descendant recovery, acknowledged rollout and
 workflow handover retain their own acceptance and review/effect gates.
+
+### Output and evidence boundaries
+
+Every family prompt receives the same pinned `family_audit_contract` from the
+fixture. It declares all nested types, disposition/verdict enums and nullable
+identifiers. A successor assessment additionally reports `successor.session_id`,
+`successor.predecessor_id` and boolean `successor.qualified`; child-event
+attribution reports `credited_event_ids` as an array of string identifiers. The
+contract names fields and possible values, never the expected source IDs or
+answers. Malformed output produces a saved failed result with field-level
+`audit_errors`, and the CLI continues later scenarios. A malformed worker report
+is distinct from a transport failure or an unavailable native observation.
+
+The backend's single tool-effect inventory classifies action endpoints, including
+refused close attempts, and defaults unknown capabilities to actions. Capability
+availability does not grant scenario scope: only the declared action, original
+answer route and default-mode digest writes are admitted by the scorer. The
+receiver-read counterpart can consume an existing synthetic receipt, so
+report-only also requires unchanged persisted state and artifacts.
+
+Successful action traces capture actual persisted task/checkpoint/digest values.
+All existing fixture task/checkpoint entities must survive unchanged, including
+intermediate writes, and every successful digest update must retain both claims
+and artifact history from the preceding committed snapshot. Custody, handoff
+acknowledgment, receiver acceptance and capability opt-ins require literal JSON
+`true`; missing, malformed and merely truthy values do not qualify.
+
+Planning evidence requires complete, current-stage source reads with appropriate
+outbound/both selectors and actual returned `PART_OF` edges. Unfiltered,
+paginated global and related-entity reads can qualify the same ascent. Correct
+asserted chains with unrelated, empty, partial or stale-stage relationship reads
+cannot pass. The planning fingerprint is test provenance in cooperative fixture
+traces; it creates no production authority or tamper-resistant control.
