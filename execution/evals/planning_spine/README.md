@@ -84,3 +84,194 @@ python3 execution/evals/planning_spine/planning_spine_runner.py --model sonnet
 
 Transport failures are reported as infrastructure errors and are never scored as
 skill behavior.
+
+## Family continuation instrument cases
+
+`--scenarios all` includes thirteen additional synthetic cases. Their fixture
+variants share `family_base` in `context.json`; the runner expands the selected
+variant before starting the existing fixture MCP server. Scoring criteria and
+scripted event controls stay outside the worker workspace. No expectations are
+placed in the model prompt. The requested JSON audit is an output interface,
+not an answer key.
+
+| Case | Required observable evidence |
+| --- | --- |
+| ordinary-single-lane | Exact task scope, current aggregate ascent, artifact bytes |
+| recursive-paginated-family | Consumed pages, recursive native ancestry and acknowledged delegation |
+| pagination-or-source-gap | Observed failure, unresolved coverage, independent owned lanes retained |
+| changed-ascent-after-checkpoint | Later relationship read replaces the stale ascent |
+| direct-late-answer-during-handoff | Fresh human answer and original obligation identity |
+| origin-checkpoint-answer-sibling-open | Exact answer route and separate receiver-consumption read; sibling stays open |
+| digest-report-only | Verification and tooling-gap scorecard; zero writes/actions |
+| digest-default-history | Two turns, stable persisted digest, cumulative history and exact readback, local assigned action |
+| inherited-event-attribution | Own child event separated from inherited parent history |
+| positive-ack-qualified-custody | Existing successor acknowledgment, custody and observed local action |
+| negative-ack-or-custody | No replacement action when custody is unqualified |
+| actual-native-compaction | Separately qualified completed/persisted native transition and observed later turn |
+| planned-and-abrupt-cross-harness | Separately qualified distinct receiver, acknowledgment and custody |
+
+The runner captures before/after state, actual fixture calls and artifact hashes.
+The opt-in backend implements local entity/relationship writes, stable digest
+identity, paginated session/history reads, answer receipts and predeclared local
+artifact actions. Answer queue acceptance is distinct from a later synthetic
+receiver read. These are test counterparts, not production coordination tools.
+Confirmed effects and the existing watch must remain unchanged; even an attempted
+inert effect replay fails scoring. Legacy checkpoint/status history is retained.
+
+The checked-in deterministic driver substitutes for `drive_session` while using
+the actual runner, backend, persistence and scorer. Negative mutations demonstrate
+that the instrument goes red for omissions, stale ascents, wrong questions,
+queue-only delivery, report-only writes, history loss, unqualified replacement,
+inherited-event credit and replay attempts. This is **instrument coverage**, not
+causal evidence that a model follows the proposed instructions. Workspace logs
+are evidence for cooperative fixture runs, not tamper-resistant audit storage.
+The existing guard and no-real-MCP configuration are unchanged; documentation or
+this offline run does not qualify their delivery in another harness.
+
+The two native cases deliberately return an infrastructure error without
+separately qualified host evidence. The current runner has no native-transition
+capture adapter and cannot qualify either by a worker-written file or report.
+The native-shape validator is a host-input contract, not provenance verification.
+No actual compaction, abrupt-stop recovery, model invocation or cross-harness
+continuation is performed by deterministic tests or `--dry-run`.
+
+For this proposal bundle, `review_bundle.json` explicitly records
+`source_mode: reviewed_proposal`: the two updated skill bodies are unapplied
+review candidates with synthetic entity references. The third skill remains
+byte-for-byte unchanged. These fixtures do not publish or install a canonical
+policy/skill amendment. Regeneration from current prod would replace that
+proposal evidence, so preserve the pinned review head when evaluating it.
+
+```sh
+uv sync --frozen --extra dev --python 3.13
+uv run --frozen --extra dev python -m pytest -q \
+  execution/evals/planning_spine/test_planning_spine_eval.py \
+  execution/evals/rule_delivery/test_rule_delivery_evals.py
+uv run --frozen --extra dev python -m pytest -q \
+  execution/scripts/test_sync_skills_frontmatter.py \
+  execution/scripts/test_planning_spine_skill_contract.py
+uv run --frozen --extra dev python \
+  execution/evals/planning_spine/planning_spine_runner.py \
+  --scenarios all --dry-run --out /tmp/planning-family-dry-run-new
+```
+
+This evaluator support does not finish the broader preparation plan. Full
+baseline coverage, canonical policy adoption, real model/instruction tests,
+actual compaction and complete descendant recovery, acknowledged rollout and
+workflow handover retain their own acceptance and review/effect gates.
+
+### Output and evidence boundaries
+
+Every family prompt receives the same pinned `family_audit_contract` from the
+fixture. It declares all nested types, disposition/verdict enums and nullable
+identifiers. A successor assessment additionally reports `successor.session_id`,
+`successor.predecessor_id` and boolean `successor.qualified`; child-event
+attribution reports `credited_event_ids` as an array of string identifiers. The
+contract names fields and possible values, never the expected source IDs or
+answers. Malformed output produces a saved failed result with field-level
+`audit_errors`, and the CLI continues later scenarios. A malformed worker report
+is distinct from a transport failure or an unavailable native observation.
+
+The backend's single tool-effect inventory classifies action endpoints, including
+refused close attempts, and defaults unknown capabilities to actions. Capability
+availability does not grant scenario scope: only the declared action, original
+answer route and default-mode digest writes are admitted by the scorer. The
+receiver-read counterpart can consume an existing synthetic receipt, so
+report-only also requires unchanged persisted state and artifacts.
+
+Successful action traces capture actual persisted task/checkpoint/digest values.
+All existing fixture task/checkpoint entities must survive unchanged, including
+intermediate writes, and every successful digest update must retain both claims
+and artifact history from the preceding committed snapshot. Custody, handoff
+acknowledgment, receiver acceptance and capability opt-ins require literal JSON
+`true`; missing, malformed and merely truthy values do not qualify.
+
+Planning evidence requires complete, current-stage source reads with appropriate
+outbound/both selectors and actual returned `PART_OF` edges. Unfiltered,
+paginated global and related-entity reads can qualify the same ascent. Correct
+asserted chains with unrelated, empty, partial or stale-stage relationship reads
+cannot pass. The planning fingerprint is test provenance in cooperative fixture
+traces; it creates no production authority or tamper-resistant control.
+
+### Malformed persisted source and bounded JSON
+
+Worker output and persisted fixture evidence are separate untrusted inputs. The
+scorer validates consumed containers, identifiers, enum/lookup fields and digest
+collections before iteration, hashing or history comparisons. It checks the
+initial state, final state, returned snapshots and every successful intermediate
+entity snapshot in the existing trace. A bad intermediate value remains a
+field-specific `state_errors` failure even if a later write restores valid state;
+it never becomes a qualified history baseline. The local store still permits
+bad-state instrumentation writes, so tests prove actual successful persistence
+and readback rather than qualifying only a backend refusal.
+
+The existing input boundary limits each JSON report/state/trace record to 1 MiB
+and 64 nesting levels; direct structured evidence also has an iterative node/depth
+bound. Quoted brackets and escaped strings do not count as nesting. Unsupported
+size/depth, invalid syntax and decoder resource-shape errors produce a saved
+failed result with `audit_errors` or `state_errors`; later selected scenarios
+continue. These are evaluator resource bounds, not new worker permissions or
+human-consent quotas. Normal fixture reports/writes and all prior scenarios
+retain their acceptance checks. Transport errors, unavailable fixture I/O and
+missing native observations keep their separate infrastructure classification.
+
+The regression controls compare exact prior source behavior with the repaired
+normal runner/backend: malformed final collections, malformed successful first
+writes followed by valid restoration, task/question identifier shapes, the
+20,001-byte deeply nested report, and the one-byte syntax-error control. No
+model/native operation or successful response/trace is fabricated by these
+checks. They remain deterministic instrument proof only.
+
+
+## Accepted producer dependency and consumer evidence
+
+This consumer split follows accepted producer issue #1604 / PR #1607, merged as
+`12b1a54f4f3c11cf9ea2bdf27dfa51c370ec3c53`. The pinned review bundle records
+all five producer file hashes and verifies them before preparing a run. It
+retains the reviewed, unapplied three-skill proposal bundle and the byte-exact
+third `reconcile-planning` fixture. Refreshing a changed producer requires
+explicit source/interface requalification, not silently loading a stale copy.
+
+The consumer imports `fixture_evidence`'s bounded decoder and shape validator;
+it implements no second decoder or request-receipt store. Deterministic drivers
+use the same `observe_tool_call` boundary as initialized stdio. The collector
+reads normalized attempts AND `complete`, `issues` and `provenance`, preserving
+original bounded requests, absent results, actual outcomes, intermediate entity
+snapshots and uncertainty. Legacy completed-only rows are readable but cannot
+establish exhaustive every-attempt coverage.
+
+A known forbidden action stays in the saved failure list in every mode even
+if its arguments are malformed, its result is refused, its completion is missing
+or the producer dies. Report-only rejects every attempted action; a received
+inert replay attempt also remains an explicit no-replay violation. Unqualified observation or evidence I/O yields `outcome: error`; malformed
+worker reports/persisted source remain actionable failures when observation is
+qualified. Neither an error nor a refusal is a successful user action. Known
+violations and infrastructure uncertainty coexist rather than overwriting each
+other. This retains the existing `pass`/`fail`/`error` vocabulary. Normal read,
+full pagination, default digest writes, assigned action and exact answer-route /
+separate receiver-consumption positives still qualify.
+
+`source_binding.json` is per-run host-side evidence alongside `result.json`,
+never worker context or a planning/authority ledger. It records the accepted
+producer merge/file hashes, consumer HEAD and actual consumer content hashes;
+HEAD identifies the source checkout revision while the hashes bind any working
+content. Results include that binding. Scoring criteria, transition controls and
+source-binding metadata remain outside the worker workspace and prompts.
+
+The additional consumer tests run the real initialized producer, append its
+actual observations to a normal `run_scenario`, and inspect the saved result.
+They cover all four historical malformed stores, normal reads/refusals,
+handler death, completion-I/O uncertainty, appended trace corruption, real
+legacy completion, individual state-read failure and later-scenario continuation.
+No trace or successful response is fabricated, and malformed-store controls
+assert unchanged actual state and no unrelated pagination error. Artifact
+collection rejects links before reading outside its synthetic artifact root and
+hashes regular files in chunks; a source gap cannot masquerade as unchanged
+artifact state. These are cooperative instrument controls, not a hostile-worker
+sandbox or causal model-instruction proof.
+
+The thirteen additional cases and seven inherited cases all remain. Both native
+cases still require separately qualified host capture and otherwise report
+explicit infrastructure errors. No model, native transition, canonical skill
+application, installed adoption or aggregate coordinator acceptance follows
+from these deterministic tests or twenty dry-run preparations.
