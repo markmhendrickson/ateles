@@ -154,6 +154,14 @@ PR_TEXT_NAME = "pull_request.md"
 MAX_PR_TEXT_BYTES = 64 * 1024
 MAX_PR_TITLE_CHARS = 256
 API_TIMEOUT_SECONDS = 30
+# GitHub moves a pull request's head shortly after a push, not at once. After
+# our own push, a PR whose only difference is its head is read again every
+# interval for at most this long in total, within the delivery deadline.
+HEAD_CATCH_UP_SECONDS = 30.0
+HEAD_CATCH_UP_INTERVAL_SECONDS = 5.0
+# The clock and sleep the catch-up wait uses; tests replace them.
+_clock = time.time
+_sleep = time.sleep
 
 WITHDRAWAL_CONFIRMED = ("the quarantine ref could not be removed; the branch record was withdrawn "
                         "and read back absent; nothing may be pushed")  # fmt: skip
@@ -962,8 +970,13 @@ def _pr_from(payload: object, repository: str, branch: str, default_branch: str)
 
 @_boundary(PR_FAILED)
 def require_existing_pr(*, repository: str, number: int, branch: str,
-                        base_branch: str, head: str, token: str) -> PullRequest:
-    """Read one exact, open, same-repository PR; never create or edit its text."""
+                        base_branch: str, head: str, token: str,
+                        wait_for_head: bool = False) -> PullRequest:
+    """Read one exact, open, same-repository PR; never create or edit its text.
+
+    With *wait_for_head* (only after this run's own push), a PR that matches
+    in every way but its head is re-read for up to ``HEAD_CATCH_UP_SECONDS``
+    while GitHub catches up; every other mismatch refuses at once."""
     check_repository(repository)
     check_push_branch(branch, base_branch, existing=True)
     if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
@@ -977,16 +990,33 @@ def require_existing_pr(*, repository: str, number: int, branch: str,
             or not isinstance(repo.get("default_branch"), str) or not repo["default_branch"]
             or branch == repo["default_branch"]):
         raise RepoWorkError(PR_FAILED, "the existing PR source is not confirmed distinct from the default branch")
-    _require_time()
-    status, payload = _api("GET", f"/repos/{repository}/pulls/{number}", token)
-    pr = _pr_from(payload, repository, branch, base_branch) if status == 200 else None
-    if (pr is None or pr.number != number or payload.get("state") != "open"
-            or payload.get("merged") is not False
-            or payload["head"].get("sha") != head
-            or not isinstance(payload["base"].get("repo"), dict)
-            or str(payload["base"]["repo"].get("full_name", "")).lower() != repository.lower()):
-        raise RepoWorkError(PR_FAILED, "the existing PR no longer matches the admitted open target")
-    return PullRequest(pr.number, pr.url, "updated")
+    mismatch = RepoWorkError(PR_FAILED, "the existing PR no longer matches the admitted open target")
+    started = _clock()
+    retries = int(HEAD_CATCH_UP_SECONDS // HEAD_CATCH_UP_INTERVAL_SECONDS)
+    while True:
+        _require_time()
+        status, payload = _api("GET", f"/repos/{repository}/pulls/{number}", token)
+        pr = _pr_from(payload, repository, branch, base_branch) if status == 200 else None
+        if (pr is None or pr.number != number or payload.get("state") != "open"
+                or payload.get("merged") is not False
+                or not isinstance(payload["base"].get("repo"), dict)
+                or str(payload["base"]["repo"].get("full_name", "")).lower() != repository.lower()):
+            raise mismatch
+        if payload["head"].get("sha") == head:
+            return PullRequest(pr.number, pr.url, "updated")
+        # Only the head differs. Before our push that is a refusal; after it,
+        # GitHub may not have caught up yet, so wait a bounded time. A head
+        # that never arrives may be someone else's push: refuse as before.
+        if not wait_for_head or retries <= 0:
+            raise mismatch
+        elapsed = _clock() - started
+        if elapsed + HEAD_CATCH_UP_INTERVAL_SECONDS > HEAD_CATCH_UP_SECONDS:
+            raise mismatch
+        if _DEADLINE and (_DEADLINE[-1] - _clock() - HEAD_CATCH_UP_INTERVAL_SECONDS
+                          < MIN_CALL_SECONDS):
+            raise mismatch
+        retries -= 1
+        _sleep(HEAD_CATCH_UP_INTERVAL_SECONDS)
 
 @_boundary(PR_FAILED)
 def open_or_update_pr(*, repository: str, branch: str, default_branch: str, token: str,
