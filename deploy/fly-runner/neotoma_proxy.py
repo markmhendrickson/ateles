@@ -174,11 +174,11 @@ def proc_net_peer_uid(
     return uids.pop() if len(uids) == 1 else None
 
 
-_SAFE_REASON = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_SAFE_REASON = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 
 
 def _safe_reason(reason) -> str:
-    if isinstance(reason, str) and _SAFE_REASON.match(reason):
+    if isinstance(reason, str) and _SAFE_REASON.fullmatch(reason):
         return reason
     return "unrecognized"
 

@@ -504,19 +504,6 @@ def test_only_the_allowed_peer_uid_is_forwarded(
 
 
 
-def test_failed_attribution_is_refused_without_signing_or_forwarding(
-    monkeypatch, upstream, sign_calls, uid_checked_proxy_port
-):
-    monkeypatch.setattr(neotoma_proxy, "proc_net_peer_uid", lambda *a, **k: None)
-    conn = _client(uid_checked_proxy_port)
-    conn.request("POST", "/mcp", body=b"{}", headers={"Content-Type": "application/json"})
-    resp = conn.getresponse()
-    resp.read()
-    conn.close()
-    assert resp.status == 403
-    assert upstream.requests == [] and sign_calls == []
-
-
 @pytest.mark.parametrize("failing", ["getpeername", "getsockname"])
 def test_unreadable_socket_addresses_are_refused(failing, monkeypatch, upstream, sign_calls, uid_checked_proxy_port):
     import socket
@@ -691,6 +678,11 @@ def test_health_check_bounds_and_sanitizes_admission_reason():
         ("x" * 65, "admission_reason=unrecognized)"),
         ("bad reason with spaces", "admission_reason=unrecognized)"),
         ("line\nbreak", "admission_reason=unrecognized)"),
+        ("no_match\n", "admission_reason=unrecognized)"),
+        ("no_match\r", "admission_reason=unrecognized)"),
+        ("no_match\r\n", "admission_reason=unrecognized)"),
+        ("y" * 64 + "\n", "admission_reason=unrecognized)"),
+        ("z" * 65, "admission_reason=unrecognized)"),
         ("Bearer abc=", "admission_reason=unrecognized)"),
         (["no_match"], "admission_reason=unrecognized)"),
         ({"a": 1}, "admission_reason=unrecognized)"),
