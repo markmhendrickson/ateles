@@ -291,7 +291,31 @@ TOOL_EFFECTS.update(
 )
 
 
-def planning_fingerprint(state: dict) -> str:
+def planning_fingerprint(state: dict) -> str | None:
+    # Only graph fields enter this hash. Validate their shapes before sorting;
+    # malformed snapshots remain available for field-level scorer diagnostics.
+    if not isinstance(state, dict):
+        return None
+    entities, relationships = state.get("entities"), state.get("relationships", [])
+    if not isinstance(entities, dict) or not isinstance(relationships, list):
+        return None
+    if any(
+        not isinstance(eid, str)
+        or not isinstance(row, dict)
+        or not isinstance(row.get("entity_type"), str)
+        or not isinstance(row.get("snapshot"), dict)
+        for eid, row in entities.items()
+    ):
+        return None
+    if any(
+        not isinstance(edge, dict)
+        or any(
+            not isinstance(edge.get(key), str)
+            for key in ("source_entity_id", "target_entity_id", "relationship_type")
+        )
+        for edge in relationships
+    ):
+        return None
     graph = {
         "types": {eid: row["entity_type"] for eid, row in state["entities"].items()},
         "edges": sorted(
@@ -646,12 +670,17 @@ class Store:
         self.state_path.write_text(json.dumps(state, indent=2))
 
     def log(self, tool: str, args: dict, result: dict) -> None:
-        state = self.load()
+        try:
+            state = self.load()
+        except (ValueError, TypeError, RecursionError, MemoryError):
+            state = None
         # Observe successful persisted writes, not merely their requested input.
         # This reuses the existing trace instead of introducing a history store.
         persisted = (
-            state["entities"]
-            if TOOL_EFFECTS.get(tool, "action") == "action" and not result.get("error")
+            state.get("entities")
+            if isinstance(state, dict)
+            and TOOL_EFFECTS.get(tool, "action") == "action"
+            and not result.get("error")
             else None
         )
         with self.log_path.open("a") as fh:
@@ -775,7 +804,12 @@ def related_entities(state: dict, args: dict) -> dict:
 
 
 def call_tool(store: Store, name: str, args: dict) -> dict:
-    state = store.load()
+    try:
+        state = store.load()
+    except (ValueError, TypeError, RecursionError, MemoryError):
+        return {"error": "fixture state is unreadable JSON"}
+    if planning_fingerprint(state) is None:
+        return {"error": "fixture state has invalid entity or relationship shape"}
     _scripted_events(store, state, name, args)
     entities: dict = state["entities"]
     if name == T_SNAPSHOT:

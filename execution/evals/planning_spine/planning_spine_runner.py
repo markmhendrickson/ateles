@@ -255,9 +255,9 @@ def collect_evidence(run_dir: Path) -> dict:
         "tool_effects": fixture_backend.TOOL_EFFECTS,
         "registered_entity_types": sorted(fixture_backend.REGISTERED_TYPES),
     }
-    errors.extend(checks.family_evidence_errors(evidence))
     evidence["state_errors"] = errors
-    # Invalid source fields must not reach a hash/sort before validation.
+    # The shared hash validates only its consumed graph fields. Full source and
+    # successful intermediate snapshots are validated once at scorer entry.
     evidence["planning_sha256"] = (
         fixture_backend.planning_fingerprint(evidence["after_state"])
         if not errors

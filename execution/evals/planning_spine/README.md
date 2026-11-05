@@ -192,3 +192,32 @@ paginated global and related-entity reads can qualify the same ascent. Correct
 asserted chains with unrelated, empty, partial or stale-stage relationship reads
 cannot pass. The planning fingerprint is test provenance in cooperative fixture
 traces; it creates no production authority or tamper-resistant control.
+
+### Malformed persisted source and bounded JSON
+
+Worker output and persisted fixture evidence are separate untrusted inputs. The
+scorer validates consumed containers, identifiers, enum/lookup fields and digest
+collections before iteration, hashing or history comparisons. It checks the
+initial state, final state, returned snapshots and every successful intermediate
+entity snapshot in the existing trace. A bad intermediate value remains a
+field-specific `state_errors` failure even if a later write restores valid state;
+it never becomes a qualified history baseline. The local store still permits
+bad-state instrumentation writes, so tests prove actual successful persistence
+and readback rather than qualifying only a backend refusal.
+
+The existing input boundary limits each JSON report/state/trace record to 1 MiB
+and 64 nesting levels; direct structured evidence also has an iterative node/depth
+bound. Quoted brackets and escaped strings do not count as nesting. Unsupported
+size/depth, invalid syntax and decoder resource-shape errors produce a saved
+failed result with `audit_errors` or `state_errors`; later selected scenarios
+continue. These are evaluator resource bounds, not new worker permissions or
+human-consent quotas. Normal fixture reports/writes and all prior scenarios
+retain their acceptance checks. Transport errors, unavailable fixture I/O and
+missing native observations keep their separate infrastructure classification.
+
+The regression controls compare exact prior source behavior with the repaired
+normal runner/backend: malformed final collections, malformed successful first
+writes followed by valid restoration, task/question identifier shapes, the
+20,001-byte deeply nested report, and the one-byte syntax-error control. No
+model/native operation or successful response/trace is fabricated by these
+checks. They remain deterministic instrument proof only.

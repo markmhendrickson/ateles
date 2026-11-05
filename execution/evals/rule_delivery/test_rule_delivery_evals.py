@@ -1015,3 +1015,43 @@ def test_fixture_relationship_direction_typo_is_unknown_not_empty(tmp_path):
     assert "error" in fixture_mcp_server.call_tool(
         store, "list_relationships", {"direction": "outgoing"}
     )
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        None,
+        [],
+        {"entities": [], "relationships": []},
+        {"entities": {"bad": {"entity_type": [], "snapshot": {}}}, "relationships": []},
+        {
+            "entities": {},
+            "relationships": [
+                {
+                    "source_entity_id": [],
+                    "target_entity_id": "x",
+                    "relationship_type": "PART_OF",
+                }
+            ],
+        },
+    ],
+)
+def test_r3_malformed_graph_has_no_fingerprint_or_unsafe_lookup(tmp_path, state):
+    assert fixture_mcp_server.planning_fingerprint(state) is None
+    store = fixture_mcp_server.Store(tmp_path)
+    store.save(state)
+    args = {"entity_id": "bad"}
+    result = fixture_mcp_server.call_tool(store, "retrieve_entity_snapshot", args)
+    assert result.get("error")
+    store.log("retrieve_entity_snapshot", args, result)
+    logged = json.loads(store.log_path.read_text())
+    assert logged["result"] == result and logged["planning_sha256"] is None
+
+
+def test_r3_backend_can_log_unreadable_json_without_inventing_success(tmp_path):
+    store = fixture_mcp_server.Store(tmp_path)
+    store.state_path.write_text("{")
+    result = fixture_mcp_server.call_tool(store, "retrieve_entities", {})
+    assert result.get("error")
+    store.log("retrieve_entities", {}, result)
+    assert json.loads(store.log_path.read_text())["result"] == result
