@@ -51,8 +51,12 @@ def _run(snapshot, *, trigger="created", override=False, hydrated=True, eid="ent
     notifier = _Notifier()
     asyncio.run(
         apis.dispatch_task(
-            eid, snapshot, trigger=trigger, notifier=notifier,
-            gate_override=override, snapshot_hydrated=hydrated,
+            eid,
+            snapshot,
+            trigger=trigger,
+            notifier=notifier,
+            gate_override=override,
+            snapshot_hydrated=hydrated,
         )
     )
     return notifier
@@ -101,9 +105,9 @@ def test_held_task_is_not_regated_on_any_non_override_trigger(world, trigger):
 
 def test_held_task_with_gate_override_still_releases(world):
     _run(_owned(status="awaiting_approval"), trigger="approved", override=True)
-    assert (
-        "ent_t1", TaskStatus.ROUTED, ""
-    ) in world["statuses"], f"release did not route: {world['statuses']}"
+    assert ("ent_t1", TaskStatus.ROUTED, "") in world["statuses"], (
+        f"release did not route: {world['statuses']}"
+    )
     assert world["spawns"] == [("cicada", "ent_t1")]
 
 
@@ -111,7 +115,8 @@ def test_pending_owned_task_is_still_gated_as_today(world):
     # Control: a not-yet-held task that the gate holds is still held and briefed.
     _run(_owned(status="pending", action_type="payment"))
     assert [s for _i, s, _r in world["statuses"]] == [
-        TaskStatus.ROUTED, TaskStatus.AWAITING_APPROVAL
+        TaskStatus.ROUTED,
+        TaskStatus.AWAITING_APPROVAL,
     ]
     assert len(world["briefs"]) == 1
 
@@ -147,10 +152,15 @@ def test_guessed_owner_left_as_filed_even_when_unscored(world):
 @pytest.mark.parametrize(
     "action",
     [
-        "payment", "send_external_comms", "publish", "delete_entity_or_data",
-        "external_api_write", "release", "correspondence",
-        "operator_only",          # operator-reserved
-        "not_a_known_action",     # unclassified -> never-tier, fail closed
+        "payment",
+        "send_external_comms",
+        "publish",
+        "delete_entity_or_data",
+        "external_api_write",
+        "release",
+        "correspondence",
+        "operator_only",  # operator-reserved
+        "not_a_known_action",  # unclassified -> never-tier, fail closed
     ],
 )
 def test_guessed_owner_with_effect_or_never_action_still_holds(world, action):
@@ -163,7 +173,13 @@ def test_guessed_owner_with_effect_or_never_action_still_holds(world, action):
 def test_guessed_owner_with_effect_action_inferred_from_text_still_holds(world):
     # No declared action_type: the agent prior for the guessed skill is the
     # effect action `payment`.
-    _run({"title": "Pay the vendor invoice", "body": "payment transfer", "status": "pending"})
+    _run(
+        {
+            "title": "Pay the vendor invoice",
+            "body": "payment transfer",
+            "status": "pending",
+        }
+    )
     assert len(world["briefs"]) == 1
 
 
