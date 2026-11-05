@@ -291,7 +291,7 @@ SPECS: list[dict[str, Any]] = [
           probe={"expect": "completed dispatches with a duration in the last full week > 0"}),
     # --- operator decision queue (daily read of the open checkpoint queue) -------
     _spec("Q1", "real_decisions_waiting_over_72h",
-          "Real decisions (one per task, aged from its oldest open hold) that have waited more than 72 hours "
+          "Real decisions (one per task, aged from the earlier of its oldest open hold and the first daily reading that saw it, so a re-filed hold does not restart the clock) that have waited more than 72 hours "
           "in the open checkpoint queue. Real means the classes in decision_queue.REAL_DECISION_CLASSES.",
           "swarm_ops", "checkpoint_queue",
           {"read": "checkpoint_brief and task snapshots, unfiltered, cursor-paged",

@@ -56,6 +56,9 @@ COLLECTOR = "execution/daemons/decision-queue-reading/decision_queue_reading.py"
 ARTIFACT_REF = "ateles-checkpoint-queue"
 METRIC_OVER_LIMIT = "Q1_real_decisions_waiting_over_72h"
 METRIC_AUTOMATIC = "Q2_automatic_holds_added_24h"
+#: The live record type that holds the operator's open holds. Its name is retired in the
+#: foundation vocabulary but the records are still written under it until migration.md runs.
+CHECKPOINT_RECORD_TYPE = "checkpoint_brief"  # vocab-ok: live record type, retired name pending migration
 STORABLE_TYPES = frozenset({"metric_definition", "metric_reading"})
 WAIT_LIMIT_HOURS = 72.0
 NEW_HOLD_HOURS = 24.0
@@ -170,7 +173,7 @@ def server_open_total(requester: Requester) -> int:
             "POST",
             "/entities/query",
             {
-                "entity_type": "checkpoint_brief",
+                "entity_type": CHECKPOINT_RECORD_TYPE,
                 "include_snapshots": False,
                 "limit": 1,
                 "snapshot_filters": {"status": {"op": "eq", "value": "awaiting_operator"}},
@@ -289,17 +292,32 @@ def compute_reading(
 
 
 def load_previous_first_seen(path: Path) -> tuple[dict[str, datetime], str | None]:
-    """first_seen per task from the previous file; (empty, reason) if unusable."""
+    """first_seen per task from the previous file; (empty, reason) if unusable.
+
+    The clock lives in ``first_seen_carry``, which every run writes: a good run
+    from its real list, an invalid run by passing the previous value through
+    untouched, so any number of failed runs in between lose nothing. Files from
+    before the carry key existed are read from ``real_decision_list`` once.
+    """
     try:
         doc = json.loads(path.read_text())
     except FileNotFoundError:
         return {}, "missing"
     except (OSError, ValueError):
         return {}, "unreadable"
-    rows = doc.get("real_decision_list") if isinstance(doc, dict) else None
-    if not isinstance(rows, list):
-        return {}, "no_list"
+    if not isinstance(doc, dict):
+        return {}, "unreadable"
     out: dict[str, datetime] = {}
+    carry = doc.get("first_seen_carry")
+    if isinstance(carry, dict):
+        for task_id, value in carry.items():
+            seen = dq._parse_time(value)
+            if seen and task_id:
+                out[str(task_id)] = seen
+        return out, None
+    rows = doc.get("real_decision_list")
+    if not isinstance(rows, list):
+        return {}, "no_carry"
     for row in rows:
         if isinstance(row, dict) and row.get("task_id"):
             seen = dq._parse_time(row.get("first_seen"))
@@ -309,7 +327,7 @@ def load_previous_first_seen(path: Path) -> tuple[dict[str, datetime], str | Non
 
 
 def build_metric_readings(
-    numbers: dict[str, Any], now: datetime, *, note: str | None = None
+    numbers: dict[str, Any], now: datetime, *, note: str | None = None, coverage_ratio: float = 1.0
 ) -> list[dict[str, Any]]:
     end = now.astimezone(timezone.utc).date()
     window_end = end.isoformat()
@@ -320,7 +338,7 @@ def build_metric_readings(
         window_start=window_start,
         window_end=window_end,
         sourced_at=sourced,
-        coverage_ratio=1.0,
+        coverage_ratio=coverage_ratio,
         coverage_note=note,
         probe_ok=True,
         collector=COLLECTOR,
@@ -392,6 +410,7 @@ def build_document(
     numbers: dict[str, Any] | None,
     failed_checks: list[dict[str, str]],
     instrument: dict[str, Any] | None,
+    carry: dict[str, datetime] | None = None,
 ) -> dict[str, Any]:
     doc: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -400,6 +419,8 @@ def build_document(
         "status": status,
         "failed_checks": failed_checks,
         "instrument": instrument,
+        # The first-seen clock, carried through every run including invalid ones.
+        "first_seen_carry": {k: _iso(v) for k, v in sorted((carry or {}).items())},
     }
     if numbers is not None and status in ("ok", "partial"):
         doc.update({k: v for k, v in numbers.items() if k != "real_decision_list"})
@@ -430,10 +451,28 @@ def run(
     requester = guarded_request(requester)
     failed: list[dict[str, str]] = []
     instrument: dict[str, Any] | None = None
+    previous, why_prev = load_previous_first_seen(path or default_path())
 
     def finish(status: str, numbers: dict[str, Any] | None, code: int) -> tuple[int, dict[str, Any]]:
+        if numbers is not None and status in ("ok", "partial"):
+            carry = {
+                r["task_id"]: t
+                for r in numbers["real_decision_list"]
+                if (t := dq._parse_time(r.get("first_seen")))
+            }
+        else:
+            carry = previous  # an invalid run must not lose the clock
+        if why_prev:
+            failed.append(
+                {"check": "previous_reading", "reason": why_prev + "; aged from raised_at"}
+            )
         doc = build_document(
-            status=status, now=now, numbers=numbers, failed_checks=failed, instrument=instrument
+            status=status,
+            now=now,
+            numbers=numbers,
+            failed_checks=failed,
+            instrument=instrument,
+            carry=carry,
         )
         if not dry_run:
             try:
@@ -444,7 +483,7 @@ def run(
         return code, doc
 
     try:
-        briefs = read_all_by_cursor("checkpoint_brief", requester, pause=pause)
+        briefs = read_all_by_cursor(CHECKPOINT_RECORD_TYPE, requester, pause=pause)
         tasks = read_all_by_cursor("task", requester, pause=pause)
         client_open = sum(
             1 for r in briefs if (r.get("snapshot") or {}).get("status") == "awaiting_operator"
@@ -472,11 +511,6 @@ def run(
     people = dq._person_owners() | names
     tasks_by_id = {r["entity_id"]: r for r in tasks if r.get("entity_id")}
     placements = dq.classify_queue(briefs, tasks_by_id, now=now, person_owners=people)
-    previous, why_prev = load_previous_first_seen(path or default_path())
-    if why_prev:
-        failed.append(
-            {"check": "previous_reading", "reason": why_prev + "; aged from raised_at"}
-        )
     try:
         numbers = compute_reading(placements, now=now, previous_first_seen=previous)
     except ValueError:
@@ -486,8 +520,20 @@ def run(
     if dry_run:
         return finish("ok", numbers, 0)
 
-    note = "operator names unavailable; classifier default used" if why else None
-    records = build_metric_readings(numbers, now, note=note)
+    notes = []
+    if why:
+        notes.append("operator names unavailable; classifier default used")
+    coverage = 1.0
+    if why_prev:
+        notes.append(
+            f"previous first-seen state unavailable ({why_prev}); ages run from hold time "
+            "and may be understated"
+        )
+        if numbers["real_decisions"]:
+            coverage = 0.5
+    records = build_metric_readings(
+        numbers, now, note="; ".join(notes) or None, coverage_ratio=coverage
+    )
     problems: list[str] = []
     try:
         problems += neotoma_io.store_and_verify(
@@ -530,7 +576,13 @@ def main(
     if args.dry_run:
         print(json.dumps(doc, indent=2, sort_keys=True))
     else:
-        print(f"status={doc['status']} failed_checks={len(doc['failed_checks'])}")
+        over = doc.get("real_decisions_over_limit", "n/a")
+        auto = doc.get("new_holds_24h_not_real", "n/a")
+        print(
+            f"date={doc['generated_at'][:10]} status={doc['status']} "
+            f"real_decisions_over_72h={over} automatic_holds_added_24h={auto} "
+            f"failed_checks={len(doc['failed_checks'])}"
+        )
     return code
 
 

@@ -289,3 +289,49 @@ def test_person_names_come_from_the_environment(monkeypatch):
     monkeypatch.delenv("APIS_OPERATOR_LOGIN", raising=False)
     assert dq.classify_one(brief(), task(owner="sam doe"), has_newer_open=False) == dq.OWNED_BY_PERSON
     assert dq.classify_one(brief(), task(owner="someone else"), has_newer_open=False) == dq.LIVE_LOW
+
+
+# ── copies must not drift from the code that owns them ──────────────────────
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+_REPO = _Path(__file__).resolve().parents[2]
+
+#: Each automatic reason prefix, with the module that composes it.
+_PREFIX_OWNERS = {
+    "not scored by a producer": "lib/daemon_runtime/gating.py",
+    "below confidence threshold": "lib/daemon_runtime/gating.py",
+    "low confidence and high blast radius": "lib/daemon_runtime/gating.py",
+    "high blast radius — operator approval required": "lib/daemon_runtime/gating.py",
+    "operator-only action — never auto-executable": "lib/daemon_runtime/gating.py",
+    "producer score could not be recorded": "execution/daemons/apis/apis.py",
+    "task authorization context changed": "execution/daemons/apis/apis.py",
+    "re-issued checkpoint": "execution/daemons/apis/apis.py",
+    "checkpoint check failed at boundary": "lib/daemon_runtime/checkpoint_posture.py",
+}
+
+
+def test_every_automatic_prefix_has_a_named_owner_and_nothing_extra():
+    assert set(dq.AUTOMATIC_REASON_PREFIXES) == set(_PREFIX_OWNERS)
+
+
+@pytest.mark.parametrize("prefix,owner", sorted(_PREFIX_OWNERS.items()))
+def test_automatic_prefix_is_still_composed_by_its_owner(prefix, owner):
+    """Fails when the gating code rewords a reason the classifier calls automatic."""
+    assert prefix in (_REPO / owner).read_text(), f"{owner} no longer composes {prefix!r}"
+
+
+def test_effect_action_types_match_the_gates_own_high_blast_set():
+    """Bound to the gate's policy source. The one extra type is deliberate."""
+    if str(_REPO) not in _sys.path:
+        _sys.path.insert(0, str(_REPO))
+    from lib.daemon_runtime import gating
+
+    owned = set(gating._FALLBACK_HIGH_BLAST)
+    assert dq.EFFECT_ACTION_TYPES - owned == {"correspondence"}, (
+        "an effect type the gate does not list as high blast"
+    )
+    # safe direction: the gate's outward types must all be kept as real
+    outward = {"payment", "send_external_comms", "publish", "release",
+               "delete_entity_or_data", "external_api_write"}
+    assert outward <= owned and outward <= dq.EFFECT_ACTION_TYPES

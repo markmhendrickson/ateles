@@ -72,7 +72,7 @@ class FakeNeotoma:
 
     def __init__(self, briefs, tasks, *, server_total=None, fail_type=None, profile=None,
                  drop_stored=False, page=2):
-        self.rows = {"checkpoint_brief": briefs, "task": tasks}
+        self.rows = {dqr.CHECKPOINT_RECORD_TYPE: briefs, "task": tasks}
         self.profile = profile
         self.server_total = server_total
         self.fail_type = fail_type
@@ -107,7 +107,7 @@ class FakeNeotoma:
             assert isinstance(flt, dict) and flt["op"] == "eq", "filter must be {op, value}"
             total = (
                 self.server_total
-                if self.server_total is not None and etype == "checkpoint_brief"
+                if self.server_total is not None and etype == dqr.CHECKPOINT_RECORD_TYPE
                 else sum(1 for r in rows if r["snapshot"]["status"] == flt["value"])
             )
             return {"entities": [], "total": total}
@@ -196,7 +196,7 @@ def test_small_drift_is_tolerated():
     assert code == 0 and doc["status"] == "ok"
 
 
-@pytest.mark.parametrize("failing", ["checkpoint_brief", "task"])
+@pytest.mark.parametrize("failing", [dqr.CHECKPOINT_RECORD_TYPE, "task"])
 def test_read_failure_non_zero_and_no_reading(failing, capsys):
     fake = FakeNeotoma(*corpus(), fail_type=failing, profile={"first_name": "Zed"})
     code = dqr.main(["--once"], requester=fake, now=NOW)
@@ -360,15 +360,100 @@ def test_task_that_leaves_the_real_list_restarts_when_it_returns():
     assert _real_ages(doc)["t1"] == 1.0
 
 
-@pytest.mark.parametrize("content", [None, "{not json", "[]", '{"status": "invalid"}'])
-def test_previous_file_unusable_is_recorded_not_fatal(content):
+@pytest.mark.parametrize(
+    "content,reason",
+    [
+        (None, "missing"),
+        ("{not json", "unreadable"),
+        ("[]", "unreadable"),
+        ('{"status": "invalid"}', "no_carry"),
+    ],
+)
+def test_previous_file_unusable_is_said_in_the_coverage(content, reason):
     if content is not None:
         out_path().parent.mkdir(parents=True)
         out_path().write_text(content)
-    code, doc = run(FakeNeotoma(*corpus(), profile={"first_name": "Zed"}))
+    fake = FakeNeotoma(*corpus(), profile={"first_name": "Zed"})
+    code, doc = run(fake)
     assert code == 0 and doc["status"] == "ok"
-    assert any(c["check"] == "previous_reading" for c in doc["failed_checks"])
+    assert any(c["check"] == "previous_reading" and reason in c["reason"] for c in doc["failed_checks"])
     assert _real_ages(doc)["t1"] == 100.0
+    # the stored readings must not read as a clean, fully covered ok
+    for rec in fake.stored["metric_reading"].values():
+        assert rec["coverage_ratio"] < 1.0
+        assert "previous first-seen state unavailable" in rec["coverage_note"]
+
+
+def test_good_run_with_state_has_full_coverage():
+    briefs, tasks = corpus()
+    run(FakeNeotoma(briefs, tasks, profile={"first_name": "Zed"}))
+    fake = FakeNeotoma(briefs, tasks, profile={"first_name": "Zed"})
+    run(fake)
+    for rec in fake.stored["metric_reading"].values():
+        assert rec["coverage_ratio"] == 1.0 and not rec.get("coverage_note")
+
+
+def _refile(briefs, later):
+    refiled = list(briefs)
+    refiled[0] = checkpoint("c1x", "t1", 0, reason="please decide this one", handler="human")
+    refiled[0]["last_observation_at"] = later.isoformat()
+    return refiled
+
+
+@pytest.mark.parametrize("invalid_runs", [1, 3])
+def test_invalid_runs_keep_the_first_seen_clock(invalid_runs):
+    briefs, tasks = corpus()
+    run(FakeNeotoma(briefs, tasks, profile={"first_name": "Zed"}))
+    for i in range(1, invalid_runs + 1):
+        when = NOW + timedelta(hours=i)
+        code, doc = dqr.run(
+            FakeNeotoma(briefs, tasks, server_total=999, profile={"first_name": "Zed"}),
+            when, dry_run=False, pause=0,
+        )
+        assert code == 1 and doc["status"] == "invalid"
+        on_disk = json.loads(out_path().read_text())
+        # the file still says the latest run was invalid and gives no numbers ...
+        assert on_disk["status"] == "invalid" and "real_decision_list" not in on_disk
+        assert on_disk["generated_at"] == when.strftime("%Y-%m-%dT%H:%M:%SZ")
+        # ... and still carries the clock
+        assert set(on_disk["first_seen_carry"]) == {"t1", "t2"}
+    later = NOW + timedelta(hours=24)
+    code, doc = dqr.run(
+        FakeNeotoma(_refile(briefs, later), tasks, profile={"first_name": "Zed"}),
+        later, dry_run=False, pause=0,
+    )
+    assert code == 0 and doc["status"] == "ok"
+    assert _real_ages(doc)["t1"] == 124.0  # re-filed hold did not restart the clock
+    assert doc["real_decisions_over_limit"] >= 1
+    assert not any(c["check"] == "previous_reading" for c in doc["failed_checks"])
+
+
+def test_invalid_run_after_read_failure_keeps_the_clock():
+    briefs, tasks = corpus()
+    run(FakeNeotoma(briefs, tasks, profile={"first_name": "Zed"}))
+    code, doc = dqr.run(FakeNeotoma(briefs, tasks, fail_type="task"), NOW + timedelta(hours=1),
+                        dry_run=False, pause=0)
+    assert doc["status"] == "invalid"
+    assert set(json.loads(out_path().read_text())["first_seen_carry"]) == {"t1", "t2"}
+
+
+def test_invalid_run_with_no_usable_previous_state_says_so():
+    out_path().parent.mkdir(parents=True)
+    out_path().write_text("{not json")
+    code, doc = dqr.run(FakeNeotoma(*corpus(), server_total=999), NOW, dry_run=False, pause=0)
+    assert doc["status"] == "invalid"
+    assert any(c["check"] == "previous_reading" for c in doc["failed_checks"])
+    on_disk = json.loads(out_path().read_text())
+    assert on_disk["first_seen_carry"] == {}
+    assert any(c["check"] == "previous_reading" for c in on_disk["failed_checks"])
+
+
+def test_status_line_has_headline_numbers_and_date(capsys, monkeypatch):
+    fake = FakeNeotoma(*corpus(), profile={"first_name": "Zed"})
+    assert dqr.main(["--once"], requester=fake, now=NOW) == 0
+    line = capsys.readouterr().out.strip()
+    assert "date=2026-11-05" in line
+    assert "real_decisions_over_72h=1" in line and "automatic_holds_added_24h=2" in line
 
 
 def test_dry_run_reads_previous_but_writes_nothing():
