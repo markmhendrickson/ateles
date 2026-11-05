@@ -57,6 +57,8 @@ from pathlib import Path
 
 import httpx
 
+from .neotoma_transient import call_with_transient_retry
+
 log = logging.getLogger(__name__)
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -426,7 +428,7 @@ def _fetch_entity(entity_id: str) -> dict | None:
     if not NEOTOMA_BEARER_TOKEN:
         return None
     url = f"{NEOTOMA_BASE_URL}/entities/{entity_id}"
-    try:
+    def _read() -> dict:
         resp = httpx.get(
             url,
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
@@ -434,6 +436,11 @@ def _fetch_entity(entity_id: str) -> dict | None:
         )
         resp.raise_for_status()
         return resp.json()
+
+    try:
+        # Timeouts / connection errors get two bounded retries; an HTTP error
+        # status is raised at once.  All attempts failing logs and returns None.
+        return call_with_transient_retry(_read, label=f"read of entity {entity_id}")
     except Exception as exc:  # noqa: BLE001 — fail closed, never crash dispatch
         log.warning(f"[gating] could not fetch entity {entity_id}: {exc}")
         return None
@@ -1146,7 +1153,7 @@ def write_checkpoint_brief(
         _canonical_json(body["entities"]).encode()
     ).hexdigest()[:16]
     try:
-        headers = {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
+        signer = None
         encoded_request_body: bytes | None = None
         if authorization_expected:
             signer = _checkpoint_producer_http_signer(handler)
@@ -1157,24 +1164,33 @@ def write_checkpoint_brief(
                 )
                 return None
             encoded_request_body = _canonical_json(body).encode("utf-8")
+        store_url = f"{NEOTOMA_BASE_URL.rstrip('/')}/store"
+
+        def _post_checkpoint():
+            # Each attempt is signed afresh (a signature may carry its own
+            # timestamp/nonce) but posts the SAME body, and so the same
+            # content-bound idempotency key.
+            headers = {"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"}
+            if signer is None:
+                return httpx.post(store_url, headers=headers, json=body, timeout=15)
             headers.update(
                 signer.sign_headers(
                     method="POST",
-                    url=f"{NEOTOMA_BASE_URL.rstrip('/')}/store",
+                    url=store_url,
                     body=encoded_request_body,
                     content_type="application/json",
                 )
             )
-        store_url = f"{NEOTOMA_BASE_URL.rstrip('/')}/store"
-        if encoded_request_body is None:
-            resp = httpx.post(store_url, headers=headers, json=body, timeout=15)
-        else:
-            resp = httpx.post(
+            return httpx.post(
                 store_url,
                 headers=headers,
                 content=encoded_request_body,
                 timeout=15,
             )
+
+        resp = call_with_transient_retry(
+            _post_checkpoint, label="checkpoint_brief store"
+        )
         resp.raise_for_status()
         data = resp.json()
         ents = data.get("entities") or []
