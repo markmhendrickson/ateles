@@ -267,7 +267,7 @@ def test_signed_checkpoint_retry_resigns_identical_body(monkeypatch):
         readbacks.append(entity_id)
         committed = next(iter(store.values()))["entities"][0]
         return {
-            "entity_id": entity_id, "entity_type": "checkpoint_brief",
+            "entity_id": entity_id, "entity_type": committed["entity_type"],
             "snapshot": committed,
             "provenance": {f: "obs" for f in (
                 "body", "task_entity_id", "policy_entity_id",
