@@ -15069,6 +15069,11 @@ class SwarmDispatcher:
                     write_headers = {"Accept": "application/vnd.github+json",
                                      "Authorization": f"Bearer {token}"}
                 else:
+                    if not await self._require_github_write_credential(
+                        t.repository, "expectation update",
+                        detail=f"{t.repository}#{parent}",
+                    ):
+                        continue
                     write_headers = self._github_headers(t.repository)
                 async with httpx.AsyncClient(timeout=30) as client:
                     resp = await client.get(

@@ -649,12 +649,16 @@ def test_every_github_write_in_the_dispatcher_goes_through_the_guard():
     """Structural guard against a new write that bypasses the credential guard:
     every POST/PATCH/PUT/DELETE issued on an httpx client in swarm_dispatch.py
     sits in a function that calls the guard. The exceptions are the App
-    token mint itself (authenticated with a JWT) and the two Neotoma helpers."""
+    token mint itself (authenticated with a JWT), the two Neotoma helpers, and
+    `_post_remote_lens_verdict`, which writes only with the lens's own App token
+    and returns before writing when that token is empty, so it never uses the
+    shared credential the guard protects."""
     import ast
     from pathlib import Path
 
     tree = ast.parse((Path(sd.__file__)).read_text())
-    allowed = {"_mint_reviewer_app_installation_token", "_store_entities", "_neotoma_post"}
+    allowed = {"_mint_reviewer_app_installation_token", "_store_entities", "_neotoma_post",
+               "_post_remote_lens_verdict"}
     unguarded: list[str] = []
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.AsyncFunctionDef, ast.FunctionDef)):
