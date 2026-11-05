@@ -110,7 +110,7 @@ def _run(github: _GitHub, *, agent: str = "pavo", raise_in_child: bool = False,
 
     loader = MagicMock()
     loader.load.return_value = _definition(agent)
-    loader.load_policies.return_value = []
+    loader.render_policy_prompt.return_value = ""
     params = dict(
         role=agent, task_entity_id="ent_task", github_token=CALLER_TOKEN,
         include_github_contract=True, github_read_only=True, seated_reviewer=True,
