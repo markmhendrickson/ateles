@@ -3,7 +3,8 @@
 <!--
   Template for the hourly Codex delivery check. Render by substituting <HOME>
   (install.sh does this through render_daemon_plist.py). Read-only: no model
-  calls, no resume, no edits outside its own state file.
+  calls, no resume, no mail. It only reads Codex's files and Neotoma, and writes
+  one findings file under ~/.local/state/ateles/.
 -->
 <plist version="1.0">
 <dict>
@@ -40,12 +41,7 @@
         <key>HOME</key>
         <string><HOME></string>
         <key>PATH</key>
-        <string><HOME>/.local/bin:<HOME>/.nvm/versions/node/v20.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-        <!-- Alerts go by email, sent as the swarm's own mailbox via gws. -->
-        <key>ATELES_NOTIFY_EMAIL</key>
-        <string>1</string>
-        <key>GOOGLE_WORKSPACE_CLI_CONFIG_DIR</key>
-        <string><HOME>/.config/gws-swarm</string>
+        <string><HOME>/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>CODEX_DELIVERY_REPO_MAP</key>
         <string><HOME>/.config/ateles/codex_delivery_repo_map.json</string>
     </dict>
