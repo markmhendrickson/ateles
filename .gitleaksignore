@@ -25,6 +25,6 @@ d73b2ce6ddd2d81b1342f28295b63047a88a19ad:execution/evals/fly_delivery_receipt/fl
 # ateles PR #1538: a fixture remote with an embedded login, flagged in the FIRST commit of the PR.
 # The later commit builds it from fragments; the PR-range scan reads history.
 4ac0c6cb3ace11bdd2ae4b650bf59f602f7a5ad3:execution/scripts/test_harness_lens_runner_repo_scope.py:pii-email:293
-# ateles PR #1608: a synthetic nonce in the FIRST commit of the PR. The later
-# commit builds it from fragments; the PR-range scan still reads the first commit.
+# ateles PR #1608: a synthetic nonce in the FIRST commit of the PR. Later commits
+# use a plain non-token value; the PR-range scan still reads the first commit.
 42f36fffb1990f92dbbcc642d74e77eae9243afa:execution/scripts/test_fly_jobs_in_flight.py:protected-patterns:19

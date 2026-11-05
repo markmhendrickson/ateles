@@ -16,7 +16,7 @@ REPO_ROOT = SCRIPTS.parent.parent
 APIS_DIR = REPO_ROOT / "execution" / "daemons" / "apis"
 HELPER = SCRIPTS / "fly_jobs_in_flight.py"
 REDEPLOY = SCRIPTS / "redeploy_daemons_from_main.sh"
-FIXTURE_NONCE = "tok-" + "should-never-print-" + str(123456789)
+FIXTURE_NONCE = "ledger-entry-value-that-must-stay-private"
 
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
