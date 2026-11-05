@@ -17,6 +17,13 @@ is sent SIGTERM, its parent dies, or ``HOLD_LIMIT_SECONDS`` passes. While it
 holds the lock no launch can reserve, so the count stays true from the check
 to the restart. The lock dies with the holder process.
 
+When the limit is reached the holder does not simply let go: a deploy that
+outlived the lock could restart Apis over a job admitted after the release. It
+first ends its parent (SIGTERM, then SIGKILL after ``PARENT_TERM_WAIT_SECONDS``),
+waits ``KICKSTART_SETTLE_SECONDS`` for a ``launchctl kickstart`` the parent had
+already started, and only then exits. It signals only the pid it was given, and
+only while that process is still its parent.
+
 Prints only the count, never ledger contents: entries hold internal tokens.
 
 Fails OPEN. A missing or unreadable ledger, or an entry with no readable
@@ -58,6 +65,16 @@ LOCK_WAIT_SECONDS = 60.0
 # The longest --hold keeps the lock, whatever happens to its parent: admission
 # never stays blocked longer than this even if release is never sent.
 HOLD_LIMIT_SECONDS = 15 * 60
+
+# Test-only override of the limit. It can only SHORTEN the limit: a value that
+# is not a number, not finite, not above zero, or not below the production
+# limit is ignored, so it can never disable or lengthen the bound.
+HOLD_LIMIT_ENV = "APIS_FLY_HOLD_LIMIT_SECONDS"
+
+# At the limit: how long the parent gets to exit after SIGTERM before SIGKILL,
+# and how long to wait afterwards so a kickstart it had begun can finish.
+PARENT_TERM_WAIT_SECONDS = 30.0
+KICKSTART_SETTLE_SECONDS = 5.0
 
 _POLL_SECONDS = 0.05
 
@@ -116,8 +133,46 @@ def _parent_alive(parent: int) -> bool:
     return True
 
 
+def hold_limit(env: dict | None = None) -> float:
+    """The lifetime limit: production value unless the test override shortens it."""
+    env = os.environ if env is None else env
+    try:
+        value = float(env.get(HOLD_LIMIT_ENV, ""))
+    except ValueError:
+        return float(HOLD_LIMIT_SECONDS)
+    if math.isfinite(value) and 0 < value < HOLD_LIMIT_SECONDS:
+        return value
+    return float(HOLD_LIMIT_SECONDS)
+
+
+def _is_my_parent(parent: int) -> bool:
+    return os.getppid() == parent and _parent_alive(parent)
+
+
+def _end_parent(parent: int) -> None:
+    """End the deploy script before the lock is released (limit reached)."""
+    if not _is_my_parent(parent):
+        return  # already gone, or the pid is no longer our parent: signal nothing
+    try:
+        os.kill(parent, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.monotonic() + PARENT_TERM_WAIT_SECONDS
+    while _parent_alive(parent) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if _parent_alive(parent):
+        try:
+            os.kill(parent, signal.SIGKILL)
+        except OSError:
+            pass
+        end = time.monotonic() + PARENT_TERM_WAIT_SECONDS
+        while _parent_alive(parent) and time.monotonic() < end:
+            time.sleep(0.1)
+    time.sleep(KICKSTART_SETTLE_SECONDS)
+
+
 def hold(parent: int, wait: float = LOCK_WAIT_SECONDS,
-         limit: float = HOLD_LIMIT_SECONDS) -> int:
+         limit: float | None = None) -> int:
     """Take the admission lock, report ``ok <count>`` or ``busy``, then keep
     the lock until SIGTERM, parent death or ``limit``."""
     def _stop(_sig, _frame):
@@ -143,9 +198,11 @@ def hold(parent: int, wait: float = LOCK_WAIT_SECONDS,
     count = count_in_flight(ledger, time.time())
     print(f"ok {count}", flush=True)
     sys.stdout.close()
-    end = time.monotonic() + limit
+    end = time.monotonic() + (hold_limit() if limit is None else limit)
     while time.monotonic() < end and _parent_alive(parent):
         time.sleep(0.2)
+    if _parent_alive(parent):
+        _end_parent(parent)  # limit reached with the deploy still running
     return 0  # the lock is released when the process exits
 
 

@@ -16,8 +16,8 @@
 # development. This mirrors Neotoma's ~/neotoma-rc-src + rc-autodeploy pattern:
 # the running swarm always reflects a clean, fast-forwarded origin/main.
 #
-# Idempotent: if the deploy checkout is already at origin/main, it exits early
-# without touching the daemons. Intended to be invoked by the
+# Idempotent: if the deploy checkout is already at origin/main and no restart is
+# pending (see the marker below), it exits early without touching the daemons. Intended to be invoked by the
 # com.ateles.rc-autodeploy LaunchAgent on a StartInterval (poll), and safe to
 # run by hand.
 #
@@ -38,6 +38,13 @@ DAEMON_LABELS=(
 BRANCH="${BRANCH:-main}"
 LOCK_DIR="${LOCK_DIR:-/tmp/ateles-rc-autodeploy.lock.d}"
 REQ_FILE="execution/scripts/daemon-requirements.txt"
+# Pending-restart marker, next to the lock directory. Written just before the
+# checkout is fast-forwarded and removed only after the restart loop has run, so
+# a deploy that was ended or failed in between is finished by the next run
+# instead of leaving the daemons on old code behind an up-to-date checkout.
+MARKER="${LOCK_DIR}.pending-restart"
+MARKER_WRITTEN=0
+RESTARTS_DONE=0
 # Resolved before the cd below, so a relative $0 still finds the helper.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -72,7 +79,19 @@ release_admission() {
     HOLDER_DIR=""
   fi
 }
-trap 'release_admission; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+# EXIT also runs when the holder ends this script with SIGTERM (no TERM trap on
+# purpose: bash would defer it until a foreground pip returned). If the run
+# wrote the marker and never finished the restarts, say so plainly.
+on_exit() {
+  local status=$?
+  if [ "$MARKER_WRITTEN" -eq 1 ] && [ "$RESTARTS_DONE" -eq 0 ]; then
+    log "DEPLOY DID NOT FINISH: restarts were not completed; the next run will complete it."
+  fi
+  release_admission
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+  exit "$status"
+}
+trap on_exit EXIT
 
 cd "$RC_DIR" || { log "ERROR: RC_DIR $RC_DIR missing"; exit 1; }
 
@@ -81,7 +100,10 @@ git fetch origin "$BRANCH" --quiet || { log "ERROR: git fetch failed"; exit 1; }
 LOCAL="$(git rev-parse HEAD)"
 REMOTE="$(git rev-parse "origin/$BRANCH")"
 
-if [ "$LOCAL" = "$REMOTE" ]; then
+PENDING=0
+[ -e "$MARKER" ] && PENDING=1
+
+if [ "$LOCAL" = "$REMOTE" ] && [ "$PENDING" -eq 0 ]; then
   log "deploy checkout already at origin/$BRANCH ($(git rev-parse --short HEAD)); nothing to do."
   exit 0
 fi
@@ -96,7 +118,12 @@ fi
 # restarts dies with that process before it reserves or starts a machine (its
 # task and any token it already minted are left as any restart leaves an
 # in-progress dispatch). The lock dies with the holder, which
-# also exits if this script dies, and after 15 minutes at most.
+# also exits if this script dies. After 15 minutes at most the holder ENDS THIS
+# SCRIPT (SIGTERM, SIGKILL after 30s), waits 5s for a kickstart already begun,
+# and only then releases the lock, so a deploy never restarts anything after
+# the lock is gone. The marker makes the next run finish what was ended. Before
+# each kickstart below this script also checks the holder is still alive, and
+# stops restarting if it is not.
 #   busy  -> the lock is held (admission or the reaper at work): defer.
 #   ok N  -> N live reservations: defer if N > 0, else deploy holding the lock.
 #   anything else (the holder could not start or answer): fail OPEN and deploy,
@@ -104,6 +131,7 @@ fi
 # Checked before the checkout is fast-forwarded, so a deferred run leaves the
 # checkout behind and the next scheduled run (StartInterval) retries.
 HOLDER_REPLY=""
+HOLDER_FAIL_OPEN=0
 if HOLDER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ateles-fly-hold.XXXXXX" 2>/dev/null)" \
    && mkfifo "$HOLDER_DIR/reply" 2>/dev/null; then
   python3 "$SCRIPT_DIR/fly_jobs_in_flight.py" --hold "$$" \
@@ -124,13 +152,14 @@ case "$HOLDER_REPLY" in
     exit 0 ;;
   *)
     log "WARNING: Fly in-flight check unavailable; deploying without it."
+    HOLDER_FAIL_OPEN=1
     release_admission ;;
 esac
 
 # Refuse to deploy if HEAD has diverged from origin/main (not a fast-forward).
 # The deploy checkout must only ever fast-forward; a divergence means someone
 # committed here and a human must reconcile.
-if ! git merge-base --is-ancestor "$LOCAL" "$REMOTE"; then
+if [ "$LOCAL" != "$REMOTE" ] && ! git merge-base --is-ancestor "$LOCAL" "$REMOTE"; then
   log "ERROR: deploy HEAD has diverged from origin/$BRANCH (not a fast-forward). Aborting; needs manual reconcile."
   exit 1
 fi
@@ -138,17 +167,29 @@ fi
 # Detect whether the dependency pin changed across this update (so we only
 # reinstall when needed).
 REQ_CHANGED=0
-if [ -f "$REQ_FILE" ]; then
+# A pending restart always refreshes the venv: an earlier run may have been
+# ended or failed (e.g. pip) after the checkout was already updated.
+[ "$PENDING" -eq 1 ] && REQ_CHANGED=1
+if [ "$LOCAL" != "$REMOTE" ] && [ -f "$REQ_FILE" ]; then
   if ! git diff --quiet "$LOCAL" "$REMOTE" -- "$REQ_FILE"; then
     REQ_CHANGED=1
   fi
 fi
 
-log "Updating deploy $(git rev-parse --short HEAD) -> $(git rev-parse --short "origin/$BRANCH")"
-
-if ! git merge --ff-only "origin/$BRANCH" --quiet; then
-  log "ERROR: fast-forward merge failed"
-  exit 1
+if [ "$LOCAL" != "$REMOTE" ]; then
+  log "Updating deploy $(git rev-parse --short HEAD) -> $(git rev-parse --short "origin/$BRANCH")"
+  if ! touch "$MARKER" 2>/dev/null; then
+    log "ERROR: cannot write pending-restart marker $MARKER"
+    exit 1
+  fi
+  MARKER_WRITTEN=1
+  if ! git merge --ff-only "origin/$BRANCH" --quiet; then
+    log "ERROR: fast-forward merge failed"
+    exit 1
+  fi
+else
+  log "restart pending from an earlier run; completing it at $(git rev-parse --short HEAD)"
+  MARKER_WRITTEN=1
 fi
 
 log "deploy now at $(git rev-parse --short HEAD)"
@@ -172,6 +213,13 @@ fi
 # relaunches it, forcing a fresh module import from the updated source.
 rc=0
 for label in "${DAEMON_LABELS[@]}"; do
+  # The holder is what keeps Fly admission blocked. If it is gone (it was
+  # killed, or it ended its lifetime), a restart could orphan a job admitted
+  # since: restart nothing more; the marker stays for the next run.
+  if [ "$HOLDER_FAIL_OPEN" -eq 0 ] && ! kill -0 "$HOLDER_PID" 2>/dev/null; then
+    log "ERROR: Fly admission holder is gone; not restarting ${label} or the rest. The pending restart completes on the next run."
+    exit 1
+  fi
   log "hard-restarting ${label}…"
   if ! launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null; then
     if ! launchctl kickstart -k "user/$(id -u)/$label" 2>/dev/null; then
@@ -181,7 +229,10 @@ for label in "${DAEMON_LABELS[@]}"; do
   fi
 done
 
-# Restarts done: let Fly admission resume.
+# Restarts done: the deploy is complete, so clear the marker and let Fly
+# admission resume.
+RESTARTS_DONE=1
+rm -f "$MARKER" 2>/dev/null || true
 release_admission
 
 if [ "$rc" -eq 0 ]; then

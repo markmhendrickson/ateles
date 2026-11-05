@@ -232,16 +232,37 @@ echo "git $*" >> "$CALLS"
 case "$1" in
   rev-parse)
     for a in "$@"; do last="$a"; done
-    if [ "$last" = "HEAD" ]; then echo aaaaaaa; else echo bbbbbbb; fi ;;
+    if [ "$last" = "HEAD" ] || [ -n "${SAME_HEAD:-}" ]; then echo aaaaaaa; else echo bbbbbbb; fi ;;
   merge)
-    echo "admission during merge: $(%s)" >> "$CALLS" ;;
+    echo "admission during merge: $(%s)" >> "$CALLS"
+    [ -n "${MERGE_DELAY:-}" ] && sleep "$MERGE_DELAY" >/dev/null 2>&1
+    exit "${MERGE_RC:-0}" ;;
+  diff)
+    exit "${DIFF_RC:-0}" ;;
 esac
 exit 0
 """ % _PROBE
 
+# Kills only the holder started for the given redeploy-script pid.
+_KILL_HOLDER_PY = (
+    "import os,signal,subprocess,sys\n"
+    "want='fly_jobs_in_flight.py --hold '+sys.argv[1]\n"
+    "for line in subprocess.run(['ps','-ax','-o','pid=,command='],capture_output=True,text=True).stdout.splitlines():\n"
+    "    pid,_,cmd=line.strip().partition(' ')\n"
+    "    if cmd.strip().endswith(want): os.kill(int(pid),signal.SIGKILL)\n"
+)
+
 _LAUNCHCTL_STUB = """#!/bin/bash
 echo "launchctl $*" >> "$CALLS"
 echo "admission during kickstart: $(%s)" >> "$CALLS"
+if [ -n "${KILL_HOLDER_ON_KICKSTART:-}" ]; then
+  # $PPID is the redeploy script.
+  "$PROBE_PY" "$KILL_HOLDER_PY" "$PPID"
+  sleep 0.5
+fi
+if [ -n "${TERM_PARENT_ON_KICKSTART:-}" ]; then
+  kill -TERM $PPID; sleep 0.5
+fi
 exit 0
 """ % _PROBE
 
@@ -256,10 +277,17 @@ def _setup_redeploy(tmp_path: Path, ledger: Path, *, extra_stubs=()) -> tuple[di
     (rc / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
     (rc / ".venv" / "bin" / "python3").write_text("#!/bin/sh\nexit 0\n")
     (rc / ".venv" / "bin" / "python3").chmod(0o755)
+    (rc / "execution" / "scripts").mkdir(parents=True, exist_ok=True)
+    (rc / "execution" / "scripts" / "daemon-requirements.txt").write_text("x\n")
+    (rc / ".venv" / "bin" / "pip").write_text(
+        '#!/bin/sh\necho "pip $*" >> "$CALLS"\n[ -n "${PIP_FAIL:-}" ] && exit 1\nexit 0\n')
+    (rc / ".venv" / "bin" / "pip").chmod(0o755)
+    (tmp_path / "kill_holder.py").write_text(_KILL_HOLDER_PY)
     calls = tmp_path / "calls.log"
     calls.write_text("")
     env = {**os.environ, "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
-           "CALLS": str(calls), "RC_DIR": str(rc), "PROBE_PY": sys.executable,
+           "CALLS": str(calls), "RC_DIR": str(rc),
+           "KILL_HOLDER_PY": str(tmp_path / "kill_holder.py"), "PROBE_PY": sys.executable,
            "ADMISSION_LOCK": str(helper.admission_lock_path(ledger)),
            "LOCK_DIR": str(tmp_path / "lock.d"), "APIS_FLY_LEDGER_FILE": str(ledger)}
     return env, calls
@@ -267,7 +295,7 @@ def _setup_redeploy(tmp_path: Path, ledger: Path, *, extra_stubs=()) -> tuple[di
 
 def _invoke(env: dict, calls: Path) -> tuple[subprocess.CompletedProcess, str]:
     calls.write_text("")
-    result = subprocess.run(["bash", str(REDEPLOY)], env=env, capture_output=True,
+    result = subprocess.run(["/bin/bash", str(REDEPLOY)], env=env, capture_output=True,
                             text=True, timeout=120)
     return result, calls.read_text()
 
@@ -343,3 +371,154 @@ def test_redeploy_fails_open_when_the_holder_cannot_start(tmp_path):
     assert "WARNING: Fly in-flight check unavailable; deploying without it." in result.stdout
     assert "git merge --ff-only origin/main" in calls
     assert FIXTURE_NONCE not in result.stdout + result.stderr
+
+
+# --- the holder ends the deploy before it releases the lock ----------------
+
+def _marker(env: dict) -> Path:
+    return Path(env["LOCK_DIR"] + ".pending-restart")
+
+
+def _wait_lock_free(lock: Path, seconds: float = 15) -> bool:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if _lock_is_free(lock):
+            return True
+        time.sleep(0.1)
+    return _lock_is_free(lock)
+
+
+def test_redeploy_does_not_restart_after_admission_holder_expires(tmp_path):
+    ledger = _ledger(tmp_path / "l.json")
+    env, calls_file = _setup_redeploy(tmp_path, ledger)
+    # Holder limit shortened to 2s; the merge step outlasts it.
+    env.update({"APIS_FLY_HOLD_LIMIT_SECONDS": "2", "MERGE_DELAY": "6"})
+    result, calls = _invoke(env, calls_file)
+    # The holder ended the script (SIGTERM) before it released the lock.
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "kickstart" not in calls
+    assert "DEPLOY DID NOT FINISH" in result.stdout
+    assert "the next run will complete it" in result.stdout
+    assert "DEPLOYED" not in result.stdout
+    assert _marker(env).exists()
+    # The script is gone, and the lock is released only after that.
+    assert _wait_lock_free(helper.admission_lock_path(ledger))
+    time.sleep(1)
+    assert "kickstart" not in calls_file.read_text()
+
+
+def test_hold_limit_override_can_only_shorten_the_limit():
+    prod = float(helper.HOLD_LIMIT_SECONDS)
+    for bad in ("0", "-1", "inf", "nan", "abc", "", str(helper.HOLD_LIMIT_SECONDS),
+                str(helper.HOLD_LIMIT_SECONDS * 10)):
+        assert helper.hold_limit({helper.HOLD_LIMIT_ENV: bad}) == prod, bad
+    assert helper.hold_limit({}) == prod
+    assert helper.hold_limit({helper.HOLD_LIMIT_ENV: "2"}) == 2.0
+
+
+def test_holder_signals_only_its_own_parent(tmp_path):
+    ledger = _ledger(tmp_path / "l.json")
+    env = {**os.environ, "APIS_FLY_LEDGER_FILE": str(ledger),
+           "APIS_FLY_HOLD_LIMIT_SECONDS": "1"}
+    # A bystander that is NOT the holder's parent must never be signalled.
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        holder = subprocess.Popen(
+            [sys.executable, str(HELPER), "--hold", str(bystander.pid)],
+            env=env, stdout=subprocess.PIPE, text=True)
+        assert holder.stdout.readline() == "ok 0\n"
+        holder.wait(timeout=30)  # limit reached; bystander is not its parent
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait()
+
+
+def test_next_run_finishes_a_deploy_ended_after_fast_forward(tmp_path):
+    ledger = _ledger(tmp_path / "l.json")
+    env, calls_file = _setup_redeploy(tmp_path, ledger)
+    env["SAME_HEAD"] = "1"
+    # No marker, checkout at origin: nothing to do.
+    idle, idle_calls = _invoke(env, calls_file)
+    assert "nothing to do" in idle.stdout and "kickstart" not in idle_calls
+    # Marker present: the same state now restarts the daemons and clears it.
+    _marker(env).write_text("")
+    done, calls = _invoke(env, calls_file)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "merge" not in calls
+    assert "pip install --quiet -r" in calls
+    assert calls.count("launchctl kickstart -k") == 3
+    assert "admission during kickstart: refused" in calls
+    assert not _marker(env).exists()
+    # Marker present and a live job: deferred, marker kept.
+    _marker(env).write_text("")
+    _ledger(ledger, time.time() + 600)
+    deferred, dcalls = _invoke(env, calls_file)
+    assert "DEFERRED: 1 Fly job(s) in flight" in deferred.stdout
+    assert "kickstart" not in dcalls and "pip" not in dcalls
+    assert _marker(env).exists()
+
+
+def test_failed_dependency_install_is_finished_by_next_run(tmp_path):
+    ledger = _ledger(tmp_path / "l.json")
+    env, calls_file = _setup_redeploy(tmp_path, ledger)
+    env.update({"DIFF_RC": "1", "PIP_FAIL": "1"})
+    first, first_calls = _invoke(env, calls_file)
+    assert first.returncode == 1, first.stdout + first.stderr
+    assert "pip install failed" in first.stdout
+    assert "DEPLOY DID NOT FINISH" in first.stdout
+    assert "kickstart" not in first_calls
+    assert _marker(env).exists()
+    # The checkout is now at origin, pip works: the next run completes.
+    env.pop("PIP_FAIL")
+    env.pop("DIFF_RC")
+    env["SAME_HEAD"] = "1"
+    second, calls = _invoke(env, calls_file)
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert "pip install --quiet -r" in calls
+    assert calls.count("launchctl kickstart -k") == 3
+    assert not _marker(env).exists()
+
+
+def test_holder_death_stops_further_restarts(tmp_path):
+    ledger = _ledger(tmp_path / "l.json")
+    env, calls_file = _setup_redeploy(tmp_path, ledger)
+    env["KILL_HOLDER_ON_KICKSTART"] = "1"
+    result, calls = _invoke(env, calls_file)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert calls.count("launchctl kickstart -k") == 1
+    assert "Fly admission holder is gone" in result.stdout
+    assert "DEPLOY DID NOT FINISH" in result.stdout
+    assert _marker(env).exists()
+    assert _wait_lock_free(helper.admission_lock_path(ledger))
+
+
+def test_failed_merge_releases_admission_lock(tmp_path):
+    ledger = _ledger(tmp_path / "l.json")
+    env, calls_file = _setup_redeploy(tmp_path, ledger)
+    env["MERGE_RC"] = "1"
+    result, calls = _invoke(env, calls_file)
+    assert result.returncode == 1
+    assert "fast-forward merge failed" in result.stdout
+    assert "kickstart" not in calls
+    assert _wait_lock_free(helper.admission_lock_path(ledger))
+
+
+def test_failed_dependency_install_releases_admission_lock(tmp_path):
+    ledger = _ledger(tmp_path / "l.json")
+    env, calls_file = _setup_redeploy(tmp_path, ledger)
+    env.update({"DIFF_RC": "1", "PIP_FAIL": "1"})
+    result, _calls = _invoke(env, calls_file)
+    assert result.returncode == 1
+    assert _wait_lock_free(helper.admission_lock_path(ledger))
+
+
+def test_killed_redeploy_releases_admission_lock(tmp_path):
+    ledger = _ledger(tmp_path / "l.json")
+    env, calls_file = _setup_redeploy(tmp_path, ledger)
+    env["TERM_PARENT_ON_KICKSTART"] = "1"  # the stub SIGTERMs the script
+    result, calls = _invoke(env, calls_file)
+    assert result.returncode != 0
+    assert calls.count("launchctl kickstart -k") == 1
+    assert "DEPLOY DID NOT FINISH" in result.stdout
+    assert _wait_lock_free(helper.admission_lock_path(ledger))
