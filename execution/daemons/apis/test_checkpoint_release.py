@@ -2507,3 +2507,129 @@ def test_bound_hold_confidence_accepts_only_a_well_formed_unscored_estimate(
     authority, expected
 ):
     assert apis._bound_hold_confidence(authority) == expected
+
+
+def _idempotent_set_status(records, writes):
+    """A ``set_task_status`` fake with Neotoma's idempotency-key semantics.
+
+    The real write keys on handler, task, status and ``key_suffix``; a second
+    write under a key Neotoma has already seen is replayed, reports success and
+    changes nothing. ``writes`` records only the writes that took effect.
+    """
+    seen: set[tuple] = set()
+
+    def set_status(task_entity_id, status, *, handler=None, reason=None,
+                   key_suffix="", **kwargs):
+        value = status.value if hasattr(status, "value") else str(status)
+        key = (handler, task_entity_id, value, key_suffix)
+        if key in seen:
+            return True
+        seen.add(key)
+        writes.append((value, key_suffix))
+        records[task_entity_id]["snapshot"]["status"] = value
+        if reason is not None:
+            records[task_entity_id]["snapshot"]["blocked_reason"] = reason
+        return True
+
+    return set_status
+
+
+@pytest.mark.asyncio
+async def test_second_release_through_a_new_checkpoint_reenters_routed(
+    monkeypatch, release_store
+):
+    """Released, failed before launch, re-held, released again: it must route.
+
+    Red before the fix: both releases keyed the routed write on
+    ``trigger="approved"`` alone, so the second release replayed the first
+    one's key, the task stayed held, and the read-back refused to spawn.
+    """
+    records, brief_id, task_id = release_store
+    task = records[task_id]["snapshot"]
+    writes: list[tuple] = []
+    monkeypatch.setattr(
+        apis, "set_task_status", _idempotent_set_status(records, writes)
+    )
+
+    first = await _resolve(brief_id, "approve")
+    assert "re-dispatched" in first["action_taken"]
+    assert task["status"] == "routed"
+
+    # The launch fails (e.g. no runner capacity); the watchdog retries it and
+    # the gate holds it again at a NEW checkpoint.
+    task["status"] = "failed"
+    task["status"] = "awaiting_approval"
+    task["blocked_reason"] = "waiting for operator approval"
+    second_id = "ent_cp2"
+    records[second_id] = json.loads(json.dumps(records[brief_id]))
+    records[second_id]["entity_id"] = second_id
+    records[second_id]["entity_version"] = "v1"
+    records[second_id]["snapshot"].update(
+        {"status": "awaiting_operator", "resolved_dispatched": False}
+    )
+    records["_observations"][second_id] = [
+        {"id": "obs-brief2-create", "user_id": TEST_OWNER}
+    ]
+
+    def read_second_approval(checkpoint_id, record, **kwargs):
+        assert checkpoint_id == second_id
+        return {"principal_sub": "ateles@ateles-swarm", "observation_id": "obs-2"}
+
+    monkeypatch.setattr(
+        gating_module, "read_authenticated_checkpoint_resolution",
+        read_second_approval,
+    )
+    monkeypatch.setattr(
+        apis, "read_authenticated_checkpoint_resolution", read_second_approval,
+        raising=False,
+    )
+
+    second = await _resolve(second_id, "approve")
+
+    assert "re-dispatched" in second["action_taken"]
+    assert task["status"] == "routed"
+    assert task["blocked_reason"] == ""
+    routed = [suffix for value, suffix in writes if value == "routed"]
+    assert len(routed) == 2 and routed[0] != routed[1]
+    assert brief_id in routed[0] and second_id in routed[1]
+
+
+@pytest.mark.asyncio
+async def test_replay_of_one_checkpoint_release_writes_routed_once(
+    monkeypatch, release_store
+):
+    """Re-delivering the SAME checkpoint's release stays idempotent."""
+    records, brief_id, task_id = release_store
+    writes: list[tuple] = []
+    monkeypatch.setattr(
+        apis, "set_task_status", _idempotent_set_status(records, writes)
+    )
+    dispatches: list = []
+    original_dispatch = apis.dispatch_task
+
+    async def spy(*args, **kwargs):
+        dispatches.append(kwargs)
+        return await original_dispatch(*args, **kwargs)
+
+    monkeypatch.setattr(apis, "dispatch_task", spy)
+
+    result = await _resolve(brief_id, "approve")
+    assert "re-dispatched" in result["action_taken"]
+    released = records[task_id]["snapshot"]
+
+    # A replayed delivery of the same checkpoint: the consumer's stamp refuses
+    # to dispatch again ...
+    await apis.handle_checkpoint_brief(
+        brief_id, records[brief_id]["snapshot"], _Notifier()
+    )
+    assert len(dispatches) == 1
+
+    # ... and even a duplicate dispatch for the same checkpoint replays the
+    # same idempotency key rather than writing a second routed transition.
+    await original_dispatch(
+        task_id, dict(released), trigger="approved", notifier=_Notifier(),
+        gate_override=True, release_key=brief_id,
+    )
+    assert [w for w in writes if w[0] == "routed"] == [
+        ("routed", f"approved-{brief_id}")
+    ]
