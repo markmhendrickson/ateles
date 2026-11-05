@@ -35,9 +35,12 @@ def make_dbs(
     c = sqlite3.connect(state)
     c.execute(
         "CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, title TEXT, "
-        "archived INTEGER, updated_at_ms INTEGER)"
+        "archived INTEGER, updated_at_ms INTEGER, rollout_path TEXT)"
     )
-    c.executemany("INSERT INTO threads VALUES (?,?,?,?,?)", threads)
+    c.executemany(
+        "INSERT INTO threads VALUES (?,?,?,?,?,?)",
+        [tuple(t) + (None,) * (6 - len(t)) for t in threads],
+    )
     c.commit()
     c.close()
     g = sqlite3.connect(goals_db)
@@ -316,6 +319,9 @@ class FakeNotifier:
         return False
 
 
+COORD = cdc.COORDINATOR_CHECK
+
+
 def result(name, keys=(), error=None):
     return cdc.CheckResult(name, [cdc.Finding(k, f"msg {k}") for k in keys], error)
 
@@ -329,7 +335,7 @@ def test_failed_read_reports_could_not_check(tmp_path):
     assert all(not r.ok for r in results)
     n = FakeNotifier()
     cdc.apply_results(results, {}, n, "warn")
-    assert len(n.sent) == 4 and all(
+    assert len(n.sent) == 5 and all(
         m.startswith("Could not check") for m, _, _ in n.sent
     )
     assert "COULD NOT CHECK" in cdc.render_report(results)
@@ -337,34 +343,27 @@ def test_failed_read_reports_could_not_check(tmp_path):
 
 def test_alert_only_on_change_and_clears_resolved_key():
     n = FakeNotifier()
-    state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn")
+    state = cdc.apply_results([result(COORD, ["k1"])], {}, n, "warn")
     assert [d for _, _, d in n.sent] == ["k1"]
-    state = cdc.apply_results([result("c", ["k1"])], state, n, "warn")
+    state = cdc.apply_results([result(COORD, ["k1"])], state, n, "warn")
     assert len(n.sent) == 1 and not n.cleared  # unchanged: silent
-    state = cdc.apply_results([result("c", [])], state, n, "warn")
+    state = cdc.apply_results([result(COORD, [])], state, n, "warn")
     assert n.cleared == ["k1"]  # resolved: key cleared
-    cdc.apply_results([result("c", ["k1"])], state, n, "warn")
+    cdc.apply_results([result(COORD, ["k1"])], state, n, "warn")
     assert len(n.sent) == 2  # recurrence alerts again
 
 
 def test_failed_check_keeps_prior_keys_and_clears_failure_when_it_recovers():
     n = FakeNotifier()
-    state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn")
-    state = cdc.apply_results([result("c", error="boom")], state, n, "warn")
-    assert not n.cleared and "k1" in state["c"]  # unknown != resolved
-    state = cdc.apply_results([result("c", error="boom")], state, n, "warn")
+    state = cdc.apply_results([result(COORD, ["k1"])], {}, n, "warn")
+    state = cdc.apply_results([result(COORD, error="boom")], state, n, "warn")
+    assert not n.cleared and "k1" in state[COORD]  # unknown != resolved
+    state = cdc.apply_results([result(COORD, error="boom")], state, n, "warn")
     assert len(n.sent) == 2  # failure alerts once
-    cdc.apply_results([result("c", ["k1"])], state, n, "warn")
-    assert n.cleared == [cdc.failure_key("c")]
+    cdc.apply_results([result(COORD, ["k1"])], state, n, "warn")
+    assert n.cleared == [cdc.failure_key(COORD)]
 
 
-def test_new_alerts_per_run_are_capped_with_one_summary_then_quiet():
-    n = FakeNotifier()
-    keys = [f"k{i:02d}" for i in range(14)]
-    state = cdc.apply_results([result("c", keys)], {}, n, "warn", max_new=10)
-    assert len(n.sent) == 11 and "4 more" in n.sent[-1][0]  # 10 findings + one summary
-    cdc.apply_results([result("c", keys)], state, n, "warn", max_new=10)
-    assert len(n.sent) == 11  # nothing new: silent
 
 
 def test_one_unreadable_target_does_not_hide_the_others():
@@ -428,70 +427,35 @@ def test_gh_reads_use_an_app_token_for_that_repo(monkeypatch):
 
 def test_undelivered_alert_is_retried_next_run():
     n = FakeNotifier(deliver=False)
-    state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn")
-    assert state["c"] == [] and n.cleared == ["k1"]
+    state = cdc.apply_results([result(COORD, ["k1"])], {}, n, "warn")
+    assert state[COORD] == [] and n.cleared == ["k1"]
     n2 = FakeNotifier()
-    state = cdc.apply_results([result("c", ["k1"])], state, n2, "warn")
-    assert [s[2] for s in n2.sent] == ["k1"] and state["c"] == ["k1"]
+    state = cdc.apply_results([result(COORD, ["k1"])], state, n2, "warn")
+    assert [s[2] for s in n2.sent] == ["k1"] and state[COORD] == ["k1"]
 
 
 def test_alert_held_through_silence_is_not_retried():
     n = FakeNotifier(deliver=False, silence=True)
-    state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn")
-    assert state["c"] == ["k1"] and n.cleared == []
+    state = cdc.apply_results([result(COORD, ["k1"])], {}, n, "warn")
+    assert state[COORD] == ["k1"] and n.cleared == []
     n2 = FakeNotifier()
-    cdc.apply_results([result("c", ["k1"])], state, n2, "warn")
+    cdc.apply_results([result(COORD, ["k1"])], state, n2, "warn")
     assert n2.sent == []
 
 
 def test_undelivered_could_not_check_alert_is_retried():
     n = FakeNotifier(deliver=False)
-    state = cdc.apply_results([result("c", error="boom")], {}, n, "warn")
-    assert cdc.failure_key("c") not in state["c"]
+    state = cdc.apply_results([result(COORD, error="boom")], {}, n, "warn")
+    assert cdc.failure_key(COORD) not in state[COORD]
     n2 = FakeNotifier()
-    state = cdc.apply_results([result("c", error="boom")], state, n2, "warn")
-    assert len(n2.sent) == 1 and cdc.failure_key("c") in state["c"]
+    state = cdc.apply_results([result(COORD, error="boom")], state, n2, "warn")
+    assert len(n2.sent) == 1 and cdc.failure_key(COORD) in state[COORD]
 
 
-def test_undelivered_first_run_summary_leaves_the_first_run_open():
-    n = FakeNotifier(deliver=False)
-    state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn", baseline=True)
-    assert state == {}
 
 
-def test_undelivered_overflow_summary_is_retried():
-    keys = [f"k{i:02d}" for i in range(4)]
-    delivered = iter([True, True, False])
-    n = FakeNotifier()
-    n.send = lambda *a, **kw: next(delivered)
-    state = cdc.apply_results([result("c", keys)], {}, n, "warn", max_new=2)
-    assert state["c"] == keys[:2]
-    n2 = FakeNotifier()
-    state = cdc.apply_results([result("c", keys)], state, n2, "warn", max_new=2)
-    assert state["c"] == keys and [s[2] for s in n2.sent] == keys[2:]
 
 
-def test_run_after_undelivered_first_summary_is_a_first_run_again(
-    monkeypatch, tmp_path
-):
-    from lib.notify.notifier import Notifier
-
-    notifiers = iter([FakeNotifier(deliver=False), FakeNotifier()])
-    used = []
-
-    def from_neotoma():
-        used.append(next(notifiers))
-        return used[-1]
-
-    monkeypatch.setitem(sys.modules, "lib.daemon_runtime", type("M", (), {}))
-    monkeypatch.setattr(Notifier, "from_neotoma", staticmethod(from_neotoma))
-    monkeypatch.setattr(cdc, "run_checks", lambda **kw: [result("c", ["k1", "k2"])])
-    monkeypatch.setenv("CODEX_DELIVERY_STATE_PATH", str(tmp_path / "state.json"))
-    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
-    assert cdc.main(["--once"]) == 0
-    assert (tmp_path / "state.json").exists()
-    assert cdc.main(["--once"]) == 0
-    assert len(used[1].sent) == 1 and "Already open" in used[1].sent[0][0]
 
 
 def _real_notifier(monkeypatch, tmp_path, silence):
@@ -508,15 +472,15 @@ def _real_notifier(monkeypatch, tmp_path, silence):
 
 def test_real_notifier_failed_delivery_is_retried(monkeypatch, tmp_path):
     n = _real_notifier(monkeypatch, tmp_path, silence=False)
-    state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn")
-    assert state["c"] == []  # no transport configured: not delivered
+    state = cdc.apply_results([result(COORD, ["k1"])], {}, n, "warn")
+    assert state[COORD] == []  # no transport configured: not delivered
     assert "k1" not in n._dedupe_journal  # so the retry is not suppressed
 
 
 def test_real_notifier_held_notice_counts_as_told(monkeypatch, tmp_path):
     n = _real_notifier(monkeypatch, tmp_path, silence=True)
-    state = cdc.apply_results([result("c", ["k1"])], {}, n, "warn")
-    assert state["c"] == ["k1"] and "k1" in n._dedupe_journal
+    state = cdc.apply_results([result(COORD, ["k1"])], {}, n, "warn")
+    assert state[COORD] == ["k1"] and "k1" in n._dedupe_journal
     assert len(n._digest_queue) == 1
 
 
@@ -538,6 +502,15 @@ def test_run_checks_end_to_end_on_fixtures(tmp_path):
         [("t1", "o", "blocked", NOW_MS - DAY_MS)],
     )
     (tmp_path / "automations").mkdir()
+    rollout = tmp_path / "coord.jsonl"
+    rollout.write_text(turn_line(NOW - timedelta(minutes=30)) + "\n")
+    c = sqlite3.connect(state)
+    c.execute(
+        "INSERT INTO threads VALUES ('co','coordinator','',0,?,?)",
+        (NOW_MS, str(rollout)),
+    )
+    c.commit()
+    c.close()
 
     class Reader:
         def deployment_configs(self):
@@ -546,8 +519,10 @@ def test_run_checks_end_to_end_on_fixtures(tmp_path):
         def task_page_fetcher(self, now):
             return pager([task(1, "2026-11-01")])
 
-    results = cdc.run_checks(now=NOW, home=tmp_path, reader_factory=Reader)
-    assert [len(r.findings) for r in results] == [1, 0, 0, 1]
+    results = cdc.run_checks(
+        now=NOW, home=tmp_path, reader_factory=Reader, environ={}
+    )
+    assert [len(r.findings) for r in results] == [1, 0, 0, 1, 0]
     assert all(r.ok for r in results)
 
 
@@ -567,30 +542,10 @@ def test_plist_template_is_hourly_and_identity_free():
 # ── first-run baseline, overdue backlog, repo map ────────────────────────────
 
 
-def test_first_run_sends_one_summary_then_stays_quiet():
-    many = [f"k{i}" for i in range(40)]
-    n = FakeNotifier()
-    state = cdc.apply_results([result("goals", many)], {}, n, "warn", baseline=True)
-    assert len(n.sent) == 1
-    assert "goals: 40" in n.sent[0][0] and "and 28 more" in n.sent[0][0]
-    n2 = FakeNotifier()
-    cdc.apply_results([result("goals", many)], state, n2, "warn")
-    assert n2.sent == []
 
 
-def test_finding_new_after_baseline_still_alerts():
-    n = FakeNotifier()
-    state = cdc.apply_results([result("goals", ["a"])], {}, n, "warn", baseline=True)
-    n2 = FakeNotifier()
-    cdc.apply_results([result("goals", ["a", "b"])], state, n2, "warn")
-    assert [s[2] for s in n2.sent] == ["b"]
 
 
-def test_failed_check_on_first_run_is_not_folded_into_baseline():
-    n = FakeNotifier()
-    cdc.apply_results([result("deploys", error="boom")], {}, n, "warn", baseline=True)
-    assert len(n.sent) == 1
-    assert "Could not check deploys" in n.sent[0][0]
 
 
 def test_old_overdue_task_is_counted_not_alerted():
@@ -730,7 +685,7 @@ def test_main_releases_held_notices_before_alerting(monkeypatch, tmp_path):
     fake.send = lambda *a, **k: order.append("send") or orig_send(*a, **k)
     monkeypatch.setitem(sys.modules, "lib.daemon_runtime", type("M", (), {}))
     monkeypatch.setattr(Notifier, "from_neotoma", staticmethod(lambda: fake))
-    monkeypatch.setattr(cdc, "run_checks", lambda **kw: [result("c", ["k1"])])
+    monkeypatch.setattr(cdc, "run_checks", lambda **kw: [result(COORD, ["k1"])])
     monkeypatch.setenv("CODEX_DELIVERY_STATE_PATH", str(tmp_path / "state.json"))
     monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
     monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", "/should/be/overridden")
@@ -751,3 +706,266 @@ def test_plist_template_sends_email_from_swarm_mailbox():
     assert env["ATELES_NOTIFY_EMAIL"] == "1"
     assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == "/h/.config/gws-swarm"
     assert "/h/.nvm/versions/node/v20.20.0/bin" in env["PATH"].split(":")
+
+
+# ── coordinator check ────────────────────────────────────────────────────────
+
+
+def turn_line(when: datetime, error: str | None = None) -> str:
+    payload = {"type": "task_complete", "last_agent_message": "PRIVATE TEXT"}
+    if error:
+        payload["error"] = error
+    return json.dumps(
+        {"timestamp": when.isoformat(), "type": "event_msg", "payload": payload}
+    )
+
+
+def filler(n: int = 1) -> str:
+    row = {"timestamp": NOW.isoformat(), "type": "x", "payload": {"t": "z" * 200}}
+    return "\n".join(json.dumps(row) for _ in range(n))
+
+
+def coordinator_db(tmp_path, lines, name="coordinator", extra=(), updated_ms=NOW_MS):
+    rollout = tmp_path / "coord.jsonl"
+    rollout.write_text("\n".join(lines) + "\n")
+    threads = [("co", name, "", 0, updated_ms, str(rollout))] + list(extra)
+    _, state = make_dbs(tmp_path, threads, [])
+    return state
+
+
+def test_coordinator_healthy_when_recent_success(tmp_path):
+    state = coordinator_db(tmp_path, [turn_line(NOW - timedelta(hours=1))])
+    assert cdc.check_coordinator(state, NOW, {}) == []
+
+
+def test_coordinator_silent_after_threshold_and_message_is_plain(tmp_path):
+    state = coordinator_db(tmp_path, [turn_line(NOW - timedelta(hours=5))])
+    findings = cdc.check_coordinator(state, NOW, {})
+    assert [f.key for f in findings] == [f"{cdc.KEY_PREFIX}:coordinator-silent"]
+    msg = findings[0].message
+    assert "not monitoring" in msg and "5h 0m" in msg and "since" in msg
+    assert "Open it in Codex" in msg and "PRIVATE" not in msg
+
+
+def test_coordinator_failed_turns_count_as_silent_despite_recent_activity(tmp_path):
+    # An old success, then two turns that failed at once. updated_at_ms is fresh
+    # (failures move it) and must not make the coordinator look healthy.
+    state = coordinator_db(
+        tmp_path,
+        [
+            turn_line(NOW - timedelta(hours=6)),
+            filler(2),
+            turn_line(NOW - timedelta(minutes=20), error="model error"),
+            turn_line(NOW - timedelta(minutes=5), error="model error"),
+        ],
+        updated_ms=NOW_MS,
+    )
+    findings = cdc.check_coordinator(state, NOW, {})
+    assert len(findings) == 1 and "6h 0m" in findings[0].message
+
+
+def test_coordinator_latest_success_wins_over_older_one(tmp_path):
+    state = coordinator_db(
+        tmp_path,
+        [turn_line(NOW - timedelta(hours=9)), turn_line(NOW - timedelta(minutes=10))],
+    )
+    assert cdc.check_coordinator(state, NOW, {}) == []
+
+
+def test_coordinator_name_missing_is_could_not_check(tmp_path):
+    state = coordinator_db(tmp_path, [turn_line(NOW)], name="other")
+    with pytest.raises(RuntimeError, match="0 open"):
+        cdc.check_coordinator(state, NOW, {})
+
+
+def test_coordinator_duplicate_name_is_could_not_check(tmp_path):
+    dup = ("co2", "coordinator", "", 0, NOW_MS, "/nowhere")
+    state = coordinator_db(tmp_path, [turn_line(NOW)], extra=[dup])
+    with pytest.raises(RuntimeError, match="2 open"):
+        cdc.check_coordinator(state, NOW, {})
+
+
+def test_coordinator_archived_duplicate_is_ignored(tmp_path):
+    old = ("co2", "coordinator", "", 1, NOW_MS, "/nowhere")
+    state = coordinator_db(tmp_path, [turn_line(NOW)], extra=[old])
+    assert cdc.check_coordinator(state, NOW, {}) == []
+
+
+def test_coordinator_name_is_exact_and_configurable(tmp_path):
+    state = coordinator_db(tmp_path, [turn_line(NOW)], name="coordinator-2")
+    with pytest.raises(RuntimeError):
+        cdc.check_coordinator(state, NOW, {})
+    settings = {cdc.COORDINATOR_NAME_ENV: "coordinator-2"}
+    assert cdc.check_coordinator(state, NOW, settings) == []
+
+
+def test_coordinator_threshold_is_configurable(tmp_path):
+    state = coordinator_db(tmp_path, [turn_line(NOW - timedelta(hours=2))])
+    assert cdc.check_coordinator(state, NOW, {}) == []
+    settings = {cdc.COORDINATOR_HOURS_ENV: "1.5"}
+    assert len(cdc.check_coordinator(state, NOW, settings)) == 1
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {cdc.COORDINATOR_HOURS_ENV: "abc"},
+        {cdc.COORDINATOR_HOURS_ENV: "-1"},
+        {cdc.COORDINATOR_HOURS_ENV: "0"},
+        {cdc.COORDINATOR_HOURS_ENV: ""},
+        {cdc.COORDINATOR_HOURS_ENV: "nan"},
+        {cdc.COORDINATOR_HOURS_ENV: "1e3"},
+        {cdc.COORDINATOR_HOURS_ENV: "99999"},
+        {cdc.COORDINATOR_NAME_ENV: "  "},
+    ],
+)
+def test_coordinator_settings_are_strictly_validated(settings):
+    with pytest.raises(ValueError):
+        cdc.coordinator_settings(settings)
+
+
+def test_coordinator_large_rollout_is_read_within_the_bound(tmp_path, monkeypatch):
+    # ~3 MB of history with the only success at the very start and a failure at
+    # the end: the bounded read must stop and report could-not-check, not silence.
+    lines = [turn_line(NOW - timedelta(hours=9)), filler(12000)]
+    lines.append(turn_line(NOW - timedelta(minutes=1), error="boom"))
+    state = coordinator_db(tmp_path, lines)
+    size = (tmp_path / "coord.jsonl").stat().st_size
+    assert size > 2_000_000
+    reads = []
+    real_open = open
+
+    def counting_open(*a, **kw):
+        fh = real_open(*a, **kw)
+        if "b" in (a[1] if len(a) > 1 else kw.get("mode", "")):
+            orig = fh.read
+            fh.read = lambda n=-1: (reads.append(n), orig(n))[1]
+        return fh
+
+    monkeypatch.setattr("builtins.open", counting_open)
+    with pytest.raises(RuntimeError, match="within the read bound"):
+        cdc.check_coordinator(state, NOW, {}, chunk=65536, max_bytes=262144)
+    monkeypatch.undo()
+    assert reads and sum(reads) <= 262144 < size
+
+
+def test_coordinator_large_rollout_finds_a_success_near_the_end(tmp_path):
+    lines = [filler(12000), turn_line(NOW - timedelta(hours=4)), filler(20)]
+    state = coordinator_db(tmp_path, lines)
+    findings = cdc.check_coordinator(state, NOW, {}, chunk=65536, max_bytes=262144)
+    assert len(findings) == 1 and "4h 0m" in findings[0].message
+
+
+def test_coordinator_event_split_across_chunks_is_still_found(tmp_path):
+    lines = [turn_line(NOW - timedelta(hours=1)), filler(30)]
+    state = coordinator_db(tmp_path, lines)
+    # Tiny chunks cut the event line in several places.
+    assert cdc.check_coordinator(state, NOW, {}, chunk=97, max_bytes=1 << 20) == []
+
+
+def test_coordinator_whole_file_without_a_success_is_could_not_check(tmp_path):
+    state = coordinator_db(tmp_path, [turn_line(NOW, error="boom"), filler(2)])
+    with pytest.raises(RuntimeError, match="whole history"):
+        cdc.check_coordinator(state, NOW, {})
+
+
+def test_coordinator_missing_rollout_is_could_not_check(tmp_path):
+    state = coordinator_db(tmp_path, [turn_line(NOW)])
+    (tmp_path / "coord.jsonl").unlink()
+    with pytest.raises(OSError):
+        cdc.check_coordinator(state, NOW, {})
+
+
+# ── coordinator alerts: once, then cleared on recovery ──────────────────────
+
+
+def test_coordinator_silence_alerts_once_and_clears_on_recovery():
+    n = FakeNotifier()
+    silent = [cdc.Finding("k:silent", "coordinator is silent")]
+    res = cdc.CheckResult(COORD, silent)
+    state = cdc.apply_results([res], {}, n, "warn")
+    assert [d for _, _, d in n.sent] == ["k:silent"]
+    state = cdc.apply_results([res], state, n, "warn")
+    assert len(n.sent) == 1 and not n.cleared
+    state = cdc.apply_results([result(COORD, [])], state, n, "warn")
+    assert n.cleared == ["k:silent"] and state[COORD] == []
+    cdc.apply_results([res], state, n, "warn")
+    assert len(n.sent) == 2  # a new silence alerts again
+
+
+# ── session findings are published, not emailed ──────────────────────────────
+
+
+def test_session_findings_are_not_emailed_and_old_keys_are_cleared():
+    n = FakeNotifier()
+    legacy = {"codex goals": ["codex-delivery:goal:t1:blocked"]}
+    state = cdc.apply_results(
+        [result("codex goals", ["codex-delivery:goal:t2:blocked"])], legacy, n, "warn"
+    )
+    assert n.sent == [] and state == {"codex goals": []}
+    assert n.cleared == ["codex-delivery:goal:t1:blocked"]
+
+
+def test_failed_session_check_still_emails_could_not_check_once():
+    n = FakeNotifier()
+    state = cdc.apply_results([result("codex goals", error="boom")], {}, n, "warn")
+    assert len(n.sent) == 1 and n.sent[0][0].startswith("Could not check codex goals")
+    cdc.apply_results([result("codex goals", error="boom")], state, n, "warn")
+    assert len(n.sent) == 1
+
+
+def test_findings_document_has_every_finding_and_names_failed_checks():
+    results = [
+        result("codex goals", ["g1", "g2"]),
+        result("due and blocked tasks", error="boom"),
+        result(COORD, ["c1"]),
+    ]
+    doc = cdc.build_findings_document(results, NOW)
+    assert doc["generated_at"] == "2026-11-04T12:00:00Z"
+    assert [f["key"] for f in doc["findings"]] == ["g1", "g2", "c1"]
+    assert {"key", "check", "message", "priority"} == set(doc["findings"][0])
+    assert doc["findings"][0]["check"] == "codex goals"
+    assert doc["failed_checks"] == ["due and blocked tasks"]
+
+
+def test_findings_file_is_private_atomic_and_replaced_whole(tmp_path):
+    path = tmp_path / "sub" / "codex-delivery-findings.json"
+    cdc.write_findings(path, {"a": 1})
+    cdc.write_findings(path, {"a": 2})
+    assert json.loads(path.read_text()) == {"a": 2}
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert [p.name for p in path.parent.iterdir()] == [path.name]  # no temp left
+
+
+def test_main_publishes_findings_and_emails_nothing_for_a_session_finding(
+    monkeypatch, tmp_path
+):
+    from lib.notify.notifier import Notifier
+
+    fake = FakeNotifier()
+    monkeypatch.setitem(sys.modules, "lib.daemon_runtime", type("M", (), {}))
+    monkeypatch.setattr(Notifier, "from_neotoma", staticmethod(lambda: fake))
+    monkeypatch.setattr(
+        cdc,
+        "run_checks",
+        lambda **kw: [
+            result("codex goals", ["g1"]),
+            result("codex automations", error="x"),
+        ],
+    )
+    monkeypatch.setenv("CODEX_DELIVERY_STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(tmp_path / "dedupe.json"))
+    assert cdc.main(["--once"]) == 1
+    doc = json.loads((tmp_path / "codex-delivery-findings.json").read_text())
+    assert [f["key"] for f in doc["findings"]] == ["g1"]
+    assert doc["failed_checks"] == ["codex automations"]
+    assert [m for m, _, _ in fake.sent if "g1" in m] == []
+    assert len(fake.sent) == 1 and fake.sent[0][0].startswith("Could not check")
+
+
+def test_dry_run_writes_no_findings_file(monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "lib.daemon_runtime", type("M", (), {}))
+    monkeypatch.setattr(cdc, "run_checks", lambda **kw: [result("codex goals", ["g1"])])
+    monkeypatch.setenv("CODEX_DELIVERY_STATE_PATH", str(tmp_path / "state.json"))
+    assert cdc.main(["--once", "--dry-run"]) == 0
+    assert not (tmp_path / "codex-delivery-findings.json").exists()

@@ -4,9 +4,10 @@
 Long-running Codex sessions stall silently: goals sit blocked with nothing to
 wake them, watchers are paused while a session says it is watching, merged work
 is not deployed, and dated follow-ups have no trigger. This script looks for
-those four conditions once an hour and tells the operator, in plain language,
-what is stuck, for how long, and what to do. It makes no model calls and
-changes nothing outside its own small state file.
+those conditions once an hour and PUBLISHES what it finds for the coordinator
+Codex session to read and act on (operator instruction, 2026-11-05: stopped
+sessions are to be assisted by the coordinator, not by email to the operator).
+It makes no model calls and changes nothing outside its own small state files.
 
 Checks (each a small independent function returning findings):
 
@@ -17,19 +18,41 @@ Checks (each a small independent function returning findings):
 3. ``check_deploys``     merged to the default branch but not deployed for
                          over a day, per ``deployment_configuration`` entity.
 4. ``check_tasks``       operator tasks due soon and blocked, or past due.
+5. ``check_coordinator`` the coordinator session itself: when did it last
+                         finish a turn successfully?
 
-Alerting reuses ``lib/notify/notifier.py`` (priority routing, silence windows,
-``dedupe_key`` / ``clear_dedupe``). A finding alerts once; when it resolves its
-key is cleared so a recurrence alerts again. A check that could not run is
-reported as "could not check X", never as an all-clear.
+Findings file: every non-dry run atomically writes
+``codex-delivery-findings.json`` (mode 0600) next to the state file with
+``generated_at``, ``findings`` (key, check, message, priority) and
+``failed_checks``. A check that could not run is listed in ``failed_checks``
+and contributes no findings: its gap is explicit and never reads as an
+all-clear.
 
-Privacy: thread rollouts are never opened, and goal objectives are never read
-into a finding or message (the thread name is used instead).
+Email (``lib/notify/notifier.py``: priority routing, silence windows,
+``dedupe_key`` / ``clear_dedupe``) is kept for exactly two things, each sent
+once and cleared on recovery: a check that could not run ("could not check X"),
+and coordinator silence. Session findings are never emailed.
+
+Coordinator health is the time of the latest successful turn: the newest
+``task_complete`` event with no error in the named thread's rollout file. The
+thread's ``updated_at_ms`` is not used, because turns that fail immediately
+also move it. The thread is found by exact name in
+``ATELES_CODEX_COORDINATOR_THREAD_NAME`` (default ``coordinator``); zero or
+several matches mean "could not check". The silence threshold is
+``ATELES_CODEX_COORDINATOR_SILENCE_HOURS`` (default 3).
+
+Privacy: goal objectives are never read into a finding or message (the thread
+name is used instead). Rollouts are not opened except the single named
+coordinator's, read backwards from the end within a fixed byte bound, and only
+for event type, timestamp and whether an error is present; no message content
+is kept, logged or published.
 
 Usage:
-    codex_delivery_check.py --once --dry-run   # print findings, send nothing;
-                                               # exit 1 if any check failed
-    codex_delivery_check.py --once             # alert on change
+    codex_delivery_check.py --once --dry-run   # print findings, send and write
+                                               # nothing; exit 1 if any check
+                                               # failed
+    codex_delivery_check.py --once             # publish findings, email on
+                                               # the two cases above
 """
 
 from __future__ import annotations
@@ -71,9 +94,18 @@ REPO_MAP_ENV = "CODEX_DELIVERY_REPO_MAP"
 TERMINAL_TASK_STATUSES = frozenset(
     {"done", "completed", "complete", "cancelled", "canceled", "closed", "dropped"}
 )
-MAX_NEW_ALERTS_PER_RUN = 10
-BASELINE_LIST_PER_CHECK = 12
 SUBPROCESS_TIMEOUT = 60
+
+COORDINATOR_CHECK = "coordinator"
+COORDINATOR_NAME_ENV = "ATELES_CODEX_COORDINATOR_THREAD_NAME"
+COORDINATOR_HOURS_ENV = "ATELES_CODEX_COORDINATOR_SILENCE_HOURS"
+DEFAULT_COORDINATOR_NAME = "coordinator"
+DEFAULT_COORDINATOR_HOURS = 3.0
+MAX_COORDINATOR_HOURS = 24.0 * 14
+# Rollout files reach hundreds of megabytes. Read backwards in chunks and stop
+# after this many bytes, so the cost per run is fixed whatever the file size.
+ROLLOUT_CHUNK_BYTES = 1 << 20
+ROLLOUT_MAX_BYTES = 64 << 20
 
 _RRULE_SECONDS = {
     "SECONDLY": 1,
@@ -101,6 +133,7 @@ _NON_PROD_LABELS = frozenset(
 class Finding:
     key: str
     message: str
+    priority: str = "warn"
 
 
 @dataclass
@@ -601,6 +634,136 @@ class NeotomaReader:
         return fetch
 
 
+# ── check 5: the coordinator session ─────────────────────────────────────────
+
+
+def coordinator_settings(environ: dict[str, str] | None = None) -> tuple[str, float]:
+    """Return (thread name, silence hours); invalid values raise, never default."""
+    env = os.environ if environ is None else environ
+    name = DEFAULT_COORDINATOR_NAME
+    if COORDINATOR_NAME_ENV in env:
+        name = env[COORDINATOR_NAME_ENV].strip()
+        if not name:
+            raise ValueError(f"{COORDINATOR_NAME_ENV} is set but empty")
+    hours = DEFAULT_COORDINATOR_HOURS
+    if COORDINATOR_HOURS_ENV in env:
+        raw = env[COORDINATOR_HOURS_ENV].strip()
+        if not re.fullmatch(r"\d+(\.\d+)?", raw):
+            raise ValueError(f"{COORDINATOR_HOURS_ENV} must be a positive number")
+        hours = float(raw)
+        if not 0 < hours <= MAX_COORDINATOR_HOURS:
+            raise ValueError(
+                f"{COORDINATOR_HOURS_ENV} must be above 0 and at most "
+                f"{MAX_COORDINATOR_HOURS:g}"
+            )
+    return name, hours
+
+
+def _successful_turn_time(line: bytes) -> datetime | None:
+    """Timestamp of a turn-complete event with no error, else None.
+
+    Only the event type, the timestamp and whether an error is present are
+    taken; nothing else from the line is kept.
+    """
+    try:
+        event = json.loads(line)
+        payload = event.get("payload")
+        kind = payload.get("type") if isinstance(payload, dict) else None
+        if "task_complete" not in (kind, event.get("type")):
+            return None
+        if isinstance(payload, dict) and payload.get("error"):
+            return None
+        if event.get("error"):
+            return None
+        stamp = _parse_ts(str(event["timestamp"]))
+        return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+    except (ValueError, KeyError, AttributeError, TypeError):
+        return None
+
+
+def latest_successful_turn(
+    path: Path,
+    chunk: int | None = None,
+    max_bytes: int | None = None,
+) -> tuple[datetime | None, bool]:
+    """Newest successful turn in a rollout, reading backwards within a bound.
+
+    Returns ``(time, whole_file_read)``. ``(None, False)`` means the bound was
+    reached with no successful turn found: the caller must not call that silence.
+    """
+    chunk = chunk or ROLLOUT_CHUNK_BYTES
+    max_bytes = max_bytes or ROLLOUT_MAX_BYTES
+    with open(path, "rb") as fh:
+        pos = fh.seek(0, os.SEEK_END)
+        carry = b""
+        read = 0
+        while pos > 0 and read < max_bytes:
+            n = min(chunk, pos)
+            pos -= n
+            fh.seek(pos)
+            buf = fh.read(n) + carry
+            read += n
+            lines = buf.split(b"\n")
+            if pos > 0:
+                carry, lines = lines[0], lines[1:]  # first line may be cut
+            else:
+                carry = b""
+            for line in reversed(lines):
+                if b"task_complete" not in line:
+                    continue
+                stamp = _successful_turn_time(line)
+                if stamp is not None:
+                    return stamp, False
+        return None, pos == 0
+
+
+def check_coordinator(
+    state_db: Path,
+    now: datetime,
+    environ: dict[str, str] | None = None,
+    chunk: int | None = None,
+    max_bytes: int | None = None,
+) -> list[Finding]:
+    name, hours = coordinator_settings(environ)
+    conn = _ro_connect(state_db)
+    try:
+        rows = conn.execute(
+            "SELECT id, rollout_path FROM threads WHERE archived = 0 AND name = ?",
+            (name,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if len(rows) != 1:
+        raise RuntimeError(
+            f'{len(rows)} open Codex sessions are named "{name}"; expected exactly one'
+        )
+    rollout = rows[0][1]
+    if not rollout:
+        raise RuntimeError(f'session "{name}" has no rollout file recorded')
+    last, whole = latest_successful_turn(Path(rollout), chunk, max_bytes)
+    if last is None:
+        raise RuntimeError(
+            f'no successful turn found for session "{name}" '
+            + ("in its whole history" if whole else "within the read bound")
+        )
+    quiet = (now - last).total_seconds()
+    if quiet <= hours * 3600:
+        return []
+    return [
+        Finding(
+            key=f"{KEY_PREFIX}:coordinator-silent",
+            message=(
+                f'The coordinator is not monitoring: the Codex session "{name}" '
+                f"has not finished a turn successfully for {humanize(quiet)} (since "
+                f"{last.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC), "
+                "so stopped sessions are not being assisted. Open it in Codex and "
+                "send it a message to resume; if its turns keep failing, read the "
+                "latest error there."
+            ),
+        )
+    ]
+
+
 # ── orchestration ────────────────────────────────────────────────────────────
 
 
@@ -651,6 +814,7 @@ def run_checks(
     home: Path,
     reader_factory: Callable[[], NeotomaReader] = NeotomaReader,
     run: Callable[[list[str]], str] = run_command,
+    environ: dict[str, str] | None = None,
 ) -> list[CheckResult]:
     now_ms = int(now.timestamp() * 1000)
     goals_db = home / "goals_1.sqlite"
@@ -681,6 +845,12 @@ def run_checks(
         _guard(
             "due and blocked tasks",
             lambda: check_tasks(reader().task_page_fetcher(now), now),
+        )
+    )
+    results.append(
+        _guard(
+            COORDINATOR_CHECK,
+            lambda: (check_coordinator(state_db, now, environ), []),
         )
     )
     return results
@@ -776,82 +946,89 @@ def apply_results(
     state: dict[str, list[str]],
     notifier: Any,
     priority: Any,
-    max_new: int = MAX_NEW_ALERTS_PER_RUN,
-    baseline: bool = False,
 ) -> dict[str, list[str]]:
-    """Send alerts for new findings, clear keys that resolved, return new state.
+    """Email the two things worth an email, clear keys that resolved, return state.
 
-    A check that failed keeps its previous keys (its true state is unknown, so
-    nothing is cleared) and raises a "could not check" alert in their place.
-
-    On the first run (``baseline``) everything already open is reported in one
-    message and recorded, so later runs alert only on change. A failed check
-    still alerts: a failure is never folded into a baseline. If that message
-    cannot be delivered the returned state is empty, so the next run is a first
-    run again.
+    Only a check that could not run and coordinator silence are emailed; every
+    other finding is published to the findings file instead. Each email is sent
+    once and its key cleared on recovery. A failed coordinator check keeps its
+    previous silence key (its true state is unknown, so nothing is cleared). Keys
+    left in state by older versions, which emailed every finding, are cleared once.
 
     An alert that could not be delivered is left out of the returned state, so
     it is retried on the next run.
     """
     new_state: dict[str, list[str]] = {}
-    sent = 0
-    overflow: dict[str, set[str]] = {}
-    summary: list[str] = []
     for result in results:
         previous = set(state.get(result.name, []))
         fail_key = failure_key(result.name)
+        emailed = result.name == COORDINATOR_CHECK
         if not result.ok:
             told = fail_key in previous or _alert(
                 notifier, failure_finding(result).message, priority, fail_key
             )
-            new_state[result.name] = sorted(previous | ({fail_key} if told else set()))
-            continue
-        if baseline:
-            new_state[result.name] = sorted(f.key for f in result.findings)
-            summary.append(f"{result.name}: {len(result.findings)}")
-            summary.extend(
-                f"- {f.message}" for f in result.findings[:BASELINE_LIST_PER_CHECK]
-            )
-            hidden = len(result.findings) - BASELINE_LIST_PER_CHECK
-            if hidden > 0:
-                summary.append(f"- and {hidden} more")
+            keep = previous if emailed else previous & {fail_key}
+            for stale in previous - keep:
+                notifier.clear_dedupe(stale)
+            new_state[result.name] = sorted(keep | ({fail_key} if told else set()))
             continue
         if fail_key in previous:
             notifier.clear_dedupe(fail_key)
             previous.discard(fail_key)
+        if not emailed:
+            for stale in previous:
+                notifier.clear_dedupe(stale)
+            new_state[result.name] = []
+            continue
         current = {f.key: f for f in result.findings}
         kept: set[str] = set()
         for key in sorted(current):
             if key in previous:
                 kept.add(key)
-            elif sent < max_new:
-                sent += 1
-                if _alert(notifier, current[key].message, priority, key):
-                    kept.add(key)
-            else:
-                overflow.setdefault(result.name, set()).add(key)
+            elif _alert(notifier, current[key].message, priority, key):
+                kept.add(key)
         for resolved in previous - set(current):
             notifier.clear_dedupe(resolved)
         new_state[result.name] = sorted(kept)
-    if summary and not _alert(
-        notifier,
-        "Delivery check started. Already open:\n"
-        + "\n".join(summary)
-        + "\nYou will hear again only when something changes.",
-        priority,
-    ):
-        return {}
-    if overflow and _alert(
-        notifier,
-        f"{sum(len(keys) for keys in overflow.values())} more delivery findings "
-        f"were found this run; only the first {max_new} are listed individually. "
-        "Run the delivery check with --once --dry-run to see them all.",
-        priority,
-    ):
-        # Told by the summary, so these are not sent again on later runs.
-        for name, keys in overflow.items():
-            new_state[name] = sorted(set(new_state[name]) | keys)
     return new_state
+
+
+def findings_path(state_path: Path) -> Path:
+    return state_path.with_name("codex-delivery-findings.json")
+
+
+def build_findings_document(
+    results: list[CheckResult], now: datetime
+) -> dict[str, Any]:
+    """What the coordinator reads. A failed check is named, never silently empty."""
+    return {
+        "generated_at": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "findings": [
+            {
+                "key": f.key,
+                "check": r.name,
+                "message": f.message,
+                "priority": f.priority,
+            }
+            for r in results
+            if r.ok
+            for f in r.findings
+        ],
+        "failed_checks": [r.name for r in results if not r.ok],
+    }
+
+
+def write_findings(path: Path, document: dict[str, Any]) -> None:
+    """Atomic, owner-only write: a reader sees the old file or the new, never half."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps(document, indent=2, sort_keys=True))
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
 
 
 def render_report(results: list[CheckResult]) -> str:
@@ -878,13 +1055,16 @@ def main(argv: list[str] | None = None) -> int:
     sys.path.insert(0, str(repo_root))
     import lib.daemon_runtime  # noqa: F401,E402
 
-    results = run_checks(now=datetime.now(timezone.utc), home=codex_home())
+    now = datetime.now(timezone.utc)
+    results = run_checks(now=now, home=codex_home())
     print(render_report(results))
     failed = any(not r.ok for r in results)
     if args.dry_run:
         return 1 if failed else 0
 
     state_path = default_state_path()
+    # Publish first: the coordinator's input must not depend on email working.
+    write_findings(findings_path(state_path), build_findings_document(results, now))
     os.environ.setdefault(
         "ATELES_DEDUPE_JOURNAL_PATH",
         str(state_path.with_name("codex-delivery-dedupe.json")),
@@ -900,7 +1080,6 @@ def main(argv: list[str] | None = None) -> int:
         state,
         notifier,
         Priority.WARN,
-        baseline=not state,
     )
     save_state(state_path, new_state)
     return 1 if failed else 0
