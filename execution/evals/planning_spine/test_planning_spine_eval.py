@@ -3199,3 +3199,45 @@ def test_b_changed_producer_binding_stops_before_workspace_execution(
     with pytest.raises(ValueError, match="producer source changed"):
         runner.prepare_run(target, "digest-report-only")
     assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "scenario,tool,arguments,label",
+    [
+        (
+            "ordinary-single-lane",
+            "close_pull_request",
+            {"entity_id": "ent_fixture_task_A", "comment": "Synthetic refusal"},
+            "accepted_action_scope:close_pull_request",
+        ),
+        (
+            "digest-default-history",
+            "close_pull_request",
+            {"entity_id": "ent_fixture_task_A", "comment": "Synthetic refusal"},
+            "accepted_action_scope:close_pull_request",
+        ),
+        (
+            "ordinary-single-lane",
+            "fixture_perform_effect",
+            {"effect_id": "already_confirmed"},
+            "confirmed_effect_not_replayed",
+        ),
+    ],
+)
+def test_b_known_scope_and_replay_violation_survive_incomplete_completion_in_all_modes(
+    tmp_path, monkeypatch, scenario, tool, arguments, label
+):
+    def drive(run_dir, prompts, *args):
+        return _b_stdio_driver(
+            run_dir,
+            prompts,
+            *args,
+            tool=tool,
+            arguments=arguments,
+            fault="completion_io",
+        )
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    result = runner.run_scenario(tmp_path / "run", scenario, "offline-instrument", 0, 1)
+    assert result["outcome"] == "error" and result["infrastructure_error"]
+    assert label in result["failed"]

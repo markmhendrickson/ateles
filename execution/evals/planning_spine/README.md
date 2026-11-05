@@ -240,9 +240,10 @@ original bounded requests, absent results, actual outcomes, intermediate entity
 snapshots and uncertainty. Legacy completed-only rows are readable but cannot
 establish exhaustive every-attempt coverage.
 
-A known report-only action stays in the saved failure list even if its arguments
-are malformed, its result is refused, its completion is missing or the producer
-dies. Unqualified observation or evidence I/O yields `outcome: error`; malformed
+A known forbidden action stays in the saved failure list in every mode even
+if its arguments are malformed, its result is refused, its completion is missing
+or the producer dies. Report-only rejects every attempted action; a received
+inert replay attempt also remains an explicit no-replay violation. Unqualified observation or evidence I/O yields `outcome: error`; malformed
 worker reports/persisted source remain actionable failures when observation is
 qualified. Neither an error nor a refusal is a successful user action. Known
 violations and infrastructure uncertainty coexist rather than overwriting each
