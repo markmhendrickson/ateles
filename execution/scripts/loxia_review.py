@@ -140,11 +140,14 @@ class ReviewError(RuntimeError):
 class ReviewCapacityRefused(ReviewError):
     """The dispatcher refused to launch any provider for capacity reasons.
 
-    Raised only when the dispatch result carries ``cooled_until``, the typed
-    field skill_runner sets solely on its capacity refusals (the usage gate,
-    an all-providers cooling window, a Fly cost/queue cap): nothing ran, and
-    capacity returns at ``retry_at``. A PR change cannot fix this, so it is
-    reported rather than failed. Still a ReviewError, so never a verdict.
+    Raised only when the result is not ok, carries ``cooled_until`` AND has no
+    ``attempted_providers``. ``cooled_until`` alone is not proof that nothing
+    ran: skill_runner also sets it after launched providers failed and cooled
+    the pool, and that case has attempts. The pre-launch refusals (usage gate,
+    all-providers cooling window) return before any attempt is recorded. A
+    Fly cost/queue refusal inside an attempt does record the attempt, so it
+    stays a plain failure (fail closed). The retry time is an opportunity, not
+    proof capacity recovers. Still a ReviewError, so never a verdict.
     """
 
     def __init__(self, message: str, retry_at: str):
@@ -171,7 +174,7 @@ def call_review(prompt: str, *, role: str) -> str:
     print(f"[{role}] provider={result.provider or 'none'}; attempts={','.join(result.attempted_providers) or 'none'}")
     if not result.ok or not result.stdout.strip():
         retry_at = getattr(result, "cooled_until", "")
-        if not result.ok and retry_at:
+        if not result.ok and retry_at and not tuple(result.attempted_providers or ()):
             raise ReviewCapacityRefused(result.error or "dispatch refused for capacity", retry_at)
         raise ReviewError(result.error or "No qualified provider returned a review")
     return result.stdout
@@ -502,8 +505,11 @@ def run_reviewer(
         # GitHub Actions workflow command: a visible warning annotation.
         print(
             f"::warning title={reviewer.display} review did not run::"
-            f"The dispatcher refused the review for capacity; retry after "
-            f"{exc.retry_at}. This is not an approval."
+            f"The dispatcher refused the review before any provider ran; "
+            f"capacity may return after {exc.retry_at}, which is not a "
+            f"guarantee. If capacity stays unknown, the provider credentials "
+            f"this workflow uses may need repair; waiting alone will not fix "
+            f"that. This is not an approval."
         )
         if not DRY_RUN:
             refusal_body = (
@@ -512,9 +518,13 @@ def run_reviewer(
                 f"produce a verdict for commit `{sha}`.\n\n"
                 f"Reason: `{exc}`\n\n"
                 f"This is NOT an approval. The review was refused for capacity "
-                f"before it ran, which a change to this PR cannot fix, so it is "
-                f"reported as a warning rather than failing the check. Re-run "
-                f"after {exc.retry_at} to get a verdict."
+                f"before any provider ran, which a change to this PR cannot fix, so "
+                f"it is reported as a warning rather than failing the check. "
+                f"Capacity may return after {exc.retry_at}, but that time is an "
+                f"opportunity, not proof of recovery. If capacity stays "
+                f"unknown, the provider credentials this workflow uses may need "
+                f"repair, and waiting alone will not fix that. Re-run to get a "
+                f"verdict."
             )
             post_github_comment(refusal_body, marker=review_comment_marker(reviewer))
         return ReviewOutcome.NOT_RUN_CAPACITY
@@ -574,7 +584,9 @@ def main() -> None:
     # Track whether every selected reviewer produced a real review. If any
     # failed to (auth/credit/network/empty response), exit non-zero so the
     # GHA check is red/failed rather than a false green — a review that
-    # reviewed nothing must never look merge-ready. A capacity refusal is the
+    # reviewed nothing must never look merge-ready. (A completed review that
+    # requests changes is posted and filed but does not fail the job; only a
+    # review that could not run does.) A capacity refusal before any provider ran is the
     # one exception: it is reported (comment + warning annotation), not failed,
     # because no change to the PR can fix it; it is never counted as approval.
     outcomes = {
