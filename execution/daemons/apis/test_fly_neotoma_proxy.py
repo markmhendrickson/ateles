@@ -382,11 +382,11 @@ def test_proc_net_peer_uid_reads_the_client_row(tmp_path):
     paths = (str(tcp), str(tcp6))
     # 0xD431 = 54321 is the client's port, 0x1F90 = 8080 the proxy's. The
     # server-side row (uid 0) has the ports the other way round.
-    assert neotoma_proxy.proc_net_peer_uid(54321, 8080, paths=paths) == 10001
-    assert neotoma_proxy.proc_net_peer_uid(8080, 54321, paths=paths) == 0
-    assert neotoma_proxy.proc_net_peer_uid(50000, 8080, paths=paths) == 4242
-    assert neotoma_proxy.proc_net_peer_uid(54322, 8080, paths=paths) is None
-    assert neotoma_proxy.proc_net_peer_uid(54321, 8080, paths=(str(tmp_path / "missing"),)) is None
+    assert neotoma_proxy.proc_net_peer_uid("127.0.0.1", 54321, "127.0.0.1", 8080, paths=paths) == 10001
+    assert neotoma_proxy.proc_net_peer_uid("127.0.0.1", 8080, "127.0.0.1", 54321, paths=paths) == 0
+    assert neotoma_proxy.proc_net_peer_uid("::1", 50000, "::1", 8080, paths=paths) == 4242
+    assert neotoma_proxy.proc_net_peer_uid("127.0.0.1", 54322, "127.0.0.1", 8080, paths=paths) is None
+    assert neotoma_proxy.proc_net_peer_uid("127.0.0.1", 54321, "127.0.0.1", 8080, paths=(str(tmp_path / "missing"),)) is None
 
 
 def test_proc_net_peer_uid_ignores_non_loopback_rows_and_refuses_ambiguity(tmp_path):
@@ -398,7 +398,7 @@ def test_proc_net_peer_uid_ignores_non_loopback_rows_and_refuses_ambiguity(tmp_p
         + "\n   0: 0500000A:D431 0500000A:1F90 01 00000000:00000000 00:00000000 00000000  1000 0 1 1 0 20 4 30 10 -1"
         + "\n   1: 0100007F:D431 0100007F:1F90 01 00000000:00000000 00:00000000 00000000 10001 0 2 1 0 20 4 30 10 -1\n"
     )
-    assert neotoma_proxy.proc_net_peer_uid(54321, 8080, paths=(str(tcp),)) == 10001
+    assert neotoma_proxy.proc_net_peer_uid("127.0.0.1", 54321, "127.0.0.1", 8080, paths=(str(tcp),)) == 10001
     # An IPv4-mapped loopback row under a different uid makes the answer ambiguous.
     tcp6 = tmp_path / "tcp6"
     tcp6.write_text(
@@ -406,8 +406,58 @@ def test_proc_net_peer_uid_ignores_non_loopback_rows_and_refuses_ambiguity(tmp_p
         + "\n   0: 0000000000000000FFFF00000100007F:D431 0000000000000000FFFF00000100007F:1F90 01"
         " 00000000:00000000 00:00000000 00000000  1000 0 3 1 0 20 4 30 10 -1\n"
     )
-    assert neotoma_proxy.proc_net_peer_uid(54321, 8080, paths=(str(tcp6),)) == 1000
-    assert neotoma_proxy.proc_net_peer_uid(54321, 8080, paths=(str(tcp), str(tcp6))) is None
+    assert neotoma_proxy.proc_net_peer_uid("127.0.0.1", 54321, "127.0.0.1", 8080, paths=(str(tcp6),)) == 1000
+    assert neotoma_proxy.proc_net_peer_uid("127.0.0.1", 54321, "127.0.0.1", 8080, paths=(str(tcp), str(tcp6))) is None
+
+
+
+def _row(local, remote, state, uid):
+    return f"   0: {local} {remote} {state} 00000000:00000000 00:00000000 00000000 {uid:>5} 0 1 1 0 20 4 30 10 -1"
+
+
+def test_proc_net_peer_uid_requires_exact_connection_identity(tmp_path):
+    header = _PROC_NET_TCP.splitlines()[0]
+
+    def lookup(paths):
+        return neotoma_proxy.proc_net_peer_uid("127.0.0.1", 54321, "127.0.0.1", 8080, paths=paths)
+
+    tcp = tmp_path / "tcp"
+    # Same ports on another loopback address at either end, and a lingering
+    # (TIME_WAIT, 06) row for the exact pair: none may contribute a uid.
+    tcp.write_text(
+        "\n".join(
+            [
+                header,
+                _row("0200007F:D431", "0100007F:1F90", "01", 1111),
+                _row("0100007F:D431", "0200007F:1F90", "01", 2222),
+                _row("0100007F:D431", "0100007F:1F90", "06", 3333),
+            ]
+        )
+        + "\n"
+    )
+    assert lookup((str(tcp),)) is None
+    # A dual-stack row for the same pair (IPv4-mapped IPv6) matches; one with
+    # another mapped client address does not.
+    tcp6 = tmp_path / "tcp6"
+    tcp6.write_text(
+        "\n".join(
+            [
+                header,
+                _row("0000000000000000FFFF00000200007F:D431", "0000000000000000FFFF00000100007F:1F90", "01", 4444),
+                _row("0000000000000000FFFF00000100007F:D431", "0000000000000000FFFF00000100007F:1F90", "01", 5555),
+            ]
+        )
+        + "\n"
+    )
+    assert lookup((str(tcp6),)) == 5555
+    # The exact IPv4 row wins alongside the ignored ones.
+    tcp.write_text(tcp.read_text() + _row("0100007F:D431", "0100007F:1F90", "01", 5555) + "\n")
+    assert lookup((str(tcp), str(tcp6))) == 5555
+    # Malformed addresses are skipped rather than raised.
+    bad = tmp_path / "bad"
+    bad.write_text(header + "\n" + _row("ZZ:D431", "0100007F:1F90", "01", 1) + "\n")
+    assert lookup((str(bad),)) is None
+    assert neotoma_proxy.proc_net_peer_uid("not-an-ip", 54321, "127.0.0.1", 8080, paths=(str(tcp),)) is None
 
 
 @pytest.fixture
@@ -433,8 +483,8 @@ def test_only_the_allowed_peer_uid_is_forwarded(
 ):
     lookups = []
 
-    def fake_peer_uid(client_port, server_port):
-        lookups.append((client_port, server_port))
+    def fake_peer_uid(client_host, client_port, server_host, server_port):
+        lookups.append((client_host, client_port, server_host, server_port))
         return peer_uid
 
     monkeypatch.setattr(neotoma_proxy, "proc_net_peer_uid", fake_peer_uid)
@@ -446,11 +496,46 @@ def test_only_the_allowed_peer_uid_is_forwarded(
     resp.read()
     conn.close()
     assert resp.status == status
-    assert lookups == [(client_port, uid_checked_proxy_port)]
+    assert lookups == [("127.0.0.1", client_port, "127.0.0.1", uid_checked_proxy_port)]
     if status == 403:
         assert upstream.requests == [] and sign_calls == []
     else:
         assert len(upstream.requests) == 1 and len(sign_calls) == 1
+
+
+
+def test_failed_attribution_is_refused_without_signing_or_forwarding(
+    monkeypatch, upstream, sign_calls, uid_checked_proxy_port
+):
+    monkeypatch.setattr(neotoma_proxy, "proc_net_peer_uid", lambda *a, **k: None)
+    conn = _client(uid_checked_proxy_port)
+    conn.request("POST", "/mcp", body=b"{}", headers={"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == 403
+    assert upstream.requests == [] and sign_calls == []
+
+
+@pytest.mark.parametrize("failing", ["getpeername", "getsockname"])
+def test_unreadable_socket_addresses_are_refused(failing, monkeypatch, upstream, sign_calls, uid_checked_proxy_port):
+    import socket
+
+    lookups = []
+    monkeypatch.setattr(neotoma_proxy, "proc_net_peer_uid", lambda *a, **k: lookups.append(a) or 4242)
+
+    def boom(self):
+        raise OSError("socket gone")
+
+    monkeypatch.setattr(socket.socket, failing, boom)
+    conn = _client(uid_checked_proxy_port)
+    conn.request("POST", "/mcp", body=b"{}", headers={"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == 403
+    assert lookups == []
+    assert upstream.requests == [] and sign_calls == []
 
 
 # --- Health check ---------------------------------------------------------
@@ -597,3 +682,65 @@ def test_health_check_reports_an_upstream_that_never_answers():
         upstream.close()
     assert result == "Neotoma unreachable"
     assert time.monotonic() - started < 5
+
+
+def test_health_check_bounds_and_sanitizes_admission_reason():
+    cases = [
+        ("no_match", "admission_reason=no_match)"),
+        ("x" * 64, "admission_reason=" + "x" * 64 + ")"),
+        ("x" * 65, "admission_reason=unrecognized)"),
+        ("bad reason with spaces", "admission_reason=unrecognized)"),
+        ("line\nbreak", "admission_reason=unrecognized)"),
+        ("Bearer abc=", "admission_reason=unrecognized)"),
+        (["no_match"], "admission_reason=unrecognized)"),
+        ({"a": 1}, "admission_reason=unrecognized)"),
+        (12345, "admission_reason=unrecognized)"),
+        ("", "admission_reason=unrecognized)"),
+    ]
+    for reason, expected in cases:
+        upstream = _HealthUpstream(session=(200, _admitted(False, reason)))
+        try:
+            result, _ = _run_health(upstream)
+        finally:
+            upstream.close()
+        assert result is not None and result.startswith("no active agent_grant admits this key"), reason
+        assert result.endswith(expected), (reason, result)
+    # A top-level reason with no aauth block is still an explicit non-admission.
+    upstream = _HealthUpstream(session=(200, json.dumps({"admission_reason": "no_match"}).encode()))
+    try:
+        result, _ = _run_health(upstream)
+    finally:
+        upstream.close()
+    assert result == "no active agent_grant admits this key (admission_reason=no_match)"
+    # A non-true admitted value without a reason is explicit too.
+    upstream = _HealthUpstream(session=(200, json.dumps({"aauth": {"admitted": False}}).encode()))
+    try:
+        result, _ = _run_health(upstream)
+    finally:
+        upstream.close()
+    assert result.startswith("no active agent_grant admits this key")
+
+
+@pytest.mark.parametrize(
+    ("session", "expected"),
+    [
+        ((500, b"secret-body"), "Neotoma /session answered 500"),
+        ((403, b'{"aauth":{"admitted":false}}'), "Neotoma /session answered 403"),
+        ((200, b""), "Neotoma /session returned no readable admission decision"),
+        ((200, b"{not json"), "Neotoma /session returned no readable admission decision"),
+        ((200, b"[1,2]"), "Neotoma /session returned no readable admission decision"),
+        ((200, b'"text"'), "Neotoma /session returned no readable admission decision"),
+        ((200, b"{}"), "Neotoma /session returned no readable admission decision"),
+        ((200, b'{"aauth":{"tier":"x"}}'), "Neotoma /session returned no readable admission decision"),
+        ((200, b'{"aauth":"nope"}'), "Neotoma /session returned no readable admission decision"),
+    ],
+)
+def test_health_check_rejects_malformed_session_payload(session, expected):
+    upstream = _HealthUpstream(session=session)
+    try:
+        result, _ = _run_health(upstream)
+    finally:
+        upstream.close()
+    assert result == expected
+    assert "secret-body" not in result
+    assert [r["path"] for r in upstream.requests] == ["/session"]

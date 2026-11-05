@@ -27,6 +27,7 @@ import http.client
 import ipaddress
 import json
 import logging
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Mapping, Optional, Sequence
@@ -77,7 +78,7 @@ HEALTH_INITIALIZE_BODY = json.dumps(
 ).encode()
 HEALTH_ACCEPT = "application/json, text/event-stream"
 MAX_HEALTH_BODY_BYTES = 65536
-MAX_REASON_CHARS = 200
+PROC_NET_ESTABLISHED = "01"
 
 
 def _parse_upstream_base(upstream_base: str):
@@ -94,38 +95,58 @@ def _parse_upstream_base(upstream_base: str):
     return parts
 
 
-def _proc_net_is_loopback(hex_address: str) -> bool:
-    """Whether a ``/proc/net/tcp`` address (host-order hex words) is loopback."""
+def _decode_proc_net_address(hex_address: str):
+    """Decode a ``/proc/net/tcp`` address (host-order hex words) or return None.
+
+    IPv4-mapped IPv6 addresses are normalised to IPv4.
+    """
     try:
         raw = bytes.fromhex(hex_address)
     except ValueError:
-        return False
+        return None
     if len(raw) not in (4, 16):
-        return False
+        return None
     # The kernel prints each 32-bit word in host (little-endian) byte order.
     packed = b"".join(raw[i : i + 4][::-1] for i in range(0, len(raw), 4))
     if len(packed) == 4:
-        return ipaddress.IPv4Address(packed).is_loopback
-    address = ipaddress.IPv6Address(packed)
-    mapped = address.ipv4_mapped
-    return address.is_loopback or (mapped is not None and mapped.is_loopback)
+        return ipaddress.IPv4Address(packed)
+    return _normalise_address(ipaddress.IPv6Address(packed))
+
+
+def _normalise_address(address):
+    mapped = getattr(address, "ipv4_mapped", None)
+    return mapped if mapped is not None else address
+
+
+def _parse_host(host) -> Optional[object]:
+    try:
+        return _normalise_address(ipaddress.ip_address(host))
+    except ValueError:
+        return None
 
 
 def proc_net_peer_uid(
+    client_host: str,
     client_port: int,
+    server_host: str,
     server_port: int,
     *,
     paths: Sequence[str] = PROC_NET_TCP_PATHS,
 ) -> Optional[int]:
-    """Return the uid owning the client end of a loopback TCP connection.
+    """Return the uid owning the client end of one accepted TCP connection.
 
-    The client's socket appears in ``/proc/net/tcp`` (or ``tcp6``) with its
-    own port as the local port and the server's port as the remote port;
-    column 8 of that row is the owning uid. Only rows whose two addresses are
-    loopback count. Returns None when no row matches, when matching rows
-    disagree on the uid, or when no table can be read; the caller treats
-    None as a refusal.
+    The client's socket appears in ``/proc/net/tcp`` (or ``tcp6``) with its own
+    address and port as the local end and the server's as the remote end;
+    column 8 of that row is the owning uid. A row counts only when both of its
+    endpoints equal the given identity (IPv4-mapped IPv6 addresses are read as
+    IPv4) and its state is ESTABLISHED. Returns None when no row matches, when
+    matching rows disagree on the uid, or when no table can be read; the
+    caller treats None as a refusal. Malformed rows are skipped.
     """
+    want_client = _parse_host(client_host)
+    want_server = _parse_host(server_host)
+    if want_client is None or want_server is None:
+        return None
     uids = set()
     for path in paths:
         try:
@@ -135,7 +156,7 @@ def proc_net_peer_uid(
             continue
         for line in lines[1:]:
             fields = line.split()
-            if len(fields) < 8:
+            if len(fields) < 8 or fields[3] != PROC_NET_ESTABLISHED:
                 continue
             local_host, _, local_port = fields[1].rpartition(":")
             remote_host, _, remote_port = fields[2].rpartition(":")
@@ -145,9 +166,21 @@ def proc_net_peer_uid(
                 uid = int(fields[7])
             except ValueError:
                 continue
-            if _proc_net_is_loopback(local_host) and _proc_net_is_loopback(remote_host):
+            if (
+                _decode_proc_net_address(local_host) == want_client
+                and _decode_proc_net_address(remote_host) == want_server
+            ):
                 uids.add(uid)
     return uids.pop() if len(uids) == 1 else None
+
+
+_SAFE_REASON = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+
+
+def _safe_reason(reason) -> str:
+    if isinstance(reason, str) and _SAFE_REASON.match(reason):
+        return reason
+    return "unrecognized"
 
 
 def health_check(
@@ -160,7 +193,7 @@ def health_check(
     """Return None when Neotoma admits the signing key on ``/mcp``, else a reason.
 
     Every request is signed. The reason never contains a header, body or key
-    material beyond the server's own ``admission_reason`` label.
+    material beyond the server's own ``admission_reason`` when it is a short safe label.
     """
     parts = _parse_upstream_base(upstream_base)
     if connect is None:
@@ -189,22 +222,26 @@ def health_check(
 
     try:
         status, _, payload = request("GET", SESSION_PATH, None, {"accept": DEFAULT_CONTENT_TYPE})
-        admitted, reason = False, None
-        if status == 200:
-            try:
-                data = json.loads(payload)
-            except ValueError:
-                data = None
-            aauth = data.get("aauth") if isinstance(data, dict) else None
-            if isinstance(aauth, dict):
-                admitted = aauth.get("admitted") is True
-                reason = aauth.get("admission_reason")
-            if reason is None and isinstance(data, dict):
-                reason = data.get("admission_reason")
+        if status != 200:
+            return f"Neotoma /session answered {status}"
+        try:
+            data = json.loads(payload)
+        except ValueError:
+            data = None
+        aauth = data.get("aauth") if isinstance(data, dict) else None
+        reason = None
+        if isinstance(aauth, dict):
+            reason = aauth.get("admission_reason")
+        if reason is None and isinstance(data, dict):
+            reason = data.get("admission_reason")
+        admitted = isinstance(aauth, dict) and aauth.get("admitted") is True
+        explicit_denial = reason is not None or (
+            isinstance(aauth, dict) and "admitted" in aauth and aauth["admitted"] is not True
+        )
         if not admitted:
-            if reason is not None:
-                reason = str(reason)[:MAX_REASON_CHARS]
-            return f"no active agent_grant admits this key (admission_reason={reason})"
+            if not explicit_denial:
+                return "Neotoma /session returned no readable admission decision"
+            return f"no active agent_grant admits this key (admission_reason={_safe_reason(reason)})"
 
         status, session_id, payload = request(
             "POST",
@@ -312,6 +349,15 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         return
 
+    def _connection_identity(self):
+        """The accepted socket's (client host, client port, server host, server port), or None."""
+        try:
+            client = self.connection.getpeername()
+            server = self.connection.getsockname()
+            return (str(client[0]), int(client[1]), str(server[0]), int(server[1]))
+        except (OSError, IndexError, TypeError, ValueError, AttributeError):
+            return None
+
     def _handle(self) -> None:
         method = self.command
         path, sep, _query = self.path.partition("?")
@@ -319,7 +365,8 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         if allowed_uid is not None:
             # Checked before anything else, the body included: a refused peer
             # learns nothing and costs no upstream call.
-            peer_uid = proc_net_peer_uid(self.client_address[1], self.server.server_address[1])
+            identity = self._connection_identity()
+            peer_uid = proc_net_peer_uid(*identity) if identity is not None else None
             if peer_uid != allowed_uid:
                 log.warning("neotoma proxy refused a connection from uid %s", peer_uid)
                 return self._reject(403, method, path)
