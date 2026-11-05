@@ -2887,6 +2887,8 @@ def parse_returned_lens_review(
     raw_update = found["expectation"][0] if found["expectation"] else ""
     if _outside_is_ambiguous(rest + "\n" + raw_update):
         return None
+    if _has_veto(stdout) and not _has_veto(raw_review):
+        return None
     review = strip_lens_review_markers(raw_review)
     update = strip_lens_review_markers(raw_update)
     if not review or len(review) > _MAX_RETURNED_TEXT or len(update) > _MAX_RETURNED_TEXT:
@@ -2909,6 +2911,8 @@ def split_expectation_update(
     found, rest = parsed
     raw_update = found["expectation"][0] if found["expectation"] else ""
     if _outside_is_ambiguous(raw_update):
+        return None
+    if _has_veto(block) and not _has_veto(rest):
         return None
     clean = strip_lens_review_markers(rest)
     if not _strip_keeps_verdict(rest, clean, lens_agent):
