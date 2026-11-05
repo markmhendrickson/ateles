@@ -2078,6 +2078,10 @@ def build_job(
             f"role {role!r} has no Neotoma identity of its own ({token_name} or an AAuth "
             "key); the shared daemon bearer never leaves the Mac"
         )
+    if owns_pending_gate and jwk_text:
+        # A seated run's child has no Neotoma tools. The runner's own record
+        # is signed with the key, so the role's static token stays home.
+        own_token = ""
     if jwk_text:
         secrets[AAUTH_JWK_JOB_NAME] = jwk_text
     if own_token:

@@ -2763,7 +2763,7 @@ _RETURNED_KINDS = {
 # Any review or aggregation marker, of any lens and any commit, or the
 # unfilled `<full40hex>` placeholder the prompt shows.
 _ANY_LENS_MARKER_RE = re.compile(
-    r"<!--\s*(?:review:|vanellus-aggregation)[^>]*?-->", re.IGNORECASE
+    r"<!--\s*(?:review:|vanellus-aggregation)[^\n]*?-->", re.IGNORECASE
 )
 _MAX_RETURNED_TEXT = 60_000
 _NO_NEOTOMA_NOTE = (

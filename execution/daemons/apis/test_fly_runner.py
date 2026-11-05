@@ -4483,3 +4483,59 @@ def test_the_runner_defines_the_same_argv_placeholders():
     spec.loader.exec_module(module)
     for name in ("WORKSPACE_PLACEHOLDER", "GIT_DIR_PLACEHOLDER", "PR_DIR_PLACEHOLDER"):
         assert getattr(module, name) == getattr(fly_runner, name)
+
+
+# ── Seated, read-only lens runs: on Fly with no Neotoma tools ───────────────
+
+
+def _seated(provider, cmd, **kw):
+    return fly_runner.build_job(
+        provider=provider, role="lanius", cmd=cmd, stdin=b"the task", timeout=60,
+        repository="owner/repo", github_requested=True,
+        mcp_config_path="/tmp/apis_mcp_x.json", owns_pending_gate=True, **kw)
+
+
+def test_a_seated_read_only_claude_run_ships_no_neotoma_mcp_and_no_role_token(
+        fly_env, claude_login, monkeypatch):  # fmt: skip
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    job = _seated("claude", ["/x/claude", "--print", "--mcp-config", "/tmp/apis_mcp_x.json",
+                             "--disallowed-tools", "mcp__mcpsrv_neotoma__correct"],
+                  github_read_only=True)  # fmt: skip
+    assert "--mcp-config" not in job.argv
+    assert fly_runner.MCP_CONFIG_PLACEHOLDER not in job.argv
+    assert "--strict-mcp-config" in job.argv
+    assert "--disallowed-tools" in job.argv  # the Mac-side deny still ships
+    assert job.neotoma_token_name == "" and "LANIUS_NEOTOMA_TOKEN" not in job.secrets
+    assert job.neotoma_jwk_name == fly_runner.AAUTH_JWK_JOB_NAME
+
+
+def test_a_seated_read_only_codex_run_is_built_and_an_mcp_override_is_refused(
+        fly_env, monkeypatch):  # fmt: skip
+    monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
+    cmd = ["/x/codex", "exec", "--strict-config", "--model", "m"]
+    job = _seated("codex", cmd, github_read_only=True)
+    assert job.argv[1:] == cmd[1:] and not any("mcp" in a for a in job.argv)
+    for bad in (["-c", 'mcp_servers.x.url="https://e"'], ['--config=mcp_servers.x.url="u"']):
+        with pytest.raises(fly_runner.FlyIneligible, match="MCP server"):
+            _seated("codex", [*cmd, *bad], github_read_only=True)
+
+
+def test_a_seated_run_that_is_not_read_only_or_is_cursor_stays_on_the_mac(
+        fly_env, claude_login, monkeypatch):  # fmt: skip
+    with pytest.raises(fly_runner.FlyIneligible, match="gate-owning"):
+        _seated("claude", ["/x/claude", "--print"])
+    monkeypatch.setenv("APIS_FLY_CURSOR_MACHINE_ID", "m-cursor")
+    with pytest.raises(fly_runner.FlyIneligible):
+        _seated("cursor", ["/x/cursor-agent"], github_read_only=True)
+
+
+def test_every_lens_review_class_is_vetted_and_delivery_only_is_unchanged(monkeypatch):
+    import model_tiering
+
+    for lens in model_tiering.KNOWN_LENSES:
+        assert model_tiering.lens_review_class(lens) in fly_runner.FLY_VETTED_CLASSES
+    assert fly_runner.DELIVERY_ONLY_CLASSES == {"open_or_merge_pr"}
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "lens_review:security,lens_review:bogus")
+    assert fly_runner.runner_classes() == {"lens_review:security"}
+    assert fly_runner.wants_fly(None, "lens_review:security") is True
+    assert fly_runner.wants_fly(None, "lens_review:qa") is False

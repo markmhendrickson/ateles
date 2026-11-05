@@ -69,6 +69,13 @@ def _review_call_sites() -> list[tuple[str, ast.Call]]:
     return sites
 
 
+def test_lens_publication_is_enabled_by_default() -> None:
+    # The dispatcher publishes a return-only lens's review itself, so the flag
+    # that refused every remote lens is on. The tests below that pin the
+    # refusal switch it off explicitly. Red before: the flag was False.
+    assert skill_runner.DISPATCHER_LENS_PUBLICATION_READY is True
+
+
 def test_every_lens_and_carry_forward_dispatch_is_read_only() -> None:
     missing = []
     for kind, call in _review_call_sites():
@@ -135,6 +142,7 @@ def test_combined_prompt_return_only_and_local_contract(monkeypatch) -> None:
 def test_individual_lens_entrance_keeps_local_prompt_and_read_only_runner_contract(
     monkeypatch, fly_env, seam,
 ) -> None:
+    monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", False)
     calls = []
     dispatcher = _pr_dispatcher_with_stubs(
         monkeypatch, vanellus_stdout="**REQUEST_CHANGES**\nblocking", calls=calls
@@ -173,6 +181,7 @@ def test_individual_lens_entrance_keeps_local_prompt_and_read_only_runner_contra
 def test_combined_lens_entrance_keeps_local_prompt_and_read_only_runner_contract(
     monkeypatch, fly_env, seam,
 ) -> None:
+    monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", False)
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
     monkeypatch.setattr(
         dispatcher, "_lens_agent_prompt",
@@ -235,6 +244,7 @@ def test_read_only_lens_fly_refusal_and_existing_local_fallback(
     fly_env, seam, monkeypatch, forced,
 ) -> None:
     spawned, fake_exec = seam
+    monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", False)
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "lens_review:qa")
     monkeypatch.setattr(fly_runner, "FLY_VETTED_CLASSES", frozenset({"lens_review:qa"}))
     monkeypatch.setattr(fly_runner, "build_job", lambda **kw: pytest.fail("Fly job built"))
