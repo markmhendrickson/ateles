@@ -5,7 +5,16 @@ A delivery that launched on Fly leaves a durable receipt in the Fly ledger, and
 while it exists every re-dispatch for that issue or task is refused and nothing
 falls back to the local path. After inspecting the remote branch and the run
 record and reconciling what happened, the operator clears the receipt here.
-Nothing clears a receipt automatically.
+One receipt is replaced automatically, and only one kind: a settled correction
+of an existing pull request (status ``updated`` or ``pr_failed``) whose recorded
+commit is exactly the head a further correction was admitted against, after
+that correction's admission read the live PR head. The dispatcher then replaces
+it with the new reservation under the ledger lock, and first appends the old
+receipt's identity to the same audit file as a ``superseding`` event
+(``action: supersede_delivery_receipt``); if that append fails nothing is
+replaced. Every other receipt (a first delivery, an unsettled or unknown one,
+one with no or another commit, ``no_changes`` and the rest) stays until it is
+cleared here.
 
 The same ledger holds lens-review entries (``lens_receipts``), keyed
 ``lens:OWNER/REPO#PR@HEAD:LENS``, each recording one lens run on one pull

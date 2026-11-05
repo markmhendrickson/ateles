@@ -1012,6 +1012,49 @@ class FlyLedger:
 
         return self._write_delivery(key, write)
 
+    def supersede_delivery(self, stored: str, expected: dict, key: str, entry: dict, *,
+                           before=None) -> bool:
+        """Swap the receipt held under *stored* for the reservation *entry*
+        under *key*, only if it still equals *expected* in full; otherwise
+        leave it untouched and return False. Two dispatches that read the same
+        receipt cannot both succeed. *entry*'s keys must not collide with any
+        OTHER receipt (the same rule ``reserve_delivery`` applies). *before* is
+        called under the lock once the compare matched and before anything is
+        written; if it raises, nothing changes. An exception raised from the
+        write may come after the file was replaced: the outcome is uncertain.
+
+        Called only for a settled existing-PR correction that the new
+        correction was declared against (``build_delivery``'s
+        ``_supersede_settled_correction`` decides that); it is the one path
+        that replaces a receipt without the operator's clear."""
+        if not isinstance(entry.get("status"), str):
+            raise FlyLedgerError("delivery receipt has no status")
+        import build_delivery
+
+        def keys(name, row):
+            aliases = row.get("associated_keys", [])
+            if not isinstance(aliases, list) or not all(isinstance(a, str) and a for a in aliases):
+                raise FlyLedgerError("delivery receipt associations are malformed")
+            return {build_delivery.canonical_key(k) for k in (name, *aliases)}
+
+        with self._locked():
+            data = self._load()
+            receipts = data.get("deliveries")
+            if not isinstance(receipts, dict) or receipts.get(stored) != expected:
+                return False
+            requested = keys(key, entry)
+            if any(requested & keys(name, held) for name, held in receipts.items() if name != stored):
+                return False
+            if before is not None:
+                before()
+            receipts.pop(stored)
+            receipts[key] = entry
+            self._save(data)
+            after = self._snapshot(self._clock()).deliveries
+            if after.get(key) != entry or (stored != key and stored in after):
+                raise FlyLedgerError("delivery receipt did not read back")
+            return True
+
     def release_delivery(self, key: str, token: str,
                          statuses: tuple[str, ...] = ("launching",)) -> bool:
         """Remove the receipt for *key* only if it is still the reservation
