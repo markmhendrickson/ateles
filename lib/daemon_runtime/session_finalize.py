@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from .neotoma_transient import call_with_transient_retry
+
 log = logging.getLogger("daemon_runtime.finalize")
 
 NEOTOMA_BASE_URL = os.environ.get(
@@ -246,12 +248,16 @@ def build_turn_payload(
     }
 
 
-def _post_store(body: dict) -> dict | None:
-    """POST a /store body. Returns the parsed JSON, or None. Fail-open."""
+def _post_store(body: dict, *, retry_transient: bool = False) -> dict | None:
+    """POST a /store body. Returns the parsed JSON, or None. Fail-open.
+
+    ``retry_transient`` opts one caller into bounded retry of timeouts and
+    connection errors (same body, so same idempotency key, every attempt).
+    """
     if not NEOTOMA_BEARER_TOKEN:
         log.warning("[finalize] no bearer token — store skipped")
         return None
-    try:
+    def _send() -> dict:
         resp = httpx.post(
             f"{NEOTOMA_BASE_URL}/store",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
@@ -260,6 +266,11 @@ def _post_store(body: dict) -> dict | None:
         )
         resp.raise_for_status()
         return resp.json()
+
+    try:
+        if retry_transient:
+            return call_with_transient_retry(_send, label="run-session store")
+        return _send()
     except Exception as exc:  # noqa: BLE001 — never crash the caller
         log.warning("[finalize] store failed: %s", exc)
         return None
@@ -302,16 +313,28 @@ def _entity_readback_matches(
     *,
     entity_type: str,
     required_fields: dict[str, str],
+    retry_transient: bool = False,
 ) -> bool:
-    """Read an entity after write and verify the fields carrying identity."""
-    try:
+    """Read an entity after write and verify the fields carrying identity.
+
+    Only the transport is retried (``retry_transient``); a value that reads
+    back wrong is a refusal on the first read.
+    """
+    def _read() -> dict:
         response = httpx.get(
             f"{NEOTOMA_BASE_URL}/entities/{entity_id}",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             timeout=10,
         )
         response.raise_for_status()
-        data = response.json()
+        return response.json()
+
+    try:
+        data = (
+            call_with_transient_retry(_read, label=f"{entity_type} readback")
+            if retry_transient
+            else _read()
+        )
         snapshot = data.get("snapshot") or {}
         if isinstance(snapshot.get("snapshot"), dict):
             snapshot = snapshot["snapshot"]
@@ -332,20 +355,29 @@ def _relationship_readback_matches(
     *,
     target_entity_id: str,
     relationship_type: str,
+    retry_transient: bool = False,
 ) -> bool:
     """Verify a relationship created by the same store write."""
-    try:
+    def _read() -> dict:
         response = httpx.get(
             f"{NEOTOMA_BASE_URL}/entities/{source_entity_id}/relationships",
             headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
             timeout=10,
         )
         response.raise_for_status()
+        return response.json()
+
+    try:
+        payload = (
+            call_with_transient_retry(_read, label="relationship readback")
+            if retry_transient
+            else _read()
+        )
         return any(
             rel.get("source_entity_id") == source_entity_id
             and rel.get("target_entity_id") == target_entity_id
             and rel.get("relationship_type") == relationship_type
-            for rel in response.json().get("relationships", [])
+            for rel in payload.get("relationships", [])
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("[finalize] relationship readback failed: %s", exc)
@@ -366,7 +398,7 @@ def create_run_session(
     data = _post_store(build_run_session_payload(
         task_id=task_id, plan_id=plan_id, agent=agent,
         run_key=run_key, title=title, summary=summary,
-    ))
+    ), retry_transient=True)
     if not data:
         return None
     ids = {
@@ -385,6 +417,7 @@ def create_run_session(
             "conversation_id": native_session_id,
             "session_id": native_session_id,
         },
+        retry_transient=True,
     ):
         return None
     if not _entity_readback_matches(
@@ -394,6 +427,7 @@ def create_run_session(
             "harness": "ateles-swarm",
             "native_session_id": native_session_id,
         },
+        retry_transient=True,
     ):
         return None
     required_relationships = (
@@ -406,6 +440,7 @@ def create_run_session(
             source_entity_id,
             target_entity_id=target_entity_id,
             relationship_type="REFERS_TO",
+            retry_transient=True,
         ):
             return None
     return RunSession(
