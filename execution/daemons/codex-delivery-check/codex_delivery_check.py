@@ -218,6 +218,26 @@ def codex_home() -> Path:
 # ── check 1: goals ───────────────────────────────────────────────────────────
 
 
+# Paused goals are deliberate and never reported (they would need a person to run
+# /goal resume). Of the statuses reported, only a spent budget needs a person.
+GOAL_MESSAGES = {
+    "blocked": (
+        "The goal in this session has been {label} for {age}; the session may be "
+        "able to continue. Read why it stopped and send it one specific next "
+        "action. It needs a person only if the blocker is a decision, approval or "
+        "command only the operator can give."
+    ),
+    "usage_limited": (
+        "The goal in this session has been {label} for {age}. Once the usage "
+        "limit resets, message the session to continue."
+    ),
+    "budget_limited": (
+        "The goal in this session has been {label} for {age}. Only a person can "
+        "raise or reset its budget."
+    ),
+}
+
+
 def check_goals(goals_db: Path, state_db: Path, now_ms: int) -> list[Finding]:
     threads = _thread_index(state_db)
     conn = _ro_connect(goals_db)
@@ -244,12 +264,8 @@ def check_goals(goals_db: Path, state_db: Path, now_ms: int) -> list[Finding]:
             Finding(
                 key=f"{KEY_PREFIX}:goal:{thread_id}:{status}",
                 subject=name,
-                needs_operator=True,
-                message=(
-                    f"The goal in this session has been {label} for {age} and "
-                    "nothing will wake it. A person must resume the goal in that "
-                    "session (the /goal resume command)."
-                ),
+                needs_operator=status == "budget_limited",
+                message=GOAL_MESSAGES[status].format(label=label, age=age),
             )
         )
     return findings
@@ -446,11 +462,12 @@ def _check_one_deploy(
     return Finding(
         key=f"{KEY_PREFIX}:undeployed:{ent.get('entity_id') or app}",
         subject=target,
-        needs_operator=True,
         message=(
-            f"{len(dates)} change(s) merged for this target have not been deployed; "
-            f"the oldest has waited {humanize(waiting)}. Deploying follows the "
-            "instance's deployment configuration."
+            f"{len(dates)} change(s) merged for this target are waiting for "
+            f"deployment; the oldest has waited {humanize(waiting)}. Find the "
+            "session or owner responsible and have it deployed from the "
+            "instance's deployment configuration. Do not deploy from this "
+            "finding alone."
         ),
     )
 
@@ -555,11 +572,11 @@ def check_tasks(
                     Finding(
                         key=f"{KEY_PREFIX}:task-overdue:{ident}",
                         subject=title,
-                        needs_operator=True,
                         message=(
                             f"A task is {days} day(s) past its due date and not "
-                            "done. Only its owner can finish it, move the date or "
-                            "close it."
+                            "done. Find the task's owner: if a session owns it, "
+                            "message that session; if the operator owns it, tell "
+                            "him."
                         ),
                     )
                 )
@@ -568,10 +585,10 @@ def check_tasks(
                     Finding(
                         key=f"{KEY_PREFIX}:task-blocked:{ident}",
                         subject=title,
-                        needs_operator=True,
                         message=(
                             f"A task is due {due.date().isoformat()} and is blocked. "
-                            "Only its owner can clear the blocker or move the date."
+                            "Find the task's owner: if a session owns it, message "
+                            "that session; if the operator owns it, tell him."
                         ),
                     )
                 )

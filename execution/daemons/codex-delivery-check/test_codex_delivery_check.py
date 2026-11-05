@@ -67,7 +67,7 @@ def test_blocked_goal_alerts_with_name_and_duration_not_objective(tmp_path):
     assert len(findings) == 1
     msg = findings[0].message
     assert findings[0].subject == "Alpha lane"
-    assert "Alpha lane" not in msg and "2d 2h" in msg and "resume" in msg
+    assert "Alpha lane" not in msg and "2d 2h" in msg and "nothing will wake" not in msg
     assert "SECRET" not in msg
 
 
@@ -419,7 +419,7 @@ def test_repo_map_makes_a_target_checkable():
     conf = {"entity_id": "e1", "snapshot": {"project": "p", "fly_app": "app-x"}}
     run = fake_run(now - timedelta(days=5), [now - timedelta(days=3)])
     findings, _ = cdc.check_deploys([conf], run, now, {"app-x": "owner/repo"})
-    assert len(findings) == 1 and "not been deployed" in findings[0].message
+    assert len(findings) == 1 and "waiting for deployment" in findings[0].message
     with pytest.raises(RuntimeError):
         cdc.check_deploys([conf], run, now, {})
 
@@ -661,3 +661,59 @@ def test_nothing_in_the_check_can_send():
 def test_plist_still_hourly_and_the_install_notice_says_no_email():
     text = (Path(cdc.__file__).parent / "install.sh").read_text()
     assert "sends no email" in text and "Alerts go by email" not in text
+
+
+# ── needs_operator: the coordinator handles what it can ─────────────────────
+
+
+def test_finding_default_is_not_needs_operator():
+    assert cdc.Finding("k", "m").needs_operator is False
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [("blocked", False), ("usage_limited", False), ("budget_limited", True)],
+)
+def test_goal_needs_operator_only_where_a_message_cannot_help(
+    tmp_path, status, expected
+):
+    goals_db, state = make_dbs(
+        tmp_path, [("t1", "n", "", 0, 0)], [("t1", "o", status, NOW_MS - HOUR_MS)]
+    )
+    (f,) = cdc.check_goals(goals_db, state, NOW_MS)
+    assert f.needs_operator is expected
+
+
+def test_blocked_goal_message_directs_the_coordinator_to_act(tmp_path):
+    goals_db, state = make_dbs(
+        tmp_path, [("t1", "n", "", 0, 0)], [("t1", "o", "blocked", NOW_MS - HOUR_MS)]
+    )
+    msg = cdc.check_goals(goals_db, state, NOW_MS)[0].message
+    assert "send it one specific next action" in msg
+    assert "nothing will wake" not in msg
+
+
+def test_task_findings_do_not_need_the_operator():
+    rows = [task(1, "2026-11-01"), task(2, "2026-11-08", status="blocked")]
+    findings, _ = cdc.check_tasks(pager(rows), NOW)
+    assert len(findings) == 2 and not any(f.needs_operator for f in findings)
+    assert all("Only its owner" not in f.message for f in findings)
+
+
+def test_undeployed_work_does_not_need_the_operator():
+    run = fake_run(NOW - timedelta(days=3), [NOW - timedelta(hours=30)])
+    (f,) = cdc.check_deploys([cfg()], run, NOW)[0]
+    assert f.needs_operator is False and "Do not deploy from this finding" in f.message
+
+
+def test_watchers_paused_or_orphaned_need_the_operator_quiet_one_does_not(tmp_path):
+    _, state = make_dbs(tmp_path, [("t1", "T", "", 0, NOW_MS - 10 * HOUR_MS)], [])
+    root = tmp_path / "automations"
+    write_automation(root, "paused", status="PAUSED")
+    write_automation(root, "quiet")
+    write_automation(root, "orphan", target_thread_id="gone")
+    flags = {
+        f.key.rsplit(":", 1)[-1]: f.needs_operator
+        for f in cdc.check_automations(root, state, NOW_MS)[0]
+    }
+    assert flags == {"paused": True, "quiet": False, "orphan": True}
