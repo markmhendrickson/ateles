@@ -253,7 +253,9 @@ from lib.daemon_runtime import (  # noqa: E402
 )
 from lib.daemon_runtime.action_type import (  # noqa: E402
     AGENT_ACTION_TYPE_PRIOR,
+    SOURCE_AGENT_PRIOR,
     ResolvedActionType,
+    infer_action_type_from_text,
     resolve_gate_action_type,
 )
 from lib.daemon_runtime.gating import (  # noqa: E402
@@ -2002,21 +2004,52 @@ def _never_started(status) -> bool:
 
 
 def _guessed_owner_is_low_stakes(skill: str, snapshot: dict) -> bool:
-    """True only when the gate itself classifies the task's action as LOW blast.
+    """True only when leaving a guessed-owner task as filed is safe.
 
     An allow-list on the gate's own verdict, not a list of actions to refuse:
     the policy resolved here is the one the execution gate resolves for this
     skill, and the action is the gate's resolved action, so the two cannot
-    disagree about what is reserved. Anything but LOW (HIGH, NEVER, an
-    unrecognised action) keeps today's hold. An empty action, a policy that
-    cannot be read, or any exception also returns False.
+    disagree about what is reserved. Two things qualify:
+
+      1. The gate classifies the action LOW blast.
+      2. The guessed owner is the builder, the task declares no action and its
+         text escalates nothing, so the action is only the builder's own prior
+         (`open_or_merge_pr`) and nothing about this task. That label comes from
+         the guess alone, so holding on it asks the operator to approve work
+         nobody owns. A declared `open_or_merge_pr`, a text-escalated action and
+         every other specialist's prior (payment, send, publish) do not qualify.
+
+    Anything else (HIGH, NEVER, unrecognised), an empty action, a policy that
+    cannot be read, or any exception returns False and keeps today's hold.
     """
     try:
         policy = resolve_policy_for_agent(skill)
-        action = (_resolve_gate_action_type(skill, snapshot, policy).value or "").strip().lower()
+        resolved = _resolve_gate_action_type(skill, snapshot, policy)
+        action = (resolved.value or "").strip().lower()
         if not action:
             return False
-        return policy.blast_radius_for(action) == BlastRadius.LOW
+        if policy.blast_radius_for(action) == BlastRadius.LOW:
+            return True
+        key = (skill or "").strip().lower()
+        if not (
+            key in build_delivery.BUILDER_SKILLS
+            and resolved.source == SOURCE_AGENT_PRIOR
+            and action == (_AGENT_ACTION_TYPE.get(key) or "").strip().lower()
+        ):
+            return False
+        # The resolver only escalates text that is STRICTER than the prior, and
+        # the builder's prior is already high blast, so it never reports text
+        # naming a payment, send or publish. Ask the text directly: any outward
+        # action named there means this is not just the builder's default.
+        return (
+            infer_action_type_from_text(
+                snapshot.get("title"),
+                snapshot.get("body"),
+                snapshot.get("description"),
+                verdict=lambda at: policy.blast_radius_for(at).value,
+            )
+            is None
+        )
     except Exception:  # noqa: BLE001 — undeterminable means keep today's hold
         return False
 
@@ -2255,10 +2288,14 @@ async def dispatch_task(
     # keyword. Neither is warranted, so the task is left exactly as filed: no
     # status write, no ROUTED, no gate, no brief, no notification, no spawn.
     #
-    # This only ever REDUCES what holds or runs. It applies only where the gate's
-    # own classification of the task's action is LOW blast; every other tier
-    # (HIGH, never-tier, unrecognised) and any action or tier that cannot be
-    # determined keeps today's hold.
+    # This only ever REDUCES what holds or runs. It applies where the gate's own
+    # classification of the task's action is LOW blast, with one exception: a
+    # guessed BUILDER whose only action is the builder's own default
+    # (`open_or_merge_pr`, no declared action, nothing in the text escalating it)
+    # is also left as filed, because that label comes from the guess and nothing
+    # about the task. A declared or text-escalated action, and the payment, send
+    # and publish defaults of the other specialists, keep today's hold, as does
+    # every other tier and any action or tier that cannot be determined.
     #
     # Scoped to tasks that have not started (a task already routed, failed or
     # executing was dispatched on purpose and belongs to the watchdog), to

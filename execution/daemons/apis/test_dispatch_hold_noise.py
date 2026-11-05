@@ -277,3 +277,84 @@ def test_correction_and_build_released_are_not_left_as_filed(world):
 def test_build_released_redispatch_keeps_existing_path(world):
     _run(_guessed(), trigger="build_released")
     assert world["statuses"], "deferred-task recovery must keep its existing path"
+
+
+# ── B exception: a guessed builder's own default is not a reason to hold ─────
+
+
+def _guessed_builder(**over):
+    """Words alone route this to the builder; nothing is declared."""
+    task = {
+        "title": "Review the engineering work on the dispatcher",
+        "body": "code change to the apis daemon",
+        "status": "pending",
+        "confidence": 0.95,
+    }
+    task.update(over)
+    return task
+
+
+def test_guessed_builder_default_action_is_left_as_filed(world, caplog):
+    caplog.set_level("INFO")
+    notifier = _run(_guessed_builder())
+    _nothing_happened(world, notifier)
+    assert "left as filed" in caplog.text
+
+
+def test_declared_builder_action_still_holds(world):
+    _run(_guessed_builder(action_type="open_or_merge_pr"))
+    assert [s for _i, s, _r in world["statuses"]][-1] == TaskStatus.AWAITING_APPROVAL
+    assert len(world["briefs"]) == 1
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        "pay the vendor invoice by bank transfer",
+        "send an email to the customer",
+        "publish the release notes on the public blog",
+    ],
+)
+def test_builder_task_whose_text_names_an_outward_action_still_holds(world, words):
+    _run(_guessed_builder(body=f"code change to the apis daemon, then {words}"))
+    assert len(world["briefs"]) == 1, world["statuses"]
+    assert world["spawns"] == []
+
+
+def test_exception_is_keyed_to_the_builder_by_source_not_value(monkeypatch):
+    # Same value and prior, but the resolver says it did not come from the prior.
+    from lib.daemon_runtime.action_type import ResolvedActionType
+
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda _s: _POLICY)
+    for source in ("content", "declared_escalated", "declared", "none"):
+        monkeypatch.setattr(
+            apis,
+            "_resolve_gate_action_type",
+            lambda *_a, source=source: ResolvedActionType("open_or_merge_pr", source),
+        )
+        assert apis._guessed_owner_is_low_stakes("cicada", {}) is False, source
+    monkeypatch.setattr(
+        apis,
+        "_resolve_gate_action_type",
+        lambda *_a: ResolvedActionType("open_or_merge_pr", "agent_prior"),
+    )
+    assert apis._guessed_owner_is_low_stakes("cicada", {}) is True
+
+
+_OTHER_PRIORS = sorted(
+    (agent, action)
+    for agent, action in apis._AGENT_ACTION_TYPE.items()
+    if agent not in apis.build_delivery.BUILDER_SKILLS
+    and _POLICY.blast_radius_for(action).value != "low"
+)
+
+
+def test_other_agent_priors_set_is_not_empty():
+    assert {"monedula", "corvus", "struthio"} <= {a for a, _ in _OTHER_PRIORS}
+
+
+@pytest.mark.parametrize("agent,action", _OTHER_PRIORS)
+def test_every_other_agents_high_or_never_prior_still_holds(monkeypatch, agent, action):
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda _s: _POLICY)
+    # No declaration, no text: the resolved action is that agent's own prior.
+    assert apis._guessed_owner_is_low_stakes(agent, {}) is False
