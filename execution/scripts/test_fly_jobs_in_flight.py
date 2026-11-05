@@ -390,19 +390,31 @@ def _wait_lock_free(lock: Path, seconds: float = 15) -> bool:
 
 def test_redeploy_does_not_restart_after_admission_holder_expires(tmp_path):
     ledger = _ledger(tmp_path / "l.json")
+    lock = helper.admission_lock_path(ledger)
     env, calls_file = _setup_redeploy(tmp_path, ledger)
     # Holder limit shortened to 2s; the merge step outlasts it.
     env.update({"APIS_FLY_HOLD_LIMIT_SECONDS": "2", "MERGE_DELAY": "6"})
-    result, calls = _invoke(env, calls_file)
+    calls_file.write_text("")
+    out = tmp_path / "out.log"
+    with open(out, "w") as fh:
+        proc = subprocess.Popen(["/bin/bash", str(REDEPLOY)], env=env, stdout=fh,
+                                stderr=subprocess.STDOUT, text=True)
+        proc.wait(timeout=60)
+    exited = time.monotonic()
+    stdout = out.read_text()
     # The holder ended the script (SIGTERM) before it released the lock.
-    assert result.returncode != 0, result.stdout + result.stderr
+    assert proc.returncode != 0, stdout
+    # The script is gone but the holder is still in its settle: lock still held.
+    assert not _lock_is_free(lock)
+    assert _wait_lock_free(lock)
+    # Released only after the settle (KICKSTART_SETTLE_SECONDS, 5s) had passed.
+    assert time.monotonic() - exited >= helper.KICKSTART_SETTLE_SECONDS - 1.0
+    calls = calls_file.read_text()
     assert "kickstart" not in calls
-    assert "DEPLOY DID NOT FINISH" in result.stdout
-    assert "the next run will complete it" in result.stdout
-    assert "DEPLOYED" not in result.stdout
+    assert "DEPLOY DID NOT FINISH" in stdout
+    assert "the next run will complete it" in stdout
+    assert "DEPLOYED" not in stdout
     assert _marker(env).exists()
-    # The script is gone, and the lock is released only after that.
-    assert _wait_lock_free(helper.admission_lock_path(ledger))
     time.sleep(1)
     assert "kickstart" not in calls_file.read_text()
 

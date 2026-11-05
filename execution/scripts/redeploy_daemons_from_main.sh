@@ -87,7 +87,16 @@ on_exit() {
   if [ "$MARKER_WRITTEN" -eq 1 ] && [ "$RESTARTS_DONE" -eq 0 ]; then
     log "DEPLOY DID NOT FINISH: restarts were not completed; the next run will complete it."
   fi
-  release_admission
+  if [ "$status" -eq 143 ]; then
+    # Ended by SIGTERM, normally the holder's lifetime limit. Do not signal or
+    # wait for the holder: it is mid-way through its own sequence (wait for this
+    # script to be gone, then a settle for a kickstart already begun) and
+    # releases the lock when that is done. If the TERM came from elsewhere, the
+    # holder sees this process die and exits, so the lock is still released.
+    [ -n "$HOLDER_DIR" ] && rm -rf "$HOLDER_DIR" 2>/dev/null
+  else
+    release_admission
+  fi
   rmdir "$LOCK_DIR" 2>/dev/null || true
   exit "$status"
 }
