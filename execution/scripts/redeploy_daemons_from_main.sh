@@ -38,6 +38,8 @@ DAEMON_LABELS=(
 BRANCH="${BRANCH:-main}"
 LOCK_DIR="${LOCK_DIR:-/tmp/ateles-rc-autodeploy.lock.d}"
 REQ_FILE="execution/scripts/daemon-requirements.txt"
+# Resolved before the cd below, so a relative $0 still finds the helper.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "[$(ts)] $*"; }
@@ -66,6 +68,17 @@ REMOTE="$(git rev-parse "origin/$BRANCH")"
 
 if [ "$LOCAL" = "$REMOTE" ]; then
   log "deploy checkout already at origin/$BRANCH ($(git rev-parse --short HEAD)); nothing to do."
+  exit 0
+fi
+
+# Defer while a Fly job is in flight. Apis awaits each Fly job it starts, so a
+# restart below would orphan the job (nothing left to read its result; the task
+# stays `executing`). Checked before the checkout is fast-forwarded, so the
+# checkout stays behind and the next scheduled run (StartInterval) deploys once
+# the job is done. The helper fails OPEN: any error, or no live reservation,
+# means deploy. Only exit 0 means "defer", and it prints only the count.
+if IN_FLIGHT="$(python3 "$SCRIPT_DIR/fly_jobs_in_flight.py" 2>/dev/null)"; then
+  log "DEFERRED: ${IN_FLIGHT} Fly job(s) in flight; leaving deploy checkout and daemons unchanged until the next run."
   exit 0
 fi
 

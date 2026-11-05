@@ -23,7 +23,9 @@ This mirrors Neotoma's `~/neotoma-rc-src` + `com.neotoma.rc-autodeploy` pattern.
 ```
 merge to main ──> (≤120s) com.ateles.rc-autodeploy fires
   ──> redeploy_daemons_from_main.sh
-        ├─ git fetch origin main; abort if deploy HEAD diverged (non-ff)
+        ├─ git fetch origin main; exit if already current
+        ├─ defer (exit 0, no change) while a Fly job is in flight
+        ├─ abort if deploy HEAD diverged (non-ff)
         ├─ git merge --ff-only origin/main
         ├─ refresh .venv iff daemon-requirements.txt changed
         └─ launchctl kickstart -k each daemon  (fresh module import)
@@ -32,6 +34,16 @@ merge to main ──> (≤120s) com.ateles.rc-autodeploy fires
 The redeploy script is idempotent (no-ops when already at `origin/main`),
 single-flighted via an atomic lockdir, and fail-soft (daemons stay on the prior
 build on any error).
+
+**Deferral while a Fly job runs.** Apis awaits every Fly job it starts, so a hard
+restart would orphan the job and leave its task `executing`. Before fast-forwarding,
+the script runs `execution/scripts/fly_jobs_in_flight.py`, which counts Fly runner
+ledger reservations (`APIS_FLY_LEDGER_FILE`, default
+`~/.config/ateles/fly-runner-ledger.json`) whose `deadline` is still ahead. If any
+are, it logs `DEFERRED: <n> Fly job(s) in flight` and exits 0 with nothing changed;
+the checkout stays behind, so the next 120s run deploys once the jobs finish. The
+check fails open: a missing or unreadable ledger, or an entry with no readable or
+past deadline, never holds a deploy.
 
 ## Per-daemon plist requirements
 
