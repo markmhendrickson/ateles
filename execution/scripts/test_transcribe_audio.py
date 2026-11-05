@@ -340,6 +340,54 @@ def test_whisper_chunked_returns_corrected_text(tmp_path, monkeypatch):
     assert "Vexcorb" not in combined
 
 
+@pytest.mark.parametrize("override", ["backend", "environment"])
+def test_paired_plain_local_override_is_rejected_before_inference(tmp_path, monkeypatch, override):
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    backend = "local" if override == "backend" else None
+    if override == "environment":
+        monkeypatch.setenv("RECORD_MEETING_DIARIZE", "0")
+    with patch.object(ta, "transcribe_fluid") as run:
+        with pytest.raises(RuntimeError, match="Paired transcription supports"):
+            ta.transcribe_two_files(tmp_path / "mic.wav", tmp_path / "system.wav", backend=backend)
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("override", ["backend", "flag", "environment"])
+def test_multichannel_plain_overrides_cannot_downmix(tmp_path, monkeypatch, override):
+    audio = tmp_path / "stereo.wav"
+    audio.write_bytes(b"synthetic")
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    kwargs = {"backend": "local"} if override == "backend" else {"use_diarization": False}
+    if override == "environment":
+        monkeypatch.setenv("RECORD_MEETING_DIARIZE", "0")
+        kwargs = {}
+    with patch.object(ta, "get_audio_channel_count", return_value=2), patch.object(ta, "transcribe_local") as run:
+        with pytest.raises(RuntimeError, match="Original channels retained"):
+            ta.transcribe_audio_file(audio, **kwargs)
+    run.assert_not_called()
+
+
+def test_paired_default_preserves_system_and_mic_raw_events(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    mic, system = tmp_path / "mic.wav", tmp_path / "system.wav"
+    mic.write_bytes(b"mic")
+    system.write_bytes(b"system")
+    def native(path, **kwargs):
+        return {"raw_response": {"original": path.name, "aligned_words": [
+            {"start": .1, "end": .5, "text": path.stem, "speaker": "S1"}
+        ]}}
+    with patch.object(ta, "transcribe_fluid", side_effect=native) as run, patch.object(ta, "get_audio_duration", return_value=2):
+        result = ta.transcribe_two_files(mic, system)
+    assert [call.args[0] for call in run.call_args_list] == [system, mic]
+    assert result["backend"] == "fluid"
+    assert "[System/S1]" in result["transcription_text"]
+    assert "[Mic/S1]" in result["transcription_text"]
+    assert [track["result"]["original"] for track in result["raw_response"]["tracks"]] == ["system.wav", "mic.wav"]
+    assert [word["speaker"] for word in result["raw_response"]["aligned_words"]] == ["System/S1", "Mic/S1"]
+
+
 def test_transcribe_two_files_delegates_and_preserves_text(tmp_path):
     mic_path = tmp_path / "mic.wav"
     remote_path = tmp_path / "remote.wav"
@@ -362,7 +410,7 @@ def test_transcribe_two_files_delegates_and_preserves_text(tmp_path):
         "transcribe_with_elevenlabs_speech_to_text",
         return_value=dict(fake_el_result),
     ) as mock_el, patch.object(ta, "get_audio_duration", return_value=30.0):
-        result = ta.transcribe_two_files(mic_path, remote_path, language="en")
+        result = ta.transcribe_two_files(mic_path, remote_path, language="en", backend="elevenlabs")
 
     assert result["transcription_text"] == "Zolium"
     mock_el.assert_called_once()
@@ -394,7 +442,7 @@ def test_transcribe_two_files_fallback_concatenation_corrected(tmp_path, monkeyp
     ), patch.dict(
         os.environ, {"ELEVENLABS_API_KEY": "fake-key"}
     ):
-        result = ta.transcribe_two_files(mic_path, remote_path, language="en")
+        result = ta.transcribe_two_files(mic_path, remote_path, language="en", backend="elevenlabs")
 
     assert "Vexcorp" in result["transcription_text"]
     assert "Vexcorb" not in result["transcription_text"]
@@ -764,7 +812,7 @@ def test_elevenlabs_without_a_key_raises_rather_than_billing_openai(
     monkeypatch.setattr(ta, "get_audio_duration", lambda _p: 5.0)
 
     with pytest.raises(RuntimeError, match="ELEVENLABS_API_KEY"):
-        ta.transcribe_audio_file(audio, use_diarization=True)
+        ta.transcribe_audio_file(audio, use_diarization=True, backend="elevenlabs")
 
 
 def test_default_routing_uses_the_local_backend(tmp_path, monkeypatch):
@@ -814,21 +862,22 @@ def test_m4a_ffprobe_channel_count_drives_public_backend_routing(tmp_path, monke
     monkeypatch.setattr(ta.shutil, "which", lambda name: "/usr/bin/ffprobe")
     monkeypatch.setattr(ta.subprocess, "run", lambda *args, **kwargs: completed)
 
-    def fake_elevenlabs(path, **kwargs):
+    def fake_fluid(path, **kwargs):
+        assert kwargs["channel_count"] == 2
         return {
             "transcription_text": "Two speakers.",
             "language": "en",
             "audio_duration_seconds": 5.0,
             "file_size_bytes": path.stat().st_size,
-            "transcription_engine": "elevenlabs_stt",
-            "transcription_model": "scribe_v2",
+            "transcription_engine": "local_fluid_audio",
+            "transcription_model": "FluidAudio + Parakeet v3",
         }
 
-    monkeypatch.setattr(ta, "transcribe_with_elevenlabs_speech_to_text", fake_elevenlabs)
+    monkeypatch.setattr(ta, "transcribe_fluid", fake_fluid)
 
     result = ta.transcribe_audio_file(audio)
 
-    assert result["transcription_engine"] == "elevenlabs_stt"
+    assert result["transcription_engine"] == "local_fluid_audio"
 
 
 def test_no_speech_marker_is_not_run_through_stutter_cleanup(tmp_path, monkeypatch):

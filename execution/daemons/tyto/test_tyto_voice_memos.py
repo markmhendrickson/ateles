@@ -937,7 +937,7 @@ def test_voice_memo_uses_local_backend_even_when_elevenlabs_key_exists(tmp_path,
     assert "--diarize" not in command
 
 
-def test_single_file_meeting_defers_routing_to_transcribe_script(tmp_path, monkeypatch):
+def test_single_file_meeting_requests_local_diarization(tmp_path, monkeypatch):
     """Tyto must not reintroduce key-presence routing beside the shared selector."""
     recording = _write(tmp_path, "20260908 101500 system.m4a", age_secs=FRESH)
     watcher = _make_watcher(tmp_path, capture_method="audio_hijack_system")
@@ -953,22 +953,52 @@ def test_single_file_meeting_defers_routing_to_transcribe_script(tmp_path, monke
         assert watcher._run_transcription(recording, None) == "ent_test_auto"
 
     command = run.call_args.args[0]
-    assert "--diarize" not in command
+    assert "--diarize" in command
     assert "--no-diarize" not in command
     assert "--backend" not in command
 
 
+def test_failed_meeting_diarization_never_retries_plain_asr(tmp_path, monkeypatch):
+    recording = _write(tmp_path, "20260908 101500 system.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="audio_hijack_system")
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    completed = MagicMock(returncode=1, stdout="", stderr="local model missing")
+    with patch.object(tyto.subprocess, "run", return_value=completed) as run:
+        with pytest.raises(RuntimeError, match="local_fluid_audio.*local model missing"):
+            watcher._run_transcription(recording, None)
+    assert run.call_count == 1
+    assert "--diarize" in run.call_args.args[0]
+
+
+def test_failed_paired_meeting_keeps_both_tracks_for_retry(tmp_path, monkeypatch):
+    remote = _write(tmp_path, "20260908 101500 system.m4a", age_secs=FRESH)
+    mic = _write(tmp_path, "20260908 101500 mic.m4a", age_secs=FRESH)
+    watcher = _make_watcher(tmp_path, capture_method="audio_hijack_system")
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.delenv("RECORD_MEETING_DIARIZE", raising=False)
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    completed = MagicMock(returncode=1, stdout="", stderr="local model missing")
+    with patch.object(tyto.subprocess, "run", return_value=completed) as run:
+        with pytest.raises(RuntimeError, match="both tracks retained"):
+            watcher._run_transcription(remote, mic)
+    assert run.call_count == 1
+    assert "--mic-file" in run.call_args.args[0]
+    assert str(mic) in run.call_args.args[0]
+    assert remote.exists() and mic.exists()
+
+
 @pytest.mark.parametrize(
-    ("env_name", "env_value", "expected_flag"),
+    ("env_name", "env_value"),
     [
-        ("TRANSCRIBE_BACKEND", "local", None),
-        ("RECORD_MEETING_DIARIZE", "0", "--no-diarize"),
+        ("TRANSCRIBE_BACKEND", "local"),
+        ("RECORD_MEETING_DIARIZE", "0"),
     ],
 )
 def test_paired_meeting_respects_local_backend_overrides(
-    tmp_path, monkeypatch, env_name, env_value, expected_flag
+    tmp_path, monkeypatch, env_name, env_value
 ):
-    """A mic pair cannot bypass an explicit instruction to keep audio local."""
+    """Unsupported overrides fail without discarding either physical track."""
     remote = _write(tmp_path, "20260908 101500 system.m4a", age_secs=FRESH)
     mic = _write(tmp_path, "20260908 101500 mic.m4a", age_secs=FRESH)
     watcher = _make_watcher(tmp_path, capture_method="audio_hijack_system")
@@ -986,12 +1016,10 @@ def test_paired_meeting_respects_local_backend_overrides(
     )
 
     with patch.object(tyto.subprocess, "run", return_value=completed) as run:
-        assert watcher._run_transcription(remote, mic) == "ent_test_local"
-
-    command = run.call_args.args[0]
-    assert "--mic-file" not in command
-    if expected_flag:
-        assert expected_flag in command
+        with pytest.raises(RuntimeError, match="both tracks retained"):
+            watcher._run_transcription(remote, mic)
+    run.assert_not_called()
+    assert remote.is_file() and mic.is_file()
 
 
 def test_completion_notification_names_actual_backend(tmp_path):

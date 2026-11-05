@@ -3,8 +3,8 @@
 Audio Transcription Script
 
 Transcribes audio with LOCAL whisper-cli by default (free, on-device, no API
-key). ElevenLabs is used when diarization is requested — speaker separation is
-the one thing the local model cannot do — and the METERED OpenAI Whisper API
+key). FluidAudio performs local diarization and timestamped ASR when speaker
+separation is requested. ElevenLabs and the METERED OpenAI Whisper API run
 only on an explicit opt-in (``--backend openai`` / ``TRANSCRIBE_BACKEND``); it
 is never a silent fallback. Persists each result as a Neotoma ``transcription`` entity with the WAV
 attached (``neotoma store`` combined file + entities). Optional: after store,
@@ -15,7 +15,7 @@ next to the WAV — see ``save_transcription`` / ``record_meeting`` skill).
 Usage:
     python transcribe_audio.py <audio_file_path> [--language <language_code>]
     python transcribe_audio.py file.wav                # local whisper-cli (default)
-    python transcribe_audio.py file.wav --diarize      # ElevenLabs, speaker labels
+    python transcribe_audio.py file.wav --diarize      # local FluidAudio, speaker labels
     python transcribe_audio.py file.wav --backend openai  # METERED OpenAI API
 
 Examples:
@@ -70,6 +70,8 @@ if "could not parse statement" in stderr_output.lower():
     sys.exit(1)
 
 from ateles.runtime_paths import get_data_dir  # noqa: E402
+from local_fluid import BACKEND_FLUID, transcribe_fluid, format_events  # noqa: E402
+from transcript_utterances import group_utterances  # noqa: E402
 
 try:
     from scripts.local_whisper import (
@@ -628,56 +630,7 @@ def _merge_word_events_by_utterance(
     if not words:
         return None
 
-    gap = _utterance_gap_seconds()
-    stitch = _utterance_stitch_seconds()
-
-    # Segment each speaker independently into utterances on silence gaps.
-    by_group: dict = {}
-    for w in words:
-        by_group.setdefault(w["group"], []).append(w)
-
-    utterances: list[dict] = []
-    for grp, grp_words in by_group.items():
-        grp_words.sort(key=lambda w: w["start"])
-        cur: list[dict] = []
-
-        def emit(run: list[dict]) -> None:
-            utterances.append(
-                {
-                    "group": grp,
-                    "start": run[0]["start"],
-                    "end": run[-1]["end"],
-                    "text": " ".join(x["text"].strip() for x in run).strip(),
-                }
-            )
-
-        for w in grp_words:
-            if cur and (w["start"] - cur[-1]["end"]) > gap:
-                emit(cur)
-                cur = []
-            cur.append(w)
-        if cur:
-            emit(cur)
-
-    if not utterances:
-        return None
-
-    # Order utterances by start time; break ties by group string for determinism.
-    utterances.sort(key=lambda u: (u["start"], str(u["group"])))
-
-    # Stitch consecutive same-speaker utterances separated only by the other
-    # speaker's brief backchannel (or a short pause) back into one turn.
-    merged: list[dict] = []
-    for u in utterances:
-        if (
-            merged
-            and merged[-1]["group"] == u["group"]
-            and (u["start"] - merged[-1]["end"]) < stitch
-        ):
-            merged[-1]["text"] = (merged[-1]["text"] + " " + u["text"]).strip()
-            merged[-1]["end"] = u["end"]
-        else:
-            merged.append(dict(u))
+    merged = group_utterances(words, gap=_utterance_gap_seconds(), stitch=_utterance_stitch_seconds())
 
     parts: list[str] = []
     for u in merged:
@@ -1614,27 +1567,42 @@ def transcribe_two_files(
     remote_path: Path,
     language: str | None = None,
     verbose: bool = False,
+    backend: str | None = None,
 ) -> dict:
     """
-    Transcribe a mic track + a system/remote track as one 2-speaker dialogue.
+    Transcribe mic and system tracks with deterministic channel prefixes.
 
-    The two mono tracks are combined into a single 2-channel file (system → left
-    / channel 0, mic → right / channel 1 — the order record_meeting also uses)
-    and transcribed via ElevenLabs MULTICHANNEL mode. Speaker identity then comes
-    from the channel number, not
-    from an acoustic diarization guess — deterministic and correct by
-    construction for known-separate tracks. The readable dialogue is built by
-    utterance (see _merge_word_events_by_utterance), so cross-talk stays legible.
-
-    This supersedes the old approach of transcribing each track in a separate API
-    call and interleaving words by timestamp, which shredded overlapping speech
-    and could mis-order words when the two independent calls' clocks drifted.
+    Local FluidAudio processes each original mono track on its original timeline.
+    Speaker IDs remain scoped to their physical track; overlapping utterances
+    stay whole. An explicitly selected ElevenLabs backend combines the tracks
+    into stereo for its multichannel API. Both paths preserve raw model output.
 
     mic_path    — operator microphone track (mono) → labeled [Mic]
     remote_path — system-wide audio track (mono)   → labeled [System]
 
     Returns same shape as transcribe_audio_file().
     """
+    selected = resolve_backend(explicit=backend, channel_count=2)
+    if selected == BACKEND_FLUID:
+        tracks = []
+        events = []
+        for label, path in (("System", remote_path), ("Mic", mic_path)):
+            result = transcribe_fluid(path, language=language, verbose=verbose)
+            tracks.append({"channel": label, "result": result["raw_response"]})
+            for word in result["raw_response"]["aligned_words"]:
+                events.append({**word, "speaker": f"{label}/{word['speaker']}"})
+        return {
+            "transcription_text": format_events(events, gap=_utterance_gap_seconds(), stitch=_utterance_stitch_seconds()), "language": language or "auto",
+            "backend": BACKEND_FLUID, "transcription_engine": "local_fluid_audio",
+            "transcription_model": "FluidAudio offline + Parakeet v3",
+            "audio_duration_seconds": max(get_audio_duration(mic_path) or 0, get_audio_duration(remote_path) or 0),
+            "file_size_bytes": mic_path.stat().st_size + remote_path.stat().st_size,
+            "raw_response": {"tracks": tracks, "aligned_words": events},
+            "mic_file": str(mic_path), "remote_file": str(remote_path),
+        }
+    if selected != BACKEND_ELEVENLABS:
+        raise RuntimeError("Paired transcription supports local FluidAudio or explicitly selected ElevenLabs")
+
     if verbose:
         print(
             f"    Two-track transcription (multichannel): "
@@ -1681,9 +1649,7 @@ def transcribe_audio_file(
 
     1. ``backend`` argument / ``--backend`` — an explicit choice wins outright.
     2. ``TRANSCRIBE_BACKEND`` env var — the same decision in the environment.
-    3. Diarization requested (``use_diarization=True``, or
-       ``RECORD_MEETING_DIARIZE=1`` with a key present) → ElevenLabs. Speaker
-       separation is the one thing local cannot do, and meetings need it.
+    3. Diarization requested, or multichannel input → local FluidAudio.
     4. Otherwise → local whisper-cli.
 
     The metered OpenAI path is reachable only via 1 and 2. It is NEVER a silent
@@ -1693,8 +1659,8 @@ def transcribe_audio_file(
     Args:
         audio_path: Path to audio file
         language: Optional language code (e.g., 'en', 'es'). If None, auto-detect.
-        use_diarization: True forces ElevenLabs; False forbids it.
-        backend: Explicit backend name ('local', 'elevenlabs', 'openai').
+        use_diarization: True requests local speaker separation; False disables it.
+        backend: Explicit backend name ('local', 'fluid', 'elevenlabs', 'openai').
 
     Returns:
         Dictionary with transcription results including text and metadata
@@ -1702,18 +1668,25 @@ def transcribe_audio_file(
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    # RECORD_MEETING_DIARIZE historically defaulted to "1", which made ElevenLabs
-    # the implicit default for every file whenever a key was present. The default
-    # is now local, so an unset value no longer means "diarize" — only an
-    # explicit "1" does. record_meeting sets it explicitly, so meeting
-    # transcription is unaffected.
+    channels = get_audio_channel_count(audio_path)
     resolved_backend = resolve_backend(
         explicit=backend,
         use_diarization=use_diarization,
-        channel_count=get_audio_channel_count(audio_path),
+        channel_count=channels,
     )
+    if channels and channels > 1 and resolved_backend not in (BACKEND_FLUID, BACKEND_ELEVENLABS):
+        raise RuntimeError(
+            "Multichannel recording requires speaker separation; remove the plain "
+            "transcription override. Original channels retained."
+        )
     if verbose:
         print(f"TRANSCRIPTION_BACKEND_SELECTED={resolved_backend}", flush=True)
+
+    if resolved_backend == BACKEND_FLUID:
+        return transcribe_fluid(
+            audio_path, language=language, verbose=verbose,
+            channel_count=channels or 1,
+        )
 
     if resolved_backend == BACKEND_LOCAL:
         if verbose:
@@ -2971,7 +2944,7 @@ def save_transcription(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Transcribe audio via ElevenLabs (when key + diarization) or OpenAI Whisper"
+        description="Transcribe locally with Whisper or FluidAudio speaker diarization"
     )
     parser.add_argument("audio_file", type=str, help="Path to audio file")
     parser.add_argument(
@@ -2985,21 +2958,22 @@ def main():
         type=str,
         default=None,
         choices=list(VALID_BACKENDS),
-        help="Transcription backend. Default: 'local' (whisper-cli, free, "
-        "on-device). 'elevenlabs' adds diarization (needs ELEVENLABS_API_KEY); "
+        help="Transcription backend. Default: 'local' for mono memos, 'fluid' for "
+        "diarization or separate channels. Both run on-device. 'elevenlabs' "
+        "is an explicit cloud opt-in (needs ELEVENLABS_API_KEY); "
         "'openai' is the METERED platform Whisper API and is never selected "
         "automatically.",
     )
     parser.add_argument(
         "--diarize",
         action="store_true",
-        help="Use ElevenLabs speech-to-text with diarization (mono) or multichannel labels (stereo) when ELEVENLABS_API_KEY is set.",
+        help="Use local FluidAudio speaker diarization and timestamped ASR.",
     )
     parser.add_argument(
         "--no-diarize",
         action="store_true",
-        help="Forbid ElevenLabs. Falls to the default local whisper-cli backend "
-        "(use --backend openai for the metered API).",
+        help="Disable automatic diarization for a single-speaker mono file, using "
+        "local whisper-cli. Paired and multichannel recordings reject this override.",
     )
     parser.add_argument(
         "--relate-contact-entity-id",
@@ -3026,10 +3000,9 @@ def main():
         type=str,
         default=None,
         metavar="PATH",
-        help="Path to mic-only audio file (your voice). When provided alongside "
-        "audio_file (the remote/system file), enables two-file merge: mic is "
-        "transcribed as single speaker [You], remote is diarized as [Speaker_N]. "
-        "Requires ELEVENLABS_API_KEY.",
+        help="Path to mic-only audio file. Together with audio_file (system audio), "
+        "uses local FluidAudio with Mic/ and System/ speaker prefixes. Both original "
+        "tracks and raw output are preserved. Cannot combine with --no-diarize.",
     )
     parser.add_argument(
         "--no-store",
@@ -3087,15 +3060,11 @@ def main():
     try:
         # Two-file merge path (mic + remote)
         if args.mic_file:
+            if args.no_diarize:
+                parser.error("--mic-file requires speaker separation; remove --no-diarize")
             mic_path = Path(args.mic_file)
             if not mic_path.exists():
                 print(f"Error: Mic file not found: {mic_path}", file=sys.stderr)
-                sys.exit(1)
-            if not os.environ.get("ELEVENLABS_API_KEY", "").strip():
-                print(
-                    "Error: --mic-file requires ELEVENLABS_API_KEY (word-level timestamps needed for merge).",
-                    file=sys.stderr,
-                )
                 sys.exit(1)
             print(f"Two-file transcription: mic={mic_path.name} remote={audio_path.name}")
             transcription_result = transcribe_two_files(
@@ -3103,6 +3072,7 @@ def main():
                 remote_path=audio_path,
                 language=args.language,
                 verbose=True,
+                backend=args.backend,
             )
         else:
             # Single-file path

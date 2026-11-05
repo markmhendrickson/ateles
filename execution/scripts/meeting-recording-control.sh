@@ -74,13 +74,13 @@ _telegram() {
 # Set RECORD_MEETING_SKIP_TRANSCRIBE=1 on stop (or toggle→stop) to save WAV only — no transcribe_audio / Neotoma transcription row.
 # Useful when you will transcribe later manually.
 
-# Diarization is enabled by default when ELEVENLABS_API_KEY is set.
+# Local FluidAudio diarization is enabled by default.
 # Set RECORD_MEETING_DIARIZE=0 to force plain transcription.
 should_use_diarization() {
   if [ "${RECORD_MEETING_DIARIZE:-1}" = "0" ]; then
     return 1
   fi
-  [ -n "${ELEVENLABS_API_KEY:-}" ]
+  return 0
 }
 
 should_record_video() {
@@ -298,22 +298,15 @@ stop_recording() {
   if should_use_diarization; then
     transcribe_cmd+=("--diarize")
     using_diarization=1
-    echo "Diarization enabled (ELEVENLABS_API_KEY detected)."
+    echo "Local FluidAudio diarization enabled."
   else
-    echo "Diarization disabled (ELEVENLABS_API_KEY missing or RECORD_MEETING_DIARIZE=0)."
+    echo "Diarization disabled (RECORD_MEETING_DIARIZE=0)."
   fi
 
   local transcribe_ok=1
   if ! "${transcribe_cmd[@]}" | tee "$TRANSCRIBE_LOG_FILE"; then
-    if [ "$using_diarization" = "1" ]; then
-      echo "Diarized transcription failed; retrying with the free local whisper-cli backend (--no-diarize)..."
-      using_diarization=0
-      if ! "$VENV_PYTHON" "$TRANSCRIBE_SCRIPT" "$audio_path" --no-diarize | tee "$TRANSCRIBE_LOG_FILE"; then
-        transcribe_ok=0
-      fi
-    else
-      transcribe_ok=0
-    fi
+    # Keep the requested speaker separation; retrying plain ASR silently loses it.
+    transcribe_ok=0
   fi
 
   if [ "$transcribe_ok" = "0" ]; then
