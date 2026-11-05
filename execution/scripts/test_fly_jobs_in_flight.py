@@ -128,7 +128,8 @@ def test_corrupt_numeric_deadline_preserves_live_reservation(tmp_path):
 
 
 def test_expired_reservation_within_grace_still_defers(tmp_path):
-    ledger = _ledger(tmp_path / "l.json", time.time() - GRACE + 60)
+    # Expired four minutes ago: inside the five-minute settling grace.
+    ledger = _ledger(tmp_path / "l.json", time.time() - 240)
     assert helper.count_in_flight(ledger, time.time()) == 1
     # An unconfirmed reservation counts on the same rule.
     data = json.loads(ledger.read_text())
@@ -140,7 +141,8 @@ def test_expired_reservation_within_grace_still_defers(tmp_path):
 
 
 def test_reservation_past_grace_does_not_defer(tmp_path):
-    ledger = _ledger(tmp_path / "l.json", time.time() - GRACE - 60)
+    # Expired six minutes ago: past the five-minute settling grace.
+    ledger = _ledger(tmp_path / "l.json", time.time() - 360)
     assert helper.count_in_flight(ledger, time.time()) == 0
     result = _run_helper(ledger)
     assert result.returncode == 1 and result.stdout == ""
