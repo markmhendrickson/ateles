@@ -11,7 +11,7 @@ is ahead); exit 1 otherwise.
 
 ``--hold`` is the form the redeploy script uses. It takes the Fly runner's own
 admission lock (``<ledger>.admission.lock``, the exclusive ``flock`` that
-``FlyRunner._admission`` takes before any reservation), counts while holding
+``FlyExecutor._admission`` takes before any reservation), counts while holding
 it, prints ONE line (``ok <count>`` or ``busy``), and keeps the lock until it
 is sent SIGTERM, its parent dies, or ``HOLD_LIMIT_SECONDS`` passes. While it
 holds the lock no launch can reserve, so the count stays true from the check
@@ -72,7 +72,7 @@ def ledger_path(env: dict | None = None) -> Path:
 
 
 def admission_lock_path(ledger: Path) -> Path:
-    """The admission lock file, named exactly as ``FlyRunner._admission``."""
+    """The admission lock file, named exactly as ``FlyExecutor._admission``."""
     ledger = Path(ledger)
     return ledger.with_name(ledger.name + ".admission.lock")
 

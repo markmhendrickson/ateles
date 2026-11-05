@@ -166,7 +166,7 @@ def test_lock_path_matches_the_runner(monkeypatch, tmp_path):
     ledger_file = tmp_path / "ledger.json"
     monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(ledger_file))
     config = fly_runner.FlyConfig.from_env()
-    runner = fly_runner.FlyRunner(config, client=object(),
+    runner = fly_runner.FlyExecutor(config, client=object(),
                                   ledger=fly_runner.FlyLedger(config.ledger_path))
     lock = helper.admission_lock_path(helper.ledger_path())
 
