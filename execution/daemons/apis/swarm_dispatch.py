@@ -2748,6 +2748,174 @@ def compose_fallback_comment(
     )
 
 
+# A lens run on Fly returns its review in delimited sections: it holds a
+# read-only GitHub token and no Neotoma tools, so the dispatcher publishes.
+DISPATCHER_REVIEW_BEGIN = "<<<DISPATCHER_REVIEW>>>"
+DISPATCHER_REVIEW_END = "<<<END_DISPATCHER_REVIEW>>>"
+DISPATCHER_EXPECTATION_BEGIN = "<<<DISPATCHER_EXPECTATION_UPDATE>>>"
+DISPATCHER_EXPECTATION_END = "<<<END_DISPATCHER_EXPECTATION_UPDATE>>>"
+_RETURNED_DELIM_RE = re.compile(
+    r"^[ \t\r]*(?P<d><<<(?:END_)?DISPATCHER_(?:REVIEW|EXPECTATION_UPDATE)>>>)[ \t\r]*$",
+    re.M,
+)
+_RETURNED_KINDS = {
+    DISPATCHER_REVIEW_BEGIN: ("review", True),
+    DISPATCHER_REVIEW_END: ("review", False),
+    DISPATCHER_EXPECTATION_BEGIN: ("expectation", True),
+    DISPATCHER_EXPECTATION_END: ("expectation", False),
+}
+# What the readers accept as swarm state is `lens_authors._VERDICT_SHAPED_RE`
+# (any `review:<name>` form, aggregation, deferral and notice markers, found
+# anywhere in a body). A returned response containing any of it is refused,
+# never cleaned: the dispatcher adds the one marker itself.
+_FOREIGN_MARKER_RE = lens_authors._VERDICT_SHAPED_RE
+_MAX_RETURNED_TEXT = 60_000
+_NO_NEOTOMA_NOTE = (
+    "You have no Neotoma tools on this run: do not try to retrieve or store "
+    "anything. Everything you need (your pre-registered expectations, the "
+    "gate and verdict rules) is in this prompt, and the dispatcher records "
+    "your review and any gate result."
+)
+
+
+def _no_neotoma_note_if_on_fly(lens: str) -> str:
+    """The no-Neotoma-tools note, only for a run that will go to Fly."""
+    if fly_runner.wants_fly(None, model_tiering.lens_review_class(lens)):
+        return "\n\n" + _NO_NEOTOMA_NOTE
+    return ""
+
+
+def _returned_sections(text: str) -> tuple[dict[str, list[str]], str] | None:
+    """Locate the delimited sections by offset, so no line is re-split or
+    re-joined: each section is the exact substring between its delimiter lines.
+    Returns (bodies by kind, the text outside every section), or None when a
+    delimiter is unmatched, nested, or ends the wrong section."""
+    found: dict[str, list[str]] = {"review": [], "expectation": []}
+    outside: list[str] = []
+    open_kind, body_start, cursor = "", 0, 0
+    for m in _RETURNED_DELIM_RE.finditer(text):
+        kind, is_begin = _RETURNED_KINDS[m.group("d")]
+        if is_begin and not open_kind:
+            outside.append(text[cursor:m.start()])
+            open_kind, body_start = kind, m.end() + 1
+        elif not is_begin and open_kind == kind:
+            found[kind].append(text[body_start:m.start()])
+            open_kind, cursor = "", m.end() + 1
+        else:
+            return None
+    if open_kind:
+        return None
+    outside.append(text[cursor:])
+    return found, "\n".join(outside)
+
+
+def _has_veto(text: str) -> bool:
+    return output_has_blocking_verdict(text) or body_has_blocking_findings(text)
+
+
+def _reader_view(text: str, lens_agent: str) -> tuple:
+    """Everything the gate reader decides about *text*, from its own readers."""
+    return (
+        lens_own_verdict(text, lens_agent=lens_agent),
+        output_has_blocking_verdict(text),
+        body_has_blocking_findings(text),
+        sign_off_is_warranted(text, lens_agent=lens_agent),
+    )
+
+
+def _outside_is_ambiguous(outside: str) -> bool:
+    """True when text outside the verdict section holds a header or any line
+    that reads as a verdict statement (it would be a second verdict)."""
+    if _HEADER_EMOJI in _normalize_for_blocking_scan(outside):
+        return True
+    return any(
+        _VERDICT_LIKE_RE.match(_LINE_DECORATION_RE.sub("", form))
+        for line in outside.splitlines()
+        for form in _veto_scan_forms_uncached(line)
+    )
+
+
+def parse_returned_lens_review(
+    stdout: str, lens_agent: str = ""
+) -> tuple[str, str | None] | None:
+    """The review and optional expectation update a return-only lens returned.
+
+    Invariant: a response the gate reader would refuse never becomes one it
+    accepts because a later step changed it. So the response is judged as it
+    arrived, with the existing readers: it must carry no swarm marker at all,
+    exactly one well-formed review section and at most one expectation section
+    (never nested), nothing outside them that reads as a second verdict or
+    header, and any veto in the whole response must be in the review itself.
+    The review is the exact substring between its delimiter lines (outer
+    newlines only are dropped), the reader must decide the same about it after
+    that as before, and it must carry a readable own verdict. Anything else is
+    None and the lens run is failed."""
+    if _FOREIGN_MARKER_RE.search(stdout or ""):
+        return None
+    parsed = _returned_sections(stdout)
+    if parsed is None:
+        return None
+    found, outside = parsed
+    if len(found["review"]) != 1 or len(found["expectation"]) > 1:
+        return None
+    raw_review = found["review"][0]
+    raw_update = found["expectation"][0] if found["expectation"] else ""
+    if _outside_is_ambiguous(outside + "\n" + raw_update):
+        return None
+    if _has_veto(stdout) and not _has_veto(raw_review):
+        return None
+    review = raw_review.strip("\r\n")
+    update = raw_update.strip("\r\n")
+    if not review.strip() or len(review) > _MAX_RETURNED_TEXT or len(update) > _MAX_RETURNED_TEXT:
+        return None
+    if _reader_view(raw_review, lens_agent) != _reader_view(review, lens_agent):
+        return None
+    if lens_own_verdict(review, lens_agent=lens_agent) is None:
+        return None  # agreeing on "unreadable" is not acceptance
+    return review, (update if update.strip() else None)
+
+
+def verified_remote_comment(lens: str, agent: str, review: str, head_sha: str) -> str | None:
+    """The final comment body for a returned review, or None when the readers
+    decide anything different about the body than about the judged review.
+    Run when the review is accepted and again immediately before it is posted,
+    on every publishing path."""
+    body = compose_remote_lens_comment(lens, review, head_sha)
+    return body if _reader_view(body, agent) == _reader_view(review, agent) else None
+
+
+def unwrap_returned_review(
+    result: SkillResult, lens_agent: str = "", lens: str = "", head_sha: str = ""
+) -> tuple[SkillResult, str | None]:
+    """A return-only lens's result with its stdout reduced to the extracted
+    review text, plus its expectation update. A truncated output (the tail
+    only, so an earlier objection may be lost) or one that does not parse is a
+    failed run with no stdout: nothing is persisted, posted or signed."""
+    if not result.ok:
+        return result, None
+    parsed = (
+        None if getattr(result, "output_truncated", False)
+        else parse_returned_lens_review(result.stdout, lens_agent)
+    )
+    if parsed is not None and lens and (
+        verified_remote_comment(lens, lens_agent, parsed[0], head_sha) is None
+    ):
+        parsed = None  # the final comment would be read differently
+    if parsed is None:
+        return dataclasses.replace(
+            result, ok=False, stdout="",
+            error="the lens did not return exactly one well-formed review block",
+        ), None
+    return dataclasses.replace(result, stdout=parsed[0]), parsed[1]
+
+
+def compose_remote_lens_comment(lens: str, text: str, commit_sha: str) -> str:
+    """The comment posted for a return-only lens: this lens's head marker, a
+    newline, then the reviewed bytes unchanged (no normalising, no footer: any
+    marker was refused before this point)."""
+    return f"{compose_lens_review_marker(lens, commit_sha)}\n{text}"
+
+
 # Stable marker embedded in every Vanellus aggregation comment so the
 # dispatcher can detect whether the comment landed (dedup / missing-check).
 _VANELLUS_COMMENT_MARKER = "<!-- vanellus-aggregation -->"
@@ -5590,6 +5758,7 @@ class SwarmDispatcher:
         review_signals = await self._review_signals(
             trigger, changed_files=changed_files
         )
+        return_only = _lens_return_only_on_fly(lens)
         try:
             result = await run_skill(
                 lens.agent,
@@ -5600,6 +5769,7 @@ class SwarmDispatcher:
                     None,
                     has_worktree=bool(worktree),
                     changed_files=changed_files,
+                    read_only=return_only,
                 ),
                 # Read-only on Fly: a lens reviews and never delivers.
                 github_read_only=True,
@@ -5620,6 +5790,10 @@ class SwarmDispatcher:
         finally:
             await cleanup_pr_worktree(worktree)
 
+        if return_only:
+            result, _ = unwrap_returned_review(
+                result, lens.agent, lens.lens, reviewed_head
+            )
         if not result.ok:
             raise RuntimeError(
                 f"lens '{lens_name}' run failed: "
@@ -5645,6 +5819,7 @@ class SwarmDispatcher:
             captured,
             agents_by_lens,
             reviewed_head=reviewed_head,
+            remote_lenses=frozenset({lens.lens}) if return_only else frozenset(),
         )
 
     async def resume_missing_lens_reviews(self, repositories: list[str]) -> dict:
@@ -6304,7 +6479,8 @@ class SwarmDispatcher:
                     section,
                     spec_so_far,
                     design_basis=(state.sections or {}).get(DESIGN_BASIS.field),
-                ),
+                )
+                + _no_neotoma_note_if_on_fly(section.lens),
                 github_token=_token_for_agent_on_repo(
                     section.agent, trigger.repository
                 ),
@@ -7787,6 +7963,11 @@ class SwarmDispatcher:
         # A lens whose block is missing or unreadable is simply absent here and
         # runs alone below, so the combined pass can only save work.
         combined_results: dict[str, SkillResult] = {}
+        # Lenses whose prompt was return-only (decided before the run, so a
+        # Mac fallback of a Fly launch is still published by the dispatcher),
+        # and the expectation updates they returned.
+        remote_lenses: set[str] = set()
+        expectation_updates: dict[str, str] = {}
         if self.config.combined_review_pass:
             if await self._hold_panel_until_checks_green(
                 trigger, source="combined_review_pass"
@@ -7824,6 +8005,7 @@ class SwarmDispatcher:
                 qa_worktree = await prepare_pr_worktree(
                     trigger.repository, trigger.number, lens.agent
                 )
+            return_only = _lens_return_only_on_fly(lens)
             try:
                 result = combined_results.get(lens.lens) or await run_skill(
                     lens.agent,
@@ -7836,7 +8018,7 @@ class SwarmDispatcher:
                         owns_pending_gate=lens.lens in pending_gates,
                         changed_files=changed_files,
                         reviewed_head=review_head,
-                        read_only=_lens_return_only_on_fly(lens),
+                        read_only=return_only,
                     ),
                     github_token=_token_for_agent_on_repo(
                         lens.agent, trigger.repository
@@ -7869,6 +8051,14 @@ class SwarmDispatcher:
                 )
             finally:
                 await cleanup_pr_worktree(qa_worktree)
+            if return_only and lens.lens not in combined_results:
+                result, returned_update = unwrap_returned_review(
+                    result, lens.agent, lens.lens, review_head
+                )
+                if result.ok:
+                    remote_lenses.add(lens.lens)
+                    if returned_update:
+                        expectation_updates[lens.lens] = returned_update
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
                 # ateles#795 amended ADR: the dispatcher — not the lens's own
@@ -8014,6 +8204,10 @@ class SwarmDispatcher:
                 reviews,
                 agents_by_lens,
                 reviewed_head=review_head,
+                remote_lenses=frozenset(remote_lenses),
+            )
+            await self._publish_expectation_updates(
+                trigger, parent, expectation_updates, agents_by_lens
             )
 
         if failed_lenses:
@@ -9141,7 +9335,8 @@ class SwarmDispatcher:
             )
             result = await run_skill(
                 agent,
-                self._fix_guidance_prompt(trigger, lens, agent, findings_text),
+                self._fix_guidance_prompt(trigger, lens, agent, findings_text)
+                + _no_neotoma_note_if_on_fly(lens),
                 github_token=_token_for_agent_on_repo(agent, trigger.repository),
                 include_github_contract=True,
                 notifier=self.notifier,
@@ -13036,21 +13231,26 @@ class SwarmDispatcher:
             "you if your gh call fails)."
         )
         if read_only:
-            _position = _position.replace(
-                "in the comment and in your reply", "in the returned review"
+            _ro_start = "\n".join(
+                line for line in (_header_line, "**<VERDICT>**") if line
             )
             comment_identity_block = (
                 "Return your complete review in your final message between "
                 "`<<<DISPATCHER_REVIEW>>>` and `<<<END_DISPATCHER_REVIEW>>>`. "
-                "The dispatcher publishes it. Start the review with these "
-                "lines, and nothing before them inside the section:\n\n"
-                f"```\n{_start_lines}\n```\n\n"
+                "The dispatcher publishes it and adds the head marker itself. "
+                "Start the review with these lines, and nothing before them "
+                "inside the section:\n\n"
+                f"```\n{_ro_start}\n```\n\n"
                 "Replace `**<VERDICT>**` with your bold verdict token. "
-                + _position
-                + " If the SHA is not supplied above, fetch the PR's current "
-                "`headRefOid` and substitute the full 40-hex SHA in the marker. "
-                "Write the rest of your review after the verdict line. "
-                "Make no GitHub write; return all publication content here."
+                + (
+                    f"{GATE_VERDICT_POSITION_RULE}. " if _header_line else ""
+                )
+                + "Write no `<!-- review:... -->` marker and never write the "
+                "text `review:` followed by a name anywhere in your reply: a "
+                "reply containing one is refused. Write the rest of your "
+                "review after the verdict line. "
+                "Make no GitHub write; return all publication content here. "
+                + _NO_NEOTOMA_NOTE
             )
         return (
             f"Invoke the {lens.agent} agent per your appended system prompt.\n\n"
@@ -13717,7 +13917,7 @@ class SwarmDispatcher:
             + (
                 "Make no GitHub write. Return any expectation checklist "
                 "updates in the delimited sections requested below; the "
-                "dispatcher publishes them.\n\n"
+                "dispatcher publishes them. " + _NO_NEOTOMA_NOTE + "\n\n"
                 if read_only
                 else "Editing your pre-registered expectation checklist on the "
                 "parent issue, where a lens below asks for it, is the only "
@@ -13773,7 +13973,6 @@ class SwarmDispatcher:
                 self._combined_prompt(
                     trigger, combinable, expectations, review_head, parent,
                     changed_files,
-                    read_only=_lens_return_only_on_fly(first),
                 ),
                 github_token=_token_for_agent_on_repo(first.agent, trigger.repository),
                 include_github_contract=True,
@@ -13790,6 +13989,9 @@ class SwarmDispatcher:
                 seated_reviewer=True,
                 # Read-only on Fly: a lens reviews and never delivers.
                 github_read_only=True,
+                # The combined pass keeps the local prompt, which has the lens
+                # post its own comments: it never runs return-only on Fly.
+                runner="local",
                 action_class=model_tiering.lens_review_class(first.lens),
                 escalation_signals=signals,
             )
@@ -14737,8 +14939,15 @@ class SwarmDispatcher:
         agents_by_lens: dict[str, str] | None = None,
         *,
         reviewed_head: str = "",
+        remote_lenses: frozenset[str] = frozenset(),
     ) -> None:
         """Backfill `review:<lens>` PR comments the panelists failed to post.
+
+        ``remote_lenses``: lenses whose prompt was return-only (they hold no
+        GitHub write access, on Fly or after a Mac fallback). Their review is
+        posted from here as the lens's own App when it has one (never the
+        shared identity then); a lens with no App takes the ordinary fallback
+        post below, under the shared identity.
 
         Headless `claude --print` panelists cannot answer permission prompts,
         so their `gh` comment step often fails silently; Vanellus aggregates
@@ -14785,6 +14994,18 @@ class SwarmDispatcher:
                 for lens in lenses_missing_comments(
                     bodies, list(captured), head_sha=head_sha
                 ):
+                    if lens in remote_lenses and _github_app_token.lens_has_own_app(lens):
+                        try:
+                            await self._post_remote_lens_verdict(
+                                client, url, t, lens, agents.get(lens, ""),
+                                captured[lens], head_sha,
+                            )
+                        except Exception as exc:  # noqa: BLE001 — lens stays pending
+                            log.error(
+                                f"[{DAEMON_NAME}] review:{lens} post failed on "
+                                f"{t.repository}#{t.number}: {type(exc).__name__}"
+                            )
+                        continue
                     if _github_app_token.lens_has_own_app(lens):
                         # A comment posted with the dispatcher's shared token is
                         # never read as this lens's verdict (the lens is read only
@@ -14797,10 +15018,21 @@ class SwarmDispatcher:
                             f"#{t.number}; the lens stays pending until its App posts"
                         )
                         continue
-                    body = compose_fallback_comment(
-                        lens, agents.get(lens, "unknown panelist"), captured[lens],
-                        head_sha,
-                    )
+                    if lens in remote_lenses:
+                        body = verified_remote_comment(
+                            lens, agents.get(lens, ""), captured[lens], head_sha
+                        )
+                        if body is None:
+                            log.error(
+                                f"[{DAEMON_NAME}] review:{lens} final comment would be "
+                                f"read differently on {t.repository}#{t.number}: not posted"
+                            )
+                            continue
+                    else:
+                        body = compose_fallback_comment(
+                            lens, agents.get(lens, "unknown panelist"),
+                            captured[lens], head_sha,
+                        )
                     post = await client.post(
                         url, json={"body": body}, headers=self._github_headers(t.repository)
                     )
@@ -14814,6 +15046,119 @@ class SwarmDispatcher:
                 f"[{DAEMON_NAME}] fallback review comments failed for "
                 f"{t.repository}#{t.number}: {exc}"
             )
+
+    @staticmethod
+    async def _lens_app_token(lens: str, agent: str, repository: str) -> str:
+        """The lens's own App token for *repository*, or "" (never another
+        identity). The agent must act as exactly this lens's declared App."""
+        identity = _app_identity_for_agent(agent)
+        if (
+            not identity
+            or identity != _github_app_token.reviewer_identity(lens)
+            or not _github_app_token.identity_declared(identity)
+        ):
+            log.error(
+                f"[{DAEMON_NAME}] the {lens} lens has no declared App identity; "
+                "its returned output is not published"
+            )
+            return ""
+        return await asyncio.to_thread(_token_for_agent_on_repo, agent, repository)
+
+    async def _post_remote_lens_verdict(
+        self, client, url: str, t: SwarmTrigger, lens: str, agent: str,
+        text: str, head_sha: str,
+    ) -> bool:
+        """Post a return-only lens's review as that lens's own App. Fails
+        closed: no declared App, no token, or a failed post leaves the lens
+        pending. Never uses the shared identity and never logs the token."""
+        token = await self._lens_app_token(lens, agent, t.repository)
+        if not token:
+            log.error(
+                f"[{DAEMON_NAME}] no App token for the {lens} lens on "
+                f"{t.repository}#{t.number}: the lens stays pending"
+            )
+            return False
+        body = verified_remote_comment(lens, agent, text, head_sha)
+        if body is None:
+            log.error(
+                f"[{DAEMON_NAME}] review:{lens} final comment would be read "
+                f"differently on {t.repository}#{t.number}: not posted"
+            )
+            return False
+        resp = await client.post(
+            url,
+            json={"body": body},
+            headers={"Accept": "application/vnd.github+json",
+                     "Authorization": f"Bearer {token}"},
+        )
+        resp.raise_for_status()
+        log.info(
+            f"[{DAEMON_NAME}] posted review:{lens} for {t.repository}#{t.number} "
+            "as the lens's own App"
+        )
+        return True
+
+    async def _publish_expectation_updates(
+        self, t: SwarmTrigger, parent: int | None, updates: dict[str, str],
+        agents_by_lens: dict[str, str],
+    ) -> None:
+        """Edit each return-only lens's own expectation checklist on the parent
+        issue, as that lens's App, the way a local lens edits it with `gh`.
+        A lens with no App of its own edits under the shared identity. Best
+        effort and never raises: a missed update leaves boxes unchecked."""
+        if not parent or not updates:
+            return
+        url = f"https://api.github.com/repos/{t.repository}/issues/{parent}/comments"
+        for lens, text in updates.items():
+            header = f"**{EXPECTATION_MARKER} ({lens})**"
+            try:
+                if not text.lstrip().startswith(header):
+                    log.warning(
+                        f"[{DAEMON_NAME}] {lens} expectation update does not keep "
+                        "its header: not published"
+                    )
+                    continue
+                if _github_app_token.lens_has_own_app(lens):
+                    token = await self._lens_app_token(
+                        lens, agents_by_lens.get(lens, ""), t.repository
+                    )
+                    if not token:
+                        continue  # an App with no token never falls back
+                    write_headers = {"Accept": "application/vnd.github+json",
+                                     "Authorization": f"Bearer {token}"}
+                else:
+                    if not await self._require_github_write_credential(
+                        t.repository, "expectation update",
+                        detail=f"{t.repository}#{parent}",
+                    ):
+                        continue
+                    write_headers = self._github_headers(t.repository)
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(
+                        url, params={"per_page": 100},
+                        headers=self._github_headers(t.repository),
+                    )
+                    resp.raise_for_status()
+                    own = [
+                        c for c in lens_authors.scope_lens_comments(
+                            resp.json(), await asyncio.to_thread(lens_comment_authors)
+                        )
+                        if str(c.get("body", "")).lstrip().startswith(header)
+                    ]
+                    if not own:
+                        continue
+                    patch = await client.patch(
+                        f"https://api.github.com/repos/{t.repository}/issues/comments/"
+                        f"{own[-1]['id']}",
+                        json={"body": text.strip()},
+                        headers=write_headers,
+                    )
+                    patch.raise_for_status()
+            except Exception as exc:  # noqa: BLE001 — best effort
+                log.warning(
+                    f"[{DAEMON_NAME}] {lens} expectation update on "
+                    f"{t.repository}#{parent} failed: {type(exc).__name__}"
+                )
 
     async def _post_gate_block(
         self, t: SwarmTrigger, parent: int | None, pending: set[str]

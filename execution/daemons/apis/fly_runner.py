@@ -62,6 +62,8 @@ from typing import Any, Callable
 
 import httpx
 
+import model_tiering
+
 log = logging.getLogger("apis.fly_runner")
 
 FLY_API_BASE_DEFAULT = "https://api.machines.dev/v1"
@@ -420,7 +422,17 @@ def _csv(raw: str) -> list[str]:
 # remote outcome as terminal (no retry, no re-dispatch, no failover). Only
 # these can be opted in through APIS_FLY_RUNNER_CLASSES; adding one means
 # checking every retry lane that can re-dispatch it.
-FLY_VETTED_CLASSES: frozenset[str] = frozenset({"carry_forward_check", "open_or_merge_pr"})
+#
+# ``lens_review:<lens>`` is vetted on this basis: a lens on Fly holds a
+# read-only GitHub token and no Neotoma tools, and the dispatcher publishes
+# its verdict from the Mac only after the run returns. A lost or unknown run
+# therefore has no effects, and the bounded same-head sweeps re-running it
+# cannot double-post (nothing reserves a lens receipt before launch).
+FLY_VETTED_CLASSES: frozenset[str] = frozenset({
+    "carry_forward_check",
+    "open_or_merge_pr",
+    *(model_tiering.lens_review_class(lens) for lens in model_tiering.KNOWN_LENSES),
+})
 # Classes that may be listed (the operator's opt-in) but are never routed by
 # class alone: only a builder's delivery path, which forces ``runner="fly"``
 # with a delivery spec, sends them to Fly. Every retry lane that can re-run a
@@ -1874,6 +1886,49 @@ def runner_argv(provider: str, cmd: list[str], mcp_config_path: str | None) -> l
     return argv
 
 
+# Providers whose seated, read-only run may go to Fly with no Neotoma tools.
+# Cursor stays on the Mac (it cannot deny a single MCP tool).
+SEATED_FLY_PROVIDERS = ("claude", "codex")
+
+
+def without_neotoma_mcp(provider: str, argv: list[str]) -> list[str]:
+    """A seated run's shipped argv with no Neotoma MCP server at all.
+
+    The Mac's ``--mcp-config`` is removed, so ``run_job.prepare_child`` finds
+    no placeholder and writes no config, and ``--strict-mcp-config`` keeps the
+    CLI from reading any other. The runner's own Neotoma identity (for its
+    result record) is never in the child's environment. Codex has no
+    ``--mcp-config``: its home is the login volume, so only a ``-c`` or
+    ``--config`` override naming an MCP server could grant one, and any such
+    argv is refused. Raises ``FlyIneligible`` when it cannot hold."""
+    if provider not in SEATED_FLY_PROVIDERS:
+        raise FlyIneligible(f"a seated {provider} run stays on the Mac")
+    out: list[str] = []
+    skip = False
+    for i, arg in enumerate(argv):
+        if skip:
+            skip = False
+            continue
+        if arg == "--mcp-config":
+            if i + 1 >= len(argv) or argv[i + 1] != MCP_CONFIG_PLACEHOLDER:
+                raise FlyIneligible("a seated run carries an MCP config that is not the Mac's own")
+            skip = True
+            continue
+        if arg == "--strict-mcp-config":
+            continue
+        out.append(arg)
+    # Only option values can grant a server (the system prompt text may say
+    # anything), so look at what follows `-c` / `--config` and `--config=...`.
+    for i, arg in enumerate(out):
+        value = arg.split("=", 1)[1] if arg.startswith("--config=") else (
+            out[i + 1] if arg in ("-c", "--config") and i + 1 < len(out) else "")
+        if "mcp_servers" in value or "mcp-config" in arg or MCP_CONFIG_PLACEHOLDER in arg:
+            raise FlyIneligible("a seated run's argv names an MCP server; it gets none on Fly")
+    if provider == "claude":
+        out.append("--strict-mcp-config")
+    return out
+
+
 def externalize_system_prompt(provider: str, argv: list[str]) -> tuple[list[str], str]:
     """Claude's ``--append-system-prompt <text>`` rewritten to
     ``--append-system-prompt-file <placeholder>``, and the text, which is
@@ -1947,6 +2002,7 @@ def build_job(
     delivery: dict | None = None,
     neotoma_tools_granted: bool = False,
     github_delivery_contract: bool = False,
+    github_read_only: bool = False,
 ) -> FlyJob:
     """Check eligibility and assemble the job, minus the GitHub token (which
     is minted at launch). Raises ``FlyIneligible`` with the reason.
@@ -1974,10 +2030,14 @@ def build_job(
         (bool(command_wrapper), "a command_wrapper (macOS sandbox) cannot run on Fly"),
         (codex_outer_sandboxed, "an outer-sandboxed Codex run cannot run on Fly"),
         (bool(cwd), "a dispatch with a working directory needs a local worktree"),
-        (owns_pending_gate, "seated and gate-owning runs stay on the Mac"),
     ):
         if flag:
             raise FlyIneligible(why)
+    if owns_pending_gate and not (github_read_only and provider in SEATED_FLY_PROVIDERS):
+        # A seated run keeps its Neotoma `correct` denial on the Mac. On Fly
+        # the only seated run allowed is a read-only one that gets no Neotoma
+        # tools at all, so there is nothing to deny (see `without_neotoma_mcp`).
+        raise FlyIneligible("seated and gate-owning runs stay on the Mac")
     if provider in LOGIN_PROVIDERS and provider not in config.login_machines:
         raise FlyIneligible(
             f"no {provider} login machine configured ({login_machine_setting(provider)})"
@@ -2018,6 +2078,10 @@ def build_job(
             f"role {role!r} has no Neotoma identity of its own ({token_name} or an AAuth "
             "key); the shared daemon bearer never leaves the Mac"
         )
+    if owns_pending_gate and jwk_text:
+        # A seated run's child has no Neotoma tools. The runner's own record
+        # is signed with the key, so the role's static token stays home.
+        own_token = ""
     if jwk_text:
         secrets[AAUTH_JWK_JOB_NAME] = jwk_text
     if own_token:
@@ -2052,6 +2116,8 @@ def build_job(
             "a job that delivers to GitHub needs a delivery plan and the PR-opener "
             "token; it cannot run on Fly without one")
     argv = runner_argv(provider, cmd, mcp_config_path)
+    if owns_pending_gate:
+        argv = without_neotoma_mcp(provider, argv)
     argv, system_prompt = externalize_system_prompt(provider, argv)
     if delivery is not None:
         delivery = _check_delivery(delivery, repository=repository, stdin=stdin,
