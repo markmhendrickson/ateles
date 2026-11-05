@@ -84,3 +84,78 @@ python3 execution/evals/planning_spine/planning_spine_runner.py --model sonnet
 
 Transport failures are reported as infrastructure errors and are never scored as
 skill behavior.
+
+## Family continuation instrument cases
+
+`--scenarios all` includes thirteen additional synthetic cases. Their fixture
+variants share `family_base` in `context.json`; the runner expands the selected
+variant before starting the existing fixture MCP server. Scoring criteria and
+scripted event controls stay outside the worker workspace. No expectations are
+placed in the model prompt. The requested JSON audit is an output interface,
+not an answer key.
+
+| Case | Required observable evidence |
+| --- | --- |
+| ordinary-single-lane | Exact task scope, current aggregate ascent, artifact bytes |
+| recursive-paginated-family | Consumed pages, recursive native ancestry and acknowledged delegation |
+| pagination-or-source-gap | Observed failure, unresolved coverage, independent owned lanes retained |
+| changed-ascent-after-checkpoint | Later relationship read replaces the stale ascent |
+| direct-late-answer-during-handoff | Fresh human answer and original obligation identity |
+| origin-checkpoint-answer-sibling-open | Exact answer route and separate receiver-consumption read; sibling stays open |
+| digest-report-only | Verification and tooling-gap scorecard; zero writes/actions |
+| digest-default-history | Two turns, stable persisted digest, cumulative history and exact readback, local assigned action |
+| inherited-event-attribution | Own child event separated from inherited parent history |
+| positive-ack-qualified-custody | Existing successor acknowledgment, custody and observed local action |
+| negative-ack-or-custody | No replacement action when custody is unqualified |
+| actual-native-compaction | Separately qualified completed/persisted native transition and observed later turn |
+| planned-and-abrupt-cross-harness | Separately qualified distinct receiver, acknowledgment and custody |
+
+The runner captures before/after state, actual fixture calls and artifact hashes.
+The opt-in backend implements local entity/relationship writes, stable digest
+identity, paginated session/history reads, answer receipts and predeclared local
+artifact actions. Answer queue acceptance is distinct from a later synthetic
+receiver read. These are test counterparts, not production coordination tools.
+Confirmed effects and the existing watch must remain unchanged; even an attempted
+inert effect replay fails scoring. Legacy checkpoint/status history is retained.
+
+The checked-in deterministic driver substitutes for `drive_session` while using
+the actual runner, backend, persistence and scorer. Negative mutations demonstrate
+that the instrument goes red for omissions, stale ascents, wrong questions,
+queue-only delivery, report-only writes, history loss, unqualified replacement,
+inherited-event credit and replay attempts. This is **instrument coverage**, not
+causal evidence that a model follows the proposed instructions. Workspace logs
+are evidence for cooperative fixture runs, not tamper-resistant audit storage.
+The existing guard and no-real-MCP configuration are unchanged; documentation or
+this offline run does not qualify their delivery in another harness.
+
+The two native cases deliberately return an infrastructure error without
+separately qualified host evidence. The current runner has no native-transition
+capture adapter and cannot qualify either by a worker-written file or report.
+The native-shape validator is a host-input contract, not provenance verification.
+No actual compaction, abrupt-stop recovery, model invocation or cross-harness
+continuation is performed by deterministic tests or `--dry-run`.
+
+For this proposal bundle, `review_bundle.json` explicitly records
+`source_mode: reviewed_proposal`: the two updated skill bodies are unapplied
+review candidates with synthetic entity references. The third skill remains
+byte-for-byte unchanged. These fixtures do not publish or install a canonical
+policy/skill amendment. Regeneration from current prod would replace that
+proposal evidence, so preserve the pinned review head when evaluating it.
+
+```sh
+uv sync --frozen --extra dev --python 3.13
+uv run --frozen --extra dev python -m pytest -q \
+  execution/evals/planning_spine/test_planning_spine_eval.py \
+  execution/evals/rule_delivery/test_rule_delivery_evals.py
+uv run --frozen --extra dev python -m pytest -q \
+  execution/scripts/test_sync_skills_frontmatter.py \
+  execution/scripts/test_planning_spine_skill_contract.py
+uv run --frozen --extra dev python \
+  execution/evals/planning_spine/planning_spine_runner.py \
+  --scenarios all --dry-run --out /tmp/planning-family-dry-run-new
+```
+
+This evaluator support does not finish the broader preparation plan. Full
+baseline coverage, canonical policy adoption, real model/instruction tests,
+actual compaction and complete descendant recovery, acknowledged rollout and
+workflow handover retain their own acceptance and review/effect gates.

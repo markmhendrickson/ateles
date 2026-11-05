@@ -990,3 +990,28 @@ def test_family_capability_rpc_calls_are_recorded_and_paginated(tmp_path):
     assert len(result["threads"]) == 2 and result["nextCursor"]
     logged = json.loads(store.log_path.read_text().splitlines()[0])
     assert logged["tool"] == "fixture_list_sessions" and logged["state_sha256"]
+
+
+def test_fixture_artifact_reader_rejects_unlisted_or_escaping_path(tmp_path):
+    store = fixture_mcp_server.Store(tmp_path / "ws")
+    store.state_path.parent.mkdir()
+    store.save({"entities": {}, "relationships": []})
+    store.control_path.write_text(
+        json.dumps({"family_tools": True, "artifact_paths": ["../outside.txt"]})
+    )
+    (tmp_path / "outside.txt").write_text("synthetic outside workspace")
+    denied = fixture_mcp_server.call_tool(
+        store, "fixture_read_artifact", {"relative_path": "../outside.txt"}
+    )
+    assert "error" in denied
+    assert "error" in fixture_mcp_server.call_tool(
+        store, "fixture_read_artifact", {"relative_path": "not-listed"}
+    )
+
+
+def test_fixture_relationship_direction_typo_is_unknown_not_empty(tmp_path):
+    store = fixture_mcp_server.Store(tmp_path)
+    store.save({"entities": {}, "relationships": []})
+    assert "error" in fixture_mcp_server.call_tool(
+        store, "list_relationships", {"direction": "outgoing"}
+    )

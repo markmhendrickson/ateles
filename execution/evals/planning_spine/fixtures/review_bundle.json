@@ -1,9 +1,9 @@
 {
   "artifact_role": "generated review evidence; not an authoring source",
   "canonical_source": "Neotoma prod skill entities",
-  "captured_at": "2026-10-01",
+  "captured_at": "2026-11-05",
   "context_fixture": "execution/evals/planning_spine/fixtures/context.json",
-  "context_sha256": "533719a09dad08afdf423ad2632d35130408648d6a7f83a945dcdc60a9c10c9d",
+  "context_sha256": "c2e5fa824c2b47e2d8c9743f8071232f5275036b303d13297a28ff71b1959dcf",
   "generated_by": "execution/scripts/render_planning_spine_review_bundle.py",
   "public_safe": true,
   "skills": [
@@ -14,9 +14,9 @@
         "identifier": "continue-session"
       },
       "path": "execution/evals/planning_spine/fixtures/skills/continue-session/SKILL.md",
-      "sha256": "f5c800c7a3a117316dbdca5f05ed0c7ec52788dd822f09b113c348a0ee430f8a",
+      "sha256": "212be531f91e9e3d2ccc22960b8f963cfc65bdf267299ebb876247b012b21ff8",
       "slug": "continue-session",
-      "snapshot_source": "generated user mirror located by name:continue-session"
+      "snapshot_source": "reviewed unapplied proposal; synthetic entity references; name:continue-session"
     },
     {
       "canonical_locator": {
@@ -25,9 +25,9 @@
         "identifier": "digest"
       },
       "path": "execution/evals/planning_spine/fixtures/skills/digest/SKILL.md",
-      "sha256": "8dd81682e0b66dcc5997146d82819f905194ac9cdb43eeecda741917e5e1bd83",
+      "sha256": "c3ca59b17a37b4f5781723f140bbbe309bdeeae1e7bc90d8f5a5b9879a9a9da4",
       "slug": "digest",
-      "snapshot_source": "generated user mirror located by name:digest"
+      "snapshot_source": "reviewed unapplied proposal; synthetic entity references; name:digest"
     },
     {
       "canonical_locator": {
@@ -38,8 +38,8 @@
       "path": "execution/evals/planning_spine/fixtures/skills/reconcile-planning/SKILL.md",
       "sha256": "73c8cc24e21facc11875db3aab57f6ad99974b0c80b1a9be69cd148e1dd9581a",
       "slug": "reconcile-planning",
-      "snapshot_source": "generated user mirror located by name:reconcile-planning"
+      "snapshot_source": "unchanged generated review evidence located by name:reconcile-planning"
     }
   ],
-  "source_mode": "generated_user_mirror"
+  "source_mode": "reviewed_proposal"
 }

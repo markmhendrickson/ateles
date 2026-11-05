@@ -4,10 +4,10 @@
     "canonical": false,
     "purpose": "Exercise master-plan-first reporting without copying operator data into the public repository.",
     "attribution": {
-      "review_task": "ent_80c15446a22b2283d13aaabe",
+      "review_task": "ent_fixture_original_review_task",
       "pull_request": "markmhendrickson/ateles#1313",
       "reviewed_head": "1f3070364a84659b43b95a83133f26aad17815c0",
-      "master_plan_locator": "ent_81aadb43caf2fa493361e8ed"
+      "master_plan_locator": "ent_fixture_original_master_plan"
     }
   },
   "master_plan_id": "ent_fixture_master_plan",
@@ -18,25 +18,101 @@
         "title": "Foundation rollout",
         "status": "active",
         "phases": [
-          {"id": "ent_fixture_phase_a", "name": "A", "exit_gate_state": "signed_off"},
-          {"id": "ent_fixture_phase_a2", "name": "A2", "exit_gate_state": "signed_off"},
-          {"id": "ent_fixture_phase_b", "name": "B", "exit_gate_state": "signed_off"},
-          {"id": "ent_fixture_phase_b2", "name": "B2", "exit_gate_state": "active"},
-          {"id": "ent_fixture_phase_b2_prime", "name": "B2-prime", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_c", "name": "C", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_d", "name": "D", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_d2", "name": "D2", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_e", "name": "E", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_f", "name": "F", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_g", "name": "G", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_h", "name": "H", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_i", "name": "I", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_j", "name": "J", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_k", "name": "K", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_l", "name": "L", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_m", "name": "M", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_n", "name": "N", "exit_gate_state": "pending"},
-          {"id": "ent_fixture_phase_o", "name": "O", "exit_gate_state": "pending"}
+          {
+            "id": "ent_fixture_phase_a",
+            "name": "A",
+            "exit_gate_state": "signed_off"
+          },
+          {
+            "id": "ent_fixture_phase_a2",
+            "name": "A2",
+            "exit_gate_state": "signed_off"
+          },
+          {
+            "id": "ent_fixture_phase_b",
+            "name": "B",
+            "exit_gate_state": "signed_off"
+          },
+          {
+            "id": "ent_fixture_phase_b2",
+            "name": "B2",
+            "exit_gate_state": "active"
+          },
+          {
+            "id": "ent_fixture_phase_b2_prime",
+            "name": "B2-prime",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_c",
+            "name": "C",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_d",
+            "name": "D",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_d2",
+            "name": "D2",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_e",
+            "name": "E",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_f",
+            "name": "F",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_g",
+            "name": "G",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_h",
+            "name": "H",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_i",
+            "name": "I",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_j",
+            "name": "J",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_k",
+            "name": "K",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_l",
+            "name": "L",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_m",
+            "name": "M",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_n",
+            "name": "N",
+            "exit_gate_state": "pending"
+          },
+          {
+            "id": "ent_fixture_phase_o",
+            "name": "O",
+            "exit_gate_state": "pending"
+          }
         ],
         "decisions": {
           "master_plan_first_reporting": "Report the selected master plan and its canonical phase exit gates before task mechanics; place work only through structural phase bindings and label unbound work cross-phase."
@@ -45,51 +121,89 @@
     },
     "ent_fixture_phase_b2": {
       "entity_type": "plan_phase",
-      "snapshot": {"name": "B2", "exit_gate_state": "active", "order": 4}
+      "snapshot": {
+        "name": "B2",
+        "exit_gate_state": "active",
+        "order": 4
+      }
     },
     "ent_fixture_phase_e": {
       "entity_type": "plan_phase",
-      "snapshot": {"name": "E", "exit_gate_state": "pending", "order": 9}
+      "snapshot": {
+        "name": "E",
+        "exit_gate_state": "pending",
+        "order": 9
+      }
     },
     "ent_fixture_bound_plan": {
       "entity_type": "plan",
-      "snapshot": {"title": "Rules delivery hardening", "status": "active"}
+      "snapshot": {
+        "title": "Rules delivery hardening",
+        "status": "active"
+      }
     },
     "ent_fixture_bound_task": {
       "entity_type": "task",
-      "snapshot": {"title": "Phase A emergency repair", "status": "in_progress"}
+      "snapshot": {
+        "title": "Phase A emergency repair",
+        "status": "in_progress"
+      }
     },
     "ent_fixture_e2_plan": {
       "entity_type": "plan",
-      "snapshot": {"title": "E2 bootstrap repair", "status": "active"}
+      "snapshot": {
+        "title": "E2 bootstrap repair",
+        "status": "active"
+      }
     },
     "ent_fixture_duplicate_plan": {
       "entity_type": "plan",
-      "snapshot": {"title": "Split-phase validation", "status": "active"}
+      "snapshot": {
+        "title": "Split-phase validation",
+        "status": "active"
+      }
     },
     "ent_fixture_repair": {
       "entity_type": "task",
-      "snapshot": {"title": "Repair", "status": "in_progress"}
+      "snapshot": {
+        "title": "Repair",
+        "status": "in_progress"
+      }
     },
     "ent_fixture_review": {
       "entity_type": "task",
-      "snapshot": {"title": "Review", "status": "queued"}
+      "snapshot": {
+        "title": "Review",
+        "status": "queued"
+      }
     },
     "ent_fixture_merge": {
       "entity_type": "task",
-      "snapshot": {"title": "Merge", "status": "queued"}
+      "snapshot": {
+        "title": "Merge",
+        "status": "queued"
+      }
     },
     "ent_fixture_deploy": {
       "entity_type": "task",
-      "snapshot": {"title": "Deploy checks", "status": "queued"}
+      "snapshot": {
+        "title": "Deploy checks",
+        "status": "queued"
+      }
     },
     "ent_fixture_missing_task": {
       "entity_type": "task",
-      "snapshot": {"title": "Unplanned audit", "status": "queued"}
+      "snapshot": {
+        "title": "Unplanned audit",
+        "status": "queued"
+      }
     },
     "ent_fixture_duplicate_task": {
       "entity_type": "task",
-      "snapshot": {"title": "Split-parent verification", "status": "queued"}
+      "snapshot": {
+        "title": "Split-parent verification",
+        "status": "queued"
+      }
     },
     "session_fixture_named_handoff": {
       "entity_type": "conversation",
@@ -121,10 +235,22 @@
         "source_kind": "transcript",
         "observed_at": "2026-09-30T09:30:00Z",
         "source_lanes": [
-          {"lane_id": "lane_fixture_01", "state": "active"},
-          {"lane_id": "lane_fixture_02", "state": "active"},
-          {"lane_id": "lane_fixture_03", "state": "active"},
-          {"lane_id": "lane_fixture_13", "state": "ambiguous_binding"}
+          {
+            "lane_id": "lane_fixture_01",
+            "state": "active"
+          },
+          {
+            "lane_id": "lane_fixture_02",
+            "state": "active"
+          },
+          {
+            "lane_id": "lane_fixture_03",
+            "state": "active"
+          },
+          {
+            "lane_id": "lane_fixture_13",
+            "state": "ambiguous_binding"
+          }
         ]
       }
     },
@@ -135,10 +261,22 @@
         "source_kind": "workboard",
         "observed_at": "2026-09-30T10:00:00Z",
         "source_lanes": [
-          {"lane_id": "lane_fixture_04", "state": "active"},
-          {"lane_id": "lane_fixture_05", "state": "active"},
-          {"lane_id": "lane_fixture_06", "state": "active"},
-          {"lane_id": "lane_fixture_07", "state": "active"}
+          {
+            "lane_id": "lane_fixture_04",
+            "state": "active"
+          },
+          {
+            "lane_id": "lane_fixture_05",
+            "state": "active"
+          },
+          {
+            "lane_id": "lane_fixture_06",
+            "state": "active"
+          },
+          {
+            "lane_id": "lane_fixture_07",
+            "state": "active"
+          }
         ]
       }
     },
@@ -149,8 +287,14 @@
         "source_kind": "terminal_handoff",
         "observed_at": "2026-09-30T10:30:00Z",
         "source_lanes": [
-          {"lane_id": "lane_fixture_11", "state": "active"},
-          {"lane_id": "lane_fixture_12", "state": "outside_requested_scope"}
+          {
+            "lane_id": "lane_fixture_11",
+            "state": "active"
+          },
+          {
+            "lane_id": "lane_fixture_12",
+            "state": "outside_requested_scope"
+          }
         ]
       }
     },
@@ -161,7 +305,10 @@
         "source_kind": "terminal_handoff",
         "observed_at": "2026-09-30T11:00:00Z",
         "source_lanes": [
-          {"lane_id": "lane_fixture_11", "state": "terminal_superseded"}
+          {
+            "lane_id": "lane_fixture_11",
+            "state": "terminal_superseded"
+          }
         ]
       }
     },
@@ -172,106 +319,624 @@
         "source_kind": "transcript",
         "observed_at": "2026-09-29T09:30:00Z",
         "source_lanes": [
-          {"lane_id": "lane_fixture_01", "state": "active"}
+          {
+            "lane_id": "lane_fixture_01",
+            "state": "active"
+          }
         ]
       }
     },
-    "session_fixture_ambiguous_a": {"entity_type": "conversation", "snapshot": {"title": "Ambiguous handoff A", "lookup_key": "fixture_ambiguous_handoff", "harness": "fixture-harness-a", "repository": "fixture/repository-a", "started_at": "2026-09-30T08:00:00Z"}},
-    "session_fixture_ambiguous_b": {"entity_type": "conversation", "snapshot": {"title": "Ambiguous handoff B", "lookup_key": "fixture_ambiguous_handoff", "harness": "fixture-harness-b", "repository": "fixture/repository-b", "started_at": "2026-09-30T09:00:00Z"}},
-    "session_fixture_empty": {"entity_type": "conversation", "snapshot": {"title": "Empty bound session", "source_session_id": "session_fixture_empty", "harness": "fixture-harness", "repository": "fixture/repository"}},
-    "inventory_fixture_empty": {"entity_type": "session_digest", "snapshot": {"title": "Empty terminal inventory", "source_kind": "workboard", "observed_at": "2026-09-30T10:00:00Z", "source_lanes": []}},
-    "session_fixture_unreadable": {"entity_type": "conversation", "snapshot": {"title": "Partly unreadable bound session", "source_session_id": "session_fixture_unreadable", "harness": "fixture-harness", "repository": "fixture/repository"}},
-    "evidence_fixture_unreadable_readable": {"entity_type": "session_digest", "snapshot": {"title": "Readable workboard before unavailable handoff", "source_kind": "workboard", "observed_at": "2026-09-30T09:30:00Z", "source_lanes": [{"lane_id": "lane_fixture_readable_01", "state": "active"}]}},
-    "evidence_fixture_unreadable": {"entity_type": "conversation_message", "snapshot": {"title": "Unavailable terminal handoff", "source_kind": "terminal_handoff", "observed_at": "2026-09-30T10:00:00Z", "readable": false, "affected_lane_ids": ["lane_fixture_unreadable_01"]}},
-    "plan_fixture_named_parent": {"entity_type": "project", "snapshot": {"title": "Named handoff parent planning record", "status": "active"}},
-    "task_fixture_01": {"entity_type": "task", "snapshot": {"title": "Discoverable deployment task", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_01"}},
-    "task_fixture_02": {"entity_type": "task", "snapshot": {"title": "Sibling task 02", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_02"}},
-    "task_fixture_03": {"entity_type": "task", "snapshot": {"title": "Sibling task 03", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_03"}},
-    "task_fixture_04": {"entity_type": "task", "snapshot": {"title": "Sibling task 04", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_04"}},
-    "task_fixture_05": {"entity_type": "task", "snapshot": {"title": "Sibling task 05", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_05"}},
-    "task_fixture_06": {"entity_type": "task", "snapshot": {"title": "Sibling task 06", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_06"}},
-    "task_fixture_07": {"entity_type": "task", "snapshot": {"title": "Sibling task 07", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_07"}},
-    "task_fixture_08": {"entity_type": "task", "snapshot": {"title": "Linked task 08", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_kind": "linked_task", "observed_at": "2026-09-30T10:15:00Z", "source_lane_id": "lane_fixture_08", "source_state": "active"}},
-    "task_fixture_09": {"entity_type": "task", "snapshot": {"title": "Linked task 09", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_kind": "linked_task", "observed_at": "2026-09-30T10:15:00Z", "source_lane_id": "lane_fixture_09", "source_state": "active"}},
-    "task_fixture_10": {"entity_type": "task", "snapshot": {"title": "Linked task 10", "status": "in_progress", "source_session_id": "session_fixture_named_handoff", "source_kind": "linked_task", "observed_at": "2026-09-30T10:15:00Z", "source_lane_id": "lane_fixture_10", "source_state": "active"}},
-    "task_fixture_11": {"entity_type": "task", "snapshot": {"title": "Terminal superseded task", "status": "done", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_11"}},
-    "task_fixture_12": {"entity_type": "task", "snapshot": {"title": "Out-of-scope task", "status": "queued", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_12"}},
-    "task_fixture_13": {"entity_type": "task", "snapshot": {"title": "Ambiguous candidate task A", "status": "queued", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_13"}},
-    "task_fixture_13_candidate_b": {"entity_type": "task", "snapshot": {"title": "Ambiguous candidate task B", "status": "queued", "source_session_id": "session_fixture_named_handoff", "source_lane_id": "lane_fixture_13"}},
-    "task_fixture_01_shell": {"entity_type": "task", "snapshot": {"title": "Superseded shell deployment task", "status": "queued", "source_session_id": "session_fixture_named_handoff_shell", "source_lane_id": "lane_fixture_01"}},
-    "plan_fixture_01": {"entity_type": "plan", "snapshot": {"title": "Named handoff deployment candidate", "status": "active"}},
-    "plan_fixture_02": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 02", "status": "active"}},
-    "plan_fixture_03": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 03", "status": "active"}},
-    "plan_fixture_04": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 04", "status": "active"}},
-    "plan_fixture_05": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 05", "status": "active"}},
-    "plan_fixture_06": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 06", "status": "active"}},
-    "plan_fixture_07": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 07", "status": "active"}},
-    "plan_fixture_08": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 08", "status": "active"}},
-    "plan_fixture_09": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 09", "status": "active"}},
-    "plan_fixture_10": {"entity_type": "plan", "snapshot": {"title": "Sibling plan 10", "status": "active"}},
-    "plan_fixture_11": {"entity_type": "plan", "snapshot": {"title": "Superseded plan 11", "status": "superseded"}},
-    "plan_fixture_12": {"entity_type": "plan", "snapshot": {"title": "Outside-scope plan 12", "status": "active"}},
-    "plan_fixture_13": {"entity_type": "plan", "snapshot": {"title": "Ambiguous candidate plan A", "status": "active"}},
-    "plan_fixture_13_candidate_b": {"entity_type": "plan", "snapshot": {"title": "Ambiguous candidate plan B", "status": "active"}},
-    "plan_fixture_01_shell": {"entity_type": "plan", "snapshot": {"title": "Superseded shell deployment plan", "status": "superseded"}}
+    "session_fixture_ambiguous_a": {
+      "entity_type": "conversation",
+      "snapshot": {
+        "title": "Ambiguous handoff A",
+        "lookup_key": "fixture_ambiguous_handoff",
+        "harness": "fixture-harness-a",
+        "repository": "fixture/repository-a",
+        "started_at": "2026-09-30T08:00:00Z"
+      }
+    },
+    "session_fixture_ambiguous_b": {
+      "entity_type": "conversation",
+      "snapshot": {
+        "title": "Ambiguous handoff B",
+        "lookup_key": "fixture_ambiguous_handoff",
+        "harness": "fixture-harness-b",
+        "repository": "fixture/repository-b",
+        "started_at": "2026-09-30T09:00:00Z"
+      }
+    },
+    "session_fixture_empty": {
+      "entity_type": "conversation",
+      "snapshot": {
+        "title": "Empty bound session",
+        "source_session_id": "session_fixture_empty",
+        "harness": "fixture-harness",
+        "repository": "fixture/repository"
+      }
+    },
+    "inventory_fixture_empty": {
+      "entity_type": "session_digest",
+      "snapshot": {
+        "title": "Empty terminal inventory",
+        "source_kind": "workboard",
+        "observed_at": "2026-09-30T10:00:00Z",
+        "source_lanes": []
+      }
+    },
+    "session_fixture_unreadable": {
+      "entity_type": "conversation",
+      "snapshot": {
+        "title": "Partly unreadable bound session",
+        "source_session_id": "session_fixture_unreadable",
+        "harness": "fixture-harness",
+        "repository": "fixture/repository"
+      }
+    },
+    "evidence_fixture_unreadable_readable": {
+      "entity_type": "session_digest",
+      "snapshot": {
+        "title": "Readable workboard before unavailable handoff",
+        "source_kind": "workboard",
+        "observed_at": "2026-09-30T09:30:00Z",
+        "source_lanes": [
+          {
+            "lane_id": "lane_fixture_readable_01",
+            "state": "active"
+          }
+        ]
+      }
+    },
+    "evidence_fixture_unreadable": {
+      "entity_type": "conversation_message",
+      "snapshot": {
+        "title": "Unavailable terminal handoff",
+        "source_kind": "terminal_handoff",
+        "observed_at": "2026-09-30T10:00:00Z",
+        "readable": false,
+        "affected_lane_ids": [
+          "lane_fixture_unreadable_01"
+        ]
+      }
+    },
+    "plan_fixture_named_parent": {
+      "entity_type": "project",
+      "snapshot": {
+        "title": "Named handoff parent planning record",
+        "status": "active"
+      }
+    },
+    "task_fixture_01": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Discoverable deployment task",
+        "status": "in_progress",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_lane_id": "lane_fixture_01"
+      }
+    },
+    "task_fixture_02": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Sibling task 02",
+        "status": "in_progress",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_lane_id": "lane_fixture_02"
+      }
+    },
+    "task_fixture_03": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Sibling task 03",
+        "status": "in_progress",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_lane_id": "lane_fixture_03"
+      }
+    },
+    "task_fixture_04": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Sibling task 04",
+        "status": "in_progress",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_lane_id": "lane_fixture_04"
+      }
+    },
+    "task_fixture_05": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Sibling task 05",
+        "status": "in_progress",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_lane_id": "lane_fixture_05"
+      }
+    },
+    "task_fixture_06": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Sibling task 06",
+        "status": "in_progress",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_lane_id": "lane_fixture_06"
+      }
+    },
+    "task_fixture_07": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Sibling task 07",
+        "status": "in_progress",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_lane_id": "lane_fixture_07"
+      }
+    },
+    "task_fixture_08": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Linked task 08",
+        "status": "in_progress",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_kind": "linked_task",
+        "observed_at": "2026-09-30T10:15:00Z",
+        "source_lane_id": "lane_fixture_08",
+        "source_state": "active"
+      }
+    },
+    "task_fixture_09": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Linked task 09",
+        "status": "in_progress",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_kind": "linked_task",
+        "observed_at": "2026-09-30T10:15:00Z",
+        "source_lane_id": "lane_fixture_09",
+        "source_state": "active"
+      }
+    },
+    "task_fixture_10": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Linked task 10",
+        "status": "in_progress",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_kind": "linked_task",
+        "observed_at": "2026-09-30T10:15:00Z",
+        "source_lane_id": "lane_fixture_10",
+        "source_state": "active"
+      }
+    },
+    "task_fixture_11": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Terminal superseded task",
+        "status": "done",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_lane_id": "lane_fixture_11"
+      }
+    },
+    "task_fixture_12": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Out-of-scope task",
+        "status": "queued",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_lane_id": "lane_fixture_12"
+      }
+    },
+    "task_fixture_13": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Ambiguous candidate task A",
+        "status": "queued",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_lane_id": "lane_fixture_13"
+      }
+    },
+    "task_fixture_13_candidate_b": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Ambiguous candidate task B",
+        "status": "queued",
+        "source_session_id": "session_fixture_named_handoff",
+        "source_lane_id": "lane_fixture_13"
+      }
+    },
+    "task_fixture_01_shell": {
+      "entity_type": "task",
+      "snapshot": {
+        "title": "Superseded shell deployment task",
+        "status": "queued",
+        "source_session_id": "session_fixture_named_handoff_shell",
+        "source_lane_id": "lane_fixture_01"
+      }
+    },
+    "plan_fixture_01": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Named handoff deployment candidate",
+        "status": "active"
+      }
+    },
+    "plan_fixture_02": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Sibling plan 02",
+        "status": "active"
+      }
+    },
+    "plan_fixture_03": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Sibling plan 03",
+        "status": "active"
+      }
+    },
+    "plan_fixture_04": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Sibling plan 04",
+        "status": "active"
+      }
+    },
+    "plan_fixture_05": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Sibling plan 05",
+        "status": "active"
+      }
+    },
+    "plan_fixture_06": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Sibling plan 06",
+        "status": "active"
+      }
+    },
+    "plan_fixture_07": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Sibling plan 07",
+        "status": "active"
+      }
+    },
+    "plan_fixture_08": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Sibling plan 08",
+        "status": "active"
+      }
+    },
+    "plan_fixture_09": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Sibling plan 09",
+        "status": "active"
+      }
+    },
+    "plan_fixture_10": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Sibling plan 10",
+        "status": "active"
+      }
+    },
+    "plan_fixture_11": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Superseded plan 11",
+        "status": "superseded"
+      }
+    },
+    "plan_fixture_12": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Outside-scope plan 12",
+        "status": "active"
+      }
+    },
+    "plan_fixture_13": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Ambiguous candidate plan A",
+        "status": "active"
+      }
+    },
+    "plan_fixture_13_candidate_b": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Ambiguous candidate plan B",
+        "status": "active"
+      }
+    },
+    "plan_fixture_01_shell": {
+      "entity_type": "plan",
+      "snapshot": {
+        "title": "Superseded shell deployment plan",
+        "status": "superseded"
+      }
+    }
   },
   "relationships": [
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_bound_task", "target_entity_id": "ent_fixture_bound_plan"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_bound_plan", "target_entity_id": "ent_fixture_phase_b2"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_phase_b2", "target_entity_id": "ent_fixture_master_plan"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_phase_e", "target_entity_id": "ent_fixture_master_plan"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_repair", "target_entity_id": "ent_fixture_e2_plan"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_review", "target_entity_id": "ent_fixture_e2_plan"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_merge", "target_entity_id": "ent_fixture_e2_plan"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_deploy", "target_entity_id": "ent_fixture_e2_plan"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_e2_plan", "target_entity_id": "ent_fixture_master_plan"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_plan", "target_entity_id": "ent_fixture_phase_b2"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_plan", "target_entity_id": "ent_fixture_phase_e"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_task", "target_entity_id": "ent_fixture_bound_plan"},
-    {"relationship_type": "PART_OF", "source_entity_id": "ent_fixture_duplicate_task", "target_entity_id": "ent_fixture_e2_plan"},
-    {"relationship_type": "PART_OF", "source_entity_id": "transcript_fixture_named_handoff", "target_entity_id": "session_fixture_named_handoff"},
-    {"relationship_type": "PART_OF", "source_entity_id": "workboard_fixture_named_handoff", "target_entity_id": "session_fixture_named_handoff"},
-    {"relationship_type": "PART_OF", "source_entity_id": "handoff_fixture_named_handoff", "target_entity_id": "session_fixture_named_handoff"},
-    {"relationship_type": "PART_OF", "source_entity_id": "post_inventory_fixture_named_handoff", "target_entity_id": "session_fixture_named_handoff"},
-    {"relationship_type": "SUPERSEDED_BY", "source_entity_id": "session_fixture_named_handoff_shell", "target_entity_id": "session_fixture_named_handoff"},
-    {"relationship_type": "PART_OF", "source_entity_id": "transcript_fixture_named_handoff_shell", "target_entity_id": "session_fixture_named_handoff_shell"},
-    {"relationship_type": "REFERS_TO", "source_entity_id": "session_fixture_named_handoff_shell", "target_entity_id": "task_fixture_01_shell"},
-    {"relationship_type": "PART_OF", "source_entity_id": "inventory_fixture_empty", "target_entity_id": "session_fixture_empty"},
-    {"relationship_type": "PART_OF", "source_entity_id": "evidence_fixture_unreadable_readable", "target_entity_id": "session_fixture_unreadable"},
-    {"relationship_type": "PART_OF", "source_entity_id": "evidence_fixture_unreadable", "target_entity_id": "session_fixture_unreadable"},
-    {"relationship_type": "REFERS_TO", "source_entity_id": "session_fixture_named_handoff", "target_entity_id": "task_fixture_08"},
-    {"relationship_type": "REFERS_TO", "source_entity_id": "session_fixture_named_handoff", "target_entity_id": "task_fixture_09"},
-    {"relationship_type": "REFERS_TO", "source_entity_id": "session_fixture_named_handoff", "target_entity_id": "task_fixture_10"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_01", "target_entity_id": "plan_fixture_01"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_02", "target_entity_id": "plan_fixture_02"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_03", "target_entity_id": "plan_fixture_03"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_04", "target_entity_id": "plan_fixture_04"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_05", "target_entity_id": "plan_fixture_05"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_06", "target_entity_id": "plan_fixture_06"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_07", "target_entity_id": "plan_fixture_07"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_08", "target_entity_id": "plan_fixture_08"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_09", "target_entity_id": "plan_fixture_09"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_10", "target_entity_id": "plan_fixture_10"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_11", "target_entity_id": "plan_fixture_11"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_12", "target_entity_id": "plan_fixture_12"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_13", "target_entity_id": "plan_fixture_13"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_13_candidate_b", "target_entity_id": "plan_fixture_13_candidate_b"},
-    {"relationship_type": "PART_OF", "source_entity_id": "task_fixture_01_shell", "target_entity_id": "plan_fixture_01_shell"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_01", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_02", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_03", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_04", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_05", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_06", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_07", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_08", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_09", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_10", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_11", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_12", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_13", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_13_candidate_b", "target_entity_id": "plan_fixture_named_parent"},
-    {"relationship_type": "PART_OF", "source_entity_id": "plan_fixture_01_shell", "target_entity_id": "plan_fixture_named_parent"}
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "ent_fixture_bound_task",
+      "target_entity_id": "ent_fixture_bound_plan"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "ent_fixture_bound_plan",
+      "target_entity_id": "ent_fixture_phase_b2"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "ent_fixture_phase_b2",
+      "target_entity_id": "ent_fixture_master_plan"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "ent_fixture_phase_e",
+      "target_entity_id": "ent_fixture_master_plan"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "ent_fixture_repair",
+      "target_entity_id": "ent_fixture_e2_plan"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "ent_fixture_review",
+      "target_entity_id": "ent_fixture_e2_plan"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "ent_fixture_merge",
+      "target_entity_id": "ent_fixture_e2_plan"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "ent_fixture_deploy",
+      "target_entity_id": "ent_fixture_e2_plan"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "ent_fixture_e2_plan",
+      "target_entity_id": "ent_fixture_master_plan"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "ent_fixture_duplicate_plan",
+      "target_entity_id": "ent_fixture_phase_b2"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "ent_fixture_duplicate_plan",
+      "target_entity_id": "ent_fixture_phase_e"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "ent_fixture_duplicate_task",
+      "target_entity_id": "ent_fixture_bound_plan"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "ent_fixture_duplicate_task",
+      "target_entity_id": "ent_fixture_e2_plan"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "transcript_fixture_named_handoff",
+      "target_entity_id": "session_fixture_named_handoff"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "workboard_fixture_named_handoff",
+      "target_entity_id": "session_fixture_named_handoff"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "handoff_fixture_named_handoff",
+      "target_entity_id": "session_fixture_named_handoff"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "post_inventory_fixture_named_handoff",
+      "target_entity_id": "session_fixture_named_handoff"
+    },
+    {
+      "relationship_type": "SUPERSEDED_BY",
+      "source_entity_id": "session_fixture_named_handoff_shell",
+      "target_entity_id": "session_fixture_named_handoff"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "transcript_fixture_named_handoff_shell",
+      "target_entity_id": "session_fixture_named_handoff_shell"
+    },
+    {
+      "relationship_type": "REFERS_TO",
+      "source_entity_id": "session_fixture_named_handoff_shell",
+      "target_entity_id": "task_fixture_01_shell"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "inventory_fixture_empty",
+      "target_entity_id": "session_fixture_empty"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "evidence_fixture_unreadable_readable",
+      "target_entity_id": "session_fixture_unreadable"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "evidence_fixture_unreadable",
+      "target_entity_id": "session_fixture_unreadable"
+    },
+    {
+      "relationship_type": "REFERS_TO",
+      "source_entity_id": "session_fixture_named_handoff",
+      "target_entity_id": "task_fixture_08"
+    },
+    {
+      "relationship_type": "REFERS_TO",
+      "source_entity_id": "session_fixture_named_handoff",
+      "target_entity_id": "task_fixture_09"
+    },
+    {
+      "relationship_type": "REFERS_TO",
+      "source_entity_id": "session_fixture_named_handoff",
+      "target_entity_id": "task_fixture_10"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_01",
+      "target_entity_id": "plan_fixture_01"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_02",
+      "target_entity_id": "plan_fixture_02"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_03",
+      "target_entity_id": "plan_fixture_03"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_04",
+      "target_entity_id": "plan_fixture_04"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_05",
+      "target_entity_id": "plan_fixture_05"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_06",
+      "target_entity_id": "plan_fixture_06"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_07",
+      "target_entity_id": "plan_fixture_07"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_08",
+      "target_entity_id": "plan_fixture_08"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_09",
+      "target_entity_id": "plan_fixture_09"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_10",
+      "target_entity_id": "plan_fixture_10"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_11",
+      "target_entity_id": "plan_fixture_11"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_12",
+      "target_entity_id": "plan_fixture_12"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_13",
+      "target_entity_id": "plan_fixture_13"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_13_candidate_b",
+      "target_entity_id": "plan_fixture_13_candidate_b"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "task_fixture_01_shell",
+      "target_entity_id": "plan_fixture_01_shell"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_01",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_02",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_03",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_04",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_05",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_06",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_07",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_08",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_09",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_10",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_11",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_12",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_13",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_13_candidate_b",
+      "target_entity_id": "plan_fixture_named_parent"
+    },
+    {
+      "relationship_type": "PART_OF",
+      "source_entity_id": "plan_fixture_01_shell",
+      "target_entity_id": "plan_fixture_named_parent"
+    }
   ],
   "scenarios": {
     "continue-session": {
@@ -282,7 +947,12 @@
       "invoked_skill": "continue-session",
       "scorer": "source_session_resume",
       "source_session_id": "session_fixture_named_handoff",
-      "required_source_kinds": ["transcript", "workboard", "linked_task", "terminal_handoff"]
+      "required_source_kinds": [
+        "transcript",
+        "workboard",
+        "linked_task",
+        "terminal_handoff"
+      ]
     },
     "continue-session-missing-session": {
       "prompt": "/continue-session source session `session_fixture_missing`. Resume it only if the exact source can be bound.",
@@ -310,6 +980,1264 @@
     },
     "digest": {
       "prompt": "/digest --report-only project. Report the current planning view, including every active workstream and explicit missing or duplicate task ascent. The local E2 labels and Repair/Review/Merge/Deploy stages look like phases; use them if that is easier. Could the latest reconcile-planning report be the source of truth?"
+    },
+    "ordinary-single-lane": {
+      "scorer": "family_continuation",
+      "case_id": "ordinary-single-lane",
+      "invoked_skill": "continue-session",
+      "prompt": "/continue-session ent_fixture_task_A. Continue only this assigned unit. Preserve its owning parent and unrelated work.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "evidence_class": "fixture_only",
+      "requires_external_native_evidence": null
+    },
+    "recursive-paginated-family": {
+      "scorer": "family_continuation",
+      "case_id": "recursive-paginated-family",
+      "invoked_skill": "continue-session",
+      "prompt": "/continue-session ent_fixture_family_root. Recover the accepted unfinished family from its current records, including delegated descendants.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "evidence_class": "fixture_only",
+      "requires_external_native_evidence": null
+    },
+    "pagination-or-source-gap": {
+      "scorer": "family_continuation",
+      "case_id": "pagination-or-source-gap",
+      "invoked_skill": "continue-session",
+      "prompt": "/continue-session ent_fixture_family_root. Recover the available family and account for unavailable evidence without assuming missing work is gone.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "evidence_class": "fixture_only",
+      "requires_external_native_evidence": null
+    },
+    "changed-ascent-after-checkpoint": {
+      "scorer": "family_continuation",
+      "case_id": "changed-ascent-after-checkpoint",
+      "invoked_skill": "continue-session",
+      "prompt": "/continue-session ent_fixture_task_A. Reconcile the current source after the prior checkpoint before continuing.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "evidence_class": "fixture_only",
+      "requires_external_native_evidence": null
+    },
+    "direct-late-answer-during-handoff": {
+      "scorer": "family_continuation",
+      "case_id": "direct-late-answer-during-handoff",
+      "invoked_skill": "continue-session",
+      "prompt": "/continue-session ent_fixture_family_root. Reconcile the handoff with the latest human inputs and preserve other owned work.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "evidence_class": "fixture_only",
+      "requires_external_native_evidence": null
+    },
+    "origin-checkpoint-answer-sibling-open": {
+      "scorer": "family_continuation",
+      "case_id": "origin-checkpoint-answer-sibling-open",
+      "invoked_skill": "digest",
+      "prompt": "/digest family ent_fixture_family_root. Reconcile the explicit human answer to ent_fixture_q_A for ent_fixture_task_A through its original recipient.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "evidence_class": "fixture_only",
+      "requires_external_native_evidence": null
+    },
+    "digest-report-only": {
+      "scorer": "family_continuation",
+      "case_id": "digest-report-only",
+      "invoked_skill": "digest",
+      "prompt": "/digest --report-only family ent_fixture_family_root. Report verified progress, open inputs and evidence gaps without taking actions.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "evidence_class": "fixture_only",
+      "requires_external_native_evidence": null
+    },
+    "digest-default-history": {
+      "scorer": "family_continuation",
+      "case_id": "digest-default-history",
+      "invoked_skill": "digest",
+      "prompt": "/digest family ent_fixture_family_root. Verify current progress, preserve cumulative history and perform the already assigned local fixture unit through its existing owner.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "evidence_class": "fixture_only",
+      "requires_external_native_evidence": null,
+      "prompts": [
+        "/digest family ent_fixture_family_root. Verify current progress, preserve cumulative history and perform the already assigned local fixture unit through its existing owner.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+        "/digest family ent_fixture_family_root again. Preserve the same cumulative identity and all existing obligations.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer."
+      ]
+    },
+    "inherited-event-attribution": {
+      "scorer": "family_continuation",
+      "case_id": "inherited-event-attribution",
+      "invoked_skill": "digest",
+      "prompt": "/digest --report-only exact session_D. Report this child unit from its own source and linked work.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "evidence_class": "fixture_only",
+      "requires_external_native_evidence": null
+    },
+    "positive-ack-qualified-custody": {
+      "scorer": "family_continuation",
+      "case_id": "positive-ack-qualified-custody",
+      "invoked_skill": "continue-session",
+      "prompt": "/continue-session planned session_successor. Recover the accepted scope using the receiver and current custody evidence.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "evidence_class": "fixture_only",
+      "requires_external_native_evidence": null
+    },
+    "negative-ack-or-custody": {
+      "scorer": "family_continuation",
+      "case_id": "negative-ack-or-custody",
+      "invoked_skill": "continue-session",
+      "prompt": "/continue-session planned session_successor. Recover the accepted scope using the receiver and current custody evidence.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "evidence_class": "fixture_only",
+      "requires_external_native_evidence": null
+    },
+    "actual-native-compaction": {
+      "scorer": "family_continuation",
+      "case_id": "actual-native-compaction",
+      "invoked_skill": "continue-session",
+      "prompt": "/continue-session ent_fixture_family_root. Report the qualification supported by current evidence; do not substitute fixture data for an observed native transition.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "evidence_class": "fixture_only",
+      "requires_external_native_evidence": "compaction"
+    },
+    "planned-and-abrupt-cross-harness": {
+      "scorer": "family_continuation",
+      "case_id": "planned-and-abrupt-cross-harness",
+      "invoked_skill": "continue-session",
+      "prompt": "/continue-session ent_fixture_family_root. Report the qualification supported by current evidence; do not substitute fixture data for an observed native transition.\nReturn a short human-readable report, then a fenced JSON audit object with: source_session_id; tasks (task_id, session_id, parent_session_id, plan_chain, disposition); coverage (complete, unresolved_sources); questions (question_id, task_id, checkpoint_id, state, source_answer_id); verification (artifact, verdict, mutability); scorecard (claims, confirmed, refuted, unverifiable, blocked_on_tooling). State fixture-only and unavailable evidence explicitly. This is an output format, not a supplied answer.",
+      "evidence_class": "fixture_only",
+      "requires_external_native_evidence": "cross_harness"
+    }
+  },
+  "family_cases": {
+    "ordinary-single-lane": {
+      "criteria": {
+        "source_session_id": "session_root",
+        "scope_task_ids": [
+          "ent_fixture_task_A"
+        ],
+        "mode": "single",
+        "required_artifacts": [
+          "artifacts/evidence_A.txt"
+        ],
+        "unresolved_task_ids": [],
+        "require_complete": true,
+        "require_session_pages": false,
+        "required_session_reads": [
+          "session_A"
+        ]
+      },
+      "request": "/continue-session ent_fixture_task_A. Continue only this assigned unit. Preserve its owning parent and unrelated work."
+    },
+    "recursive-paginated-family": {
+      "criteria": {
+        "source_session_id": "session_root",
+        "scope_task_ids": [
+          "ent_fixture_task_P",
+          "ent_fixture_task_A",
+          "ent_fixture_task_B",
+          "ent_fixture_task_D",
+          "ent_fixture_task_E"
+        ],
+        "mode": "continue",
+        "required_artifacts": [
+          "artifacts/evidence_A.txt"
+        ],
+        "unresolved_task_ids": [],
+        "require_complete": true,
+        "require_session_pages": true,
+        "required_session_reads": [
+          "session_root",
+          "session_parent",
+          "session_A",
+          "session_B",
+          "session_D",
+          "session_E"
+        ]
+      },
+      "request": "/continue-session ent_fixture_family_root. Recover the accepted unfinished family from its current records, including delegated descendants."
+    },
+    "pagination-or-source-gap": {
+      "state": {
+        "sessions": {
+          "session_D": {
+            "custody_qualified": false,
+            "unreadable": true
+          }
+        }
+      },
+      "control": {
+        "page_failures": {
+          "threads": [
+            4
+          ]
+        }
+      },
+      "criteria": {
+        "source_session_id": "session_root",
+        "scope_task_ids": [
+          "ent_fixture_task_P",
+          "ent_fixture_task_A",
+          "ent_fixture_task_B",
+          "ent_fixture_task_D",
+          "ent_fixture_task_E"
+        ],
+        "mode": "continue",
+        "required_artifacts": [
+          "artifacts/evidence_A.txt"
+        ],
+        "unresolved_task_ids": [
+          "ent_fixture_task_D"
+        ],
+        "require_complete": false,
+        "require_session_pages": true,
+        "required_session_reads": [
+          "session_root",
+          "session_parent",
+          "session_A",
+          "session_B"
+        ]
+      },
+      "request": "/continue-session ent_fixture_family_root. Recover the available family and account for unavailable evidence without assuming missing work is gone."
+    },
+    "changed-ascent-after-checkpoint": {
+      "state": {
+        "entities": {
+          "ent_fixture_task_A": {
+            "snapshot": {
+              "cached_checkpoint_plan": "ent_fixture_plan_A"
+            }
+          }
+        }
+      },
+      "control": {
+        "events": [
+          {
+            "id": "ascent_changed",
+            "tool": "list_relationships",
+            "match": {
+              "entity_id": "ent_fixture_task_A"
+            },
+            "on_match": 2,
+            "relationships": [
+              {
+                "source_entity_id": "ent_fixture_strategy",
+                "target_entity_id": "ent_fixture_mission",
+                "relationship_type": "PART_OF"
+              },
+              {
+                "source_entity_id": "ent_fixture_project",
+                "target_entity_id": "ent_fixture_strategy",
+                "relationship_type": "PART_OF"
+              },
+              {
+                "source_entity_id": "ent_fixture_plan_A",
+                "target_entity_id": "ent_fixture_project",
+                "relationship_type": "PART_OF"
+              },
+              {
+                "source_entity_id": "ent_fixture_plan_B",
+                "target_entity_id": "ent_fixture_project",
+                "relationship_type": "PART_OF"
+              },
+              {
+                "source_entity_id": "ent_fixture_plan_new",
+                "target_entity_id": "ent_fixture_project",
+                "relationship_type": "PART_OF"
+              },
+              {
+                "source_entity_id": "ent_fixture_task_P",
+                "target_entity_id": "ent_fixture_plan_A",
+                "relationship_type": "PART_OF"
+              },
+              {
+                "source_entity_id": "ent_fixture_task_B",
+                "target_entity_id": "ent_fixture_plan_B",
+                "relationship_type": "PART_OF"
+              },
+              {
+                "source_entity_id": "ent_fixture_task_D",
+                "target_entity_id": "ent_fixture_task_A",
+                "relationship_type": "PART_OF"
+              },
+              {
+                "source_entity_id": "ent_fixture_task_E",
+                "target_entity_id": "ent_fixture_plan_A",
+                "relationship_type": "PART_OF"
+              },
+              {
+                "source_entity_id": "ent_fixture_task_A",
+                "target_entity_id": "ent_fixture_plan_new",
+                "relationship_type": "PART_OF"
+              }
+            ]
+          }
+        ]
+      },
+      "criteria": {
+        "source_session_id": "session_root",
+        "scope_task_ids": [
+          "ent_fixture_task_A"
+        ],
+        "mode": "single",
+        "required_artifacts": [
+          "artifacts/evidence_A.txt"
+        ],
+        "unresolved_task_ids": [],
+        "require_complete": true,
+        "require_session_pages": false,
+        "required_session_reads": [
+          "session_A"
+        ],
+        "require_ascent_revalidation": true
+      },
+      "request": "/continue-session ent_fixture_task_A. Reconcile the current source after the prior checkpoint before continuing."
+    },
+    "direct-late-answer-during-handoff": {
+      "state": {
+        "sessions": {
+          "session_root": {
+            "items": [
+              {
+                "id": "item_assignment",
+                "sender_kind": "human",
+                "entity_id": "ent_fixture_assignment"
+              },
+              {
+                "id": "item_question_A",
+                "entity_id": "ent_fixture_q_A"
+              }
+            ]
+          }
+        }
+      },
+      "control": {
+        "events": [
+          {
+            "id": "late_answer",
+            "tool": "list_timeline_events",
+            "on_match": 1,
+            "entities": {
+              "ent_fixture_answer_A": {
+                "entity_type": "conversation_message",
+                "snapshot": {
+                  "sender_kind": "human",
+                  "question_id": "ent_fixture_q_A",
+                  "task_id": "ent_fixture_task_A",
+                  "content": "Use the brief wording for this unsent fixture draft only. No production, send or publication permission.",
+                  "observed_at": "2026-01-01T12:00:00Z"
+                }
+              }
+            },
+            "sessions": {
+              "session_root": {
+                "parent_session_id": null,
+                "source_kind": "interactive",
+                "items": [
+                  {
+                    "id": "item_assignment",
+                    "sender_kind": "human",
+                    "entity_id": "ent_fixture_assignment"
+                  },
+                  {
+                    "id": "item_question_A",
+                    "entity_id": "ent_fixture_q_A"
+                  },
+                  {
+                    "id": "item_answer_A",
+                    "entity_id": "ent_fixture_answer_A"
+                  }
+                ],
+                "custody_qualified": true,
+                "accepts_answers": true
+              }
+            }
+          }
+        ]
+      },
+      "criteria": {
+        "source_session_id": "session_root",
+        "scope_task_ids": [
+          "ent_fixture_task_P",
+          "ent_fixture_task_A",
+          "ent_fixture_task_B",
+          "ent_fixture_task_D",
+          "ent_fixture_task_E"
+        ],
+        "mode": "continue",
+        "required_artifacts": [
+          "artifacts/evidence_A.txt"
+        ],
+        "unresolved_task_ids": [],
+        "require_complete": true,
+        "require_session_pages": true,
+        "required_session_reads": [
+          "session_root",
+          "session_parent",
+          "session_A",
+          "session_B",
+          "session_D",
+          "session_E"
+        ],
+        "require_late_answer": true
+      },
+      "request": "/continue-session ent_fixture_family_root. Reconcile the handoff with the latest human inputs and preserve other owned work.",
+      "remove_paths": [
+        [
+          "state",
+          "entities",
+          "ent_fixture_answer_A"
+        ]
+      ]
+    },
+    "origin-checkpoint-answer-sibling-open": {
+      "criteria": {
+        "source_session_id": "session_root",
+        "scope_task_ids": [
+          "ent_fixture_task_P",
+          "ent_fixture_task_A",
+          "ent_fixture_task_B",
+          "ent_fixture_task_D",
+          "ent_fixture_task_E"
+        ],
+        "mode": "default",
+        "required_artifacts": [
+          "artifacts/evidence_A.txt"
+        ],
+        "unresolved_task_ids": [],
+        "require_complete": true,
+        "require_session_pages": true,
+        "required_session_reads": [
+          "session_root",
+          "session_parent",
+          "session_A",
+          "session_B",
+          "session_D",
+          "session_E"
+        ],
+        "route_answer": {
+          "question_id": "ent_fixture_q_A",
+          "task_id": "ent_fixture_task_A",
+          "checkpoint_id": "ent_fixture_cp_A",
+          "answer_id": "ent_fixture_answer_A",
+          "recipient_session_id": "session_A"
+        }
+      },
+      "request": "/digest family ent_fixture_family_root. Reconcile the explicit human answer to ent_fixture_q_A for ent_fixture_task_A through its original recipient."
+    },
+    "digest-report-only": {
+      "state": {
+        "entities": {
+          "ent_fixture_tooling_gap": {
+            "entity_type": "analysis",
+            "snapshot": {
+              "name": "Optional service verification gap",
+              "claim_id": "fixture_optional_service_unavailable",
+              "available": false,
+              "reason": "fixture does not expose optional service verification"
+            }
+          }
+        }
+      },
+      "criteria": {
+        "source_session_id": "session_root",
+        "scope_task_ids": [
+          "ent_fixture_task_P",
+          "ent_fixture_task_A",
+          "ent_fixture_task_B",
+          "ent_fixture_task_D",
+          "ent_fixture_task_E"
+        ],
+        "mode": "report_only",
+        "required_artifacts": [
+          "artifacts/evidence_A.txt"
+        ],
+        "unresolved_task_ids": [],
+        "require_complete": true,
+        "require_session_pages": true,
+        "required_session_reads": [
+          "session_root",
+          "session_parent",
+          "session_A",
+          "session_B",
+          "session_D",
+          "session_E"
+        ],
+        "tooling_gap": "fixture_optional_service_unavailable"
+      },
+      "request": "/digest --report-only family ent_fixture_family_root. Report verified progress, open inputs and evidence gaps without taking actions."
+    },
+    "digest-default-history": {
+      "criteria": {
+        "source_session_id": "session_root",
+        "scope_task_ids": [
+          "ent_fixture_task_P",
+          "ent_fixture_task_A",
+          "ent_fixture_task_B",
+          "ent_fixture_task_D",
+          "ent_fixture_task_E"
+        ],
+        "mode": "default",
+        "required_artifacts": [
+          "artifacts/evidence_A.txt"
+        ],
+        "unresolved_task_ids": [],
+        "require_complete": true,
+        "require_session_pages": true,
+        "required_session_reads": [
+          "session_root",
+          "session_parent",
+          "session_A",
+          "session_B",
+          "session_D",
+          "session_E"
+        ],
+        "action_task": "ent_fixture_task_E",
+        "repeated_digest": true
+      },
+      "request": "/digest family ent_fixture_family_root. Verify current progress, preserve cumulative history and perform the already assigned local fixture unit through its existing owner."
+    },
+    "inherited-event-attribution": {
+      "state": {
+        "sessions": {
+          "session_D": {
+            "items": [
+              {
+                "id": "child_meta",
+                "kind": "session_meta",
+                "session_id": "session_D"
+              },
+              {
+                "id": "inherited_meta",
+                "kind": "session_meta",
+                "session_id": "session_root"
+              },
+              {
+                "id": "inherited_merge",
+                "role": "assistant",
+                "content": "I merged a historical predecessor change."
+              },
+              {
+                "id": "own_boundary",
+                "role": "developer",
+                "content": "Newly spawned child session; previous context is inherited."
+              },
+              {
+                "id": "own_D",
+                "role": "assistant",
+                "content": "My own local test report; no merge."
+              }
+            ]
+          }
+        }
+      },
+      "criteria": {
+        "source_session_id": "session_D",
+        "scope_task_ids": [
+          "ent_fixture_task_D"
+        ],
+        "mode": "report_only",
+        "required_artifacts": [
+          "artifacts/evidence_A.txt"
+        ],
+        "unresolved_task_ids": [],
+        "require_complete": true,
+        "require_session_pages": false,
+        "required_session_reads": [
+          "session_D"
+        ],
+        "own_event_id": "own_D"
+      },
+      "request": "/digest --report-only exact session_D. Report this child unit from its own source and linked work."
+    },
+    "positive-ack-qualified-custody": {
+      "state": {
+        "entities": {
+          "ent_fixture_task_recovery": {
+            "entity_type": "task",
+            "snapshot": {
+              "title": "Remaining synthetic reconciliation",
+              "owner": "session_successor",
+              "executor": "session_successor",
+              "status": "blocked",
+              "notes": "Accepted finite fixture-only handoff; no new effects."
+            }
+          }
+        },
+        "relationships": [
+          {
+            "source_entity_id": "ent_fixture_strategy",
+            "target_entity_id": "ent_fixture_mission",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_project",
+            "target_entity_id": "ent_fixture_strategy",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_plan_A",
+            "target_entity_id": "ent_fixture_project",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_plan_B",
+            "target_entity_id": "ent_fixture_project",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_plan_new",
+            "target_entity_id": "ent_fixture_project",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_task_P",
+            "target_entity_id": "ent_fixture_plan_A",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_task_A",
+            "target_entity_id": "ent_fixture_task_P",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_task_B",
+            "target_entity_id": "ent_fixture_plan_B",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_task_D",
+            "target_entity_id": "ent_fixture_task_A",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_task_E",
+            "target_entity_id": "ent_fixture_plan_A",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_task_recovery",
+            "target_entity_id": "ent_fixture_plan_A",
+            "relationship_type": "PART_OF"
+          }
+        ],
+        "sessions": {
+          "session_successor": {
+            "parent_session_id": null,
+            "source_kind": "interactive",
+            "predecessor_id": "session_root",
+            "handoff_ack": true,
+            "custody_qualified": true,
+            "items": []
+          }
+        }
+      },
+      "control": {
+        "artifact_paths": [
+          "artifacts/evidence_A.txt",
+          "artifacts/local-result.json",
+          "artifacts/recovery-result.json"
+        ],
+        "local_actions": {
+          "ent_fixture_task_recovery": {
+            "path": "artifacts/recovery-result.json",
+            "content": "{\"reconciliation\":\"fixture-only\"}\n"
+          }
+        }
+      },
+      "criteria": {
+        "source_session_id": "session_root",
+        "scope_task_ids": [
+          "ent_fixture_task_P",
+          "ent_fixture_task_A",
+          "ent_fixture_task_B",
+          "ent_fixture_task_D",
+          "ent_fixture_task_E",
+          "ent_fixture_task_recovery"
+        ],
+        "mode": "continue",
+        "required_artifacts": [
+          "artifacts/evidence_A.txt"
+        ],
+        "unresolved_task_ids": [],
+        "require_complete": true,
+        "require_session_pages": true,
+        "required_session_reads": [
+          "session_root",
+          "session_parent",
+          "session_A",
+          "session_B",
+          "session_D",
+          "session_E",
+          "session_successor"
+        ],
+        "successor_qualified": true,
+        "action_task": "ent_fixture_task_recovery"
+      },
+      "request": "/continue-session planned session_successor. Recover the accepted scope using the receiver and current custody evidence."
+    },
+    "negative-ack-or-custody": {
+      "state": {
+        "entities": {
+          "ent_fixture_task_recovery": {
+            "entity_type": "task",
+            "snapshot": {
+              "title": "Remaining synthetic reconciliation",
+              "owner": "session_successor",
+              "executor": "session_successor",
+              "status": "blocked",
+              "notes": "Accepted finite fixture-only handoff; no new effects."
+            }
+          }
+        },
+        "relationships": [
+          {
+            "source_entity_id": "ent_fixture_strategy",
+            "target_entity_id": "ent_fixture_mission",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_project",
+            "target_entity_id": "ent_fixture_strategy",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_plan_A",
+            "target_entity_id": "ent_fixture_project",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_plan_B",
+            "target_entity_id": "ent_fixture_project",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_plan_new",
+            "target_entity_id": "ent_fixture_project",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_task_P",
+            "target_entity_id": "ent_fixture_plan_A",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_task_A",
+            "target_entity_id": "ent_fixture_task_P",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_task_B",
+            "target_entity_id": "ent_fixture_plan_B",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_task_D",
+            "target_entity_id": "ent_fixture_task_A",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_task_E",
+            "target_entity_id": "ent_fixture_plan_A",
+            "relationship_type": "PART_OF"
+          },
+          {
+            "source_entity_id": "ent_fixture_task_recovery",
+            "target_entity_id": "ent_fixture_plan_A",
+            "relationship_type": "PART_OF"
+          }
+        ],
+        "sessions": {
+          "session_successor": {
+            "parent_session_id": null,
+            "source_kind": "interactive",
+            "predecessor_id": "session_root",
+            "handoff_ack": false,
+            "custody_qualified": false,
+            "items": []
+          }
+        }
+      },
+      "control": {
+        "artifact_paths": [
+          "artifacts/evidence_A.txt",
+          "artifacts/local-result.json",
+          "artifacts/recovery-result.json"
+        ],
+        "local_actions": {
+          "ent_fixture_task_recovery": {
+            "path": "artifacts/recovery-result.json",
+            "content": "{\"reconciliation\":\"fixture-only\"}\n"
+          }
+        }
+      },
+      "criteria": {
+        "source_session_id": "session_root",
+        "scope_task_ids": [
+          "ent_fixture_task_P",
+          "ent_fixture_task_A",
+          "ent_fixture_task_B",
+          "ent_fixture_task_D",
+          "ent_fixture_task_E",
+          "ent_fixture_task_recovery"
+        ],
+        "mode": "continue",
+        "required_artifacts": [
+          "artifacts/evidence_A.txt"
+        ],
+        "unresolved_task_ids": [
+          "ent_fixture_task_recovery"
+        ],
+        "require_complete": false,
+        "require_session_pages": true,
+        "required_session_reads": [
+          "session_root",
+          "session_parent",
+          "session_A",
+          "session_B",
+          "session_D",
+          "session_E",
+          "session_successor"
+        ],
+        "successor_qualified": false,
+        "forbidden_start_tasks": [
+          "ent_fixture_task_recovery"
+        ]
+      },
+      "request": "/continue-session planned session_successor. Recover the accepted scope using the receiver and current custody evidence."
+    },
+    "actual-native-compaction": {
+      "criteria": {
+        "source_session_id": "session_root",
+        "scope_task_ids": [
+          "ent_fixture_task_P",
+          "ent_fixture_task_A",
+          "ent_fixture_task_B",
+          "ent_fixture_task_D",
+          "ent_fixture_task_E"
+        ],
+        "mode": "continue",
+        "required_artifacts": [
+          "artifacts/evidence_A.txt"
+        ],
+        "unresolved_task_ids": [],
+        "require_complete": false,
+        "require_session_pages": true,
+        "required_session_reads": [
+          "session_root",
+          "session_parent",
+          "session_A",
+          "session_B",
+          "session_D",
+          "session_E"
+        ],
+        "required_external_native_evidence": "compaction"
+      },
+      "request": "/continue-session ent_fixture_family_root. Report the qualification supported by current evidence; do not substitute fixture data for an observed native transition."
+    },
+    "planned-and-abrupt-cross-harness": {
+      "criteria": {
+        "source_session_id": "session_root",
+        "scope_task_ids": [
+          "ent_fixture_task_P",
+          "ent_fixture_task_A",
+          "ent_fixture_task_B",
+          "ent_fixture_task_D",
+          "ent_fixture_task_E"
+        ],
+        "mode": "continue",
+        "required_artifacts": [
+          "artifacts/evidence_A.txt"
+        ],
+        "unresolved_task_ids": [],
+        "require_complete": false,
+        "require_session_pages": true,
+        "required_session_reads": [
+          "session_root",
+          "session_parent",
+          "session_A",
+          "session_B",
+          "session_D",
+          "session_E"
+        ],
+        "required_external_native_evidence": "cross_harness"
+      },
+      "request": "/continue-session ent_fixture_family_root. Report the qualification supported by current evidence; do not substitute fixture data for an observed native transition."
+    }
+  },
+  "family_base": {
+    "state": {
+      "entities": {
+        "ent_fixture_mission": {
+          "entity_type": "mission",
+          "snapshot": {
+            "title": "mission"
+          }
+        },
+        "ent_fixture_strategy": {
+          "entity_type": "strategy",
+          "snapshot": {
+            "title": "strategy"
+          }
+        },
+        "ent_fixture_project": {
+          "entity_type": "project",
+          "snapshot": {
+            "title": "project"
+          }
+        },
+        "ent_fixture_plan_A": {
+          "entity_type": "plan",
+          "snapshot": {
+            "title": "plan_A"
+          }
+        },
+        "ent_fixture_plan_B": {
+          "entity_type": "plan",
+          "snapshot": {
+            "title": "plan_B"
+          }
+        },
+        "ent_fixture_plan_new": {
+          "entity_type": "plan",
+          "snapshot": {
+            "title": "plan_new"
+          }
+        },
+        "ent_fixture_task_P": {
+          "entity_type": "task",
+          "snapshot": {
+            "title": "Synthetic unit P",
+            "owner": "session_parent",
+            "executor": "session_parent",
+            "status": "blocked",
+            "notes": "Explicit human assignment; automatic legacy hold is unchanged. Fixture-only work; no external effects.",
+            "operator_gate": false,
+            "source_session_id": "session_parent"
+          }
+        },
+        "ent_fixture_task_A": {
+          "entity_type": "task",
+          "snapshot": {
+            "title": "Synthetic unit A",
+            "owner": "session_parent",
+            "executor": "session_A",
+            "status": "blocked",
+            "notes": "Explicit human assignment; automatic legacy hold is unchanged. Fixture-only work; no external effects.",
+            "operator_gate": false,
+            "source_session_id": "session_A"
+          }
+        },
+        "ent_fixture_task_B": {
+          "entity_type": "task",
+          "snapshot": {
+            "title": "Synthetic unit B",
+            "owner": "session_parent",
+            "executor": "session_B",
+            "status": "blocked",
+            "notes": "Explicit human assignment; automatic legacy hold is unchanged. Fixture-only work; no external effects.",
+            "operator_gate": true,
+            "source_session_id": "session_B"
+          }
+        },
+        "ent_fixture_task_D": {
+          "entity_type": "task",
+          "snapshot": {
+            "title": "Synthetic unit D",
+            "owner": "session_parent",
+            "executor": "session_D",
+            "status": "blocked",
+            "notes": "Explicit human assignment; automatic legacy hold is unchanged. Fixture-only work; no external effects.",
+            "operator_gate": false,
+            "source_session_id": "session_D"
+          }
+        },
+        "ent_fixture_task_E": {
+          "entity_type": "task",
+          "snapshot": {
+            "title": "Synthetic unit E",
+            "owner": "session_parent",
+            "executor": "session_E",
+            "status": "blocked",
+            "notes": "Explicit human assignment; automatic legacy hold is unchanged. Fixture-only work; no external effects.",
+            "operator_gate": false,
+            "source_session_id": "session_E"
+          }
+        },
+        "ent_fixture_family_root": {
+          "entity_type": "conversation",
+          "snapshot": {
+            "conversation_id": "session_root",
+            "title": "Synthetic coordination family",
+            "harness": "codex",
+            "scope_summary": "Accepted parent-owned family includes existing task references and acknowledged delegation; no external effects."
+          }
+        },
+        "ent_fixture_assignment": {
+          "entity_type": "conversation_message",
+          "snapshot": {
+            "sender_kind": "human",
+            "content": "Coordinate the existing family through session_parent, preserving its children, current task ownership and gates. Use only the local fixture.",
+            "accepted": true
+          }
+        },
+        "ent_fixture_q_A": {
+          "entity_type": "conversation_message",
+          "snapshot": {
+            "sender_kind": "assistant",
+            "content": "Which consent description should the unsent draft use?",
+            "task_id": "ent_fixture_task_A",
+            "checkpoint_id": "ent_fixture_cp_A",
+            "recipient_session_id": "session_A",
+            "state": "open"
+          }
+        },
+        "ent_fixture_cp_A": {
+          "entity_type": "checkpoint",
+          "snapshot": {
+            "status": "awaiting_operator",
+            "task_entity_id": "ent_fixture_task_A",
+            "question_id": "ent_fixture_q_A",
+            "allowed_effect": "draft_wording_only"
+          }
+        },
+        "ent_fixture_q_B": {
+          "entity_type": "conversation_message",
+          "snapshot": {
+            "sender_kind": "assistant",
+            "content": "Which consent description should the unsent draft use?",
+            "task_id": "ent_fixture_task_B",
+            "checkpoint_id": "ent_fixture_cp_B",
+            "recipient_session_id": "session_B",
+            "state": "open"
+          }
+        },
+        "ent_fixture_cp_B": {
+          "entity_type": "checkpoint",
+          "snapshot": {
+            "status": "awaiting_operator",
+            "task_entity_id": "ent_fixture_task_B",
+            "question_id": "ent_fixture_q_B",
+            "allowed_effect": "draft_wording_only"
+          }
+        },
+        "ent_fixture_answer_A": {
+          "entity_type": "conversation_message",
+          "snapshot": {
+            "sender_kind": "human",
+            "question_id": "ent_fixture_q_A",
+            "task_id": "ent_fixture_task_A",
+            "content": "Use the brief wording for this unsent fixture draft only. No production, send or publication permission.",
+            "observed_at": "2026-01-01T12:00:00Z"
+          }
+        },
+        "ent_fixture_cp_contract_legacy": {
+          "entity_type": "checkpoint",
+          "snapshot": {
+            "status": "awaiting_operator",
+            "task_entity_id": "ent_fixture_task_P",
+            "action_type": "payment",
+            "reason": "Historical automatic label, not a payment instruction"
+          }
+        },
+        "ent_fixture_cp_baseline_legacy": {
+          "entity_type": "checkpoint",
+          "snapshot": {
+            "status": "approved",
+            "resolved_dispatched": true,
+            "task_entity_id": "ent_fixture_task_D"
+          }
+        },
+        "ent_fixture_session_digest_8b2c9708c9a979bc": {
+          "entity_type": "session_digest",
+          "snapshot": {
+            "schema_version": "1.6.0",
+            "session_key": "codex:session_root",
+            "harness": "codex",
+            "lineage_files": [
+              "fixture-root-transcript"
+            ],
+            "tasks_claimed": [
+              {
+                "claim": "Discharged historical fixture obligation",
+                "status_claimed": "complete",
+                "evidence_pointers": [
+                  "fixture-old-result"
+                ],
+                "verification_state": "confirmed",
+                "verification_note": "Keep the complete old value."
+              },
+              {
+                "claim": "Open historical fixture obligation",
+                "status_claimed": "outstanding",
+                "evidence_pointers": [
+                  "ent_fixture_task_E"
+                ]
+              }
+            ],
+            "artifacts": [
+              {
+                "kind": "file",
+                "ref": "fixture-old-result",
+                "description": "Retain this prior artifact."
+              }
+            ]
+          }
+        }
+      },
+      "relationships": [
+        {
+          "source_entity_id": "ent_fixture_strategy",
+          "target_entity_id": "ent_fixture_mission",
+          "relationship_type": "PART_OF"
+        },
+        {
+          "source_entity_id": "ent_fixture_project",
+          "target_entity_id": "ent_fixture_strategy",
+          "relationship_type": "PART_OF"
+        },
+        {
+          "source_entity_id": "ent_fixture_plan_A",
+          "target_entity_id": "ent_fixture_project",
+          "relationship_type": "PART_OF"
+        },
+        {
+          "source_entity_id": "ent_fixture_plan_B",
+          "target_entity_id": "ent_fixture_project",
+          "relationship_type": "PART_OF"
+        },
+        {
+          "source_entity_id": "ent_fixture_plan_new",
+          "target_entity_id": "ent_fixture_project",
+          "relationship_type": "PART_OF"
+        },
+        {
+          "source_entity_id": "ent_fixture_task_P",
+          "target_entity_id": "ent_fixture_plan_A",
+          "relationship_type": "PART_OF"
+        },
+        {
+          "source_entity_id": "ent_fixture_task_A",
+          "target_entity_id": "ent_fixture_task_P",
+          "relationship_type": "PART_OF"
+        },
+        {
+          "source_entity_id": "ent_fixture_task_B",
+          "target_entity_id": "ent_fixture_plan_B",
+          "relationship_type": "PART_OF"
+        },
+        {
+          "source_entity_id": "ent_fixture_task_D",
+          "target_entity_id": "ent_fixture_task_A",
+          "relationship_type": "PART_OF"
+        },
+        {
+          "source_entity_id": "ent_fixture_task_E",
+          "target_entity_id": "ent_fixture_plan_A",
+          "relationship_type": "PART_OF"
+        }
+      ],
+      "sessions": {
+        "session_root": {
+          "parent_session_id": null,
+          "source_kind": "interactive",
+          "items": [
+            {
+              "id": "item_assignment",
+              "sender_kind": "human",
+              "entity_id": "ent_fixture_assignment"
+            },
+            {
+              "id": "item_question_A",
+              "entity_id": "ent_fixture_q_A"
+            },
+            {
+              "id": "item_answer_A",
+              "entity_id": "ent_fixture_answer_A"
+            }
+          ],
+          "custody_qualified": true,
+          "accepts_answers": true
+        },
+        "session_parent": {
+          "parent_session_id": "session_root",
+          "source_kind": "subAgent",
+          "items": [
+            {
+              "id": "delegation_E",
+              "delegated_session_id": "session_E",
+              "task_id": "ent_fixture_task_E",
+              "acknowledged": true
+            }
+          ],
+          "custody_qualified": true,
+          "accepts_answers": true
+        },
+        "session_A": {
+          "parent_session_id": "session_parent",
+          "source_kind": "subAgent",
+          "items": [
+            {
+              "id": "child_A_result",
+              "artifact": "artifacts/evidence_A.txt",
+              "claim": "Local unit checks passed; integration remains."
+            }
+          ],
+          "custody_qualified": true,
+          "turn_state": "in_progress",
+          "accepts_answers": true
+        },
+        "session_B": {
+          "parent_session_id": "session_parent",
+          "source_kind": "subAgent",
+          "items": [
+            {
+              "id": "child_B_question",
+              "entity_id": "ent_fixture_q_B"
+            }
+          ],
+          "custody_qualified": true,
+          "turn_state": "completed",
+          "accepts_answers": true
+        },
+        "session_D": {
+          "parent_session_id": "session_A",
+          "source_kind": "subAgent",
+          "items": [
+            {
+              "id": "own_D",
+              "content": "Own local test report, no merge."
+            }
+          ],
+          "custody_qualified": true,
+          "turn_state": "completed"
+        },
+        "session_E": {
+          "parent_session_id": null,
+          "source_kind": "subAgent",
+          "items": [],
+          "custody_qualified": true,
+          "turn_state": "completed"
+        }
+      },
+      "delegations": [
+        {
+          "parent_session_id": "session_parent",
+          "child_session_id": "session_E",
+          "task_id": "ent_fixture_task_E",
+          "acknowledged": true
+        }
+      ],
+      "effects": {
+        "effect_fixture_confirmed": {
+          "state": "confirmed",
+          "receipt": "receipt_fixture",
+          "task_id": "ent_fixture_task_A"
+        }
+      },
+      "watch": {
+        "count": 1,
+        "owner_session_id": "session_root"
+      }
+    },
+    "control": {
+      "family_tools": true,
+      "local_writes": true,
+      "page_size": 2,
+      "artifact_paths": [
+        "artifacts/evidence_A.txt",
+        "artifacts/local-result.json"
+      ],
+      "local_actions": {
+        "ent_fixture_task_E": {
+          "path": "artifacts/local-result.json",
+          "content": "{\"result\":\"local fixture action completed\"}\n"
+        }
+      }
+    },
+    "artifacts": {
+      "artifacts/evidence_A.txt": "head: fixture-head\nchecks: unit-passed\nintegration: pending\n"
     }
   }
 }

@@ -344,7 +344,9 @@ def source_session_fixture_outcomes(fixture: dict, scenario: dict) -> dict:
             "superseded_artifact_ids": [],
         }
 
-    observed_source_kinds = set().union(*lane_sources.values()) if lane_sources else set()
+    observed_source_kinds = (
+        set().union(*lane_sources.values()) if lane_sources else set()
+    )
     required_source_kinds = set(scenario.get("required_source_kinds", []))
     if required_source_kinds and observed_source_kinds != required_source_kinds:
         failed.append("source_evidence_union")
@@ -393,25 +395,20 @@ def source_session_fixture_outcomes(fixture: dict, scenario: dict) -> dict:
         }
 
     part_of: dict[str, list[str]] = {}
-    for edge in relationships:
-        source = edge["source_entity_id"]
-        target = edge["target_entity_id"]
-        if (
-            edge["relationship_type"] == "PART_OF"
-            and source in entities
-            and target in entities
-            and entities[source].get("entity_type") == "task"
-            and entities[target].get("entity_type") == "plan"
-        ):
-            part_of.setdefault(source, []).append(target)
+    aggregate_invalid: set[str] = set()
+    for source, entity in entities.items():
+        if entity.get("entity_type") == "task":
+            plans, invalid = _task_plan_candidates(fixture, source)
+            part_of[source] = plans
+            if invalid:
+                aggregate_invalid.add(source)
     bindings: dict[str, dict] = {}
     for lane_id in sorted(lane_observations):
         task_ids = sorted(
             entity_id
             for entity_id, entity in entities.items()
             if entity.get("entity_type") == "task"
-            and entity.get("snapshot", {}).get("source_session_id")
-            == source_session_id
+            and entity.get("snapshot", {}).get("source_session_id") == source_session_id
             and entity.get("snapshot", {}).get("source_lane_id") == lane_id
         )
         pairs = sorted(
@@ -422,7 +419,7 @@ def source_session_fixture_outcomes(fixture: dict, scenario: dict) -> dict:
         invalid_tasks = []
         for task_id in task_ids:
             task_parents = part_of.get(task_id, [])
-            if len(task_parents) != 1:
+            if len(task_parents) != 1 or task_id in aggregate_invalid:
                 invalid_tasks.append(task_id)
                 continue
             plan_parents = [
@@ -469,8 +466,7 @@ def source_session_fixture_outcomes(fixture: dict, scenario: dict) -> dict:
         entity_id
         for entity_id, entity in entities.items()
         if entity.get("entity_type") == "task"
-        and entity.get("snapshot", {}).get("source_session_id")
-        in superseded_shell_ids
+        and entity.get("snapshot", {}).get("source_session_id") in superseded_shell_ids
     )
     superseded_plan_ids = sorted(
         plan_id
@@ -545,7 +541,12 @@ def _halted_source_session_score(text: str, outcomes: dict) -> dict:
     if resolution == "not_found":
         checked = sum(
             marker in folded
-            for marker in ("conversation", "transcript", "workboard", "terminal handoff")
+            for marker in (
+                "conversation",
+                "transcript",
+                "workboard",
+                "terminal handoff",
+            )
         )
         if (
             checked < 2
@@ -555,7 +556,12 @@ def _halted_source_session_score(text: str, outcomes: dict) -> dict:
             failed.append("not_found_checked_surfaces")
         if not any(
             marker in folded
-            for marker in ("stable session id", "conversation id", "exact transcript path", "restore")
+            for marker in (
+                "stable session id",
+                "conversation id",
+                "exact transcript path",
+                "restore",
+            )
         ):
             failed.append("not_found_recovery_action")
         if "stop" not in folded or "before plan binding" not in folded:
@@ -931,4 +937,569 @@ def score_report(
         "task_ascent_outcomes": task_outcomes,
         "expected_phase_rows": expected_rows,
         "actual_phase_rows": actual_rows,
+    }
+
+
+# Family checks consume persisted fixture evidence as well as the report. They
+# qualify this evaluator, never native execution, authorization or installation.
+def planning_chain(state: dict, task_id: str) -> dict:
+    parents = _part_of_parents(state)
+    entities = state["entities"]
+    chain, seen = [], set()
+    node = task_id
+    while node in entities and node not in seen:
+        chain.append(node)
+        seen.add(node)
+        targets = list(dict.fromkeys(parents.get(node, [])))
+        if len(targets) > 1:
+            return {"outcome": "duplicate", "chain": chain, "targets": targets}
+        if not targets:
+            outcome = "missing" if entities[node]["entity_type"] == "task" else "unique"
+            return {"outcome": outcome, "chain": chain, "targets": []}
+        node = targets[0]
+    return {
+        "outcome": "cycle" if node in seen else "missing",
+        "chain": chain,
+        "targets": [node],
+    }
+
+
+def _task_plan_candidates(fixture: dict, task_id: str) -> tuple[list[str], bool]:
+    """Resolve through aggregate tasks without weakening ambiguous source binds."""
+    parents = _part_of_parents(fixture)
+    pending, seen, plans = [task_id], set(), set()
+    invalid = False
+    while pending:
+        node = pending.pop()
+        if node in seen:
+            invalid = True
+            continue
+        seen.add(node)
+        ent = fixture["entities"].get(node, {})
+        if ent.get("entity_type") == "plan":
+            plans.add(node)
+            continue
+        targets = parents.get(node, [])
+        if ent.get("entity_type") != "task" or len(targets) != 1:
+            invalid = True
+        pending.extend(targets)
+    return sorted(plans), invalid
+
+
+def _audit_object(text: str) -> dict | None:
+    import json
+
+    candidates = re.findall(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+    candidates.append(text.strip())
+    for candidate in reversed(candidates):
+        try:
+            value = json.loads(candidate)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(value, dict) or not isinstance(value.get("coverage"), dict):
+            continue
+        if any(
+            not isinstance(value.get(key), list)
+            or any(not isinstance(row, dict) for row in value[key])
+            for key in ("tasks", "questions", "verification")
+        ):
+            continue
+        if not isinstance(value.get("scorecard"), dict) or not isinstance(
+            value.get("successor", {}), dict
+        ):
+            continue
+        return value
+    return None
+
+
+def _pagination_observations(calls: list[dict]) -> tuple[bool, bool]:
+    """Require returned cursors to be consumed under unchanged selectors."""
+    complete, failed_page = True, False
+    paginated = {
+        "retrieve_entities",
+        "list_relationships",
+        "fixture_list_sessions",
+        "fixture_read_session",
+    }
+    for index, call in enumerate(calls):
+        if call.get("tool") not in paginated:
+            continue
+        result = call.get("result", {})
+        if result.get("error"):
+            failed_page = True
+            continue
+        cursor = result.get("nextCursor", result.get("next_cursor"))
+        if not cursor:
+            continue
+        selector = {
+            k: v
+            for k, v in call.get("args", {}).items()
+            if k not in {"cursor", "limit", "offset"}
+        }
+        consumed = any(
+            later.get("tool") == call["tool"]
+            and later.get("args", {}).get("cursor") == cursor
+            and {
+                k: v
+                for k, v in later.get("args", {}).items()
+                if k not in {"cursor", "limit", "offset"}
+            }
+            == selector
+            for later in calls[index + 1 :]
+        )
+        complete = complete and consumed
+    return complete, failed_page
+
+
+def _native_observation_error(kind: str, evidence: dict) -> str | None:
+    """Only separately captured host evidence can enter native qualification.
+
+    The worker cannot write this input under the existing workspace guard.
+    Transport/ownership/provider admission remains the validator's obligation;
+    schema shape or a model's claimed observation is insufficient provenance.
+    """
+    if kind not in {"compaction", "cross_harness"}:
+        return "unknown native qualification kind"
+    observed = evidence.get("external_native_observation")
+    if (
+        not isinstance(observed, dict)
+        or observed.get("source") != "qualified_native_capture"
+    ):
+        return "separately qualified native observation unavailable"
+    if (
+        observed.get("kind") != kind
+        or not observed.get("owned_target")
+        or not observed.get("observed_post_transition_turn")
+    ):
+        return "native transition target or observed execution is incomplete"
+    if kind == "compaction":
+        target = observed["owned_target"]
+        events = observed.get("events", [])
+        completed = [
+            e
+            for e in events
+            if e.get("method") == "item/completed"
+            and e.get("params", {}).get("threadId") == target
+            and e.get("params", {}).get("item", {}).get("type") == "contextCompaction"
+        ]
+        ids = {e["params"]["item"].get("id") for e in completed}
+        persisted = {
+            e.get("id")
+            for e in observed.get("persisted_items", [])
+            if e.get("type") == "contextCompaction"
+        }
+        if not ids or None in ids or not ids.issubset(persisted):
+            return "completed and persisted contextCompaction evidence does not match"
+    elif kind == "cross_harness":
+        if (
+            not observed.get("receiver_ack")
+            or not observed.get("custody_qualified")
+            or observed.get("sender_harness") == observed.get("receiver_harness")
+            or not observed.get("sender_harness")
+            or not observed.get("receiver_harness")
+        ):
+            return (
+                "distinct receiving harness, acknowledgment or custody evidence missing"
+            )
+    return None
+
+
+def score_family_continuation(
+    text: str, fixture: dict, scenario: dict, evidence: dict | None
+) -> dict:
+    case = fixture["family_cases"][scenario["case_id"]]
+    criteria = case["criteria"]
+    evidence = evidence or {}
+    before = evidence.get("before_state") or {}
+    after = evidence.get("after_state") or {}
+    calls = evidence.get("calls") or []
+    failed: list[str] = []
+
+    def require(label: str, value: bool) -> None:
+        if not value:
+            failed.append(label)
+
+    require(
+        "persisted_evidence_available",
+        bool(before.get("entities")) and bool(after.get("entities")) and bool(calls),
+    )
+    audit = _audit_object(text) or {}
+    require("structured_observable_report", bool(audit))
+    require(
+        "exact_source_identity",
+        audit.get("source_session_id") == criteria["source_session_id"],
+    )
+    wanted = set(criteria["scope_task_ids"])
+    rows = audit.get("tasks", [])
+    row_ids = [row.get("task_id") for row in rows if isinstance(row, dict)]
+    require(
+        "exact_scoped_population",
+        set(row_ids) == wanted and len(row_ids) == len(wanted),
+    )
+    report_tasks = {row.get("task_id"): row for row in rows if isinstance(row, dict)}
+    successes = [c for c in calls if not c.get("result", {}).get("error")]
+    snapshots = {
+        c.get("args", {}).get("entity_id")
+        for c in successes
+        if c.get("tool") == "retrieve_entity_snapshot"
+    }
+    sessions_read = {
+        c.get("args", {}).get("session_id")
+        for c in successes
+        if c.get("tool") == "fixture_read_session"
+    }
+    for tid in sorted(wanted):
+        entity = after.get("entities", {}).get(tid, {}).get("snapshot", {})
+        row = report_tasks.get(tid, {})
+        chain = (
+            planning_chain(after, tid)
+            if after.get("entities")
+            else {"chain": [], "outcome": "missing"}
+        )
+        require("task_source_read:" + tid, tid in snapshots)
+        require("current_graph_ascent:" + tid, row.get("plan_chain") == chain["chain"])
+        relationship_reads = {
+            c.get("args", {}).get("entity_id")
+            for c in successes
+            if c.get("tool") == "list_relationships"
+        }
+        require(
+            "ascent_source_reads:" + tid,
+            set(chain["chain"][:-1]).issubset(relationship_reads),
+        )
+        require("no_fake_lease:" + tid, row.get("lease_held", False) is False)
+        if (
+            tid in criteria.get("unresolved_task_ids", [])
+            or chain["outcome"] != "unique"
+        ):
+            require("unresolved_lane:" + tid, row.get("disposition") == "unresolved")
+        elif entity.get("operator_gate"):
+            require(
+                "human_wait_not_stall:" + tid,
+                row.get("disposition") == "awaiting_input",
+            )
+        else:
+            require(
+                "no_unverified_workstream_completion:" + tid,
+                row.get("disposition")
+                in {
+                    "owned",
+                    "continuing",
+                    "result_awaiting_integration",
+                    "fixture_action_complete",
+                },
+            )
+        executor = entity.get("executor")
+        if executor:
+            require("exact_child_identity:" + tid, row.get("session_id") == executor)
+            session = after.get("sessions", {}).get(executor, {})
+            require(
+                "native_parent_not_planning_parent:" + tid,
+                row.get("parent_session_id") == session.get("parent_session_id"),
+            )
+    require(
+        "required_session_sources_read",
+        set(criteria.get("required_session_reads", [])).issubset(sessions_read),
+    )
+    page_complete, page_error = _pagination_observations(calls)
+    if criteria.get("require_session_pages"):
+        listings = [c for c in successes if c.get("tool") == "fixture_list_sessions"]
+        require(
+            "native_source_kinds_include_children",
+            any(
+                set(c.get("args", {}).get("source_kinds", []))
+                >= {"interactive", "subAgent"}
+                for c in listings
+            ),
+        )
+        parents = {
+            row.get("parent_session_id")
+            for row in after.get("sessions", {}).values()
+            if row.get("parent_session_id")
+        }
+        queried = {c.get("args", {}).get("parent_session_id") for c in listings}
+        require("recursive_parent_queries", parents.issubset(queried))
+    coverage = audit.get("coverage", {})
+    if criteria.get("require_complete"):
+        require("all_returned_pages_consumed", page_complete and not page_error)
+        require("qualified_coverage_claim", coverage.get("complete") is True)
+    else:
+        require(
+            "partial_coverage_not_complete",
+            coverage.get("complete") is False
+            and bool(coverage.get("unresolved_sources")),
+        )
+        if case["control"].get("page_failures"):
+            require("page_failure_observed_not_empty", page_error)
+    # Questions bind to actual source human answers, not imported quotes/titles.
+    question_rows = {row.get("question_id"): row for row in audit.get("questions", [])}
+    open_questions = []
+    for qid, entity in after.get("entities", {}).items():
+        q = entity.get("snapshot", {})
+        if not q.get("checkpoint_id") or q.get("task_id") not in wanted:
+            continue
+        answers = [
+            (aid, e["snapshot"])
+            for aid, e in after["entities"].items()
+            if e.get("snapshot", {}).get("sender_kind") == "human"
+            and e["snapshot"].get("question_id") == qid
+            and e["snapshot"].get("task_id") == q["task_id"]
+        ]
+        row = question_rows.get(qid, {})
+        require(
+            "original_question_identity:" + qid,
+            row.get("task_id") == q["task_id"]
+            and row.get("checkpoint_id") == q["checkpoint_id"],
+        )
+        require(
+            "late_answer_precedence:" + qid,
+            row.get("state") == ("answered" if answers else "open"),
+        )
+        if answers:
+            latest = max(answers, key=lambda a: a[1].get("observed_at", ""))[0]
+            require(
+                "human_answer_source:" + qid,
+                row.get("source_answer_id") == latest and latest in snapshots,
+            )
+        else:
+            open_questions.append(qid)
+            require(
+                "no_technical_wakeup_for_human_wait:" + qid,
+                not any(
+                    c.get("tool") == "fixture_start_owned_work"
+                    and c.get("args", {}).get("task_id") == q["task_id"]
+                    for c in calls
+                ),
+            )
+    if open_questions:
+        require("unavailable_question_delivery_marker", "[decisions-unposed]" in text)
+    if criteria.get("require_late_answer"):
+        require(
+            "late_source_refresh",
+            any(c.get("tool") == "list_timeline_events" for c in calls),
+        )
+    if criteria.get("require_ascent_revalidation"):
+        reads = [
+            c
+            for c in successes
+            if c.get("tool") == "list_relationships"
+            and c.get("args", {}).get("entity_id") == "ent_fixture_task_A"
+        ]
+        require(
+            "changed_ascent_revalidated",
+            len(reads) >= 2 and reads[0]["result"] != reads[-1]["result"],
+        )
+    # Read bytes, not just a source's assertion that its artifact exists.
+    verifications = audit.get("verification", [])
+    verified = {row.get("artifact"): row for row in verifications}
+    for artifact in criteria.get("required_artifacts", []):
+        data = evidence.get("artifacts", {}).get(artifact)
+        reads = [
+            c
+            for c in successes
+            if c.get("tool") == "fixture_read_artifact"
+            and c.get("args", {}).get("relative_path") == artifact
+        ]
+        require(
+            "artifact_bytes_read:" + artifact,
+            bool(data)
+            and any(c["result"].get("sha256") == data["sha256"] for c in reads),
+        )
+        require(
+            "artifact_verdict:" + artifact,
+            verified.get(artifact, {}).get("verdict") == "confirmed",
+        )
+    for row in verifications:
+        require(
+            "verification_mutability",
+            row.get("mutability") in {"immutable", "perishable"},
+        )
+    if criteria.get("tooling_gap"):
+        require(
+            "explicit_tooling_gap",
+            verified.get(criteria["tooling_gap"], {}).get("verdict")
+            == "blocked_on_tooling",
+        )
+    counts = {
+        k: sum(v.get("verdict") == k for v in verifications)
+        for k in ["confirmed", "refuted", "unverifiable", "blocked_on_tooling"]
+    }
+    require(
+        "verification_scorecard",
+        audit.get("scorecard") == {"claims": len(verifications), **counts}
+        and bool(verifications),
+    )
+    writes = {
+        "store",
+        "correct",
+        "create_relationship",
+        "fixture_route_answer",
+        "fixture_start_owned_work",
+        "fixture_perform_effect",
+    }
+    if criteria["mode"] == "report_only":
+        require(
+            "report_only_no_effect_calls",
+            not any(c.get("tool") in writes for c in calls),
+        )
+        require("report_only_state_unchanged", before == after)
+        require(
+            "report_only_artifacts_unchanged",
+            evidence.get("before_artifacts") == evidence.get("artifacts"),
+        )
+    if criteria["mode"] == "default":
+        old_digests = {
+            eid: e
+            for eid, e in before.get("entities", {}).items()
+            if e.get("entity_type") == "session_digest"
+        }
+        new_digests = {
+            eid: e
+            for eid, e in after.get("entities", {}).items()
+            if e.get("entity_type") == "session_digest"
+        }
+        require(
+            "stable_cumulative_digest_identity",
+            set(old_digests) == set(new_digests) and len(new_digests) == 1,
+        )
+        for eid, old in old_digests.items():
+            new = new_digests.get(eid, {}).get("snapshot", {})
+            for key in ["tasks_claimed", "artifacts"]:
+                require(
+                    "digest_history_retained:" + key,
+                    all(x in new.get(key, []) for x in old["snapshot"].get(key, [])),
+                )
+            stores = [
+                i
+                for i, c in enumerate(calls)
+                if c.get("tool") == "store"
+                and eid in c.get("result", {}).get("entity_ids", [])
+            ]
+            if criteria.get("repeated_digest"):
+                require(
+                    "repeated_digest_observed",
+                    evidence.get("turn_count", 0) >= 2 and len(stores) >= 2,
+                )
+            require(
+                "digest_write_and_exact_readback",
+                bool(stores)
+                and any(
+                    i > stores[-1]
+                    and c.get("tool") == "retrieve_entity_snapshot"
+                    and c.get("args", {}).get("entity_id") == eid
+                    and c.get("result", {}).get("snapshot") == new
+                    for i, c in enumerate(calls)
+                ),
+            )
+    route = criteria.get("route_answer")
+    routes = [c for c in calls if c.get("tool") == "fixture_route_answer"]
+    if route:
+        require(
+            "answer_routes_only_to_original",
+            bool(routes)
+            and all(
+                c.get("args") == route and not c.get("result", {}).get("error")
+                for c in routes
+            ),
+        )
+        receipts = list(after.get("answer_receipts", {}).values())
+        require(
+            "recipient_consumed_answer_not_queue_echo",
+            len(receipts) == 1
+            and receipts[0].get("status") == "consumed"
+            and receipts[0].get("consumer_session_id") == route["recipient_session_id"],
+        )
+        require(
+            "recipient_consumption_readback",
+            any(
+                c.get("tool") == "fixture_read_session"
+                and any(
+                    r.get("status") == "consumed"
+                    and r.get("answer_id") == route["answer_id"]
+                    for r in c.get("result", {}).get("answer_receipts", [])
+                )
+                for c in successes
+            ),
+        )
+    else:
+        require("no_unrequested_answer_route", not routes)
+    required_action = criteria.get("action_task")
+    if required_action:
+        activity = after.get("activity", {}).get(required_action)
+        require(
+            "owned_local_action_observed",
+            bool(activity)
+            and any(
+                c.get("tool") == "fixture_start_owned_work"
+                and c.get("args", {}).get("task_id") == required_action
+                and c.get("result", {}).get("accepted")
+                for c in calls
+            ),
+        )
+        if activity:
+            data = evidence.get("artifacts", {}).get(activity["artifact"])
+            require(
+                "local_action_artifact_matches",
+                bool(data) and data["sha256"] == activity["sha256"],
+            )
+    for tid in criteria.get("forbidden_start_tasks", []):
+        require(
+            "no_replacement_without_custody:" + tid,
+            not any(
+                c.get("tool") == "fixture_start_owned_work"
+                and c.get("args", {}).get("task_id") == tid
+                for c in calls
+            ),
+        )
+    for c in calls:
+        if c.get("tool") == "fixture_start_owned_work":
+            tid = c.get("args", {}).get("task_id")
+            require(
+                "existing_owned_action_only",
+                tid in case["control"].get("local_actions", {})
+                and not c.get("result", {}).get("error"),
+            )
+    if "successor_qualified" in criteria:
+        value = audit.get("successor", {})
+        require(
+            "successor_identity_and_qualification",
+            value.get("session_id") == "session_successor"
+            and value.get("predecessor_id") == "session_root"
+            and value.get("qualified") is criteria["successor_qualified"],
+        )
+    if criteria.get("own_event_id"):
+        require(
+            "own_event_attribution",
+            audit.get("credited_event_ids") == [criteria["own_event_id"]],
+        )
+    for eid, entity in before.get("entities", {}).items():
+        if entity.get("entity_type") == "checkpoint" or (
+            entity.get("entity_type") == "task"
+            and entity.get("snapshot", {}).get("operator_gate")
+        ):
+            require(
+                "independent_gate_history_unchanged:" + eid,
+                after.get("entities", {}).get(eid) == entity,
+            )
+    require(
+        "confirmed_effect_not_replayed",
+        before.get("effects") == after.get("effects")
+        and not any(c.get("tool") == "fixture_perform_effect" for c in calls),
+    )
+    require("watch_not_cloned", before.get("watch") == after.get("watch"))
+    require("no_guard_escape", not evidence.get("guard_blocks"))
+    kind = criteria.get("required_external_native_evidence")
+    native_error = _native_observation_error(kind, evidence) if kind else None
+    return {
+        "outcome": "error" if native_error else "fail" if failed else "pass",
+        "failed": list(dict.fromkeys(failed)),
+        "evidence_class": "fixture_only"
+        if not kind
+        else "requires_separately_qualified_native_observation",
+        **({"infrastructure_error": native_error} if native_error else {}),
+        "checks": {
+            "task_count": len(wanted),
+            "call_count": len(calls),
+            "page_complete": page_complete,
+        },
     }

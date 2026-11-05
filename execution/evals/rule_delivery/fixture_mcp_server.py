@@ -137,7 +137,10 @@ TOOLS = [
     {
         "name": "list_timeline_events",
         "description": "List recent timeline events.",
-        "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer"}, "cursor": {"type": "string"}},
+        },
     },
     {
         "name": "list_observations",
@@ -190,6 +193,12 @@ def _tool(
 
 TOOLS.extend(
     [
+        _tool(
+            "fixture_read_artifact",
+            "Read bytes of a declared local fixture artifact; no external paths.",
+            {"relative_path": {"type": "string"}},
+            ["relative_path"],
+        ),
         _tool(
             "list_relationships",
             "Read paginated fixture relationships.",
@@ -319,6 +328,12 @@ def _page(rows: list, args: dict, key: str, control: dict, selector: dict) -> di
             offset = cursor["offset"]
         if not isinstance(offset, int) or offset < 0 or offset > len(rows):
             raise ValueError("invalid offset")
+        if offset in control.get("page_failures", {}).get(key, []):
+            return {
+                "error": "fixture page unavailable",
+                "cursor": args.get("cursor"),
+                "offset": offset,
+            }
         end = min(offset + limit, len(rows))
         cursor = (
             base64.urlsafe_b64encode(
@@ -435,6 +450,22 @@ def _family_tool(store, state: dict, name: str, args: dict) -> dict:
     if not store.control().get("family_tools"):
         return {"error": "family fixture capabilities are disabled"}
     sessions = state.get("sessions", {})
+    if name == "fixture_read_artifact":
+        rel = str(args.get("relative_path", ""))
+        if rel not in store.control().get("artifact_paths", []):
+            return {"error": "artifact is outside fixture allowlist"}
+        target = (store.state_path.parent / rel).resolve()
+        if (
+            not target.is_relative_to(store.state_path.parent.resolve())
+            or not target.is_file()
+        ):
+            return {"error": "fixture artifact unavailable"}
+        raw = target.read_bytes()
+        return {
+            "relative_path": rel,
+            "content": raw.decode(),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
     if name == "fixture_list_sessions":
         rows = [
             {"id": sid, **row}
@@ -521,9 +552,10 @@ def _family_tool(store, state: dict, name: str, args: dict) -> dict:
         action = store.control().get("local_actions", {}).get(tid)
         if (
             not action
-            or task.get("owner_session_id") != sid
+            or (task.get("owner_session_id") or task.get("owner")) != sid
             or task.get("operator_gate")
             or not owner.get("custody_qualified")
+            or owner.get("competing_supervisor")
             or (owner.get("predecessor_id") and not owner.get("handoff_ack"))
         ):
             return {
@@ -768,6 +800,8 @@ def call_tool(store: Store, name: str, args: dict) -> dict:
         return {"success": True, **args}
     if name == "list_relationships":
         eid, direction = args.get("entity_id"), args.get("direction", "both")
+        if direction not in {"outbound", "inbound", "both"}:
+            return {"error": "invalid relationship direction"}
         rows = [
             edge
             for edge in state.get("relationships", [])
@@ -799,7 +833,18 @@ def call_tool(store: Store, name: str, args: dict) -> dict:
     if name == T_RELATED:
         return related_entities(state, args)
     if name in ("list_timeline_events", "list_observations"):
-        return {"results": []}
+        rows = (
+            state.get("timeline_events", [])
+            if name == "list_timeline_events"
+            else state.get("observations", {}).get(args.get("entity_id"), [])
+        )
+        return _page(
+            rows,
+            args,
+            "results",
+            store.control(),
+            {"tool": name, "entity_id": args.get("entity_id")},
+        )
     if name == "describe_entity_type":
         kind = str(args.get("entity_type", ""))
         known = kind in REGISTERED_TYPES
