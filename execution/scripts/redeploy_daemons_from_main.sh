@@ -91,8 +91,11 @@ fi
 # stays `executing`). The helper takes the Fly runner's own admission lock
 # (the cross-process flock every reservation is made under), counts live
 # reservations while holding it, and keeps holding it until the restarts below
-# finish, so no new job can be reserved between this check and the restart;
-# launches that try meanwhile simply wait. The lock dies with the holder, which
+# finish, so no new job can be reserved between this check and the restart.
+# A launch that tries meanwhile waits; one waiting inside an Apis this script
+# restarts dies with that process before it reserves or starts a machine (its
+# task and any token it already minted are left as any restart leaves an
+# in-progress dispatch). The lock dies with the holder, which
 # also exits if this script dies, and after 15 minutes at most.
 #   busy  -> the lock is held (admission or the reaper at work): defer.
 #   ok N  -> N live reservations: defer if N > 0, else deploy holding the lock.

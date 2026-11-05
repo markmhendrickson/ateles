@@ -48,8 +48,12 @@ reservations count on the same rule. If any are live, the script logs
 `DEFERRED: <n> Fly job(s) in flight` and exits 0 with nothing changed; the checkout
 stays behind, so the next 120s run retries. If none are, the script keeps holding
 the lock through the fast-forward, any venv refresh and the restarts, so no new job
-can be reserved between the check and the restart; launches that try meanwhile
-wait, and resume once the lock is released. The lock dies with the holder, which
+can be reserved between the check and the restart. A launch that tries meanwhile
+waits for the lock. One waiting in another process resumes once the lock is
+released; one waiting inside an Apis that is being restarted dies with it before it
+reserves or starts a Fly machine, so no machine is orphaned, but its task and any
+GitHub token it already minted (the launch mints before it waits for admission) are
+left as any restart leaves an in-progress dispatch. The lock dies with the holder, which
 also exits if the script dies and after 15 minutes at most. If the lock cannot be
 taken within 60 seconds (admission or the reaper is at work), the run logs
 `DEFERRED: Fly admission lock busy` and exits 0. The check fails open: if the
