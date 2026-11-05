@@ -37,13 +37,31 @@ build on any error).
 
 **Deferral while a Fly job runs.** Apis awaits every Fly job it starts, so a hard
 restart would orphan the job and leave its task `executing`. Before fast-forwarding,
-the script runs `execution/scripts/fly_jobs_in_flight.py`, which counts Fly runner
-ledger reservations (`APIS_FLY_LEDGER_FILE`, default
-`~/.config/ateles/fly-runner-ledger.json`) whose `deadline` is still ahead. If any
-are, it logs `DEFERRED: <n> Fly job(s) in flight` and exits 0 with nothing changed;
-the checkout stays behind, so the next 120s run deploys once the jobs finish. The
-check fails open: a missing or unreadable ledger, or an entry with no readable or
-past deadline, never holds a deploy.
+the script starts `execution/scripts/fly_jobs_in_flight.py --hold`, which takes the
+Fly runner's own admission lock (`<ledger>.admission.lock`, the cross-process
+`flock` every reservation is made under), then counts Fly runner ledger
+reservations (`APIS_FLY_LEDGER_FILE`, default
+`~/.config/ateles/fly-runner-ledger.json`) that are still live. A reservation is
+live until 300 seconds after its `deadline`, because a run past its deadline may
+still be collecting its last answer and settling its result; `unconfirmed`
+reservations count on the same rule. If any are live, the script logs
+`DEFERRED: <n> Fly job(s) in flight` and exits 0 with nothing changed; the checkout
+stays behind, so the next 120s run retries. If none are, the script keeps holding
+the lock through the fast-forward, any venv refresh and the restarts, so no new job
+can be reserved between the check and the restart; launches that try meanwhile
+wait, and resume once the lock is released. The lock dies with the holder, which
+also exits if the script dies and after 15 minutes at most. If the lock cannot be
+taken within 60 seconds (admission or the reaper is at work), the run logs
+`DEFERRED: Fly admission lock busy` and exits 0. The check fails open: if the
+holder cannot start or answer, the script logs one fixed warning and deploys, and a
+missing or unreadable ledger, or an entry with no readable deadline (including one
+too large to convert), never holds a deploy; a corrupt entry is skipped without
+hiding a live one.
+
+What remains: consecutive Fly jobs can still defer a deploy for as long as they
+keep overlapping. This change stops admission only from the check to the restart;
+it does not pause admission ahead of a pending deploy so that running jobs can
+drain. That limit is known and left for a later change.
 
 ## Per-daemon plist requirements
 
