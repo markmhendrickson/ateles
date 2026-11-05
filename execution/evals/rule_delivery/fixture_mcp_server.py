@@ -7,10 +7,11 @@ run directory (``neotoma_state.json``) over MCP stdio, mirrors the names of
 the real Neotoma tools a session reaches for (``retrieve_entity_snapshot``,
 ``retrieve_entities``, ``correct``, ``get_session_identity``).
 
-Every call is appended to ``mcp_calls.jsonl`` in the run directory. That log,
-not the model's own account of what it did, is the ground truth the checks
-read: it records which rule ids were fetched, in what order, and what was
-written.
+Qualified stdio and in-process calls share a checked pre-dispatch receipt in
+``mcp_calls.jsonl``, followed by actual handler/state and response observations.
+Readers retain incomplete evidence explicitly. This cooperative fixture log is
+not tamper-resistant auditing, client acknowledgment or power-loss durability.
+Direct low-level handler calls do not establish exhaustive observation.
 
 Usage (from an ``--mcp-config`` file): ``python3 fixture_mcp_server.py <run_dir>``.
 The server sends no ``instructions`` in its initialize reply, so MCP
@@ -23,6 +24,7 @@ import base64
 import copy
 import hashlib
 import json
+import math
 import sys
 import time
 import uuid
@@ -420,7 +422,15 @@ def _scripted_events(store, state: dict, name: str, args: dict) -> None:
     if not events:
         return
     applied_path = store.state_path.parent.parent / "fixture_events_applied.json"
-    applied = json.loads(applied_path.read_text()) if applied_path.exists() else []
+    applied = (
+        evidence.read_json_file(applied_path, "scripted event state")[0]
+        if applied_path.exists()
+        else []
+    )
+    if not isinstance(applied, list) or any(
+        not isinstance(item, str) for item in applied
+    ):
+        raise evidence.EvidenceError("scripted event state: expected event identifiers")
     trace = (
         evidence.read_trace(
             store.log_path,
@@ -433,17 +443,29 @@ def _scripted_events(store, state: dict, name: str, args: dict) -> None:
         "invalid_record",
         "invalid_event",
         "invalid_json",
+        "invalid_utf8",
         "invalid_correlation",
+        "invalid_receipt",
+        "unsupported_trace_version",
         "duplicate_receipt",
+        "duplicate_protocol_receipt",
         "request_digest_mismatch",
         "truncated_frame",
         "oversized_frame",
         "trace_limit",
         "trace_unavailable",
-        "protocol_gap",
-        "missing_receipt",
     }
-    if any(issue["code"] in structural for issue in trace["issues"]):
+    known = {
+        attempt["correlation_id"]
+        for attempt in trace["attempts"]
+        if attempt.get("correlation_id")
+    }
+    if any(
+        issue["code"] in structural
+        or issue["code"] in {"protocol_gap", "missing_receipt"}
+        and issue.get("correlation_id") not in known
+        for issue in trace["issues"]
+    ):
         raise evidence.EvidenceError("scripted transition has ambiguous prior trace")
     calls = trace["attempts"]
     for event in events:
@@ -684,11 +706,12 @@ class Store:
         self.control_path = run_dir.parent / "fixture_control.json"
 
     def control(self) -> dict:
-        return (
-            json.loads(self.control_path.read_text())
-            if self.control_path.is_file()
-            else {}
-        )
+        if not self.control_path.is_file():
+            return {}
+        control = evidence.read_json_file(self.control_path, "fixture control")[0]
+        if not isinstance(control, dict):
+            raise evidence.EvidenceError("fixture control: expected object")
+        return control
 
     def load(self) -> dict:
         return evidence.read_json_file(self.state_path)[0]
@@ -1095,25 +1118,44 @@ def validate_arguments(name, args):
         edge(args, "arguments")
 
 
+def _valid_rpc_id(value):
+    return type(value) in (str, int) or type(value) is float and math.isfinite(value)
+
+
 def _rpc_error(mid, code, message):
     return {
         "jsonrpc": "2.0",
-        "id": mid if isinstance(mid, (str, int)) and type(mid) is not bool else None,
+        "id": mid if _valid_rpc_id(mid) else None,
         "error": {"code": code, "message": message},
     }
 
 
-def _protocol_gap(store, diagnostic):
-    try:
-        store.append_record(
-            {
-                "trace_version": 1,
-                "event": "protocol",
-                "correlation_id": uuid.uuid4().hex,
-                "diagnostic": diagnostic,
+def _protocol_gap(store, diagnostic, correlation=None, request=None):
+    record = {
+        "trace_version": 1,
+        "event": "protocol",
+        "correlation_id": correlation or uuid.uuid4().hex,
+        "diagnostic": diagnostic,
+    }
+    if request is not None:
+        try:
+            request_raw = evidence.encode_json(request, "unsupported request")
+            record.update(
+                request=request,
+                request_sha256=hashlib.sha256(request_raw).hexdigest(),
+                handler_started=False,
+            )
+            evidence.encode_json(record, "protocol observation")
+        except evidence.EvidenceError:
+            record = {
+                key: value
+                for key, value in record.items()
+                if key not in {"request", "request_sha256", "handler_started"}
             }
-        )
-    except (OSError, ValueError, TypeError, RecursionError, MemoryError):
+    try:
+        store.append_record(record)
+    except Exception:
+        # Evidence-store failure is visible, never rewritten as a success.
         sys.stderr.write("fixture protocol observation unavailable\n")
 
 
@@ -1137,12 +1179,16 @@ def process_request(store, request, *, responder=None, handler=None):
             reply = _rpc_error(mid, -32600, "invalid RPC envelope")
         elif method == "notifications/initialized" and "id" not in request:
             return None
-        elif type(mid) is bool or not isinstance(mid, (str, int)):
+        elif not _valid_rpc_id(mid):
             _protocol_gap(store, "invalid RPC id")
             reply = _rpc_error(None, -32600, "invalid RPC id")
         elif method == "initialize":
             params = request.get("params", {})
-            if not isinstance(params, dict):
+            if (
+                not isinstance(params, dict)
+                or not isinstance(params.get("protocolVersion", PROTOCOL_VERSION), str)
+                or not params.get("protocolVersion", PROTOCOL_VERSION)
+            ):
                 _protocol_gap(store, "invalid initialize params")
                 reply = _rpc_error(mid, -32602, "params: expected object")
             else:
@@ -1182,13 +1228,15 @@ def process_request(store, request, *, responder=None, handler=None):
                 "request": request,
             }
         )
-    except (OSError, ValueError, TypeError, RecursionError, MemoryError):
-        _protocol_gap(
-            store, "initial checked receipt unavailable; handler not executed"
+    except Exception as exc:
+        unsupported = isinstance(exc, evidence.EvidenceError)
+        message = (
+            "unsupported bounded input representation; handler not executed"
+            if unsupported
+            else "initial checked receipt unavailable; handler not executed"
         )
-        reply = _rpc_error(
-            mid, -32603, "initial observation unavailable; handler not executed"
-        )
+        _protocol_gap(store, message, cid, request)
+        reply = _rpc_error(mid, -32602 if unsupported else -32603, message)
         try:
             _deliver(store, reply, responder)
         except (OSError, ValueError, TypeError, RecursionError, MemoryError):
@@ -1201,11 +1249,7 @@ def process_request(store, request, *, responder=None, handler=None):
     out = None
     outcome = "not_executed"
     try:
-        if (
-            request.get("jsonrpc") != "2.0"
-            or type(mid) is bool
-            or not isinstance(mid, (str, int))
-        ):
+        if request.get("jsonrpc") != "2.0" or not _valid_rpc_id(mid):
             raise RequestValidationError("invalid RPC version/id")
         params = request.get("params", {})
         if not isinstance(params, dict):
@@ -1229,14 +1273,27 @@ def process_request(store, request, *, responder=None, handler=None):
         out = {"error": str(exc)}
     finally:
         store.current_correlation = prior
+    try:
+        result_text = evidence.encode_json(out, "handler result").decode("utf-8")
+        result_encoding_error = None
+    except Exception as exc:
+        result_text = None
+        result_encoding_error = type(exc).__name__
     terminal = {
         "trace_version": 1,
         "event": "completed",
         "correlation_id": cid,
         "request_sha256": request_hash,
         "handler_outcome": outcome,
-        "result_status": "available",
-        "result": out,
+        "result_status": "available" if result_text is not None else "unavailable",
+        **(
+            {"result": out}
+            if result_text is not None
+            else {
+                "outcome_error": "handler result serialization unsupported: "
+                + result_encoding_error
+            }
+        ),
     }
     try:
         terminal.update(
@@ -1246,7 +1303,7 @@ def process_request(store, request, *, responder=None, handler=None):
                 else True
             )
         )
-    except (OSError, ValueError, TypeError, RecursionError, MemoryError) as exc:
+    except Exception as exc:
         terminal.update(state_capture="error", state_error=type(exc).__name__)
     try:
         evidence.encode_json(terminal, "completion")
@@ -1268,31 +1325,40 @@ def process_request(store, request, *, responder=None, handler=None):
             )
     try:
         store.append_record(terminal)
-    except (OSError, ValueError, TypeError, RecursionError, MemoryError):
-        _protocol_gap(store, "completion observation unavailable; no replay")
+    except Exception:
+        _protocol_gap(store, "completion observation unavailable; no replay", cid)
+    delivery_error = None
     try:
-        text = evidence.encode_json(out, "handler result").decode("utf-8")
+        if result_text is None:
+            raise evidence.EvidenceError("handler result unavailable")
+        text = result_text
         reply = {
             "jsonrpc": "2.0",
-            "id": mid
-            if type(mid) is not bool and isinstance(mid, (str, int))
-            else None,
+            "id": mid if _valid_rpc_id(mid) else None,
             "result": {
                 "content": [{"type": "text", "text": text}],
                 "isError": isinstance(out, dict) and "error" in out,
             },
         }
-        _deliver(store, reply, responder)
-        delivery = "written" if responder is not None else "inprocess_return"
-        delivery_error = None
-    except (OSError, ValueError, TypeError, RecursionError, MemoryError) as exc:
-        delivery = "failed"
-        delivery_error = type(exc).__name__
+        response_raw = evidence.encode_json(reply, "response") + b"\n"
+    except Exception as exc:
+        # Encoding failed before response I/O. A small correlated error can be
+        # delivered; it does not erase known handler effects or invent rollback.
+        delivery_error = "response encoding: " + type(exc).__name__
         reply = _rpc_error(
             mid,
             -32603,
             "response unavailable; handler may have executed; do not replay",
         )
+        response_raw = evidence.encode_json(reply, "error response") + b"\n"
+    try:
+        if responder is not None:
+            responder(response_raw)
+        delivery = "written" if responder is not None else "inprocess_return"
+    except Exception as exc:
+        # Never retry a possibly partial response or the underlying handler.
+        delivery = "failed"
+        delivery_error = "response write: " + type(exc).__name__
     try:
         store.append_record(
             {
@@ -1304,8 +1370,8 @@ def process_request(store, request, *, responder=None, handler=None):
                 **({"error": delivery_error} if delivery_error else {}),
             }
         )
-    except (OSError, ValueError, TypeError, RecursionError, MemoryError):
-        _protocol_gap(store, "response observation unavailable; no replay")
+    except Exception:
+        _protocol_gap(store, "response observation unavailable; no replay", cid)
     return reply
 
 

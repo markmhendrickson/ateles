@@ -716,9 +716,7 @@ def _family_store(tmp_path, state=None, control=None):
 
 
 def _fixture_call(store, tool, args):
-    result = fixture_mcp_server.call_tool(store, tool, args)
-    store.log(tool, args, result)
-    return result
+    return fixture_mcp_server.observe_tool_call(store, tool, args)
 
 
 def test_local_entity_pagination_requires_all_pages_and_stable_filters(tmp_path):
@@ -1059,3 +1057,531 @@ def test_r3_backend_can_log_unreadable_json_without_inventing_success(tmp_path):
     assert result.get("error")
     store.log("retrieve_entities", {}, result)
     assert json.loads(store.log_path.read_text())["result"] == result
+
+
+# Natural initialized stdio producer tests. Generic synthetic requests only;
+# private historical probes/results are not copied into the repository.
+def _a_store(tmp_path, *, writes=True):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    state = {
+        "entities": {
+            "ent_fixture_a": {"entity_type": "task", "snapshot": {"status": "open"}}
+        },
+        "relationships": [],
+    }
+    store = fixture_mcp_server.Store(ws)
+    store.save(state)
+    if writes:
+        store.control_path.write_text(
+            json.dumps({"local_writes": True, "family_tools": True, "page_size": 2})
+        )
+    return store
+
+
+def _a_stdio(store, requests, *, patch="", raw_input=None):
+    script = (
+        "import sys; sys.path.insert(0,"
+        + repr(str(HERE))
+        + "); import fixture_mcp_server as s\n"
+        + patch
+        + "\nsys.argv=['fixture',"
+        + repr(str(store.state_path.parent))
+        + "]; raise SystemExit(s.main())\n"
+    )
+    init = [
+        {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18"},
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+    ]
+    prefix = b"".join(fixture_mcp_server.evidence.encode_json(x) + b"\n" for x in init)
+    content = prefix + (
+        raw_input
+        if raw_input is not None
+        else b"".join(
+            fixture_mcp_server.evidence.encode_json(x) + b"\n" for x in requests
+        )
+    )
+    process = subprocess.run(
+        [sys.executable, "-c", script], input=content, capture_output=True, timeout=20
+    )
+    replies = []
+    bad_lines = []
+    for raw in process.stdout.splitlines():
+        try:
+            replies.append(json.loads(raw))
+        except (ValueError, UnicodeError):
+            bad_lines.append(raw)
+    return process, replies, bad_lines
+
+
+def _a_request(name, args, mid=1):
+    return {
+        "jsonrpc": "2.0",
+        "id": mid,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": args},
+    }
+
+
+A_BAD_REQUESTS = [
+    _a_request("store", {"entities": [None]}),
+    _a_request("store", {"entities": [[]]}),
+    _a_request("store", {"entities": [{"entity_type": []}]}),
+    _a_request("store", {"entities": [], "relationships": [None]}),
+    *[
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": value}
+        for value in (None, [], 1, "bad")
+    ],
+    *[_a_request(value, {}) for value in (None, [], {}, 1, "")],
+    *[_a_request("store", value) for value in (None, [], 1, True, "bad")],
+    _a_request("store", {"entities": {}}),
+    _a_request("store", {"entities": [{}]}),
+    *[
+        _a_request("store", {"entities": [{"entity_type": value}]})
+        for value in (None, {}, 1, True)
+    ],
+    _a_request("store", {"entities": [{"entity_type": "task", "entity_id": []}]}),
+    _a_request(
+        "store",
+        {
+            "entities": [
+                {
+                    "entity_type": "session_digest",
+                    "session_key": {},
+                    "schema_version": "1",
+                }
+            ]
+        },
+    ),
+    _a_request("store", {"relationships": [[]]}),
+    _a_request(
+        "store",
+        {
+            "relationships": [
+                {
+                    "source_index": True,
+                    "target_index": 0,
+                    "relationship_type": "PART_OF",
+                }
+            ]
+        },
+    ),
+    _a_request(
+        "store",
+        {
+            "relationships": [
+                {"source_index": -1, "target_index": 0, "relationship_type": "PART_OF"}
+            ]
+        },
+    ),
+    _a_request(
+        "store",
+        {
+            "relationships": [
+                {
+                    "source_entity_id": [],
+                    "target_entity_id": "a",
+                    "relationship_type": "PART_OF",
+                }
+            ]
+        },
+    ),
+    _a_request(
+        "store",
+        {
+            "relationships": [
+                {
+                    "source_entity_id": "a",
+                    "target_entity_id": "a",
+                    "relationship_type": [],
+                }
+            ]
+        },
+    ),
+    _a_request("correct", {"entity_id": "ent_fixture_a", "field": [], "value": "done"}),
+    _a_request("close_pull_request", {"entity_id": "ent_fixture_a", "comment": []}),
+    _a_request("retrieve_entities", {"limit": True}),
+    _a_request("retrieve_entities", {"limit": -1}),
+    _a_request("retrieve_entities", {"cursor": []}),
+    _a_request("fixture_list_sessions", {"source_kinds": [{}]}),
+    _a_request(
+        "create_relationship",
+        {
+            "source_entity_id": {},
+            "target_entity_id": "a",
+            "relationship_type": "PART_OF",
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize("invalid_request", A_BAD_REQUESTS)
+def test_a_initialized_stdio_bad_request_class_is_visible_and_same_server_recovers(
+    tmp_path, invalid_request
+):
+    request = invalid_request
+    store = _a_store(tmp_path)
+    before = store.load()
+    process, replies, bad = _a_stdio(
+        store,
+        [
+            request,
+            _a_request("retrieve_entity_snapshot", {"entity_id": "ent_fixture_a"}, 2),
+            {"jsonrpc": "2.0", "id": 3, "method": "ping"},
+        ],
+    )
+    assert process.returncode == 0 and not bad
+    assert [r["id"] for r in replies] == [0, 1, 2, 3]
+    error = json.loads(replies[1]["result"]["content"][0]["text"])
+    assert error.get("error") and replies[1]["result"]["isError"]
+    assert (
+        json.loads(replies[2]["result"]["content"][0]["text"])["snapshot"]["status"]
+        == "open"
+    )
+    assert replies[3]["result"] == {} and store.load() == before
+    normalized = fixture_mcp_server.evidence.read_trace(store.log_path)
+    assert normalized["complete"] and len(normalized["attempts"]) == 2
+    first = normalized["attempts"][0]
+    assert (
+        first["request"] == request and first["handler_outcome"] == "validation_error"
+    )
+    assert first["result"]["error"] == error["error"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"{\n",
+        b"[]\n",
+        b"null\n",
+        b"\xff\n",
+        b"[" * 10000 + b"0" + b"]" * 10000 + b"\n",
+        b"x" * (fixture_mcp_server.evidence.MAX_INPUT_BYTES + 4) + b"\n",
+    ],
+    ids=lambda value: "frame-" + str(len(value)),
+)
+def test_a_initialized_stdio_protocol_gaps_are_explicit_not_empty_compliance(
+    tmp_path, raw
+):
+    store = _a_store(tmp_path)
+    later = (
+        fixture_mcp_server.evidence.encode_json(
+            _a_request("retrieve_entity_snapshot", {"entity_id": "ent_fixture_a"}, 2)
+        )
+        + b"\n"
+    )
+    process, replies, bad = _a_stdio(store, [], raw_input=raw + later)
+    assert process.returncode == 0 and not bad
+    assert replies[1].get("error") and replies[2]["id"] == 2
+    normalized = fixture_mcp_server.evidence.read_trace(store.log_path)
+    assert not normalized["complete"] and any(
+        x["code"] == "protocol_gap" for x in normalized["issues"]
+    )
+    assert (
+        len(normalized["attempts"]) == 1
+        and normalized["attempts"][0]["result"]["snapshot"]["status"] == "open"
+    )
+
+
+def test_a_stdio_valid_write_relationship_readback_and_bad_state_instrumentation(
+    tmp_path,
+):
+    store = _a_store(tmp_path)
+    requests = [
+        _a_request(
+            "store",
+            {
+                "entities": [
+                    {
+                        "entity_type": "task",
+                        "entity_id": "ent_fixture_b",
+                        "title": "Synthetic unit",
+                    }
+                ],
+                "relationships": [
+                    {
+                        "source_index": 0,
+                        "target_entity_id": "ent_fixture_a",
+                        "relationship_type": "PART_OF",
+                    }
+                ],
+            },
+            1,
+        ),
+        _a_request("retrieve_entity_snapshot", {"entity_id": "ent_fixture_b"}, 2),
+        _a_request(
+            "store",
+            {
+                "entities": [
+                    {
+                        "entity_type": "session_digest",
+                        "session_key": "synthetic",
+                        "schema_version": "1",
+                        "tasks_claimed": None,
+                        "artifacts": 7,
+                    }
+                ]
+            },
+            3,
+        ),
+        _a_request(
+            "list_relationships",
+            {"entity_id": "ent_fixture_b", "direction": "outbound"},
+            4,
+        ),
+    ]
+    process, replies, bad = _a_stdio(store, requests)
+    assert process.returncode == 0 and not bad
+    normalized = fixture_mcp_server.evidence.read_trace(store.log_path)
+    assert normalized["complete"] and len(normalized["attempts"]) == 4
+    assert normalized["attempts"][0]["result"]["success"] is True
+    assert normalized["attempts"][1]["result"]["snapshot"]["title"] == "Synthetic unit"
+    digest_id = normalized["attempts"][2]["result"]["entity_ids"][0]
+    assert store.load()["entities"][digest_id]["snapshot"]["tasks_claimed"] is None
+    assert store.load()["entities"][digest_id]["snapshot"]["artifacts"] == 7
+    assert (
+        normalized["attempts"][3]["result"]["relationships"][0]["target_entity_id"]
+        == "ent_fixture_a"
+    )
+
+
+@pytest.mark.parametrize("writes", [False, True])
+def test_a_stdio_default_inert_and_ordinary_refusal_stay_observed(tmp_path, writes):
+    store = _a_store(tmp_path, writes=writes)
+    process, replies, bad = _a_stdio(
+        store,
+        [_a_request("store", {"entities": [{"entity_type": "unregistered_type"}]})],
+    )
+    assert process.returncode == 0 and not bad
+    normalized = fixture_mcp_server.evidence.read_trace(store.log_path)
+    assert (
+        normalized["complete"]
+        and normalized["attempts"][0]["handler_outcome"] == "refused"
+    )
+    assert normalized["attempts"][0]["result"].get("error")
+
+
+def test_a_stdio_reused_rpc_ids_across_process_restarts_are_distinct_attempts(tmp_path):
+    store = _a_store(tmp_path)
+    for _ in range(2):
+        process, replies, bad = _a_stdio(
+            store,
+            [_a_request("retrieve_entity_snapshot", {"entity_id": "ent_fixture_a"}, 7)],
+        )
+        assert process.returncode == 0 and not bad and replies[1]["id"] == 7
+    normalized = fixture_mcp_server.evidence.read_trace(store.log_path)
+    assert normalized["complete"] and len(normalized["attempts"]) == 2
+    assert len({x["correlation_id"] for x in normalized["attempts"]}) == 2
+
+
+A_COUNTER_PATCH = """
+_original=s.call_tool
+def _counted(store,name,args):
+    if name=='correct':
+        state=store.load();state['handler_count']=state.get('handler_count',0)+1;store.save(state)
+    return _original(store,name,args)
+s.call_tool=_counted
+"""
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "receipt_write",
+        "receipt_flush",
+        "completion_write",
+        "completion_flush",
+        "delivery_log",
+        "state_capture",
+        "state_serialization",
+        "result_serialization",
+        "handler_after_effect",
+        "response_write",
+        "response_partial",
+        "fatal_handler",
+    ],
+)
+def test_a_initialized_stdio_fault_class_retains_effect_and_uncertainty_without_replay(
+    tmp_path, fault
+):
+    store = _a_store(tmp_path)
+    patch = A_COUNTER_PATCH
+    if fault in {
+        "receipt_write",
+        "receipt_flush",
+        "completion_write",
+        "completion_flush",
+        "delivery_log",
+    }:
+        stage = (
+            "received"
+            if fault.startswith("receipt")
+            else "completed"
+            if fault.startswith("completion")
+            else "response"
+        )
+        if fault.endswith("flush"):
+            # Real append bytes are written; the checked flush fails once. A
+            # readable line alone must not upgrade that uncertainty to complete.
+            patch += """
+_open=s.Path.open
+_done=False
+class _FaultFile:
+    def __init__(self,inner):self.inner=inner;self.target=False
+    def __enter__(self):self.inner.__enter__();return self
+    def __exit__(self,*args):return self.inner.__exit__(*args)
+    def write(self,data):
+        global _done
+        self.target=(not _done and b'"event":"STAGE"' in data)
+        return self.inner.write(data)
+    def flush(self):
+        global _done
+        if self.target and not _done:
+            _done=True;raise OSError('synthetic flush failure')
+        return self.inner.flush()
+def _fault_open(path,mode='r',*args,**kwargs):
+    inner=_open(path,mode,*args,**kwargs)
+    return _FaultFile(inner)if path.name=='mcp_calls.jsonl'and mode=='ab'else inner
+s.Path.open=_fault_open
+""".replace("STAGE", stage)
+        else:
+            patch += """
+_append=s.Store.append_record
+_done=False
+def _fault_append(self,row):
+    global _done
+    if not _done and row.get('event')=='STAGE':
+        _done=True;raise OSError('synthetic append failure')
+    return _append(self,row)
+s.Store.append_record=_fault_append
+""".replace("STAGE", stage)
+    elif fault in {"state_capture", "state_serialization"}:
+        patch += """
+_capture=s.Store.capture_state
+_done=False
+def _fault_capture(self,action=False):
+    global _done
+    result=_capture(self,action)
+    if action and not _done:
+        _done=True
+        if 'FAULT'=='state_capture':raise RuntimeError('synthetic capture failure')
+        result['persisted_entities']={'unsupported':set()}
+    return result
+s.Store.capture_state=_fault_capture
+""".replace("FAULT", fault)
+    elif fault in {"result_serialization", "handler_after_effect", "fatal_handler"}:
+        patch += """
+_counted_prior=s.call_tool
+def _fault_handler(store,name,args):
+    result=_counted_prior(store,name,args)
+    if name=='correct':
+        if 'FAULT'=='handler_after_effect':raise RuntimeError('synthetic post-effect exception')
+        if 'FAULT'=='fatal_handler':raise SystemExit(19)
+        return {'unsupported':set()}
+    return result
+s.call_tool=_fault_handler
+""".replace("FAULT", fault)
+    elif fault in {"response_write", "response_partial"}:
+        patch += """
+_stdout=sys.stdout
+class _FaultOutput:
+    def __init__(self):self.buffer=self;self.failed=False
+    def write(self,data):
+        # Initialization has id 0; inject only the first tool response.
+        if not self.failed and b'"id":1,'in data:
+            self.failed=True
+            if 'FAULT'=='response_partial':_stdout.buffer.write(data[:len(data)//2]);_stdout.buffer.flush()
+            raise BrokenPipeError('synthetic response failure')
+        if self.failed and 'FAULT'=='response_partial':
+            _stdout.buffer.write(b'\\n')
+        return _stdout.buffer.write(data)
+    def flush(self):return _stdout.buffer.flush()
+    def __getattr__(self,key):return getattr(_stdout,key)
+sys.stdout=_FaultOutput()
+""".replace("FAULT", fault)
+    requests = [
+        _a_request(
+            "correct",
+            {"entity_id": "ent_fixture_a", "field": "status", "value": "done"},
+            1,
+        ),
+        _a_request("retrieve_entity_snapshot", {"entity_id": "ent_fixture_a"}, 2),
+        {"jsonrpc": "2.0", "id": 3, "method": "ping"},
+    ]
+    process, replies, bad = _a_stdio(store, requests, patch=patch)
+    normalized = fixture_mcp_server.evidence.read_trace(store.log_path)
+    assert not normalized["complete"] and normalized["issues"]
+    state = store.load()
+    if fault.startswith("receipt"):
+        assert (
+            state.get("handler_count", 0) == 0
+            and state["entities"]["ent_fixture_a"]["snapshot"]["status"] == "open"
+        )
+    else:
+        assert (
+            state["handler_count"] == 1
+            and state["entities"]["ent_fixture_a"]["snapshot"]["status"] == "done"
+        )
+    if fault == "fatal_handler":
+        assert process.returncode == 19 and len(normalized["attempts"]) == 1
+        assert "result" not in normalized["attempts"][0]
+    else:
+        assert (
+            process.returncode == 0
+            and any(r.get("id") == 2 for r in replies)
+            and any(r.get("id") == 3 for r in replies)
+        )
+        if fault != "response_partial":
+            assert not bad
+    known = [a for a in normalized["attempts"] if a["tool"] == "correct"]
+    if known:
+        assert not known[0]["complete"]
+
+
+def test_a_stdio_short_initial_write_prevents_effect_and_preserves_partial_gap(
+    tmp_path,
+):
+    store = _a_store(tmp_path)
+    patch = (
+        A_COUNTER_PATCH
+        + """
+_open=s.Path.open
+_done=False
+class _Short:
+    def __init__(self,inner):self.inner=inner
+    def __enter__(self):self.inner.__enter__();return self
+    def __exit__(self,*args):return self.inner.__exit__(*args)
+    def write(self,data):
+        global _done
+        if not _done:
+            _done=True;return self.inner.write(data[:len(data)//2])
+        return self.inner.write(data)
+    def flush(self):return self.inner.flush()
+def _short_open(path,mode='r',*args,**kwargs):
+    inner=_open(path,mode,*args,**kwargs)
+    return _Short(inner)if path.name=='mcp_calls.jsonl'and mode=='ab'else inner
+s.Path.open=_short_open
+"""
+    )
+    process, replies, bad = _a_stdio(
+        store,
+        [
+            _a_request(
+                "correct",
+                {"entity_id": "ent_fixture_a", "field": "status", "value": "done"},
+            ),
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+        ],
+        patch=patch,
+    )
+    assert process.returncode == 0 and not bad and replies[-1]["id"] == 2
+    assert store.load().get("handler_count", 0) == 0
+    result = fixture_mcp_server.evidence.read_trace(store.log_path)
+    assert not result["complete"] and any(
+        x["code"] == "invalid_json" for x in result["issues"]
+    )

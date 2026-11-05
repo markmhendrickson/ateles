@@ -12,6 +12,8 @@ from pathlib import Path
 MAX_INPUT_BYTES = 1_048_576
 MAX_INPUT_DEPTH = 64
 MAX_INPUT_NODES = 1_000_000
+MAX_TRACE_BYTES = 64 * MAX_INPUT_BYTES
+MAX_TRACE_RECORDS = 100_000
 
 
 def decode_input_json(text: str, path: str, errors: list[str]):
@@ -92,7 +94,11 @@ def encode_json(value, path="record", *, limit=MAX_INPUT_BYTES):
     while pending:
         item = pending.pop()
         if isinstance(item, str):
-            if len(item) > limit or len(item.encode("utf-8")) > limit:
+            try:
+                length = len(item.encode("utf-8"))
+            except UnicodeError:
+                raise EvidenceError(path + ": invalid Unicode string") from None
+            if len(item) > limit or length > limit:
                 raise EvidenceError(path + ": string exceeds serialization bound")
         elif isinstance(item, dict):
             pending.extend(item.keys())
@@ -126,26 +132,24 @@ def encode_json(value, path="record", *, limit=MAX_INPUT_BYTES):
 
 
 def read_frames(stream, *, limit=MAX_INPUT_BYTES):
-    """Read/drain one bounded LF frame at a time; never dispatch fragments."""
+    """Bound LF-delimited payload bytes (the delimiter is not payload)."""
     while True:
-        raw = stream.readline(limit + 1)
+        raw = stream.readline(limit + 2)
         if not raw:
             return
-        oversized = len(raw) > limit
-        if not raw.endswith(b"\n"):
-            if len(raw) <= limit:
-                yield None, "truncated_frame"
-                return
-            # Discard an unsupported frame in bounded chunks, then recover at LF.
+        if raw.endswith(b"\n"):
+            yield (
+                (None, "oversized_frame") if len(raw) - 1 > limit else (raw[:-1], None)
+            )
+        elif len(raw) <= limit:
+            yield raw, "truncated_frame"
+            return
+        else:
             while raw and not raw.endswith(b"\n"):
-                raw = stream.readline(limit + 1)
+                raw = stream.readline(limit + 2)
             yield None, "oversized_frame"
             if not raw:
                 return
-        elif oversized:
-            yield None, "oversized_frame"
-        else:
-            yield raw[:-1], None
 
 
 def read_json_file(path, label="state"):
@@ -182,10 +186,22 @@ def normalize_records(records, *, exclude_correlation=None, initial_issues=None)
             }
         )
 
+    total = 0
     for index, row in enumerate(records):
+        if index >= MAX_TRACE_RECORDS:
+            issue("trace_limit", index=index)
+            break
         if _structure_errors(row, f"records[{index}]") or not isinstance(row, dict):
             issue("invalid_record", index=index)
             continue
+        try:
+            total += len(encode_json(row, f"records[{index}]"))
+        except EvidenceError:
+            issue("invalid_record", index=index)
+            continue
+        if total > MAX_TRACE_BYTES:
+            issue("trace_limit", index=index)
+            break
         cid = row.get("correlation_id")
         if exclude_correlation is not None and cid == exclude_correlation:
             continue
@@ -222,6 +238,21 @@ def normalize_records(records, *, exclude_correlation=None, initial_issues=None)
         event = row.get("event")
         if event == "protocol":
             issue("protocol_gap", cid, diagnostic=row.get("diagnostic"))
+            if (
+                isinstance(row.get("request"), dict)
+                and row["request"].get("method") == "tools/call"
+            ):
+                entry = correlated.setdefault(
+                    cid,
+                    {
+                        "received": [],
+                        "completed": [],
+                        "response": [],
+                        "order": [],
+                        "protocol": [],
+                    },
+                )
+                entry.setdefault("protocol", []).append(row)
             continue
         if not isinstance(event, str) or event not in {
             "received",
@@ -242,9 +273,9 @@ def normalize_records(records, *, exclude_correlation=None, initial_issues=None)
         if len(receipts) != 1:
             issue("missing_receipt" if not receipts else "duplicate_receipt", cid)
             # An orphan terminal never fabricates a received request.
-            if not receipts:
+            if not receipts and not entry.get("protocol"):
                 continue
-        receipt = receipts[0]
+        receipt = receipts[0] if receipts else entry["protocol"][0]
         request = receipt.get("request")
         if not isinstance(request, dict):
             issue("invalid_receipt", cid)
@@ -259,10 +290,16 @@ def normalize_records(records, *, exclude_correlation=None, initial_issues=None)
             "received_tool": tool,
             "args": args,
             "request": request,
-            "receipt_observed": True,
-            "provenance": "observed_v1",
+            "receipt_observed": bool(receipts),
+            "provenance": "observed_v1"
+            if receipts
+            else "failed_pre_dispatch_observation",
             "complete": False,
-            "handler_outcome": "unknown",
+            "handler_outcome": "not_executed"
+            if any(
+                row.get("handler_started") is False for row in entry.get("protocol", [])
+            )
+            else "unknown",
             "response_delivery": "unknown",
             "request_sha256": receipt.get("request_sha256"),
         }
@@ -271,6 +308,11 @@ def normalize_records(records, *, exclude_correlation=None, initial_issues=None)
         def gap(code):
             local.append(code)
             issue(code, cid)
+
+        if request.get("method") != "tools/call":
+            gap("invalid_receipt")
+        if len(entry.get("protocol", [])) > 1:
+            gap("duplicate_protocol_receipt")
 
         try:
             import hashlib
@@ -297,17 +339,52 @@ def normalize_records(records, *, exclude_correlation=None, initial_issues=None)
                 "not_executed",
             }:
                 gap("invalid_handler_outcome")
-            attempt["handler_outcome"] = outcome
-            if terminal.get("result_status") == "available" and isinstance(
-                terminal.get("result"), dict
-            ):
+            attempt["handler_outcome"] = (
+                outcome
+                if isinstance(outcome, str)
+                and outcome
+                in {
+                    "returned",
+                    "refused",
+                    "validation_error",
+                    "exception",
+                    "not_executed",
+                }
+                else "unknown"
+            )
+            if terminal.get("result_status") == "available" and "result" in terminal:
                 attempt["result"] = terminal["result"]
+                if not isinstance(terminal["result"], dict):
+                    gap("invalid_result_shape")
             else:
                 gap("result_unavailable")
             if outcome == "exception":
                 gap("handler_exception")
             if terminal.get("state_capture") != "complete":
                 gap("state_capture_incomplete")
+            else:
+
+                def digest(value):
+                    return (
+                        isinstance(value, str)
+                        and len(value) == 64
+                        and all(char in "0123456789abcdef" for char in value)
+                    )
+
+                if not digest(terminal.get("state_sha256")):
+                    gap("invalid_state_digest")
+                if "planning_sha256" not in terminal or (
+                    terminal["planning_sha256"] is not None
+                    and not digest(terminal["planning_sha256"])
+                ):
+                    gap("invalid_planning_digest")
+                if "persisted_entities" in terminal and not isinstance(
+                    terminal["persisted_entities"], dict
+                ):
+                    gap("invalid_persisted_entities")
+            for key in ("state_error", "outcome_error"):
+                if key in terminal and not isinstance(terminal[key], str):
+                    gap("invalid_" + key)
             for key in (
                 "state_sha256",
                 "planning_sha256",
@@ -323,7 +400,17 @@ def normalize_records(records, *, exclude_correlation=None, initial_issues=None)
             delivery = deliveries[0]
             if delivery.get("request_sha256") != receipt.get("request_sha256"):
                 gap("delivery_mismatch")
-            attempt["response_delivery"] = delivery.get("delivery")
+            attempt["response_delivery"] = (
+                delivery.get("delivery")
+                if isinstance(delivery.get("delivery"), str)
+                and delivery["delivery"] in {"written", "inprocess_return", "failed"}
+                else "unknown"
+            )
+            if delivery.get("error"):
+                attempt["response_error"] = delivery["error"]
+                gap("response_error")
+            if "error" in delivery and not isinstance(delivery["error"], str):
+                gap("invalid_response_error")
             if not isinstance(delivery.get("delivery"), str) or delivery[
                 "delivery"
             ] not in {"written", "inprocess_return"}:
@@ -332,7 +419,10 @@ def normalize_records(records, *, exclude_correlation=None, initial_issues=None)
                 gap("record_order")
         if len(receipts) != 1:
             local.append("duplicate_receipt")
-        attempt["complete"] = not local
+        attempt["issues"] = [
+            item["code"] for item in issues if item.get("correlation_id") == cid
+        ]
+        attempt["complete"] = not attempt["issues"]
         attempts.append(attempt)
     return {
         "attempts": attempts,
@@ -353,13 +443,18 @@ def read_trace(path, *, exclude_correlation=None):
     try:
         with Path(path).open("rb") as handle:
             for index, (raw, error) in enumerate(read_frames(handle)):
-                if index >= 100_000 or total > 64 * MAX_INPUT_BYTES:
+                if index >= MAX_TRACE_RECORDS:
                     issues.append({"code": "trace_limit"})
                     break
-                if error:
-                    issues.append({"code": error, "index": index})
-                    continue
+                frame_issue = {"code": error, "index": index} if error else None
+                if frame_issue:
+                    issues.append(frame_issue)
+                    if raw is None:
+                        continue
                 total += len(raw)
+                if total > MAX_TRACE_BYTES:
+                    issues.append({"code": "trace_limit", "index": index})
+                    break
                 if not raw.strip():
                     continue
                 errors = []
@@ -374,6 +469,12 @@ def read_trace(path, *, exclude_correlation=None):
                         {"code": "invalid_json", "index": index, "diagnostics": errors}
                     )
                 else:
+                    if (
+                        frame_issue
+                        and isinstance(value, dict)
+                        and isinstance(value.get("correlation_id"), str)
+                    ):
+                        frame_issue["correlation_id"] = value["correlation_id"]
                     records.append(value)
     except OSError as exc:
         issues.append({"code": "trace_unavailable", "error": type(exc).__name__})
@@ -382,3 +483,7 @@ def read_trace(path, *, exclude_correlation=None):
     return normalize_records(
         records, exclude_correlation=exclude_correlation, initial_issues=issues
     )
+
+
+# Public compatibility name for downstream source validation; implementation once.
+structure_errors = _structure_errors
