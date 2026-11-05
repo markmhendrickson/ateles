@@ -364,8 +364,6 @@ def test_failed_check_keeps_prior_keys_and_clears_failure_when_it_recovers():
     assert n.cleared == [cdc.failure_key(COORD)]
 
 
-
-
 def test_one_unreadable_target_does_not_hide_the_others():
     good = cfg()
     bad = cfg(entity_id="bad", fly_app="app-bad")
@@ -452,12 +450,6 @@ def test_undelivered_could_not_check_alert_is_retried():
     assert len(n2.sent) == 1 and cdc.failure_key(COORD) in state[COORD]
 
 
-
-
-
-
-
-
 def _real_notifier(monkeypatch, tmp_path, silence):
     from lib.notify.notifier import Notifier
 
@@ -519,9 +511,7 @@ def test_run_checks_end_to_end_on_fixtures(tmp_path):
         def task_page_fetcher(self, now):
             return pager([task(1, "2026-11-01")])
 
-    results = cdc.run_checks(
-        now=NOW, home=tmp_path, reader_factory=Reader, environ={}
-    )
+    results = cdc.run_checks(now=NOW, home=tmp_path, reader_factory=Reader, environ={})
     assert [len(r.findings) for r in results] == [1, 0, 0, 1, 0]
     assert all(r.ok for r in results)
 
@@ -540,12 +530,6 @@ def test_plist_template_is_hourly_and_identity_free():
 
 
 # ── first-run baseline, overdue backlog, repo map ────────────────────────────
-
-
-
-
-
-
 
 
 def test_old_overdue_task_is_counted_not_alerted():
@@ -644,9 +628,7 @@ def test_job_queue_is_its_own_and_shared_queue_is_untouched(monkeypatch, tmp_pat
     assert all("other daemon" not in " ".join(c) for c in gws.cmds)
 
 
-def test_held_notice_goes_out_after_silence_and_waits_during_it(
-    monkeypatch, tmp_path
-):
+def test_held_notice_goes_out_after_silence_and_waits_during_it(monkeypatch, tmp_path):
     from lib.notify import notifier as nmod
     from lib.notify.notifier import Priority
 
