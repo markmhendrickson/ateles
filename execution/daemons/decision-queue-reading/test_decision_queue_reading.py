@@ -102,10 +102,13 @@ class FakeNeotoma:
         rows = self.rows[etype]
         if "snapshot_filters" in body:
             assert "cursor" not in body
+            flt = body["snapshot_filters"]["status"]
+            # the real server rejects a bare string here (HTTP 400 seen live)
+            assert isinstance(flt, dict) and flt["op"] == "eq", "filter must be {op, value}"
             total = (
                 self.server_total
                 if self.server_total is not None and etype == "checkpoint_brief"
-                else sum(1 for r in rows if r["snapshot"]["status"] == body["snapshot_filters"]["status"])
+                else sum(1 for r in rows if r["snapshot"]["status"] == flt["value"])
             )
             return {"entities": [], "total": total}
         start = int(body["cursor"]) if body.get("cursor") else 0

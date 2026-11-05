@@ -140,7 +140,7 @@ def read_all_by_cursor(
         try:
             res = requester("POST", "/entities/query", body)
         except Exception as exc:  # noqa: BLE001 - category only, never raw text
-            raise ReadFailure(f"read_{entity_type}", type(exc).__name__) from None
+            raise ReadFailure(f"read_{entity_type}", _category(exc)) from None
         rows.extend(res.get("entities") or [])
         if total is None and isinstance(res.get("total"), int):
             total = res["total"]
@@ -158,6 +158,11 @@ def read_all_by_cursor(
     return rows
 
 
+def _category(exc: BaseException) -> str:
+    status = getattr(exc, "status", None)
+    return f"{type(exc).__name__}:{status}" if isinstance(status, int) else type(exc).__name__
+
+
 def server_open_total(requester: Requester) -> int:
     """The server's own count of open checkpoints (one-row filtered query)."""
     try:
@@ -168,11 +173,11 @@ def server_open_total(requester: Requester) -> int:
                 "entity_type": "checkpoint_brief",
                 "include_snapshots": False,
                 "limit": 1,
-                "snapshot_filters": {"status": "awaiting_operator"},
+                "snapshot_filters": {"status": {"op": "eq", "value": "awaiting_operator"}},
             },
         )
     except Exception as exc:  # noqa: BLE001
-        raise ReadFailure("instrument_check", type(exc).__name__) from None
+        raise ReadFailure("instrument_check", _category(exc)) from None
     total = res.get("total")
     if not isinstance(total, int):
         raise ReadFailure("instrument_check", "no_total")
