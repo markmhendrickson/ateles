@@ -99,9 +99,9 @@ ALLOWLIST: dict[str, str] = {
         'unset is reported by FlyConfig.missing() and refuses Fly',
     "execution/daemons/apis/fly_runner.py:FlyConfig.from_env:env.get('APIS_FLY_CURSOR_LOGIN_DIRS', '')":
         'unset means the documented default Cursor login directories',
-    "execution/daemons/apis/fly_runner.py:FlyConfig.from_env:env.get('APIS_FLY_GITHUB_APP_PREFIX', '')":
+    "execution/daemons/apis/fly_runner.py:review_github_app_prefix:os.environ.get('APIS_FLY_GITHUB_APP_PREFIX', '')":
         'unset means the documented default GitHub App',
-    "execution/daemons/apis/fly_runner.py:FlyConfig.from_env:env.get('APIS_FLY_GITHUB_APP_PREFIX', '').strip() or 'ATELES_REVIEWER_APP'":
+    "execution/daemons/apis/fly_runner.py:review_github_app_prefix:os.environ.get('APIS_FLY_GITHUB_APP_PREFIX', '').strip() or 'ATELES_REVIEWER_APP'":
         'unset means the documented default GitHub App',
     "execution/daemons/apis/fly_runner.py:FlyConfig.from_env:env.get('APIS_FLY_IMAGE', '')":
         'unset is reported by FlyConfig.missing() and refuses Fly',
