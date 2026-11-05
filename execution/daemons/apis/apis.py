@@ -2063,6 +2063,7 @@ async def dispatch_task(
     snapshot_hydrated: bool | None = None,
     detach_after_accept: bool = False,
     _approved_correction_lifecycle: _ApprovedCorrectionLifecycle | None = None,
+    release_key: str = "",
 ) -> bool | None:
     """
     Route a task to the appropriate T4 skill and spawn it via a bundled-plan CLI.
@@ -2088,10 +2089,16 @@ async def dispatch_task(
             EXECUTING, while completing the harness run in the background.
             Used by the request/response checkpoint-release path so client
             cancellation cannot abort work that the operator already released.
+        release_key:   The checkpoint whose approval releases this task. Keys the
+            routed/executing writes to that release, so a task released, failed,
+            re-held and released again through a NEW checkpoint really writes
+            instead of replaying the first release's idempotency key, while a
+            replay of the SAME checkpoint stays idempotent.
     """
     title = snapshot.get("title", "(untitled)")
     current_status = snapshot.get("status")
     correction_lifecycle = None
+    lifecycle_key = f"{trigger}-{release_key}" if release_key else trigger
     if gate_override and snapshot.get("task_type") == "existing_pr_correction":
         try:
             binding = _approved_correction_lifecycle
@@ -2433,7 +2440,7 @@ async def dispatch_task(
         set_task_status(
             entity_id, TaskStatus.ROUTED, handler=DAEMON_NAME,
             from_status=current_status, reason="" if gate_override else None,
-            key_suffix=trigger,
+            key_suffix=lifecycle_key,
         )
     if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.ROUTED):
         log.warning(
@@ -2758,7 +2765,7 @@ async def dispatch_task(
     else:
         set_task_status(
             entity_id, TaskStatus.EXECUTING, handler=DAEMON_NAME,
-            from_status=TaskStatus.ROUTED.value, key_suffix=trigger,
+            from_status=TaskStatus.ROUTED.value, key_suffix=lifecycle_key,
         )
     if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.EXECUTING):
         log.warning(
@@ -4656,6 +4663,7 @@ async def handle_checkpoint_brief(
         notifier=notifier,
         gate_override=True,
         detach_after_accept=detach_after_accept,
+        release_key=entity_id,
         **lifecycle_binding,
     )
     if correction_lifecycle is not None and dispatched is not True:
