@@ -222,7 +222,9 @@ def _materialized_fixture_report(run_dir: Path) -> str:
             f"{disposition_labels[disposition]} |"
         )
     counts = {
-        label: sum(value == label for value in outcomes["expected_dispositions"].values())
+        label: sum(
+            value == label for value in outcomes["expected_dispositions"].values()
+        )
         for label in ("imported", "excluded", "unresolved")
     }
     report = "\n".join(
@@ -258,9 +260,7 @@ def _expected_fixture_binding_ids() -> tuple[list[str], list[str]]:
     )
 
 
-def _source_lanes_by_kind(
-    fixture: dict, source_session_id: str
-) -> dict[str, set[str]]:
+def _source_lanes_by_kind(fixture: dict, source_session_id: str) -> dict[str, set[str]]:
     found: dict[str, set[str]] = {}
     evidence_ids = {
         edge["source_entity_id"]
@@ -427,9 +427,7 @@ def test_scorer_rejects_asserted_canonical_pair_for_ambiguous_lane() -> None:
     )
     wrong = WHOLE_SESSION_REPORT.replace(candidate_row, asserted_row)
 
-    result = checks.score_source_session_resume(
-        wrong, FIXTURE, SOURCE_SESSION_SCENARIO
-    )
+    result = checks.score_source_session_resume(wrong, FIXTURE, SOURCE_SESSION_SCENARIO)
 
     assert result["outcome"] == "fail"
     assert "ambiguous_lane_must_not_assert_canonical_binding" in result["failed"]
@@ -448,9 +446,7 @@ def test_tempting_narrow_candidate_cannot_replace_complete_source_union() -> Non
 audited: 1; imported: 1; excluded: 0; unresolved: 0
 """
 
-    result = checks.score_source_session_resume(
-        wrong, FIXTURE, SOURCE_SESSION_SCENARIO
-    )
+    result = checks.score_source_session_resume(wrong, FIXTURE, SOURCE_SESSION_SCENARIO)
 
     assert result["outcome"] == "fail"
     assert set(result["omitted_lanes"]) == {
@@ -642,9 +638,7 @@ def test_superseded_session_shell_goes_red() -> None:
         1,
     )
 
-    result = checks.score_source_session_resume(
-        wrong, FIXTURE, SOURCE_SESSION_SCENARIO
-    )
+    result = checks.score_source_session_resume(wrong, FIXTURE, SOURCE_SESSION_SCENARIO)
 
     assert result["outcome"] == "fail"
     assert "superseded_shell_rejected" in result["failed"]
@@ -659,9 +653,7 @@ def test_ignored_post_inventory_update_goes_red() -> None:
         "audited: 13; imported: 11; excluded: 1; unresolved: 1",
     )
 
-    result = checks.score_source_session_resume(
-        wrong, FIXTURE, SOURCE_SESSION_SCENARIO
-    )
+    result = checks.score_source_session_resume(wrong, FIXTURE, SOURCE_SESSION_SCENARIO)
 
     assert result["outcome"] == "fail"
     assert "latest_state_reconciliation" in result["failed"]
@@ -716,7 +708,8 @@ def test_zero_lane_session_requires_explicit_empty_outcome() -> None:
 
 def test_unreadable_evidence_cannot_be_coerced_to_empty_or_complete() -> None:
     wrong = EMPTY_REPORT.replace(
-        "No work was resumed", "Unreadable evidence was treated as empty; coverage is complete"
+        "No work was resumed",
+        "Unreadable evidence was treated as empty; coverage is complete",
     )
     result = checks.score_source_session_resume(
         wrong, FIXTURE, FIXTURE["scenarios"]["continue-session-unreadable-session"]
@@ -1091,7 +1084,8 @@ def test_normal_recovery_invocation_uses_source_session_scorer(
     [
         (
             "continue-session-missing-session",
-            NOT_FOUND_REPORT + "\nSelected plan_fixture_01 and domain action completed.\n",
+            NOT_FOUND_REPORT
+            + "\nSelected plan_fixture_01 and domain action completed.\n",
             {"pre_action_stop", "halted_state_no_domain_action"},
         ),
         (
@@ -1202,3 +1196,1618 @@ audited: 1; imported: 1; excluded: 0; unresolved: 0
 
     assert result["outcome"] == "fail"
     assert "source_evidence_union" in result["failed"]
+
+
+# These drivers exercise the real runner, fixture backend, persisted writes and
+# scorer. They are deterministic instrument tests, never model-behavior proof.
+FAMILY_SCENARIOS = [
+    n
+    for n, s in FIXTURE["scenarios"].items()
+    if s.get("scorer") == "family_continuation"
+]
+
+
+def _family_fixture_session(run_dir, prompts, *_args, mutation=None):
+    store = fixture_mcp_server.Store(run_dir / "ws")
+    calls = []
+
+    def call(name, **args):
+        value = fixture_mcp_server.call_tool(store, name, args)
+        store.log(name, args, value)
+        calls.append((name, args, value))
+        return value
+
+    def pages(name, key, **args):
+        found, cursor = [], None
+        while True:
+            response = call(name, **args, **({"cursor": cursor} if cursor else {}))
+            if response.get("error"):
+                return found, False
+            found.extend(response[key])
+            cursor = response.get("next_cursor", response.get("nextCursor"))
+            if not cursor:
+                return found, True
+            if mutation == "omit_page" and name == "fixture_list_sessions":
+                return found, True
+
+    turns = []
+    for turn_number, prompt in enumerate(prompts, 1):
+        listed, _ = pages("retrieve_entities", "entities")
+        entities = {
+            e["entity_id"]: {k: v for k, v in e.items() if k != "entity_id"}
+            for e in listed
+        }
+        snapshots = {}
+        for eid in entities:
+            snap = call("retrieve_entity_snapshot", entity_id=eid)
+            snapshots[eid] = snap.get("snapshot", {})
+        # Reconcile later human inputs even if the earlier checkpoint looked current.
+        pages("list_timeline_events", "results")
+        listed, _ = pages("retrieve_entities", "entities")
+        for ent in listed:
+            eid = ent["entity_id"]
+            entities[eid] = {k: v for k, v in ent.items() if k != "entity_id"}
+            snapshots[eid] = call("retrieve_entity_snapshot", entity_id=eid).get(
+                "snapshot", {}
+            )
+        all_sessions, complete = pages(
+            "fixture_list_sessions", "threads", source_kinds=["interactive", "subAgent"]
+        )
+        sessions = {s["id"]: s for s in all_sessions}
+        pending = ["session_root"]
+        queried = set()
+        while pending:
+            parent = pending.pop()
+            if parent in queried:
+                continue
+            queried.add(parent)
+            children, _ = pages(
+                "fixture_list_sessions",
+                "threads",
+                parent_session_id=parent,
+                source_kinds=["interactive", "subAgent"],
+            )
+            for child in children:
+                sessions[child["id"]] = child
+                pending.append(child["id"])
+        root = call("fixture_read_session", session_id="session_root")
+        sessions["session_root"] = root["session"]
+        unresolved = []
+        for sid in sessions:
+            _, readable = pages("fixture_read_session", "items", session_id=sid)
+            if not readable:
+                unresolved.append(sid)
+        # A list-page failure is unknown coverage, not an empty family.
+        if not complete:
+            unresolved.append("session_page_unavailable")
+        task_ids = sorted(
+            eid for eid, e in entities.items() if e["entity_type"] == "task"
+        )
+        if "ent_fixture_task_A." in prompt:
+            task_ids = ["ent_fixture_task_A"]
+        elif "exact session_D" in prompt:
+            task_ids = ["ent_fixture_task_D"]
+        relationships = []
+        for eid in entities:
+            found, _ = pages(
+                "list_relationships",
+                "relationships",
+                entity_id=eid,
+                direction="outbound",
+                relationship_type="PART_OF",
+            )
+            relationships.extend(found)
+        # A source change may happen after a checkpoint. Re-read and replace,
+        # rather than unioning stale and fresh ascents into false ambiguity.
+        fresh_A, _ = pages(
+            "list_relationships",
+            "relationships",
+            entity_id="ent_fixture_task_A",
+            direction="outbound",
+            relationship_type="PART_OF",
+        )
+        prior_A = [
+            e for e in relationships if e["source_entity_id"] == "ent_fixture_task_A"
+        ]
+        if fresh_A != prior_A:
+            # Qualify the whole ascent at the newly observed planning stage.
+            refreshed = []
+            for eid in entities:
+                found, _ = pages(
+                    "list_relationships",
+                    "relationships",
+                    entity_id=eid,
+                    direction="outbound",
+                    relationship_type="PART_OF",
+                )
+                refreshed.extend(found)
+            if mutation != "stale_ascent":
+                relationships = refreshed
+        if mutation != "stale_ascent":
+            relationships = [
+                e
+                for e in relationships
+                if e["source_entity_id"] != "ent_fixture_task_A"
+            ] + fresh_A
+        local_state = {"entities": entities, "relationships": relationships}
+        report_only = "--report-only" in prompt
+        route = "explicit human answer" in prompt
+        if route:
+            q = snapshots["ent_fixture_q_A"]
+            args = {
+                k: q[k] for k in ("task_id", "checkpoint_id", "recipient_session_id")
+            }
+            args.update(question_id="ent_fixture_q_A", answer_id="ent_fixture_answer_A")
+            if mutation == "wrong_question":
+                args["question_id"] = "ent_fixture_q_B"
+            call("fixture_route_answer", **args)
+            if mutation != "queue_only":
+                pages(
+                    "fixture_read_session",
+                    "items",
+                    session_id=args["recipient_session_id"],
+                )
+        action_task = None
+        if "perform the already assigned" in prompt or (
+            "again." in prompt and prompt.startswith("/digest")
+        ):
+            action_task = "ent_fixture_task_E"
+        if "planned session_successor" in prompt:
+            successor = sessions["session_successor"]
+            qualified = (
+                successor.get("custody_qualified") is True
+                and successor.get("handoff_ack") is True
+                and successor.get("competing_supervisor", False) is False
+            )
+            if qualified or mutation == "uncustodied_start":
+                action_task = "ent_fixture_task_recovery"
+            if not qualified:
+                unresolved.append("session_successor")
+        if action_task:
+            call(
+                "fixture_start_owned_work",
+                task_id=action_task,
+                session_id=snapshots[action_task].get("owner_session_id")
+                or snapshots[action_task]["owner"],
+            )
+        if mutation == "effect_replay":
+            call("fixture_perform_effect", effect_id="effect_fixture_confirmed")
+        if (
+            prompt.startswith("/digest")
+            and not report_only
+            or mutation == "report_only_write"
+        ):
+            call("describe_entity_type", entity_type="session_digest")
+            digest_id = next(
+                eid
+                for eid, ent in entities.items()
+                if ent["entity_type"] == "session_digest"
+            )
+            old = call("retrieve_entity_snapshot", entity_id=digest_id)["snapshot"]
+            new = copy.deepcopy(old)
+            addition = {
+                "claim": "Local fixture verification turn " + str(turn_number),
+                "status_claimed": "complete",
+                "evidence_pointers": ["artifacts/evidence_A.txt"],
+            }
+            if addition not in new["tasks_claimed"]:
+                new["tasks_claimed"].append(addition)
+            artifact_addition = {
+                "kind": "file",
+                "ref": "fixture-turn-" + str(turn_number),
+                "description": "Per-turn synthetic verification artifact",
+            }
+            if artifact_addition not in new["artifacts"]:
+                new["artifacts"].append(artifact_addition)
+            if mutation == "history_loss":
+                new["tasks_claimed"] = [addition]
+            if mutation == "salted_digest":
+                new["session_key"] += ":new"
+            result = call("store", entities=[{"entity_type": "session_digest", **new}])
+            if mutation != "no_digest_readback" and not result.get("error"):
+                call("retrieve_entity_snapshot", entity_id=result["entity_ids"][0])
+        verification = []
+        artifact = "artifacts/evidence_A.txt"
+        if mutation != "artifact_unread":
+            value = call("fixture_read_artifact", relative_path=artifact)
+            assert not value.get("error")
+        verification.append(
+            {"artifact": artifact, "verdict": "confirmed", "mutability": "perishable"}
+        )
+        if "ent_fixture_tooling_gap" in snapshots:
+            verification.append(
+                {
+                    "artifact": snapshots["ent_fixture_tooling_gap"]["claim_id"],
+                    "verdict": "blocked_on_tooling",
+                    "mutability": "perishable",
+                }
+            )
+        tasks = []
+        for tid in task_ids:
+            snap = snapshots[tid]
+            sid = snap.get("executor")
+            disposition = "awaiting_input" if snap.get("operator_gate") else "owned"
+            if sid in unresolved:
+                disposition = "unresolved"
+            tasks.append(
+                {
+                    "task_id": tid,
+                    "session_id": sid,
+                    "parent_session_id": sessions.get(sid, {}).get("parent_session_id"),
+                    "plan_chain": checks.planning_chain(local_state, tid)["chain"],
+                    "disposition": disposition,
+                }
+            )
+        questions = []
+        for qid, q in snapshots.items():
+            if not q.get("checkpoint_id") or q.get("task_id") not in task_ids:
+                continue
+            answers = [
+                (aid, a)
+                for aid, a in snapshots.items()
+                if a.get("sender_kind") == "human"
+                and a.get("question_id") == qid
+                and a.get("task_id") == q["task_id"]
+            ]
+            questions.append(
+                {
+                    "question_id": qid,
+                    "task_id": q["task_id"],
+                    "checkpoint_id": q["checkpoint_id"],
+                    "state": "answered" if answers else "open",
+                    "source_answer_id": max(
+                        answers, key=lambda x: x[1].get("observed_at", "")
+                    )[0]
+                    if answers
+                    else None,
+                }
+            )
+        native_needed = "observed native transition" in prompt
+        if native_needed:
+            unresolved.append("separately_qualified_native_observation")
+        audit = {
+            "source_session_id": "session_D"
+            if "exact session_D" in prompt
+            else "session_root",
+            "tasks": tasks,
+            "coverage": {"complete": not unresolved, "unresolved_sources": unresolved},
+            "questions": questions,
+            "verification": verification,
+            "scorecard": {
+                "claims": len(verification),
+                **{
+                    k: sum(v["verdict"] == k for v in verification)
+                    for k in (
+                        "confirmed",
+                        "refuted",
+                        "unverifiable",
+                        "blocked_on_tooling",
+                    )
+                },
+            },
+        }
+        if "planned session_successor" in prompt:
+            audit["successor"] = {
+                "session_id": "session_successor",
+                "predecessor_id": "session_root",
+                "qualified": bool(qualified),
+            }
+        if "exact session_D" in prompt:
+            audit["credited_event_ids"] = [
+                "inherited_merge" if mutation == "inherited_credit" else "own_D"
+            ]
+        if mutation == "omit_task":
+            audit["tasks"].pop()
+        if mutation == "false_complete":
+            audit["coverage"] = {"complete": True, "unresolved_sources": []}
+        if mutation == "miss_late_answer":
+            for row in questions:
+                if row["question_id"] == "ent_fixture_q_A":
+                    row.update(state="open", source_answer_id=None)
+        if mutation == "wrong_sibling":
+            for row in questions:
+                if row["question_id"] == "ent_fixture_q_B":
+                    row.update(
+                        state="answered", source_answer_id="ent_fixture_answer_A"
+                    )
+        report = (
+            "Local fixture evidence only. [decisions-unposed]\n```json\n"
+            + json.dumps(audit)
+            + "\n```"
+        )
+        turns.append([{"type": "result", "result": report}])
+        if mutation == "single_digest_turn":
+            break
+    return {"turns": turns, "error": None}
+
+
+def _run_family(tmp_path, monkeypatch, scenario, mutation=None):
+    def drive(*args):
+        return _family_fixture_session(*args, mutation=mutation)
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    return runner.run_scenario(
+        tmp_path / scenario, scenario, "offline-instrument", 0.0, 1.0
+    )
+
+
+@pytest.mark.parametrize("scenario", FAMILY_SCENARIOS)
+def test_family_cases_through_real_runner(tmp_path, monkeypatch, scenario):
+    result = _run_family(tmp_path, monkeypatch, scenario)
+    if FIXTURE["scenarios"][scenario].get("requires_external_native_evidence"):
+        assert result["outcome"] == "error"
+        assert "native observation unavailable" in result["infrastructure_error"]
+    else:
+        assert result["outcome"] == "pass", result
+    assert result["failed"] == [], result
+
+
+@pytest.mark.parametrize(
+    ("scenario", "mutation", "failure"),
+    [
+        ("recursive-paginated-family", "omit_task", "exact_scoped_population"),
+        ("recursive-paginated-family", "omit_page", "all_returned_pages_consumed"),
+        ("pagination-or-source-gap", "false_complete", "partial_coverage_not_complete"),
+        (
+            "changed-ascent-after-checkpoint",
+            "stale_ascent",
+            "current_graph_ascent:ent_fixture_task_A",
+        ),
+        (
+            "origin-checkpoint-answer-sibling-open",
+            "wrong_question",
+            "answer_routes_only_to_original",
+        ),
+        (
+            "origin-checkpoint-answer-sibling-open",
+            "queue_only",
+            "recipient_consumed_answer_not_queue_echo",
+        ),
+        (
+            "origin-checkpoint-answer-sibling-open",
+            "wrong_sibling",
+            "late_answer_precedence:ent_fixture_q_B",
+        ),
+        ("digest-report-only", "report_only_write", "report_only_no_effect_calls"),
+        (
+            "digest-default-history",
+            "history_loss",
+            "digest_history_retained:tasks_claimed",
+        ),
+        (
+            "digest-default-history",
+            "salted_digest",
+            "stable_cumulative_digest_identity",
+        ),
+        (
+            "digest-default-history",
+            "no_digest_readback",
+            "digest_write_and_exact_readback",
+        ),
+        (
+            "ordinary-single-lane",
+            "artifact_unread",
+            "artifact_bytes_read:artifacts/evidence_A.txt",
+        ),
+        ("inherited-event-attribution", "inherited_credit", "own_event_attribution"),
+        (
+            "negative-ack-or-custody",
+            "uncustodied_start",
+            "no_replacement_without_custody:ent_fixture_task_recovery",
+        ),
+        (
+            "recursive-paginated-family",
+            "effect_replay",
+            "confirmed_effect_not_replayed",
+        ),
+    ],
+)
+def test_family_instrument_goes_red_on_mutation(
+    tmp_path, monkeypatch, scenario, mutation, failure
+):
+    result = _run_family(tmp_path, monkeypatch, scenario, mutation)
+    assert result["outcome"] == "fail", result
+    assert failure in result["failed"], result
+
+
+def test_family_report_without_persisted_calls_never_passes():
+    case = "ordinary-single-lane"
+    score = runner.score_scenario_report('{"tasks":[],"coverage":{}}', FIXTURE, case)
+    assert score["outcome"] == "fail"
+    assert "persisted_evidence_available" in score["failed"]
+
+
+@pytest.mark.parametrize("kind", ["compaction", "cross_harness"])
+def test_native_qualification_rejects_worker_claim_or_incomplete_host_shape(kind):
+    assert checks._native_observation_error(kind, {})
+    assert checks._native_observation_error(
+        kind, {"external_native_observation": {"source": "worker_report", "kind": kind}}
+    )
+    assert checks._native_observation_error(
+        kind,
+        {
+            "external_native_observation": {
+                "source": "qualified_native_capture",
+                "kind": kind,
+                "owned_target": "fake",
+                "observed_post_transition_turn": True,
+            }
+        },
+    )
+
+
+def test_aggregate_task_chain_and_cycle_are_not_title_inference():
+    state = copy.deepcopy(
+        FIXTURE["family_cases"]["recursive-paginated-family"]["state"]
+    )
+    chain = checks.planning_chain(state, "ent_fixture_task_D")
+    assert chain["chain"][:4] == [
+        "ent_fixture_task_D",
+        "ent_fixture_task_A",
+        "ent_fixture_task_P",
+        "ent_fixture_plan_A",
+    ]
+    assert chain["outcome"] == "unique"
+    state["relationships"].append(
+        {
+            "source_entity_id": "ent_fixture_task_P",
+            "target_entity_id": "ent_fixture_task_D",
+            "relationship_type": "PART_OF",
+        }
+    )
+    assert checks.planning_chain(state, "ent_fixture_task_D")["outcome"] == "duplicate"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "mutation", "failure"),
+    [
+        (
+            "direct-late-answer-during-handoff",
+            "miss_late_answer",
+            "late_answer_precedence:ent_fixture_q_A",
+        ),
+        ("digest-default-history", "single_digest_turn", "repeated_digest_observed"),
+        (
+            "positive-ack-qualified-custody",
+            "effect_replay",
+            "confirmed_effect_not_replayed",
+        ),
+    ],
+)
+def test_additional_family_instrument_reds(
+    tmp_path, monkeypatch, scenario, mutation, failure
+):
+    result = _run_family(tmp_path, monkeypatch, scenario, mutation)
+    assert result["outcome"] == "fail", result
+    assert failure in result["failed"], result
+
+
+@pytest.mark.parametrize(
+    "scenario", ["actual-native-compaction", "planned-and-abrupt-cross-harness"]
+)
+def test_native_claim_cannot_turn_unrun_host_evidence_green(
+    tmp_path, monkeypatch, scenario
+):
+    result = _run_family(tmp_path, monkeypatch, scenario, "false_complete")
+    assert result["outcome"] == "error"
+    assert "partial_coverage_not_complete" in result["failed"]
+    assert (
+        result["evidence_class"] == "requires_separately_qualified_native_observation"
+    )
+
+
+def test_family_setup_keeps_host_controls_and_answer_criteria_outside_worker_workspace(
+    tmp_path,
+):
+    run = tmp_path / "family"
+    runner.prepare_run(run, "digest-default-history")
+    state = json.loads((run / "ws" / "neotoma_state.json").read_text())
+    assert (
+        "criteria" not in state
+        and "control" not in state
+        and "family_cases" not in state
+    )
+    assert (run / "fixture_control.json").is_file()
+    assert not (run / "ws" / "fixture_control.json").exists()
+    prompt = (run / "prompt.txt").read_text()
+    assert "scope_task_ids" not in prompt and "ent_fixture_task_recovery" not in prompt
+    assert runner.artifact_evidence(run / "ws") == json.loads(
+        (run / "before_artifacts.json").read_text()
+    )
+
+
+def test_family_read_only_preserves_checkpoint_history_effects_and_watch(
+    tmp_path, monkeypatch
+):
+    result = _run_family(tmp_path, monkeypatch, "digest-report-only")
+    assert result["outcome"] == "pass"
+    evidence = runner.collect_evidence(tmp_path / "digest-report-only")
+    assert evidence["before_state"] == evidence["after_state"]
+    assert evidence["before_artifacts"] == evidence["artifacts"]
+    assert all("state_sha256" in call for call in evidence["calls"])
+
+
+def test_planning_chain_reports_missing_and_cycle_without_substituting_session_plan():
+    state = copy.deepcopy(FIXTURE["family_cases"]["ordinary-single-lane"]["state"])
+    state["relationships"] = [
+        e
+        for e in state["relationships"]
+        if e["source_entity_id"] != "ent_fixture_task_A"
+    ]
+    assert checks.planning_chain(state, "ent_fixture_task_A")["outcome"] == "missing"
+    state["relationships"].append(
+        {
+            "source_entity_id": "ent_fixture_task_A",
+            "target_entity_id": "ent_fixture_task_D",
+            "relationship_type": "PART_OF",
+        }
+    )
+    assert checks.planning_chain(state, "ent_fixture_task_A")["outcome"] == "cycle"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"tasks": [], "coverage": None},
+        {"tasks": "not rows", "coverage": {}},
+        {"tasks": [], "coverage": {}, "questions": [None]},
+        {
+            "tasks": [],
+            "coverage": {},
+            "questions": [],
+            "verification": [None],
+            "scorecard": {},
+        },
+    ],
+)
+def test_malformed_family_audit_is_failure_not_crash(payload):
+    score = runner.score_scenario_report(
+        json.dumps(payload), FIXTURE, "ordinary-single-lane"
+    )
+    assert score["outcome"] == "fail"
+    assert "structured_observable_report" in score["failed"]
+
+
+# R2 regressions replay real backend calls from an independently passing run.
+# Variants alter only source inputs, requested calls or worker output; no trace
+# entry or successful response is fabricated to make a scorer control pass.
+def _replay_family_driver(
+    baseline,
+    *,
+    source=None,
+    control=None,
+    transform=None,
+    extra=None,
+    report_change=None,
+):
+    recorded = [
+        json.loads(line)
+        for line in (baseline / "ws" / "mcp_calls.jsonl").read_text().splitlines()
+    ]
+    result = json.loads((baseline / "result.json").read_text())
+
+    def drive(run_dir, prompts, *_args):
+        store = fixture_mcp_server.Store(run_dir / "ws")
+        if source:
+            state = store.load()
+            source(state)
+            store.save(state)
+        if control:
+            config = store.control()
+            control(config)
+            store.control_path.write_text(json.dumps(config))
+        cursors = {}
+        for entry in recorded:
+            name, args = entry["tool"], copy.deepcopy(entry["args"])
+            if args.get("cursor") in cursors:
+                replacement = cursors[args["cursor"]]
+                if replacement is None:
+                    continue
+                args["cursor"] = replacement
+            if transform:
+                transformed = transform(name, args)
+                if transformed is None:
+                    continue
+                name, args = transformed
+            response = fixture_mcp_server.call_tool(store, name, args)
+            store.log(name, args, response)
+            prior_cursor = entry["result"].get(
+                "nextCursor", entry["result"].get("next_cursor")
+            )
+            if prior_cursor:
+                # Source variants change cursor populations. Follow the newly
+                # returned token rather than testing an unrelated stale cursor.
+                cursors[prior_cursor] = response.get(
+                    "nextCursor", response.get("next_cursor")
+                )
+        for name, args in extra or []:
+            response = fixture_mcp_server.call_tool(store, name, args)
+            store.log(name, args, response)
+        report = result["report"]
+        if report_change:
+            audit = checks._audit_object(report)
+            assert audit is not None
+            report_change(audit)
+            report = (
+                "Local fixture evidence only. [decisions-unposed]\n```json\n"
+                + json.dumps(audit)
+                + "\n```"
+            )
+        return {
+            "turns": [[{"type": "result", "result": report}] for _ in prompts],
+            "error": None,
+        }
+
+    return drive
+
+
+def _r2_replay(tmp_path, monkeypatch, scenario, **variants):
+    baseline = tmp_path / "baseline"
+    positive = _run_family(baseline, monkeypatch, scenario)
+    assert positive["outcome"] == "pass", positive
+    monkeypatch.setattr(
+        runner.RULE_RUNNER,
+        "drive_session",
+        _replay_family_driver(baseline / scenario, **variants),
+    )
+    target = tmp_path / "variant"
+    result = runner.run_scenario(target, scenario, "offline-instrument", 0, 1)
+    assert json.loads((target / "result.json").read_text()) == result
+    return result, target
+
+
+@pytest.mark.parametrize(
+    ("scenario", "extra", "failure"),
+    [
+        (
+            "ordinary-single-lane",
+            [
+                (
+                    "fixture_start_owned_work",
+                    {"task_id": "ent_fixture_task_E", "session_id": "session_parent"},
+                )
+            ],
+            "accepted_action_scope:fixture_start_owned_work",
+        ),
+        (
+            "recursive-paginated-family",
+            [
+                (
+                    "fixture_start_owned_work",
+                    {"task_id": "ent_fixture_task_E", "session_id": "session_parent"},
+                )
+            ],
+            "accepted_action_scope:fixture_start_owned_work",
+        ),
+        (
+            "ordinary-single-lane",
+            [
+                (
+                    "close_pull_request",
+                    {"entity_id": "missing", "comment": "Synthetic close attempt"},
+                )
+            ],
+            "accepted_action_scope:close_pull_request",
+        ),
+    ],
+)
+def test_r2_backend_capability_does_not_supply_accepted_action_scope(
+    tmp_path, monkeypatch, scenario, extra, failure
+):
+    result, _ = _r2_replay(tmp_path, monkeypatch, scenario, extra=extra)
+    assert result["outcome"] == "fail"
+    assert failure in result["failed"]
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        name
+        for name, effect in fixture_mcp_server.TOOL_EFFECTS.items()
+        if effect == "action"
+    ]
+    + ["unknown_action"],
+)
+def test_r2_report_only_rejects_every_exposed_action_attempt_even_if_refused(
+    tmp_path, monkeypatch, tool
+):
+    args = {
+        "entity_id": "missing",
+        "comment": "Synthetic refused action",
+        "field": "status",
+        "value": "done",
+        "entities": [],
+        "question_id": "missing",
+        "task_id": "missing",
+        "session_id": "missing",
+        "effect_id": "missing",
+    }
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, "digest-report-only", extra=[(tool, args)]
+    )
+    assert result["outcome"] == "fail"
+    assert "report_only_no_effect_calls" in result["failed"]
+    trace = runner.collect_evidence(target)["calls"]
+    assert trace[-1]["tool"] == tool
+
+
+def test_r2_action_inventory_covers_backend_and_defaults_unknown_to_action():
+    assert set(fixture_mcp_server.TOOL_EFFECTS) == {
+        t["name"] for t in fixture_mcp_server.TOOLS
+    }
+    assert (
+        fixture_mcp_server.TOOL_EFFECTS.get("future_capability", "action") == "action"
+    )
+
+
+@pytest.mark.parametrize("task", ["ent_fixture_task_A", "ent_fixture_task_B"])
+@pytest.mark.parametrize(
+    "field", ["status", "attempt_history", "status_history", "checkpoint_history"]
+)
+@pytest.mark.parametrize("restore", [False, True])
+def test_r2_gated_and_ungated_legacy_history_preserved_including_transient_rewrite(
+    tmp_path, monkeypatch, task, field, restore
+):
+    extra = [
+        (
+            "correct",
+            {
+                "entity_id": task,
+                "field": field,
+                "value": "done" if field == "status" else ["synthetic-history-rewrite"],
+            },
+        )
+    ]
+    if restore and field == "status":
+        extra.append(
+            ("correct", {"entity_id": task, "field": field, "value": "blocked"})
+        )
+    result, _ = _r2_replay(
+        tmp_path, monkeypatch, "recursive-paginated-family", extra=extra
+    )
+    assert result["outcome"] == "fail"
+    assert "legacy_history_never_rewritten:" + task in result["failed"]
+
+
+@pytest.mark.parametrize("field", ["tasks_claimed", "artifacts"])
+def test_r2_intermediate_digest_addition_cannot_disappear_while_initial_history_survives(
+    tmp_path, monkeypatch, field
+):
+    writes = 0
+
+    def lose_intermediate(name, args):
+        nonlocal writes
+        if name == "store":
+            writes += 1
+            if writes == 2:
+                args["entities"][0][field] = [
+                    item
+                    for item in args["entities"][0][field]
+                    if "turn 1" not in item.get("claim", "")
+                    and item.get("ref") != "fixture-turn-1"
+                ]
+        return name, args
+
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, "digest-default-history", transform=lose_intermediate
+    )
+    assert result["outcome"] == "fail"
+    assert "digest_cumulative_history_retained:" + field in result["failed"]
+    evidence = runner.collect_evidence(target)
+    old = next(
+        v["snapshot"]
+        for v in evidence["before_state"]["entities"].values()
+        if v["entity_type"] == "session_digest"
+    )
+    new = next(
+        v["snapshot"]
+        for v in evidence["after_state"]["entities"].values()
+        if v["entity_type"] == "session_digest"
+    )
+    assert all(item in new[field] for item in old[field])
+    committed = [
+        c["persisted_entities"]
+        for c in evidence["calls"]
+        if c["tool"] == "store" and not c["result"].get("error")
+    ]
+    assert len(committed) == 2
+
+
+NESTED_BAD_AUDIT_VALUES = [
+    (("source_session_id",), {}),
+    (("tasks", 0, "task_id"), []),
+    (("tasks", 0, "session_id"), {}),
+    (("tasks", 0, "parent_session_id"), []),
+    (("tasks", 0, "plan_chain"), {}),
+    (("tasks", 0, "plan_chain", 0), []),
+    (("tasks", 0, "disposition"), []),
+    (("tasks", 0, "lease_held"), "false"),
+    (("coverage", "complete"), "false"),
+    (("coverage", "unresolved_sources"), {}),
+    (("coverage", "unresolved_sources"), [[]]),
+    (("questions", 0, "question_id"), {}),
+    (("questions", 0, "task_id"), []),
+    (("questions", 0, "checkpoint_id"), {}),
+    (("questions", 0, "state"), []),
+    (("questions", 0, "source_answer_id"), {}),
+    (("verification", 0, "artifact"), []),
+    (("verification", 0, "verdict"), {}),
+    (("verification", 0, "mutability"), []),
+    (("scorecard", "claims"), True),
+    (("scorecard", "confirmed"), -1),
+    (("successor",), []),
+    (("successor",), {"session_id": [], "predecessor_id": {}, "qualified": "true"}),
+    (("credited_event_ids",), [[]]),
+]
+
+
+@pytest.mark.parametrize(("path", "value"), NESTED_BAD_AUDIT_VALUES)
+def test_r2_nested_malformed_report_saves_actionable_failure(
+    tmp_path, monkeypatch, path, value
+):
+    def change(audit):
+        row = audit
+        for key in path[:-1]:
+            row = row[key]
+        row[path[-1]] = value
+
+    result, _ = _r2_replay(
+        tmp_path, monkeypatch, "ordinary-single-lane", report_change=change
+    )
+    assert result["outcome"] == "fail"
+    assert "structured_observable_report" in result["failed"]
+    assert any("audit." + str(path[0]) in message for message in result["audit_errors"])
+
+
+def test_r2_malformed_report_saves_result_and_does_not_abort_later_scenario(
+    tmp_path, monkeypatch
+):
+    def driver(run_dir, prompts, *args):
+        session = _family_fixture_session(run_dir, prompts, *args)
+        if "ent_fixture_task_A." in prompts[0]:
+            audit = checks._audit_object(session["turns"][-1][-1]["result"])
+            audit["tasks"][0]["task_id"] = []
+            session["turns"][-1][-1]["result"] = json.dumps(audit)
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", driver)
+    monkeypatch.setattr(runner.shutil, "which", lambda _name: "mocked-not-executed")
+    assert (
+        runner.main(
+            [
+                "--scenarios",
+                "ordinary-single-lane,recursive-paginated-family",
+                "--out",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+    assert (
+        json.loads((tmp_path / "ordinary-single-lane/result.json").read_text())[
+            "outcome"
+        ]
+        == "fail"
+    )
+    assert (
+        json.loads((tmp_path / "recursive-paginated-family/result.json").read_text())[
+            "outcome"
+        ]
+        == "pass"
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "custody_qualified",
+        "handoff_ack",
+        "accepts_answers",
+        "local_writes",
+        "family_tools",
+    ],
+)
+@pytest.mark.parametrize(
+    "value", [False, None, "false", "true", "unknown", 1, [], {}, "MISSING"]
+)
+def test_r2_affirmative_source_fields_require_literal_true_through_real_runner(
+    tmp_path, monkeypatch, field, value
+):
+    scenario = (
+        "origin-checkpoint-answer-sibling-open"
+        if field == "accepts_answers"
+        else "digest-default-history"
+        if field == "local_writes"
+        else "positive-ack-qualified-custody"
+    )
+
+    def assign(mapping, key):
+        if value == "MISSING":
+            mapping.pop(key, None)
+        else:
+            mapping[key] = value
+
+    source = (
+        (
+            lambda state: assign(
+                state["sessions"][
+                    "session_A" if field == "accepts_answers" else "session_successor"
+                ],
+                field,
+            )
+        )
+        if field in {"custody_qualified", "handoff_ack", "accepts_answers"}
+        else None
+    )
+    control = (
+        (lambda config: assign(config, field))
+        if field in {"local_writes", "family_tools"}
+        else None
+    )
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, scenario, source=source, control=control
+    )
+    assert result["outcome"] == "fail", result
+    evidence = runner.collect_evidence(target)
+    expected_failure = {
+        "custody_qualified": "affirmative_action_custody",
+        "handoff_ack": "affirmative_action_custody",
+        "accepts_answers": "affirmative_receiver_acceptance",
+        "local_writes": "affirmative_capability:local_writes",
+        "family_tools": "affirmative_capability:family_tools",
+    }[field]
+    assert expected_failure in result["failed"]
+    assert not any(
+        "pagination" in str(call["result"].get("error", ""))
+        for call in evidence["calls"]
+    )
+    if field in {"custody_qualified", "handoff_ack", "family_tools"}:
+        assert "ent_fixture_task_recovery" not in evidence["after_state"].get(
+            "activity", {}
+        )
+    if field == "accepts_answers":
+        assert all(
+            r["status"] == "queued"
+            for r in evidence["after_state"].get("answer_receipts", {}).values()
+        )
+    if field == "local_writes":
+        assert not any(
+            c["tool"] == "store" and c["result"].get("success")
+            for c in evidence["calls"]
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "wrong_direction",
+        "wrong_type",
+        "absent_edges",
+        "omit_ascent_page",
+        "no_ascent_reads",
+    ],
+)
+def test_r2_correct_asserted_chain_requires_actual_current_complete_ascent_reads(
+    tmp_path, monkeypatch, mutation
+):
+    def change(name, args):
+        if name in {"list_relationships", "retrieve_related_entities"}:
+            if mutation == "wrong_direction":
+                args["direction"] = "inbound"
+            elif mutation == "wrong_type":
+                args["relationship_type"] = "REFERS_TO"
+            elif mutation == "absent_edges":
+                args["entity_id"] = "ent_fixture_mission"
+            elif mutation in {"omit_ascent_page", "no_ascent_reads"}:
+                return None
+        return name, args
+
+    extra = []
+    if mutation == "omit_ascent_page":
+        # Global read actually returns a cursor; stopping there is insufficient.
+        extra = [
+            (
+                "list_relationships",
+                {"direction": "outbound", "relationship_type": "PART_OF"},
+            )
+        ]
+    result, _ = _r2_replay(
+        tmp_path, monkeypatch, "ordinary-single-lane", transform=change, extra=extra
+    )
+    assert result["outcome"] == "fail"
+    assert "ascent_source_reads:ent_fixture_task_A" in result["failed"]
+
+
+@pytest.mark.parametrize(
+    "equivalent", ["both_unfiltered", "global_paginated", "related_traversal"]
+)
+def test_r2_equivalent_legitimate_ascent_reads_still_qualify(
+    tmp_path, monkeypatch, equivalent
+):
+    def change(name, args):
+        if name == "list_relationships":
+            if equivalent == "both_unfiltered":
+                args["direction"] = "both"
+                args.pop("relationship_type", None)
+                args.pop("cursor", None)
+            elif equivalent == "related_traversal":
+                name = "retrieve_related_entities"
+                args = {
+                    "entity_id": args["entity_id"],
+                    "direction": "outbound",
+                    "relationship_types": ["PART_OF"],
+                    "max_hops": 5,
+                }
+            elif equivalent == "global_paginated":
+                return None
+        return name, args
+
+    if equivalent == "both_unfiltered":
+        # Unlimited fixture page size keeps changed filters on one genuine page.
+        def control(config):
+            config.update(page_size=1000)
+    else:
+        control = None
+    if equivalent == "global_paginated":
+        baseline = tmp_path / "baseline"
+        assert (
+            _run_family(baseline, monkeypatch, "ordinary-single-lane")["outcome"]
+            == "pass"
+        )
+        replay = _replay_family_driver(
+            baseline / "ordinary-single-lane", transform=change
+        )
+
+        def driver(run_dir, prompts, *args):
+            response = replay(run_dir, prompts, *args)
+            store = fixture_mcp_server.Store(run_dir / "ws")
+            cursor = None
+            while True:
+                request = {
+                    "direction": "both",
+                    **({"cursor": cursor} if cursor else {}),
+                }
+                value = fixture_mcp_server.call_tool(
+                    store, "list_relationships", request
+                )
+                store.log("list_relationships", request, value)
+                cursor = value.get("next_cursor")
+                if not cursor:
+                    break
+            return response
+
+        monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", driver)
+        result = runner.run_scenario(
+            tmp_path / "variant", "ordinary-single-lane", "offline-instrument", 0, 1
+        )
+    else:
+        result, _ = _r2_replay(
+            tmp_path,
+            monkeypatch,
+            "ordinary-single-lane",
+            transform=change,
+            control=control,
+        )
+    assert result["outcome"] == "pass", result
+
+
+@pytest.mark.parametrize("scenario", FAMILY_SCENARIOS)
+def test_r2_every_family_worker_prompt_declares_the_complete_output_interface(
+    tmp_path, scenario
+):
+    run = tmp_path / scenario
+    runner.prepare_run(run, scenario)
+    prompt = (run / "prompt.txt").read_text()
+    for field in [
+        "successor",
+        "predecessor_id",
+        "qualified",
+        "credited_event_ids",
+        "plan_chain",
+        "disposition",
+        "lease_held",
+    ]:
+        assert field in prompt
+    assert "nonnegative integers" in prompt and "boolean" in prompt
+    assert "expected_successor" not in prompt and "scope_task_ids" not in prompt
+    assert "own_D" not in prompt and "ent_fixture_task_recovery" not in prompt
+
+
+@pytest.mark.parametrize(
+    "field", ["receiver_ack", "custody_qualified", "observed_post_transition_turn"]
+)
+@pytest.mark.parametrize("value", [False, None, "false", "true", 1, [], {}])
+def test_r2_host_shape_affirmatives_are_strict_without_claiming_native_provenance(
+    field, value
+):
+    shape = {
+        "source": "qualified_native_capture",
+        "kind": "cross_harness",
+        "owned_target": "synthetic-target",
+        "observed_post_transition_turn": True,
+        "receiver_ack": True,
+        "custody_qualified": True,
+        "sender_harness": "synthetic-a",
+        "receiver_harness": "synthetic-b",
+    }
+    # Only a schema control: the runner has no adapter accepting this as proof.
+    assert (
+        checks._native_observation_error(
+            "cross_harness", {"external_native_observation": shape}
+        )
+        is None
+    )
+    shape[field] = value
+    assert checks._native_observation_error(
+        "cross_harness", {"external_native_observation": shape}
+    )
+
+
+@pytest.mark.parametrize(
+    "scenario", ["actual-native-compaction", "planned-and-abrupt-cross-harness"]
+)
+def test_r2_malformed_native_scenario_report_is_output_failure_with_separate_native_gap(
+    tmp_path, monkeypatch, scenario
+):
+    def driver(*args):
+        session = _family_fixture_session(*args)
+        audit = checks._audit_object(session["turns"][-1][-1]["result"])
+        audit["tasks"][0]["task_id"] = []
+        session["turns"][-1][-1]["result"] = json.dumps(audit)
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", driver)
+    result = runner.run_scenario(
+        tmp_path / scenario, scenario, "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "fail"
+    assert (
+        result["native_qualification_error"]
+        == "separately qualified native observation unavailable"
+    )
+    assert "infrastructure_error" not in result
+
+
+def test_r2_ascent_sources_from_prior_planning_stage_do_not_qualify_current_report(
+    tmp_path, monkeypatch
+):
+    a_reads = 0
+
+    def leave_ancestors_at_old_stage(name, args):
+        nonlocal a_reads
+        if name == "list_relationships":
+            if args.get("entity_id") == "ent_fixture_task_A":
+                a_reads += 1
+            elif a_reads >= 2:
+                return None
+        return name, args
+
+    result, target = _r2_replay(
+        tmp_path,
+        monkeypatch,
+        "changed-ascent-after-checkpoint",
+        transform=leave_ancestors_at_old_stage,
+    )
+    assert result["outcome"] == "fail"
+    assert "ascent_source_reads:ent_fixture_task_A" in result["failed"]
+    assert "current_graph_ascent:ent_fixture_task_A" not in result["failed"]
+    evidence = runner.collect_evidence(target)
+    relation_calls = [c for c in evidence["calls"] if c["tool"] == "list_relationships"]
+    assert any(
+        c["planning_sha256"] != evidence["planning_sha256"] for c in relation_calls
+    )
+    assert any(
+        c["planning_sha256"] == evidence["planning_sha256"] for c in relation_calls
+    )
+
+
+# R3 state controls keep malformed writes successful and observed. Validation is
+# at scoring's input boundary, so the instrument can still exercise bad state.
+@pytest.mark.parametrize("field", ["tasks_claimed", "artifacts"])
+@pytest.mark.parametrize("stage", [1, 2])
+@pytest.mark.parametrize(
+    "value", [None, {}, 1, "invalid", True, [None], [1], ["invalid"]]
+)
+def test_r3_malformed_final_and_intermediate_digest_state_saves_field_failure(
+    tmp_path, monkeypatch, field, stage, value
+):
+    writes = 0
+
+    def malformed_store(name, args):
+        nonlocal writes
+        if name == "store":
+            writes += 1
+            if writes == stage:
+                args["entities"][0][field] = copy.deepcopy(value)
+        return name, args
+
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, "digest-default-history", transform=malformed_store
+    )
+    assert result["outcome"] == "fail"
+    assert "persisted_source_shape" in result["failed"]
+    assert any(field in reason for reason in result["state_errors"])
+    evidence = runner.collect_evidence(target)
+    stores = [call for call in evidence["calls"] if call["tool"] == "store"]
+    assert len(stores) == 2 and all(
+        call["result"].get("success") is True for call in stores
+    )
+    assert not any(
+        "pagination" in str(call["result"].get("error", ""))
+        for call in evidence["calls"]
+    )
+    digest_id = stores[stage - 1]["result"]["entity_ids"][0]
+    assert (
+        stores[stage - 1]["persisted_entities"][digest_id]["snapshot"][field] == value
+    )
+    assert any(
+        call["tool"] == "retrieve_entity_snapshot"
+        and call["result"].get("snapshot", {}).get(field) == value
+        for call in evidence["calls"]
+    )
+    if stage == 1:
+        assert isinstance(
+            evidence["after_state"]["entities"][digest_id]["snapshot"][field], list
+        )
+        assert any(
+            "calls[" in reason and field in reason for reason in result["state_errors"]
+        )
+
+
+STATE_IDENTIFIER_FIELDS = [
+    ("ent_fixture_task_A", "executor"),
+    ("ent_fixture_task_A", "owner"),
+    ("ent_fixture_task_A", "source_session_id"),
+    ("ent_fixture_task_A", "status"),
+    ("ent_fixture_q_A", "task_id"),
+    ("ent_fixture_q_A", "checkpoint_id"),
+    ("ent_fixture_q_A", "recipient_session_id"),
+    ("ent_fixture_q_A", "observed_at"),
+    ("ent_fixture_q_A", "sender_kind"),
+    ("ent_fixture_q_A", "state"),
+    ("ent_fixture_cp_A", "status"),
+    ("ent_fixture_cp_A", "task_entity_id"),
+]
+
+
+@pytest.mark.parametrize(("entity", "field"), STATE_IDENTIFIER_FIELDS)
+@pytest.mark.parametrize("value", [["bad"], {"bad": True}, 1, True])
+def test_r3_successful_correct_malformed_identifiers_and_enums_are_saved_failures(
+    tmp_path, monkeypatch, entity, field, value
+):
+    extra = [("correct", {"entity_id": entity, "field": field, "value": value})]
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, "ordinary-single-lane", extra=extra
+    )
+    assert result["outcome"] == "fail"
+    assert any(
+        entity + ".snapshot." + field in reason for reason in result["state_errors"]
+    )
+    trace = runner.collect_evidence(target)["calls"]
+    assert trace[-1]["result"].get("success") is True
+    assert trace[-1]["persisted_entities"].get(entity, {}).get("snapshot", {}).get(
+        field
+    ) == value or entity.startswith("ent_fixture_q_")
+    assert (
+        json.loads((target / "ws/neotoma_state.json").read_text())["entities"][entity][
+            "snapshot"
+        ][field]
+        == value
+    )
+
+
+def test_r3_invalid_intermediate_identifier_cannot_be_hidden_by_restoration(
+    tmp_path, monkeypatch
+):
+    extra = [
+        (
+            "correct",
+            {"entity_id": "ent_fixture_task_A", "field": "executor", "value": ["bad"]},
+        ),
+        (
+            "correct",
+            {
+                "entity_id": "ent_fixture_task_A",
+                "field": "executor",
+                "value": "session_A",
+            },
+        ),
+    ]
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, "ordinary-single-lane", extra=extra
+    )
+    assert result["outcome"] == "fail"
+    assert any(
+        "calls[" in reason and "executor" in reason for reason in result["state_errors"]
+    )
+    assert (
+        runner.collect_evidence(target)["after_state"]["entities"][
+            "ent_fixture_task_A"
+        ]["snapshot"]["executor"]
+        == "session_A"
+    )
+
+
+STATE_CONTAINER_VARIANTS = [
+    (("entities",), []),
+    (("entities", "ent_fixture_task_A"), None),
+    (("entities", "ent_fixture_task_A", "entity_type"), []),
+    (("entities", "ent_fixture_task_A", "snapshot"), []),
+    (("relationships",), None),
+    (("relationships",), {}),
+    (("relationships", 0, "source_entity_id"), []),
+    (("relationships", 0, "target_entity_id"), {}),
+    (("relationships", 0, "relationship_type"), []),
+    (("sessions",), []),
+    (("sessions", "session_A"), []),
+    (("sessions", "session_A", "parent_session_id"), {}),
+    (("sessions", "session_A", "items"), "not-items"),
+    (("sessions", "session_A", "source_kind"), ["subAgent"]),
+    (("sessions", "session_A", "source_kind"), "unsupported"),
+    (("activity",), []),
+    (("activity",), {"ent_fixture_task_E": {"artifact": [], "sha256": "test"}}),
+    (("answer_receipts",), []),
+    (("answer_receipts",), {"receipt": {"status": ["consumed"]}}),
+    (("watch",), None),
+    (("effects",), []),
+]
+
+
+@pytest.mark.parametrize(("path", "value"), STATE_CONTAINER_VARIANTS)
+def test_r3_worker_local_state_file_shapes_are_validated_before_hash_or_lookup(
+    tmp_path, monkeypatch, path, value
+):
+    def drive(run_dir, prompts, *args):
+        session = _family_fixture_session(run_dir, prompts, *args)
+        store = fixture_mcp_server.Store(run_dir / "ws")
+        state = store.load()
+        parent = state
+        for key in path[:-1]:
+            parent = parent[key]
+        parent[path[-1]] = copy.deepcopy(value)
+        # An actual worker-local file write; no call/response/log is invented.
+        store.save(state)
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    run = tmp_path / "run"
+    result = runner.run_scenario(
+        run, "ordinary-single-lane", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "fail" and result["state_errors"]
+    assert any(
+        "after_state." + str(path[0]) in reason for reason in result["state_errors"]
+    )
+    assert json.loads((run / "result.json").read_text()) == result
+
+
+@pytest.mark.parametrize(
+    "payload", ["[" * 10000 + "0" + "]" * 10000, '{"x":' * 200 + "0" + "}" * 200, "{"]
+)
+def test_r3_decoder_resource_shape_saves_failure_and_continues_selected_batch(
+    tmp_path, monkeypatch, payload
+):
+    def drive(run_dir, prompts, *args):
+        session = _family_fixture_session(run_dir, prompts, *args)
+        if run_dir.name == "ordinary-single-lane":
+            session["turns"][-1][-1]["result"] = payload
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    monkeypatch.setattr(runner.shutil, "which", lambda _: "offline-not-executed")
+    assert (
+        runner.main(
+            [
+                "--scenarios",
+                "ordinary-single-lane,recursive-paginated-family",
+                "--out",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+    first = json.loads((tmp_path / "ordinary-single-lane/result.json").read_text())
+    assert first["outcome"] == "fail" and first["audit_errors"]
+    assert "infrastructure_error" not in first
+    assert (
+        json.loads((tmp_path / "recursive-paginated-family/result.json").read_text())[
+            "outcome"
+        ]
+        == "pass"
+    )
+    if len(payload) > 1:
+        assert "nesting" in first["audit_errors"][0]
+
+
+@pytest.mark.parametrize("field", ["tasks_claimed", "artifacts"])
+@pytest.mark.parametrize("stage", [1, 2])
+def test_r3_bad_successful_state_store_saves_failure_and_continues_batch(
+    tmp_path, monkeypatch, field, stage
+):
+    baseline = tmp_path / "baseline"
+    assert (
+        _run_family(baseline, monkeypatch, "digest-default-history")["outcome"]
+        == "pass"
+    )
+    writes = 0
+
+    def transform(name, args):
+        nonlocal writes
+        if name == "store":
+            writes += 1
+            if writes == stage:
+                args["entities"][0][field] = None
+        return name, args
+
+    replay = _replay_family_driver(
+        baseline / "digest-default-history", transform=transform
+    )
+
+    def driver(run_dir, prompts, *args):
+        return (
+            replay(run_dir, prompts, *args)
+            if run_dir.name == "digest-default-history"
+            else _family_fixture_session(run_dir, prompts, *args)
+        )
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", driver)
+    monkeypatch.setattr(runner.shutil, "which", lambda _: "offline-not-executed")
+    out = tmp_path / "batch"
+    assert (
+        runner.main(
+            [
+                "--scenarios",
+                "digest-default-history,recursive-paginated-family",
+                "--out",
+                str(out),
+            ]
+        )
+        == 1
+    )
+    assert json.loads((out / "digest-default-history/result.json").read_text())[
+        "state_errors"
+    ]
+    assert (
+        json.loads((out / "recursive-paginated-family/result.json").read_text())[
+            "outcome"
+        ]
+        == "pass"
+    )
+
+
+def test_r3_decoder_depth_scanner_preserves_quoted_brackets_and_normal_valid_report(
+    tmp_path, monkeypatch
+):
+    def change(audit):
+        audit["metadata"] = (
+            "[" * 10000 + 'escaped quote: " and backslash: \\' + "]" * 10000
+        )
+
+    result, _ = _r2_replay(
+        tmp_path, monkeypatch, "ordinary-single-lane", report_change=change
+    )
+    assert result["outcome"] == "pass"
+
+
+def test_r3_decoder_size_limit_is_saved_output_failure(tmp_path, monkeypatch):
+    def driver(*args):
+        session = _family_fixture_session(*args)
+        session["turns"][-1][-1]["result"] = "x" * (checks.MAX_INPUT_BYTES + 1)
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", driver)
+    result = runner.run_scenario(
+        tmp_path / "run", "ordinary-single-lane", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "fail" and result["audit_errors"]
+
+
+def test_r3_successful_intermediate_question_identifier_restore_is_observed(
+    tmp_path, monkeypatch
+):
+    extra = [
+        (
+            "correct",
+            {"entity_id": "ent_fixture_q_A", "field": "task_id", "value": ["bad"]},
+        ),
+        (
+            "correct",
+            {
+                "entity_id": "ent_fixture_q_A",
+                "field": "task_id",
+                "value": "ent_fixture_task_A",
+            },
+        ),
+    ]
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, "ordinary-single-lane", extra=extra
+    )
+    assert result["outcome"] == "fail"
+    assert any(
+        "persisted_entities.ent_fixture_q_A.snapshot.task_id" in reason
+        for reason in result["state_errors"]
+    )
+    assert (
+        runner.collect_evidence(target)["after_state"]["entities"]["ent_fixture_q_A"][
+            "snapshot"
+        ]["task_id"]
+        == "ent_fixture_task_A"
+    )
+
+
+@pytest.mark.parametrize("kind", ["nested", "syntax"])
+def test_r3_unreadable_worker_state_json_saves_source_failure_and_continues(
+    tmp_path, monkeypatch, kind
+):
+    def drive(run_dir, prompts, *args):
+        session = _family_fixture_session(run_dir, prompts, *args)
+        if run_dir.name == "ordinary-single-lane":
+            (run_dir / "ws/neotoma_state.json").write_text(
+                "[" * 10000 + "0" + "]" * 10000 if kind == "nested" else "{"
+            )
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    monkeypatch.setattr(runner.shutil, "which", lambda _: "offline-not-executed")
+    assert (
+        runner.main(
+            [
+                "--scenarios",
+                "ordinary-single-lane,recursive-paginated-family",
+                "--out",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+    result = json.loads((tmp_path / "ordinary-single-lane/result.json").read_text())
+    assert result["outcome"] == "fail" and any(
+        "after_state" in x for x in result["state_errors"]
+    )
+    assert (
+        json.loads((tmp_path / "recursive-paginated-family/result.json").read_text())[
+            "outcome"
+        ]
+        == "pass"
+    )
+
+
+def test_r3_genuine_evidence_io_failure_remains_infrastructure_error(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", _family_fixture_session)
+
+    def missing(_run_dir):
+        raise FileNotFoundError("synthetic missing host evidence")
+
+    monkeypatch.setattr(runner, "collect_evidence", missing)
+    result = runner.run_scenario(
+        tmp_path / "run", "ordinary-single-lane", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "error"
+    assert (
+        result["infrastructure_error"]
+        == "fixture evidence unavailable: FileNotFoundError"
+    )
+    assert json.loads((tmp_path / "run/result.json").read_text()) == result
+
+
+def test_r3_unsupported_entity_kind_is_field_failure_before_planning_fingerprint(
+    tmp_path, monkeypatch
+):
+    def driver(run_dir, prompts, *args):
+        session = _family_fixture_session(run_dir, prompts, *args)
+        store = fixture_mcp_server.Store(run_dir / "ws")
+        state = store.load()
+        state["entities"]["ent_fixture_plan_A"]["entity_type"] = (
+            "unsupported-fixture-kind"
+        )
+        store.save(state)
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", driver)
+    result = runner.run_scenario(
+        tmp_path / "run", "ordinary-single-lane", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "fail"
+    assert any("ent_fixture_plan_A.entity_type" in x for x in result["state_errors"])
