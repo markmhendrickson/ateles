@@ -2808,3 +2808,394 @@ def test_r3_unsupported_entity_kind_is_field_failure_before_planning_fingerprint
     )
     assert result["outcome"] == "fail"
     assert any("ent_fixture_plan_A.entity_type" in x for x in result["state_errors"])
+
+
+# Consumer integration controls: the actual initialized accepted stdio producer
+# appends to the normal run's trace. Only drive_session is deterministic; the
+# backend, trace, state, source binding, scoring and saved results are real.
+B_MALFORMED_STORES = [
+    {"entities": [None]},
+    {"entities": [[]]},
+    {"entities": [{"entity_type": []}]},
+    {"entities": [], "relationships": [None]},
+]
+
+
+def _b_stdio_driver(
+    run_dir, prompts, *args, tool="close_pull_request", arguments=None, fault=None
+):
+    import subprocess
+
+    session = _family_fixture_session(run_dir, prompts, *args)
+    store = fixture_mcp_server.Store(run_dir / "ws")
+    before_state = store.state_path.read_bytes()
+    before_trace = store.log_path.read_bytes()
+    arguments = (
+        arguments
+        if arguments is not None
+        else {"entity_id": "ent_fixture_task_A", "comment": "Synthetic refusal control"}
+    )
+    request = {
+        "jsonrpc": "2.0",
+        "id": 71,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments},
+    }
+    patch = ""
+    if fault == "fatal_handler":
+        patch = """
+_original=s.call_tool
+def fail(store,name,args):
+    if name=='close_pull_request': raise SystemExit(19)
+    return _original(store,name,args)
+s.call_tool=fail
+"""
+    elif fault == "completion_io":
+        patch = """
+_original=s.Store.append_record
+_failed=False
+def fail(self,row):
+    global _failed
+    if row.get('event')=='completed' and not _failed:
+        _failed=True
+        raise OSError('synthetic completion fault')
+    return _original(self,row)
+s.Store.append_record=fail
+"""
+    script = (
+        "import sys;sys.path.insert(0,"
+        + repr(str(runner.RULE_EVAL))
+        + ");import fixture_mcp_server as s\n"
+        + patch
+        + '\nsys.argv=["fixture",'
+        + repr(str(store.state_path.parent))
+        + "];raise SystemExit(s.main())\n"
+    )
+    messages = [
+        {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18"},
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        request,
+        {
+            "jsonrpc": "2.0",
+            "id": 72,
+            "method": "tools/call",
+            "params": {
+                "name": "retrieve_entity_snapshot",
+                "arguments": {"entity_id": "ent_fixture_task_A"},
+            },
+        },
+        {"jsonrpc": "2.0", "id": 73, "method": "ping"},
+    ]
+    raw = b"".join(
+        fixture_mcp_server.evidence.encode_json(row) + b"\n" for row in messages
+    )
+    process = subprocess.run(
+        [sys.executable, "-c", script], input=raw, capture_output=True, timeout=20
+    )
+    (run_dir / "stdio-input.jsonl").write_bytes(raw)
+    (run_dir / "stdio-stdout.bin").write_bytes(process.stdout)
+    (run_dir / "stdio-stderr.bin").write_bytes(process.stderr)
+    (run_dir / "stdio-result.json").write_text(
+        json.dumps(
+            {
+                "returncode": process.returncode,
+                "request": request,
+                "state_unchanged": store.state_path.read_bytes() == before_state,
+            }
+        )
+        + "\n"
+    )
+    assert store.log_path.read_bytes().startswith(before_trace), (
+        "producer erased earlier observations"
+    )
+    assert store.state_path.read_bytes() == before_state
+    replies = [json.loads(line) for line in process.stdout.splitlines()]
+    if fault == "fatal_handler":
+        assert process.returncode == 19 and [row["id"] for row in replies] == [0]
+        session["error"] = "fixture process exited 19"
+    else:
+        assert process.returncode == 0 and [row["id"] for row in replies] == [
+            0,
+            71,
+            72,
+            73,
+        ]
+        assert (
+            json.loads(replies[2]["result"]["content"][0]["text"])["entity_id"]
+            == "ent_fixture_task_A"
+        )
+        assert replies[3]["result"] == {}
+    if fault == "corrupt_tail":
+        with store.log_path.open("ab") as handle:
+            handle.write(
+                b'{"trace_version":1'
+            )  # explicit corruption control, no invented call
+    return session
+
+
+@pytest.mark.parametrize("arguments", B_MALFORMED_STORES)
+def test_b_initialized_stdio_malformed_store_is_saved_report_only_violation(
+    tmp_path, monkeypatch, arguments
+):
+    def drive(run_dir, prompts, *args):
+        return _b_stdio_driver(
+            run_dir, prompts, *args, tool="store", arguments=arguments
+        )
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    target = tmp_path / "run"
+    result = runner.run_scenario(
+        target, "digest-report-only", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "fail"
+    assert "report_only_no_effect_calls" in result["failed"]
+    evidence = runner.collect_evidence(target)
+    assert evidence["trace_evidence"]["complete"]
+    attempt = next(row for row in evidence["calls"] if row.get("rpc_id") == 71)
+    assert attempt["tool"] == "store" and attempt["args"] == arguments
+    assert attempt["request"]["params"]["arguments"] == arguments
+    assert (
+        attempt["handler_outcome"] == "validation_error" and attempt["result"]["error"]
+    )
+    assert not any(
+        "pagination" in str(row.get("result", {}).get("error", ""))
+        for row in evidence["calls"]
+    )
+    assert evidence["before_state"] == evidence["after_state"]
+    assert json.loads((target / "result.json").read_text()) == result
+    assert (
+        result["source_binding"]["producer"]["accepted_merge"]
+        == "12b1a54f4f3c11cf9ea2bdf27dfa51c370ec3c53"
+    )
+
+
+@pytest.mark.parametrize(
+    "tool,arguments,expected",
+    [
+        ("retrieve_entity_snapshot", {"entity_id": "ent_fixture_task_A"}, "pass"),
+        (
+            "close_pull_request",
+            {"entity_id": "ent_fixture_task_A", "comment": "Synthetic refusal"},
+            "fail",
+        ),
+    ],
+)
+def test_b_normal_stdio_read_and_refusal_controls(
+    tmp_path, monkeypatch, tool, arguments, expected
+):
+    def drive(run_dir, prompts, *args):
+        return _b_stdio_driver(run_dir, prompts, *args, tool=tool, arguments=arguments)
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    result = runner.run_scenario(
+        tmp_path / "run", "digest-report-only", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == expected, result
+    assert result["trace_evidence"]["complete"]
+    if expected == "fail":
+        assert "report_only_no_effect_calls" in result["failed"]
+
+
+@pytest.mark.parametrize("fault", ["fatal_handler", "completion_io", "corrupt_tail"])
+def test_b_known_stdio_violation_survives_uncertain_or_incomplete_outcome(
+    tmp_path, monkeypatch, fault
+):
+    def drive(run_dir, prompts, *args):
+        return _b_stdio_driver(run_dir, prompts, *args, fault=fault)
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    target = tmp_path / "run"
+    result = runner.run_scenario(
+        target, "digest-report-only", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "error" and result["infrastructure_error"]
+    assert "report_only_no_effect_calls" in result["failed"]
+    assert json.loads((target / "result.json").read_text()) == result
+    evidence = runner.collect_evidence(target)
+    assert not evidence["trace_evidence"]["complete"]
+    attempt = next(row for row in evidence["calls"] if row.get("rpc_id") == 71)
+    assert attempt["tool"] == "close_pull_request"
+    if fault in {"fatal_handler", "completion_io"}:
+        assert "result" not in attempt
+
+
+def test_b_actual_legacy_completion_is_weaker_and_keeps_known_violation(
+    tmp_path, monkeypatch
+):
+    def drive(run_dir, prompts, *args):
+        session = _family_fixture_session(run_dir, prompts, *args)
+        store = fixture_mcp_server.Store(run_dir / "ws")
+        arguments = {
+            "entity_id": "ent_fixture_task_A",
+            "comment": "Synthetic legacy refusal",
+        }
+        actual = fixture_mcp_server.call_tool(store, "close_pull_request", arguments)
+        assert actual["error"]
+        store.log(
+            "close_pull_request", arguments, actual
+        )  # actual legacy interface, not a receipt
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    result = runner.run_scenario(
+        tmp_path / "run", "digest-report-only", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "error"
+    assert "report_only_no_effect_calls" in result["failed"]
+    assert result["trace_evidence"]["provenance"] == "legacy_or_mixed"
+
+
+def test_b_individual_state_io_gap_retains_observed_action(tmp_path, monkeypatch):
+    def drive(run_dir, prompts, *args):
+        session = _b_stdio_driver(run_dir, prompts, *args)
+        original = Path.open
+        target = run_dir / "ws" / "neotoma_state.json"
+
+        def opened(path, *a, **k):
+            if path == target and a and a[0] == "rb":
+                raise PermissionError("synthetic source read unavailable")
+            return original(path, *a, **k)
+
+        monkeypatch.setattr(Path, "open", opened)
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    target = tmp_path / "run"
+    result = runner.run_scenario(
+        target, "digest-report-only", "offline-instrument", 0, 1
+    )
+    assert (
+        result["outcome"] == "error"
+        and "PermissionError" in result["infrastructure_error"]
+    )
+    assert "report_only_no_effect_calls" in result["failed"]
+    assert json.loads((target / "result.json").read_text()) == result
+
+
+def test_b_saved_uncertain_violation_does_not_abort_later_scenario(
+    tmp_path, monkeypatch
+):
+    def drive(run_dir, prompts, *args):
+        return (
+            _b_stdio_driver(run_dir, prompts, *args, fault="completion_io")
+            if run_dir.name == "digest-report-only"
+            else _family_fixture_session(run_dir, prompts, *args)
+        )
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    monkeypatch.setattr(runner.shutil, "which", lambda _: "offline-not-executed")
+    assert (
+        runner.main(
+            [
+                "--scenarios",
+                "digest-report-only,ordinary-single-lane",
+                "--out",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+    first = json.loads((tmp_path / "digest-report-only/result.json").read_text())
+    second = json.loads((tmp_path / "ordinary-single-lane/result.json").read_text())
+    assert (
+        first["outcome"] == "error" and "report_only_no_effect_calls" in first["failed"]
+    )
+    assert second["outcome"] == "pass"
+
+
+@pytest.mark.parametrize("kind", ["root", "entry"])
+def test_b_artifact_collector_rejects_links_before_external_bytes(tmp_path, kind):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "synthetic-outside"
+    outside.mkdir()
+    (outside / "data").write_bytes(b"synthetic outside bytes")
+    if kind == "root":
+        (ws / "artifacts").symlink_to(outside, target_is_directory=True)
+    else:
+        (ws / "artifacts").mkdir()
+        (ws / "artifacts" / "linked").symlink_to(outside / "data")
+    with pytest.raises(ValueError, match="not confined"):
+        runner.artifact_evidence(ws)
+
+
+def test_b_artifact_link_gap_is_saved_without_claiming_unchanged_state(
+    tmp_path, monkeypatch
+):
+    outside = tmp_path / "synthetic-outside"
+    outside.write_bytes(b"synthetic")
+
+    def drive(run_dir, prompts, *args):
+        session = _family_fixture_session(run_dir, prompts, *args)
+        (run_dir / "ws" / "artifacts" / "linked").symlink_to(outside)
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    target = tmp_path / "run"
+    result = runner.run_scenario(
+        target, "digest-report-only", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "fail" and any(
+        "artifacts:" in x for x in result["state_errors"]
+    )
+    assert json.loads((target / "result.json").read_text()) == result
+
+
+def test_b_source_bindings_are_host_only_and_pin_the_accepted_producer(tmp_path):
+    target = tmp_path / "run"
+    runner.prepare_run(target, "digest-report-only")
+    binding = json.loads((target / "source_binding.json").read_text())
+    assert (
+        binding["producer"]["accepted_merge"]
+        == "12b1a54f4f3c11cf9ea2bdf27dfa51c370ec3c53"
+    )
+    assert len(binding["producer"]["files"]) == 5 and binding["consumer"]["revision"]
+    assert not (target / "ws" / "source_binding.json").exists()
+    assert all("sha256" in row for row in binding["consumer"]["files"])
+    assert not runner.verify_review_bundle()
+
+
+@pytest.mark.parametrize("value", [None, [], {}, True, "unknown"])
+def test_b_malformed_quality_metadata_never_crashes_or_passes(
+    tmp_path, monkeypatch, value
+):
+    def drive(*args):
+        return _family_fixture_session(*args)
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    original = runner.collect_evidence
+
+    def collect(path):
+        evidence = original(path)
+        evidence["trace_evidence"] = value
+        return evidence
+
+    monkeypatch.setattr(runner, "collect_evidence", collect)
+    result = runner.run_scenario(
+        tmp_path / "run", "digest-report-only", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "error" and result["infrastructure_error"]
+
+
+def test_b_consumer_uses_the_accepted_shared_decoder_and_structure_validator():
+    assert checks.decode_input_json is fixture_mcp_server.evidence.decode_input_json
+    assert checks._structure_errors is fixture_mcp_server.evidence.structure_errors
+
+
+def test_b_changed_producer_binding_stops_before_workspace_execution(
+    tmp_path, monkeypatch
+):
+    bundle = json.loads(runner.REVIEW_BUNDLE.read_text())
+    bundle["producer_dependency"]["files"][0]["sha256"] = "0" * 64
+    path = tmp_path / "bundle.json"
+    path.write_text(json.dumps(bundle))
+    monkeypatch.setattr(runner, "REVIEW_BUNDLE", path)
+    target = tmp_path / "run"
+    with pytest.raises(ValueError, match="producer source changed"):
+        runner.prepare_run(target, "digest-report-only")
+    assert not target.exists()

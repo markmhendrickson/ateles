@@ -21,6 +21,7 @@ import hashlib
 import importlib.util
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -120,7 +121,55 @@ def verify_review_bundle() -> list[str]:
                 errors.append(
                     f"context fixture: public-safety probe found {forbidden!r}"
                 )
+    producer = manifest.get("producer_dependency", {})
+    if not producer.get("accepted_merge") or len(producer.get("files", [])) != 5:
+        errors.append("accepted shared producer binding is missing")
+    for row in producer.get("files", []):
+        path = REPO_ROOT / row["path"]
+        if not path.is_file() or hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest() != row.get("sha256"):
+            errors.append("accepted shared producer source changed: " + row["path"])
     return errors
+
+
+def source_binding() -> dict:
+    """Content-bound host evidence; never a worker authority or expectation."""
+    manifest = json.loads(REVIEW_BUNDLE.read_text())
+    paths = [
+        HERE / name
+        for name in (
+            "planning_spine_runner.py",
+            "planning_spine_checks.py",
+            "test_planning_spine_eval.py",
+            "README.md",
+        )
+    ]
+    paths += [FIXTURES / "context.json", REVIEW_BUNDLE]
+    paths += [REPO_ROOT / row["path"] for row in manifest["skills"]]
+    try:
+        revision = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        revision = None
+    return {
+        "producer": manifest["producer_dependency"],
+        "consumer": {
+            "revision": revision,
+            "files": [
+                {
+                    "path": path.relative_to(REPO_ROOT).as_posix(),
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+                for path in paths
+            ],
+        },
+    }
 
 
 def prepare_run(run_dir: Path, scenario: str) -> None:
@@ -137,6 +186,9 @@ def prepare_run(run_dir: Path, scenario: str) -> None:
     ws = run_dir / "ws"
     skills_root = ws / ".claude" / "skills"
     skills_root.mkdir(parents=True)
+    (run_dir / "source_binding.json").write_text(
+        json.dumps(source_binding(), indent=2) + "\n"
+    )
     manifest = json.loads(REVIEW_BUNDLE.read_text())
     for row in manifest["skills"]:
         target = skills_root / row["slug"]
@@ -206,22 +258,29 @@ def prepare_run(run_dir: Path, scenario: str) -> None:
 
 
 def artifact_evidence(ws: Path) -> dict:
-    """Capture only local artifact bytes; exclude fixture state and tool logs."""
+    """Hash actual confined artifact bytes without following synthetic links."""
     root = ws / "artifacts"
-    return (
-        {
-            p.relative_to(ws).as_posix(): {
-                "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
-                "bytes": p.stat().st_size,
+    if root.is_symlink() or not root.resolve().is_relative_to(ws.resolve()):
+        raise ValueError("artifact root is not confined")
+    if not root.exists():
+        return {}
+    if not root.is_dir():
+        raise ValueError("artifact root is not a directory")
+    observed = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+            raise ValueError("artifact entry is not confined")
+        if path.is_file():
+            digest, size = hashlib.sha256(), 0
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    digest.update(chunk)
+                    size += len(chunk)
+            observed[path.relative_to(ws).as_posix()] = {
+                "sha256": digest.hexdigest(),
+                "bytes": size,
             }
-            for p in sorted(root.rglob("*"))
-            if p.is_file()
-            and not p.is_symlink()
-            and p.resolve().is_relative_to(root.resolve())
-        }
-        if root.is_dir()
-        else {}
-    )
+    return observed
 
 
 def collect_evidence(run_dir: Path) -> dict:
@@ -258,9 +317,12 @@ def collect_evidence(run_dir: Path) -> dict:
             infrastructure_errors.append("guard evidence: " + type(exc).__name__)
     try:
         artifacts = artifact_evidence(ws)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         artifacts = {}
-        infrastructure_errors.append("artifact evidence: " + type(exc).__name__)
+        if isinstance(exc, ValueError):
+            errors.append("artifacts: " + str(exc))
+        else:
+            infrastructure_errors.append("artifact evidence: " + type(exc).__name__)
     evidence = {
         "before_state": read_json(run_dir / "before_state.json", "before_state"),
         "after_state": read_json(ws / "neotoma_state.json", "after_state"),
@@ -369,6 +431,7 @@ def run_scenario(
         "model": model,
         "error": session["error"],
         "report": report,
+        "source_binding": json.loads((run_dir / "source_binding.json").read_text()),
         **scored,
     }
     (run_dir / "result.json").write_text(json.dumps(output, indent=2) + "\n")

@@ -1683,10 +1683,12 @@ def score_family_continuation(
         return {
             "outcome": "error" if quality_error else "fail",
             "failed": failed,
+            "trace_evidence": evidence.get("trace_evidence")
+            if isinstance(evidence, dict)
+            else None,
             **(
                 {
                     "infrastructure_error": quality_error,
-                    "trace_evidence": evidence.get("trace_evidence"),
                 }
                 if quality_error
                 else {}

@@ -221,3 +221,56 @@ writes followed by valid restoration, task/question identifier shapes, the
 20,001-byte deeply nested report, and the one-byte syntax-error control. No
 model/native operation or successful response/trace is fabricated by these
 checks. They remain deterministic instrument proof only.
+
+
+## Accepted producer dependency and consumer evidence
+
+This consumer split follows accepted producer issue #1604 / PR #1607, merged as
+`12b1a54f4f3c11cf9ea2bdf27dfa51c370ec3c53`. The pinned review bundle records
+all five producer file hashes and verifies them before preparing a run. It
+retains the reviewed, unapplied three-skill proposal bundle and the byte-exact
+third `reconcile-planning` fixture. Refreshing a changed producer requires
+explicit source/interface requalification, not silently loading a stale copy.
+
+The consumer imports `fixture_evidence`'s bounded decoder and shape validator;
+it implements no second decoder or request-receipt store. Deterministic drivers
+use the same `observe_tool_call` boundary as initialized stdio. The collector
+reads normalized attempts AND `complete`, `issues` and `provenance`, preserving
+original bounded requests, absent results, actual outcomes, intermediate entity
+snapshots and uncertainty. Legacy completed-only rows are readable but cannot
+establish exhaustive every-attempt coverage.
+
+A known report-only action stays in the saved failure list even if its arguments
+are malformed, its result is refused, its completion is missing or the producer
+dies. Unqualified observation or evidence I/O yields `outcome: error`; malformed
+worker reports/persisted source remain actionable failures when observation is
+qualified. Neither an error nor a refusal is a successful user action. Known
+violations and infrastructure uncertainty coexist rather than overwriting each
+other. This retains the existing `pass`/`fail`/`error` vocabulary. Normal read,
+full pagination, default digest writes, assigned action and exact answer-route /
+separate receiver-consumption positives still qualify.
+
+`source_binding.json` is per-run host-side evidence alongside `result.json`,
+never worker context or a planning/authority ledger. It records the accepted
+producer merge/file hashes, consumer HEAD and actual consumer content hashes;
+HEAD identifies the source checkout revision while the hashes bind any working
+content. Results include that binding. Scoring criteria, transition controls and
+source-binding metadata remain outside the worker workspace and prompts.
+
+The additional consumer tests run the real initialized producer, append its
+actual observations to a normal `run_scenario`, and inspect the saved result.
+They cover all four historical malformed stores, normal reads/refusals,
+handler death, completion-I/O uncertainty, appended trace corruption, real
+legacy completion, individual state-read failure and later-scenario continuation.
+No trace or successful response is fabricated, and malformed-store controls
+assert unchanged actual state and no unrelated pagination error. Artifact
+collection rejects links before reading outside its synthetic artifact root and
+hashes regular files in chunks; a source gap cannot masquerade as unchanged
+artifact state. These are cooperative instrument controls, not a hostile-worker
+sandbox or causal model-instruction proof.
+
+The thirteen additional cases and seven inherited cases all remain. Both native
+cases still require separately qualified host capture and otherwise report
+explicit infrastructure errors. No model, native transition, canonical skill
+application, installed adoption or aggregate coordinator acceptance follows
+from these deterministic tests or twenty dry-run preparations.

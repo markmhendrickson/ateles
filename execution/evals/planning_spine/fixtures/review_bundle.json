@@ -41,5 +41,33 @@
       "snapshot_source": "unchanged generated review evidence located by name:reconcile-planning"
     }
   ],
-  "source_mode": "reviewed_proposal"
+  "source_mode": "reviewed_proposal",
+  "producer_dependency": {
+    "issue": 1604,
+    "pull_request": 1607,
+    "accepted_merge": "12b1a54f4f3c11cf9ea2bdf27dfa51c370ec3c53",
+    "interface": "fixture_evidence normalized attempts with completeness/provenance; qualified process_request/observe_tool_call",
+    "files": [
+      {
+        "path": "execution/evals/rule_delivery/README.md",
+        "sha256": "1907fa9c7523fe270b119431af0118062f32cf00f4897742b0cea5ab406cba8b"
+      },
+      {
+        "path": "execution/evals/rule_delivery/fixture_evidence.py",
+        "sha256": "a13aaaaeaaabfd2a2c5a4f1339b3f9ab8a4819d4cd3ff97de98c6942c808d2ef"
+      },
+      {
+        "path": "execution/evals/rule_delivery/fixture_mcp_server.py",
+        "sha256": "829257d379bf8c3179332fc64a95feaa131637aba509281db6bba73a84ba9eb8"
+      },
+      {
+        "path": "execution/evals/rule_delivery/test_fixture_evidence.py",
+        "sha256": "6657cd678850af556041999a28bcd524b392c063fd7674831b52d111bd08c779"
+      },
+      {
+        "path": "execution/evals/rule_delivery/test_rule_delivery_evals.py",
+        "sha256": "b4fa076518220698f3a5d90aad71751f1ef424a69f1417f6268ef724d36e2771"
+      }
+    ]
+  }
 }
