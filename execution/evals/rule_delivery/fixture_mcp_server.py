@@ -650,11 +650,7 @@ class Store:
         # Observe successful persisted writes, not merely their requested input.
         # This reuses the existing trace instead of introducing a history store.
         persisted = (
-            {
-                eid: row
-                for eid, row in state["entities"].items()
-                if row["entity_type"] in {"session_digest", "task", "checkpoint"}
-            }
+            state["entities"]
             if TOOL_EFFECTS.get(tool, "action") == "action" and not result.get("error")
             else None
         )

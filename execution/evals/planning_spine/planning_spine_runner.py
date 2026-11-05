@@ -228,23 +228,42 @@ def collect_evidence(run_dir: Path) -> dict:
     ws = run_dir / "ws"
     log = ws / "mcp_calls.jsonl"
     guard = ws / "guard_blocks.jsonl"
-    return {
-        "before_state": json.loads((run_dir / "before_state.json").read_text()),
-        "after_state": json.loads((ws / "neotoma_state.json").read_text()),
-        "before_artifacts": json.loads((run_dir / "before_artifacts.json").read_text()),
+    errors = []
+
+    def read_json(path, label):
+        return checks.decode_input_json(path.read_text(), label, errors)
+
+    evidence = {
+        "before_state": read_json(run_dir / "before_state.json", "before_state"),
+        "after_state": read_json(ws / "neotoma_state.json", "after_state"),
+        "before_artifacts": read_json(
+            run_dir / "before_artifacts.json", "before_artifacts"
+        ),
         "artifacts": artifact_evidence(ws),
-        "calls": [json.loads(line) for line in log.read_text().splitlines()]
+        "calls": [
+            checks.decode_input_json(line, f"calls[{i}]", errors)
+            for i, line in enumerate(log.read_text().splitlines())
+        ]
         if log.is_file()
         else [],
         "guard_blocks": guard.read_text().splitlines() if guard.is_file() else [],
-        "backend_control": json.loads((run_dir / "fixture_control.json").read_text())
+        "backend_control": read_json(
+            run_dir / "fixture_control.json", "backend_control"
+        )
         if (run_dir / "fixture_control.json").is_file()
         else {},
         "tool_effects": fixture_backend.TOOL_EFFECTS,
-        "planning_sha256": fixture_backend.planning_fingerprint(
-            json.loads((ws / "neotoma_state.json").read_text())
-        ),
+        "registered_entity_types": sorted(fixture_backend.REGISTERED_TYPES),
     }
+    errors.extend(checks.family_evidence_errors(evidence))
+    evidence["state_errors"] = errors
+    # Invalid source fields must not reach a hash/sort before validation.
+    evidence["planning_sha256"] = (
+        fixture_backend.planning_fingerprint(evidence["after_state"])
+        if not errors
+        else None
+    )
+    return evidence
 
 
 def score_scenario_report(
@@ -286,10 +305,16 @@ def run_scenario(
     result = RULE_RUNNER.result_event(turn)
     report = result.get("result") or ""
     transport_error = session["error"]
-    if report.startswith("API Error:"):
+    if isinstance(report, str) and report.startswith("API Error:"):
         transport_error = report
     fixture = load_fixture()
-    evidence = collect_evidence(run_dir)
+    try:
+        evidence = collect_evidence(run_dir)
+    except OSError as exc:
+        evidence = {}
+        transport_error = (
+            transport_error or "fixture evidence unavailable: " + type(exc).__name__
+        )
     evidence["turn_count"] = len(session["turns"])
     scored = (
         {

@@ -1122,22 +1122,359 @@ def audit_validation_errors(value: object) -> list[str]:
     return errors
 
 
-def _audit_object(text: str, errors: list[str] | None = None) -> dict | None:
+# Engineering bounds for this synthetic evaluator, not worker authority limits.
+MAX_INPUT_BYTES = 1_048_576
+MAX_INPUT_DEPTH = 64
+MAX_INPUT_NODES = 1_000_000
+
+
+def decode_input_json(text: str, path: str, errors: list[str]):
+    """Contain bounded malformed JSON before decoding can exhaust recursion."""
     import json
 
-    candidates = re.findall(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
-    if not candidates:
-        candidates = [text.strip()]
-    try:
-        value = json.loads(candidates[-1])
-    except (ValueError, TypeError):
-        if errors is not None:
-            errors.append("audit: expected valid JSON object")
+    if not isinstance(text, str):
+        errors.append(path + ": expected JSON text")
         return None
-    invalid = audit_validation_errors(value)
+    try:
+        if len(text) > MAX_INPUT_BYTES or len(text.encode("utf-8")) > MAX_INPUT_BYTES:
+            errors.append(f"{path}: JSON input exceeds {MAX_INPUT_BYTES} bytes")
+            return None
+    except UnicodeError:
+        errors.append(path + ": invalid Unicode in JSON input")
+        return None
+    depth, quoted, escaped = 0, False, False
+    for char in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_INPUT_DEPTH:
+                errors.append(f"{path}: JSON nesting exceeds {MAX_INPUT_DEPTH} levels")
+                return None
+        elif char in "]}":
+            depth -= 1
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError, RecursionError, MemoryError, OverflowError):
+        errors.append(path + ": invalid JSON or unsupported decoder resource shape")
+        return None
+
+
+def _structure_errors(value: object, path: str) -> list[str]:
+    # Iterative traversal protects direct scorer callers as well as decoded data.
+    pending, visited = [(value, path, 0)], 0
+    while pending:
+        item, here, depth = pending.pop()
+        visited += 1
+        if depth > MAX_INPUT_DEPTH or visited > MAX_INPUT_NODES:
+            return [here + ": unsupported input depth or collection size"]
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if not isinstance(key, str):
+                    return [here + ": object keys must be strings"]
+                pending.append((child, here + "." + key, depth + 1))
+        elif isinstance(item, list):
+            pending.extend(
+                (child, f"{here}[{i}]", depth + 1) for i, child in enumerate(item)
+            )
+        elif item is not None and not isinstance(item, (str, int, float, bool)):
+            return [here + ": expected JSON-compatible value"]
+    return []
+
+
+def _audit_object(text: str, errors: list[str] | None = None) -> dict | None:
+    invalid = []
+    if not isinstance(text, str) or len(text) > MAX_INPUT_BYTES:
+        invalid.append("audit: expected bounded JSON report text")
+        value = None
+    else:
+        candidates = re.findall(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+        value = decode_input_json(
+            candidates[-1] if candidates else text.strip(), "audit", invalid
+        )
+    if not invalid:
+        invalid.extend(_structure_errors(value, "audit"))
+    if not invalid:
+        invalid.extend(audit_validation_errors(value))
     if errors is not None:
         errors.extend(invalid)
     return None if invalid else value
+
+
+def family_evidence_errors(evidence: object) -> list[str]:
+    """Validate every consumed source shape before iteration or key lookup.
+
+    This is the existing synthetic fixture contract, not a production schema.
+    Qualification flag values are deliberately left to the strict affirmative
+    predicates: unknown/malformed flags remain observable negative test inputs.
+    """
+    errors = _structure_errors(evidence, "evidence")
+    if errors:
+        return errors
+
+    def expect(path, ok, kind):
+        if not ok and len(errors) < 128:
+            errors.append(path + ": expected " + kind)
+
+    def object_(value, path):
+        expect(path, isinstance(value, dict), "object")
+        return value if isinstance(value, dict) else {}
+
+    def array(value, path):
+        expect(path, isinstance(value, list), "array")
+        return value if isinstance(value, list) else []
+
+    def identifier(value, path, nullable=False):
+        expect(
+            path,
+            (nullable and value is None)
+            or (isinstance(value, str) and bool(value.strip())),
+            "nonempty string" + (" or null" if nullable else ""),
+        )
+
+    def ids(row, path, keys, nullable=False):
+        for key in keys:
+            if key in row:
+                identifier(row[key], path + "." + key, nullable)
+
+    def objects(value, path):
+        return [
+            object_(item, f"{path}[{i}]") for i, item in enumerate(array(value, path))
+        ]
+
+    def edges(value, path):
+        for i, edge in enumerate(objects(value, path)):
+            for key in ("source_entity_id", "target_entity_id", "relationship_type"):
+                identifier(edge.get(key), f"{path}[{i}].{key}")
+
+    def snapshot(value, kind, path):
+        row = object_(value, path)
+        ids(
+            row,
+            path,
+            (
+                "executor",
+                "owner",
+                "owner_session_id",
+                "source_session_id",
+                "task_id",
+                "task_entity_id",
+                "question_id",
+                "checkpoint_id",
+                "recipient_session_id",
+                "conversation_id",
+            ),
+            True,
+        )
+        for key in ("status", "state", "sender_kind", "observed_at"):
+            if key in row:
+                identifier(row[key], path + "." + key)
+        if kind == "session_digest":
+            for key in ("tasks_claimed", "artifacts"):
+                objects(row.get(key), path + "." + key)
+            for key in ("session_key", "schema_version", "harness"):
+                if key in row:
+                    identifier(row[key], path + "." + key)
+            if "lineage_files" in row:
+                for i, item in enumerate(
+                    array(row["lineage_files"], path + ".lineage_files")
+                ):
+                    identifier(item, f"{path}.lineage_files[{i}]")
+        return row
+
+    def entities(value, path):
+        for eid, entity in object_(value, path).items():
+            identifier(eid, path + ".key")
+            row = object_(entity, path + "." + eid)
+            identifier(row.get("entity_type"), path + "." + eid + ".entity_type")
+            if known_types:
+                expect(
+                    path + "." + eid + ".entity_type",
+                    isinstance(row.get("entity_type"), str)
+                    and row["entity_type"] in known_types,
+                    "registered fixture entity type",
+                )
+            snapshot(
+                row.get("snapshot"),
+                row.get("entity_type"),
+                path + "." + eid + ".snapshot",
+            )
+
+    def session(value, path):
+        row = object_(value, path)
+        ids(row, path, ("parent_session_id", "predecessor_id"), True)
+        if "source_kind" in row:
+            expect(
+                path + ".source_kind",
+                isinstance(row["source_kind"], str)
+                and row["source_kind"] in {"interactive", "subAgent"},
+                "interactive or subAgent",
+            )
+        if "items" in row:
+            for i, item in enumerate(objects(row["items"], path + ".items")):
+                ids(
+                    item,
+                    f"{path}.items[{i}]",
+                    (
+                        "id",
+                        "entity_id",
+                        "task_id",
+                        "session_id",
+                        "delegated_session_id",
+                    ),
+                    True,
+                )
+
+    def receipts(value, path):
+        for i, row in enumerate(objects(value, path)):
+            here = f"{path}[{i}]"
+            ids(
+                row,
+                here,
+                (
+                    "receipt_id",
+                    "answer_id",
+                    "question_id",
+                    "task_id",
+                    "checkpoint_id",
+                    "recipient_session_id",
+                    "consumer_session_id",
+                ),
+                True,
+            )
+            expect(
+                here + ".status",
+                isinstance(row.get("status"), str)
+                and row["status"] in {"queued", "consumed"},
+                "queued or consumed",
+            )
+
+    def state(value, path):
+        row = object_(value, path)
+        entities(row.get("entities"), path + ".entities")
+        edges(row.get("relationships"), path + ".relationships")
+        for sid, child in object_(row.get("sessions", {}), path + ".sessions").items():
+            identifier(sid, path + ".sessions.key")
+            session(child, path + ".sessions." + sid)
+        for key in ("effects", "watch"):
+            if key in row:
+                object_(row[key], path + "." + key)
+        if "answer_receipts" in row:
+            mapping = object_(row["answer_receipts"], path + ".answer_receipts")
+            receipts(list(mapping.values()), path + ".answer_receipts.values")
+        for tid, activity in object_(
+            row.get("activity", {}), path + ".activity"
+        ).items():
+            identifier(tid, path + ".activity.key")
+            entry = object_(activity, path + ".activity." + tid)
+            for key in ("artifact", "sha256", "task_id", "session_id", "state"):
+                identifier(entry.get(key), path + ".activity." + tid + "." + key)
+
+    root = object_(evidence, "evidence")
+    registered = root.get("registered_entity_types", [])
+    expect(
+        "registered_entity_types",
+        isinstance(registered, list)
+        and all(isinstance(item, str) for item in registered),
+        "array of type names",
+    )
+    known_types = (
+        set(registered)
+        if isinstance(registered, list)
+        and all(isinstance(item, str) for item in registered)
+        else set()
+    )
+    for key in ("before_state", "after_state"):
+        state(root.get(key, {}), key)
+    for index, call in enumerate(objects(root.get("calls", []), "calls")):
+        path = f"calls[{index}]"
+        identifier(call.get("tool"), path + ".tool")
+        args = object_(call.get("args"), path + ".args")
+        ids(
+            args,
+            path + ".args",
+            (
+                "entity_id",
+                "session_id",
+                "parent_session_id",
+                "task_id",
+                "question_id",
+                "checkpoint_id",
+                "answer_id",
+                "recipient_session_id",
+                "relative_path",
+            ),
+            True,
+        )
+        for key in ("source_kinds", "relationship_types"):
+            if key in args:
+                for i, item in enumerate(array(args[key], path + ".args." + key)):
+                    identifier(item, f"{path}.args.{key}[{i}]")
+        if "entities" in args:
+            objects(args["entities"], path + ".args.entities")
+        result = object_(call.get("result"), path + ".result")
+        for key in ("next_cursor", "nextCursor"):
+            if key in result:
+                identifier(result[key], path + ".result." + key, True)
+        if "entity_ids" in result:
+            for i, item in enumerate(
+                array(result["entity_ids"], path + ".result.entity_ids")
+            ):
+                identifier(item, f"{path}.result.entity_ids[{i}]")
+        if "relationships" in result:
+            edges(result["relationships"], path + ".result.relationships")
+        if "snapshot" in result:
+            snapshot(
+                result["snapshot"], result.get("entity_type"), path + ".result.snapshot"
+            )
+        if "answer_receipts" in result:
+            receipts(result["answer_receipts"], path + ".result.answer_receipts")
+        if "session" in result:
+            session(result["session"], path + ".result.session")
+        if "threads" in result:
+            for i, row in enumerate(
+                objects(result["threads"], path + ".result.threads")
+            ):
+                identifier(row.get("id"), f"{path}.result.threads[{i}].id")
+                session(row, f"{path}.result.threads[{i}]")
+        if "persisted_entities" in call:
+            entities(call["persisted_entities"], path + ".persisted_entities")
+    for key in ("backend_control", "tool_effects", "before_artifacts", "artifacts"):
+        object_(root.get(key, {}), key)
+    for key in ("before_artifacts", "artifacts"):
+        mapping = root.get(key, {})
+        if isinstance(mapping, dict):
+            for artifact, value in mapping.items():
+                identifier(artifact, key + ".key")
+                item = object_(value, key + "." + artifact)
+                identifier(item.get("sha256"), key + "." + artifact + ".sha256")
+                if "bytes" in item:
+                    expect(
+                        key + "." + artifact + ".bytes",
+                        type(item["bytes"]) is int and item["bytes"] >= 0,
+                        "nonnegative integer",
+                    )
+    effects = root.get("tool_effects", {})
+    if isinstance(effects, dict):
+        for tool, kind in effects.items():
+            identifier(tool, "tool_effects.key")
+            expect(
+                "tool_effects." + tool,
+                isinstance(kind, str)
+                and kind in {"read", "read_may_consume", "action"},
+                "declared effect class",
+            )
+    control = root.get("backend_control", {})
+    if isinstance(control, dict) and "local_actions" in control:
+        object_(control["local_actions"], "backend_control.local_actions")
+    return errors
 
 
 def _qualified_ascent_edges(
@@ -1259,7 +1596,11 @@ def _native_observation_error(kind: str, evidence: dict) -> str | None:
     """
     if kind not in {"compaction", "cross_harness"}:
         return "unknown native qualification kind"
-    observed = evidence.get("external_native_observation")
+    observed = (
+        evidence.get("external_native_observation")
+        if isinstance(evidence, dict)
+        else None
+    )
     if (
         not isinstance(observed, dict)
         or observed.get("source") != "qualified_native_capture"
@@ -1312,10 +1653,49 @@ def score_family_continuation(
     case = fixture["family_cases"][scenario["case_id"]]
     criteria = case["criteria"]
     evidence = evidence or {}
-    before = evidence.get("before_state") or {}
-    after = evidence.get("after_state") or {}
-    calls = evidence.get("calls") or []
-    failed: list[str] = []
+    audit_errors = []
+    audit = _audit_object(text, audit_errors)
+    state_errors = (
+        list(evidence.get("state_errors", []))
+        if isinstance(evidence, dict)
+        and isinstance(evidence.get("state_errors", []), list)
+        and all(isinstance(item, str) for item in evidence.get("state_errors", []))
+        else []
+    )
+    state_errors.extend(family_evidence_errors(evidence))
+    if state_errors or audit is None:
+        failed = (["persisted_source_shape"] if state_errors else []) + (
+            ["structured_observable_report"] if audit is None else []
+        )
+        if (
+            not isinstance(evidence, dict)
+            or not evidence.get("before_state")
+            or not evidence.get("after_state")
+            or not evidence.get("calls")
+        ):
+            failed.append("persisted_evidence_available")
+        kind = criteria.get("required_external_native_evidence")
+        native_error = _native_observation_error(kind, evidence) if kind else None
+        return {
+            "outcome": "fail",
+            "failed": failed,
+            **(
+                {"state_errors": list(dict.fromkeys(state_errors))}
+                if state_errors
+                else {}
+            ),
+            **({"audit_errors": audit_errors} if audit_errors else {}),
+            "evidence_class": "fixture_only"
+            if not kind
+            else "requires_separately_qualified_native_observation",
+            **({"native_qualification_error": native_error} if native_error else {}),
+        }
+    before, after, calls = (
+        evidence["before_state"],
+        evidence["after_state"],
+        evidence["calls"],
+    )
+    failed = []
 
     def require(label: str, value: bool) -> None:
         if not value:
@@ -1325,21 +1705,6 @@ def score_family_continuation(
         "persisted_evidence_available",
         bool(before.get("entities")) and bool(after.get("entities")) and bool(calls),
     )
-    audit_errors = []
-    audit = _audit_object(text, audit_errors)
-    require("structured_observable_report", audit is not None)
-    if audit is None:
-        kind = criteria.get("required_external_native_evidence")
-        native_error = _native_observation_error(kind, evidence) if kind else None
-        return {
-            "outcome": "fail",
-            "failed": failed,
-            "audit_errors": audit_errors,
-            "evidence_class": "fixture_only"
-            if not kind
-            else "requires_separately_qualified_native_observation",
-            **({"native_qualification_error": native_error} if native_error else {}),
-        }
     require(
         "affirmative_capability:family_tools",
         evidence.get("backend_control", {}).get("family_tools") is True,

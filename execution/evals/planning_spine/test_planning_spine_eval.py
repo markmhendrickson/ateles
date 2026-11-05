@@ -2399,3 +2399,415 @@ def test_r2_ascent_sources_from_prior_planning_stage_do_not_qualify_current_repo
     assert any(
         c["planning_sha256"] == evidence["planning_sha256"] for c in relation_calls
     )
+
+
+# R3 state controls keep malformed writes successful and observed. Validation is
+# at scoring's input boundary, so the instrument can still exercise bad state.
+@pytest.mark.parametrize("field", ["tasks_claimed", "artifacts"])
+@pytest.mark.parametrize("stage", [1, 2])
+@pytest.mark.parametrize(
+    "value", [None, {}, 1, "invalid", True, [None], [1], ["invalid"]]
+)
+def test_r3_malformed_final_and_intermediate_digest_state_saves_field_failure(
+    tmp_path, monkeypatch, field, stage, value
+):
+    writes = 0
+
+    def malformed_store(name, args):
+        nonlocal writes
+        if name == "store":
+            writes += 1
+            if writes == stage:
+                args["entities"][0][field] = copy.deepcopy(value)
+        return name, args
+
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, "digest-default-history", transform=malformed_store
+    )
+    assert result["outcome"] == "fail"
+    assert "persisted_source_shape" in result["failed"]
+    assert any(field in reason for reason in result["state_errors"])
+    evidence = runner.collect_evidence(target)
+    stores = [call for call in evidence["calls"] if call["tool"] == "store"]
+    assert len(stores) == 2 and all(
+        call["result"].get("success") is True for call in stores
+    )
+    assert not any(
+        "pagination" in str(call["result"].get("error", ""))
+        for call in evidence["calls"]
+    )
+    digest_id = stores[stage - 1]["result"]["entity_ids"][0]
+    assert (
+        stores[stage - 1]["persisted_entities"][digest_id]["snapshot"][field] == value
+    )
+    assert any(
+        call["tool"] == "retrieve_entity_snapshot"
+        and call["result"].get("snapshot", {}).get(field) == value
+        for call in evidence["calls"]
+    )
+    if stage == 1:
+        assert isinstance(
+            evidence["after_state"]["entities"][digest_id]["snapshot"][field], list
+        )
+        assert any(
+            "calls[" in reason and field in reason for reason in result["state_errors"]
+        )
+
+
+STATE_IDENTIFIER_FIELDS = [
+    ("ent_fixture_task_A", "executor"),
+    ("ent_fixture_task_A", "owner"),
+    ("ent_fixture_task_A", "source_session_id"),
+    ("ent_fixture_task_A", "status"),
+    ("ent_fixture_q_A", "task_id"),
+    ("ent_fixture_q_A", "checkpoint_id"),
+    ("ent_fixture_q_A", "recipient_session_id"),
+    ("ent_fixture_q_A", "observed_at"),
+    ("ent_fixture_q_A", "sender_kind"),
+    ("ent_fixture_q_A", "state"),
+    ("ent_fixture_cp_A", "status"),
+    ("ent_fixture_cp_A", "task_entity_id"),
+]
+
+
+@pytest.mark.parametrize(("entity", "field"), STATE_IDENTIFIER_FIELDS)
+@pytest.mark.parametrize("value", [["bad"], {"bad": True}, 1, True])
+def test_r3_successful_correct_malformed_identifiers_and_enums_are_saved_failures(
+    tmp_path, monkeypatch, entity, field, value
+):
+    extra = [("correct", {"entity_id": entity, "field": field, "value": value})]
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, "ordinary-single-lane", extra=extra
+    )
+    assert result["outcome"] == "fail"
+    assert any(
+        entity + ".snapshot." + field in reason for reason in result["state_errors"]
+    )
+    trace = runner.collect_evidence(target)["calls"]
+    assert trace[-1]["result"].get("success") is True
+    assert trace[-1]["persisted_entities"].get(entity, {}).get("snapshot", {}).get(
+        field
+    ) == value or entity.startswith("ent_fixture_q_")
+    assert (
+        json.loads((target / "ws/neotoma_state.json").read_text())["entities"][entity][
+            "snapshot"
+        ][field]
+        == value
+    )
+
+
+def test_r3_invalid_intermediate_identifier_cannot_be_hidden_by_restoration(
+    tmp_path, monkeypatch
+):
+    extra = [
+        (
+            "correct",
+            {"entity_id": "ent_fixture_task_A", "field": "executor", "value": ["bad"]},
+        ),
+        (
+            "correct",
+            {
+                "entity_id": "ent_fixture_task_A",
+                "field": "executor",
+                "value": "session_A",
+            },
+        ),
+    ]
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, "ordinary-single-lane", extra=extra
+    )
+    assert result["outcome"] == "fail"
+    assert any(
+        "calls[" in reason and "executor" in reason for reason in result["state_errors"]
+    )
+    assert (
+        runner.collect_evidence(target)["after_state"]["entities"][
+            "ent_fixture_task_A"
+        ]["snapshot"]["executor"]
+        == "session_A"
+    )
+
+
+STATE_CONTAINER_VARIANTS = [
+    (("entities",), []),
+    (("entities", "ent_fixture_task_A"), None),
+    (("entities", "ent_fixture_task_A", "entity_type"), []),
+    (("entities", "ent_fixture_task_A", "snapshot"), []),
+    (("relationships",), None),
+    (("relationships",), {}),
+    (("relationships", 0, "source_entity_id"), []),
+    (("relationships", 0, "target_entity_id"), {}),
+    (("relationships", 0, "relationship_type"), []),
+    (("sessions",), []),
+    (("sessions", "session_A"), []),
+    (("sessions", "session_A", "parent_session_id"), {}),
+    (("sessions", "session_A", "items"), "not-items"),
+    (("sessions", "session_A", "source_kind"), ["subAgent"]),
+    (("sessions", "session_A", "source_kind"), "unsupported"),
+    (("activity",), []),
+    (("activity",), {"ent_fixture_task_E": {"artifact": [], "sha256": "test"}}),
+    (("answer_receipts",), []),
+    (("answer_receipts",), {"receipt": {"status": ["consumed"]}}),
+    (("watch",), None),
+    (("effects",), []),
+]
+
+
+@pytest.mark.parametrize(("path", "value"), STATE_CONTAINER_VARIANTS)
+def test_r3_worker_local_state_file_shapes_are_validated_before_hash_or_lookup(
+    tmp_path, monkeypatch, path, value
+):
+    def drive(run_dir, prompts, *args):
+        session = _family_fixture_session(run_dir, prompts, *args)
+        store = fixture_mcp_server.Store(run_dir / "ws")
+        state = store.load()
+        parent = state
+        for key in path[:-1]:
+            parent = parent[key]
+        parent[path[-1]] = copy.deepcopy(value)
+        # An actual worker-local file write; no call/response/log is invented.
+        store.save(state)
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    run = tmp_path / "run"
+    result = runner.run_scenario(
+        run, "ordinary-single-lane", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "fail" and result["state_errors"]
+    assert any(
+        "after_state." + str(path[0]) in reason for reason in result["state_errors"]
+    )
+    assert json.loads((run / "result.json").read_text()) == result
+
+
+@pytest.mark.parametrize(
+    "payload", ["[" * 10000 + "0" + "]" * 10000, '{"x":' * 200 + "0" + "}" * 200, "{"]
+)
+def test_r3_decoder_resource_shape_saves_failure_and_continues_selected_batch(
+    tmp_path, monkeypatch, payload
+):
+    def drive(run_dir, prompts, *args):
+        session = _family_fixture_session(run_dir, prompts, *args)
+        if run_dir.name == "ordinary-single-lane":
+            session["turns"][-1][-1]["result"] = payload
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    monkeypatch.setattr(runner.shutil, "which", lambda _: "offline-not-executed")
+    assert (
+        runner.main(
+            [
+                "--scenarios",
+                "ordinary-single-lane,recursive-paginated-family",
+                "--out",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+    first = json.loads((tmp_path / "ordinary-single-lane/result.json").read_text())
+    assert first["outcome"] == "fail" and first["audit_errors"]
+    assert "infrastructure_error" not in first
+    assert (
+        json.loads((tmp_path / "recursive-paginated-family/result.json").read_text())[
+            "outcome"
+        ]
+        == "pass"
+    )
+    if len(payload) > 1:
+        assert "nesting" in first["audit_errors"][0]
+
+
+@pytest.mark.parametrize("field", ["tasks_claimed", "artifacts"])
+@pytest.mark.parametrize("stage", [1, 2])
+def test_r3_bad_successful_state_store_saves_failure_and_continues_batch(
+    tmp_path, monkeypatch, field, stage
+):
+    baseline = tmp_path / "baseline"
+    assert (
+        _run_family(baseline, monkeypatch, "digest-default-history")["outcome"]
+        == "pass"
+    )
+    writes = 0
+
+    def transform(name, args):
+        nonlocal writes
+        if name == "store":
+            writes += 1
+            if writes == stage:
+                args["entities"][0][field] = None
+        return name, args
+
+    replay = _replay_family_driver(
+        baseline / "digest-default-history", transform=transform
+    )
+
+    def driver(run_dir, prompts, *args):
+        return (
+            replay(run_dir, prompts, *args)
+            if run_dir.name == "digest-default-history"
+            else _family_fixture_session(run_dir, prompts, *args)
+        )
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", driver)
+    monkeypatch.setattr(runner.shutil, "which", lambda _: "offline-not-executed")
+    out = tmp_path / "batch"
+    assert (
+        runner.main(
+            [
+                "--scenarios",
+                "digest-default-history,recursive-paginated-family",
+                "--out",
+                str(out),
+            ]
+        )
+        == 1
+    )
+    assert json.loads((out / "digest-default-history/result.json").read_text())[
+        "state_errors"
+    ]
+    assert (
+        json.loads((out / "recursive-paginated-family/result.json").read_text())[
+            "outcome"
+        ]
+        == "pass"
+    )
+
+
+def test_r3_decoder_depth_scanner_preserves_quoted_brackets_and_normal_valid_report(
+    tmp_path, monkeypatch
+):
+    def change(audit):
+        audit["metadata"] = (
+            "[" * 10000 + 'escaped quote: " and backslash: \\' + "]" * 10000
+        )
+
+    result, _ = _r2_replay(
+        tmp_path, monkeypatch, "ordinary-single-lane", report_change=change
+    )
+    assert result["outcome"] == "pass"
+
+
+def test_r3_decoder_size_limit_is_saved_output_failure(tmp_path, monkeypatch):
+    def driver(*args):
+        session = _family_fixture_session(*args)
+        session["turns"][-1][-1]["result"] = "x" * (checks.MAX_INPUT_BYTES + 1)
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", driver)
+    result = runner.run_scenario(
+        tmp_path / "run", "ordinary-single-lane", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "fail" and result["audit_errors"]
+
+
+def test_r3_successful_intermediate_question_identifier_restore_is_observed(
+    tmp_path, monkeypatch
+):
+    extra = [
+        (
+            "correct",
+            {"entity_id": "ent_fixture_q_A", "field": "task_id", "value": ["bad"]},
+        ),
+        (
+            "correct",
+            {
+                "entity_id": "ent_fixture_q_A",
+                "field": "task_id",
+                "value": "ent_fixture_task_A",
+            },
+        ),
+    ]
+    result, target = _r2_replay(
+        tmp_path, monkeypatch, "ordinary-single-lane", extra=extra
+    )
+    assert result["outcome"] == "fail"
+    assert any(
+        "persisted_entities.ent_fixture_q_A.snapshot.task_id" in reason
+        for reason in result["state_errors"]
+    )
+    assert (
+        runner.collect_evidence(target)["after_state"]["entities"]["ent_fixture_q_A"][
+            "snapshot"
+        ]["task_id"]
+        == "ent_fixture_task_A"
+    )
+
+
+@pytest.mark.parametrize("kind", ["nested", "syntax"])
+def test_r3_unreadable_worker_state_json_saves_source_failure_and_continues(
+    tmp_path, monkeypatch, kind
+):
+    def drive(run_dir, prompts, *args):
+        session = _family_fixture_session(run_dir, prompts, *args)
+        if run_dir.name == "ordinary-single-lane":
+            (run_dir / "ws/neotoma_state.json").write_text(
+                "[" * 10000 + "0" + "]" * 10000 if kind == "nested" else "{"
+            )
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", drive)
+    monkeypatch.setattr(runner.shutil, "which", lambda _: "offline-not-executed")
+    assert (
+        runner.main(
+            [
+                "--scenarios",
+                "ordinary-single-lane,recursive-paginated-family",
+                "--out",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+    result = json.loads((tmp_path / "ordinary-single-lane/result.json").read_text())
+    assert result["outcome"] == "fail" and any(
+        "after_state" in x for x in result["state_errors"]
+    )
+    assert (
+        json.loads((tmp_path / "recursive-paginated-family/result.json").read_text())[
+            "outcome"
+        ]
+        == "pass"
+    )
+
+
+def test_r3_genuine_evidence_io_failure_remains_infrastructure_error(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", _family_fixture_session)
+
+    def missing(_run_dir):
+        raise FileNotFoundError("synthetic missing host evidence")
+
+    monkeypatch.setattr(runner, "collect_evidence", missing)
+    result = runner.run_scenario(
+        tmp_path / "run", "ordinary-single-lane", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "error"
+    assert (
+        result["infrastructure_error"]
+        == "fixture evidence unavailable: FileNotFoundError"
+    )
+    assert json.loads((tmp_path / "run/result.json").read_text()) == result
+
+
+def test_r3_unsupported_entity_kind_is_field_failure_before_planning_fingerprint(
+    tmp_path, monkeypatch
+):
+    def driver(run_dir, prompts, *args):
+        session = _family_fixture_session(run_dir, prompts, *args)
+        store = fixture_mcp_server.Store(run_dir / "ws")
+        state = store.load()
+        state["entities"]["ent_fixture_plan_A"]["entity_type"] = (
+            "unsupported-fixture-kind"
+        )
+        store.save(state)
+        return session
+
+    monkeypatch.setattr(runner.RULE_RUNNER, "drive_session", driver)
+    result = runner.run_scenario(
+        tmp_path / "run", "ordinary-single-lane", "offline-instrument", 0, 1
+    )
+    assert result["outcome"] == "fail"
+    assert any("ent_fixture_plan_A.entity_type" in x for x in result["state_errors"])
