@@ -38,6 +38,7 @@ import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -136,6 +137,30 @@ class ReviewError(RuntimeError):
     """No qualified provider produced a review; never a review verdict."""
 
 
+class ReviewCapacityRefused(ReviewError):
+    """The dispatcher refused to launch any provider for capacity reasons.
+
+    Raised only when the dispatch result carries ``cooled_until``, the typed
+    field skill_runner sets solely on its capacity refusals (the usage gate,
+    an all-providers cooling window, a Fly cost/queue cap): nothing ran, and
+    capacity returns at ``retry_at``. A PR change cannot fix this, so it is
+    reported rather than failed. Still a ReviewError, so never a verdict.
+    """
+
+    def __init__(self, message: str, retry_at: str):
+        super().__init__(message)
+        self.retry_at = retry_at
+
+
+class ReviewOutcome(Enum):
+    """Per-reviewer result. Only REVIEWED carries a verdict; only FAILED fails
+    the job. NOT_RUN_CAPACITY is neither an approval nor a failure."""
+
+    REVIEWED = "reviewed"
+    NOT_RUN_CAPACITY = "not_run_capacity"
+    FAILED = "failed"
+
+
 def call_review(prompt: str, *, role: str) -> str:
     daemon_dir = Path(__file__).resolve().parents[1] / "daemons" / "apis"
     if str(daemon_dir) not in sys.path:
@@ -145,6 +170,9 @@ def call_review(prompt: str, *, role: str) -> str:
     result = asyncio.run(run_review_prompt(role=role, prompt=prompt))
     print(f"[{role}] provider={result.provider or 'none'}; attempts={','.join(result.attempted_providers) or 'none'}")
     if not result.ok or not result.stdout.strip():
+        retry_at = getattr(result, "cooled_until", "")
+        if not result.ok and retry_at:
+            raise ReviewCapacityRefused(result.error or "dispatch refused for capacity", retry_at)
         raise ReviewError(result.error or "No qualified provider returned a review")
     return result.stdout
 
@@ -451,18 +479,45 @@ def build_prompt(reviewer: Reviewer, diff: str, changed_files: list[str]) -> str
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
-def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> bool:
+def run_reviewer(
+    reviewer: Reviewer, diff: str, changed_files: list[str]
+) -> ReviewOutcome:
     """Build the prompt, route inference, and (unless dry-run) post the comment and
     file a Neotoma issue on REQUEST_CHANGES — all attributed to this reviewer.
 
-    Returns True if a real review was produced, False if it failed. A failure
-    posts a clearly-marked "review could not run" comment (so the PR shows the
-    reviewer is broken, not silently absent) and the caller exits non-zero.
+    Returns REVIEWED if a real review was produced. A failure posts a
+    clearly-marked "review could not run" comment (so the PR shows the reviewer
+    is broken, not silently absent) and returns FAILED, so the caller exits
+    non-zero. A capacity refusal by the dispatcher (nothing ran) posts the same
+    kind of comment plus a GitHub Actions warning and returns
+    NOT_RUN_CAPACITY, which does not fail the job and is never an approval.
     """
     prompt = build_prompt(reviewer, diff, changed_files)
     print(f"[{reviewer.skill}] Routing review across qualified providers...")
     try:
         review = call_review(prompt, role=reviewer.skill)
+    except ReviewCapacityRefused as exc:
+        sha = HEAD_SHA[:12] or "unknown"
+        print(f"[{reviewer.skill}] REVIEW NOT RUN (capacity): {exc}", file=sys.stderr)
+        # GitHub Actions workflow command: a visible warning annotation.
+        print(
+            f"::warning title={reviewer.display} review did not run::"
+            f"The dispatcher refused the review for capacity; retry after "
+            f"{exc.retry_at}. This is not an approval."
+        )
+        if not DRY_RUN:
+            refusal_body = (
+                f"{review_comment_marker(reviewer)}\n\n"
+                f"⚠️ **Review could not run** — {reviewer.display} did not "
+                f"produce a verdict for commit `{sha}`.\n\n"
+                f"Reason: `{exc}`\n\n"
+                f"This is NOT an approval. The review was refused for capacity "
+                f"before it ran, which a change to this PR cannot fix, so it is "
+                f"reported as a warning rather than failing the check. Re-run "
+                f"after {exc.retry_at} to get a verdict."
+            )
+            post_github_comment(refusal_body, marker=review_comment_marker(reviewer))
+        return ReviewOutcome.NOT_RUN_CAPACITY
     except ReviewError as exc:
         print(f"[{reviewer.skill}] REVIEW FAILED: {exc}", file=sys.stderr)
         if not DRY_RUN:
@@ -475,7 +530,7 @@ def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> boo
                 f"is visible; re-run once the cause is resolved."
             )
             post_github_comment(failure_body, marker=review_comment_marker(reviewer))
-        return False
+        return ReviewOutcome.FAILED
 
     print("\n" + "=" * 60)
     print(review)
@@ -483,7 +538,7 @@ def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> boo
 
     if DRY_RUN:
         print(f"[{reviewer.skill}] DRY RUN — not posting comment or filing issue")
-        return True
+        return ReviewOutcome.REVIEWED
 
     post_github_comment(review, marker=review_comment_marker(reviewer))
 
@@ -497,7 +552,7 @@ def run_reviewer(reviewer: Reviewer, diff: str, changed_files: list[str]) -> boo
             ),
             agent=reviewer.skill,
         )
-    return True
+    return ReviewOutcome.REVIEWED
 
 
 def main() -> None:
@@ -519,12 +574,23 @@ def main() -> None:
     # Track whether every selected reviewer produced a real review. If any
     # failed to (auth/credit/network/empty response), exit non-zero so the
     # GHA check is red/failed rather than a false green — a review that
-    # reviewed nothing must never look merge-ready.
-    failed = [
-        reviewer.display
+    # reviewed nothing must never look merge-ready. A capacity refusal is the
+    # one exception: it is reported (comment + warning annotation), not failed,
+    # because no change to the PR can fix it; it is never counted as approval.
+    outcomes = {
+        reviewer.display: run_reviewer(reviewer, diff, changed_files)
         for reviewer in reviewers
-        if not run_reviewer(reviewer, diff, changed_files)
+    }
+    failed = [name for name, o in outcomes.items() if o is ReviewOutcome.FAILED]
+    not_run = [
+        name for name, o in outcomes.items() if o is ReviewOutcome.NOT_RUN_CAPACITY
     ]
+    if not_run:
+        print(
+            f"[loxia] {len(not_run)} reviewer(s) refused for capacity and did "
+            f"not run: {', '.join(not_run)} — reported, not failed; no approval.",
+            file=sys.stderr,
+        )
 
     if failed:
         print(

@@ -136,8 +136,8 @@ def test_run_reviewer_returns_false_and_posts_failure_on_error(monkeypatch):
         lambda body, marker=None: posted.update(body=body, marker=marker),
     )
 
-    ok = lx.run_reviewer(lx.LOXIA, "diff", ["f.py"])
-    assert ok is False
+    outcome = lx.run_reviewer(lx.LOXIA, "diff", ["f.py"])
+    assert outcome is lx.ReviewOutcome.FAILED
     assert "Review could not run" in posted["body"]
     assert "NOT an approval" in posted["body"]
 
@@ -145,7 +145,7 @@ def test_run_reviewer_returns_false_and_posts_failure_on_error(monkeypatch):
 def test_run_reviewer_returns_true_on_success(monkeypatch):
     monkeypatch.setattr(lx, "DRY_RUN", True)  # skip posting
     monkeypatch.setattr(lx, "call_review", lambda _p, **kw: "## Loxia Review 🪶\nVerdict: APPROVE")
-    assert lx.run_reviewer(lx.LOXIA, "diff", ["f.py"]) is True
+    assert lx.run_reviewer(lx.LOXIA, "diff", ["f.py"]) is lx.ReviewOutcome.REVIEWED
 
 
 def test_call_review_preserves_requested_role(monkeypatch):
@@ -166,3 +166,98 @@ def test_capacity_failure_does_not_publish_review(monkeypatch):
     monkeypatch.setitem(sys.modules, "skill_runner", types.SimpleNamespace(run_review_prompt=run))
     with pytest.raises(lx.ReviewError, match="no qualified capacity"):
         lx.call_review("input", role="loxia")
+
+
+# ── Usage-gate refusal: reported, not failed (never an approval) ────────────
+
+
+def _skill_runner_returning(monkeypatch, **fields):
+    import types
+
+    base = dict(ok=False, stdout="", error="", provider="", attempted_providers=(), cooled_until="")
+    base.update(fields)
+
+    async def run(**kwargs):
+        return types.SimpleNamespace(**base)
+
+    monkeypatch.setitem(sys.modules, "skill_runner", types.SimpleNamespace(run_review_prompt=run))
+
+
+def _run_main(monkeypatch, capsys):
+    monkeypatch.setattr(lx, "PR_NUMBER", "87")
+    monkeypatch.setattr(lx, "get_pr_diff", lambda: "diff")
+    monkeypatch.setattr(lx, "get_changed_files", lambda: ["f.py"])
+    monkeypatch.setattr(lx, "select_reviewers", lambda _f: [lx.LOXIA])
+    code = 0
+    try:
+        lx.main()
+    except SystemExit as exc:
+        code = exc.code
+    return code, capsys.readouterr()
+
+
+def test_usage_gate_refusal_posts_comment_and_does_not_fail(monkeypatch, capsys):
+    # The dispatcher's usage-gate refusal: nothing ran, cooled_until set.
+    _skill_runner_returning(
+        monkeypatch,
+        error="frontier dispatch refused by the usage gate (claude: stale); retry after 22:00",
+        cooled_until="2026-11-05T22:00:00+01:00",
+    )
+    posted = []
+    filed = []
+    monkeypatch.setattr(lx, "DRY_RUN", False)
+    monkeypatch.setattr(lx, "HEAD_SHA", "abcdef123456")
+    monkeypatch.setattr(lx, "post_github_comment", lambda body, marker=None: posted.append(body))
+    monkeypatch.setattr(lx, "file_neotoma_issue", lambda **kw: filed.append(kw))
+
+    assert lx.run_reviewer(lx.LOXIA, "diff", ["f.py"]) is lx.ReviewOutcome.NOT_RUN_CAPACITY
+    out = capsys.readouterr().out
+    assert "::warning " in out and "not an approval" in out
+
+    posted.clear()
+    code, captured = _run_main(monkeypatch, capsys)
+    assert code == 0  # the job does not fail on the refusal
+    body = posted[0]
+    assert "Review could not run" in body
+    assert "usage gate" in body  # the reason is shown
+    assert "NOT an approval" in body
+    assert "The check fails" not in body
+    assert "Verdict" not in body  # no verdict of any kind is emitted
+    assert filed == []
+    assert "::warning " in captured.out
+
+
+def test_other_review_error_still_fails(monkeypatch, capsys):
+    # A provider failure after dispatch carries no cooled_until: still fails.
+    _skill_runner_returning(monkeypatch, error="review timed out after 180s", provider="claude")
+    posted = []
+    monkeypatch.setattr(lx, "DRY_RUN", False)
+    monkeypatch.setattr(lx, "post_github_comment", lambda body, marker=None: posted.append(body))
+    code, captured = _run_main(monkeypatch, capsys)
+    assert code == 1
+    assert "The check fails" in posted[0]
+    assert "::warning " not in captured.out
+
+
+def test_capacity_refusal_requires_typed_field_not_text(monkeypatch):
+    # Text that looks like a refusal but without cooled_until is a plain error.
+    _skill_runner_returning(monkeypatch, error="frontier dispatch refused by the usage gate")
+    with pytest.raises(lx.ReviewError) as info:
+        lx.call_review("input", role="loxia")
+    assert not isinstance(info.value, lx.ReviewCapacityRefused)
+
+
+def test_request_changes_outcome_unchanged(monkeypatch, capsys):
+    # A completed REQUEST_CHANGES review takes the reviewed path exactly as
+    # before: verdict posted, Neotoma issue filed, no refusal warning.
+    _skill_runner_returning(
+        monkeypatch, ok=True, stdout="## Loxia Review 🪶\nVerdict: REQUEST_CHANGES", provider="codex",
+    )
+    posted, filed = [], []
+    monkeypatch.setattr(lx, "DRY_RUN", False)
+    monkeypatch.setattr(lx, "post_github_comment", lambda body, marker=None: posted.append(body))
+    monkeypatch.setattr(lx, "file_neotoma_issue", lambda **kw: filed.append(kw))
+    assert lx.run_reviewer(lx.LOXIA, "diff", ["f.py"]) is lx.ReviewOutcome.REVIEWED
+    assert "REQUEST_CHANGES" in posted[0]
+    assert len(filed) == 1
+    assert "::warning " not in capsys.readouterr().out
