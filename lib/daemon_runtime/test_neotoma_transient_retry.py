@@ -221,3 +221,154 @@ def test_release_lifecycle_mismatch_not_retried(monkeypatch):
     _scripted(monkeypatch, gating, "get", [_task("routed")], calls)
     assert apis._release_lifecycle_proven("ent_t", apis.TaskStatus.EXECUTING) is False
     assert len(calls) == 1
+
+
+# ── signed checkpoint persist ────────────────────────────────────────────────
+
+
+def test_signed_checkpoint_retry_resigns_identical_body(monkeypatch):
+    from lib.daemon_runtime.test_gating import _http_signer
+
+    monkeypatch.setattr(gating, "NEOTOMA_BEARER_TOKEN", "t")
+    monkeypatch.setattr(gating, "NEOTOMA_BASE_URL", "http://n")
+    monkeypatch.setattr(gating, "CHECKPOINT_REQUIRED_APPROVER_JKT", "A" * 43)
+    signer = _http_signer()
+    monkeypatch.setattr(gating, "CHECKPOINT_PRODUCER_JKT", signer.thumbprint,
+                        raising=False)
+    sign_calls: list[bytes] = []
+    real_sign = signer.sign_headers
+
+    def counting_sign(**kw):
+        sign_calls.append(kw["body"])
+        return real_sign(**kw)
+
+    monkeypatch.setattr(signer, "sign_headers", counting_sign)
+    monkeypatch.setattr(gating, "_checkpoint_producer_http_signer",
+                        lambda handler: signer)
+
+    # Stateful server keyed by idempotency key, so a replay is idempotent.
+    store: dict[str, dict] = {}
+    posts: list[tuple[bytes, str]] = []
+
+    def post(url, **kw):
+        content = kw["content"]
+        body = gating.json.loads(content)
+        key = body["idempotency_key"]
+        posts.append((content, key))
+        store.setdefault(key, body)  # commit
+        if len(posts) == 1:
+            raise httpx.ReadTimeout("slow after commit")
+        return _Resp({"entities": [{"entity_id": "ent_cp"}]})
+
+    monkeypatch.setattr(gating.httpx, "post", post)
+    readbacks: list[str] = []
+
+    def fetch(entity_id):
+        readbacks.append(entity_id)
+        committed = next(iter(store.values()))["entities"][0]
+        return {
+            "entity_id": entity_id, "entity_type": "checkpoint_brief",
+            "snapshot": committed,
+            "provenance": {f: "obs" for f in (
+                "body", "task_entity_id", "policy_entity_id",
+                "blast_radius", "gate_action", "handler")},
+        }
+
+    monkeypatch.setattr(gating, "_fetch_entity", fetch)
+    monkeypatch.setattr(gating, "_fetch_entity_observations", lambda _id: [{
+        "id": "obs", "fields": next(iter(store.values()))["entities"][0],
+        "user_id": "tenant-a",
+        "provenance": {"agent_sub": "apis@ateles-swarm",
+                       "agent_thumbprint": signer.thumbprint,
+                       "attribution_tier": "software"},
+    }])
+    task_record = {"entity_id": "ent_task", "entity_type": "task",
+                   "observation_count": 1,
+                   "last_observation_at": "2026-09-21T00:00:00Z",
+                   "snapshot": {"status": "awaiting_approval"}}
+    policy = gating.ExecutionPolicy(entity_id="default", loaded=True)
+    decision = gating.evaluate_gate(
+        confidence=0.3, action_type="local_edit", policy=policy)
+
+    got = gating.write_checkpoint_brief(
+        task_entity_id="ent_task", decision=decision, title="t",
+        plan_summary="p", handler="apis", user_id="tenant-a",
+        action_type="local_edit", task_record=task_record, policy=policy)
+
+    assert got == "ent_cp"
+    assert len(sign_calls) == 2
+    assert len(posts) == 2
+    assert posts[0][0] == posts[1][0] == sign_calls[0] == sign_calls[1]
+    assert posts[0][1] == posts[1][1]
+    assert len(store) == 1
+    assert readbacks == ["ent_cp"]  # authenticated read-back still required
+
+
+# ── run-session relationship read-backs ──────────────────────────────────────
+
+_TASK, _KEY = "ent_task", "r1"
+_EDGES = [("c", _TASK), ("s", _TASK), ("c", "s")]
+
+
+def _run_session_with_edge_script(monkeypatch, script):
+    """script[i] = behaviours for edge i's read: timeout, 4xx, ok, wrong,
+    missing.  Returns (result, per-edge attempt counts)."""
+    native = f"{_TASK}:{_KEY}"
+    stored = {"entities": [
+        {"entity_type": "conversation", "entity_id": "c"},
+        {"entity_type": "agent_session", "entity_id": "s"},
+    ]}
+    monkeypatch.setattr(sf.httpx, "post", lambda *a, **k: _Resp(stored))
+    state = {"edge": 0}
+    attempts = [0, 0, 0]
+
+    def get(url, **kw):
+        if not url.endswith("/relationships"):
+            if url.endswith("/c"):
+                return _Resp({"entity_type": "conversation", "snapshot": {
+                    "conversation_id": native, "session_id": native}})
+            return _Resp({"entity_type": "agent_session", "snapshot": {
+                "harness": "ateles-swarm", "native_session_id": native}})
+        i = state["edge"]
+        attempts[i] += 1
+        behaviour = script[i].pop(0)
+        src, tgt = _EDGES[i]
+        if behaviour == "timeout":
+            raise httpx.ReadTimeout("slow")
+        if behaviour == "4xx":
+            return _Resp(status=403)
+        state["edge"] += 1
+        if behaviour == "missing":
+            return _Resp({"relationships": []})
+        rtype = "OTHER" if behaviour == "wrong" else "REFERS_TO"
+        return _Resp({"relationships": [{
+            "source_entity_id": src, "target_entity_id": tgt,
+            "relationship_type": rtype}]})
+
+    monkeypatch.setattr(sf.httpx, "get", get)
+    result = sf.create_run_session(task_id=_TASK, agent="a", run_key=_KEY)
+    return result, attempts
+
+
+@pytest.mark.parametrize("edge", [0, 1, 2])
+@pytest.mark.parametrize(
+    ("behaviours", "ok", "attempts"),
+    [
+        (["timeout", "ok"], True, 2),
+        (["timeout", "timeout", "timeout"], False, 3),
+        (["4xx"], False, 1),
+        (["wrong"], False, 1),
+        (["missing"], False, 1),
+    ],
+    ids=["timeout_then_match", "exhausted", "4xx", "wrong_edge", "missing_edge"],
+)
+def test_create_run_session_relationship_readback_retry(
+    monkeypatch, edge, behaviours, ok, attempts
+):
+    script = [["ok"], ["ok"], ["ok"]]
+    script[edge] = list(behaviours)
+    result, counts = _run_session_with_edge_script(monkeypatch, script)
+    assert (result is not None) is ok
+    assert counts[edge] == attempts
+    if not ok:  # edges after a failed one are never read
+        assert all(c == 0 for c in counts[edge + 1:])
