@@ -2035,13 +2035,53 @@ def body_has_blocking_findings(body: str | None) -> bool:
     a false-clean verdict — this is the SAME guard `body_has_blocking_findings`
     already is, this call is what feeds `sign_off`'s clean-verdict check in the
     panel loop (`swarm_dispatch`'s per-lens `sign_off` call site).
+
+    A whole line that only says there are none (`- [x] No [BLOCKING]
+    findings.`, the review steward's approval checklist) is not a finding and
+    is dropped from each normalized form first (`is_clean_no_blocking_line`).
+    Without that, every approval contradicted itself: REQUEST_CHANGES, a
+    content-block stamp, an unparseable-verdict page and a fix round for a
+    defect nobody reported.
     """
     if not body:
         return False
-    forms = _veto_scan_forms(body)
+    forms = tuple(_without_clean_no_blocking_lines(text) for text in _veto_scan_forms(body))
     if any(_BLOCKING_MARKER_RE.search(text) for text in forms):
         return True
     return any(_wildcard_token_hit(text, "[BLOCKING]", marker=True) for text in forms)
+
+
+# A whole line stating there are no blocking findings, as the review steward
+# writes it in its approval checklist: `- [x] No [BLOCKING] findings.` It
+# carries the marker without being a finding, so `body_has_blocking_findings`
+# drops it before scanning. Deliberately narrow, because this check guards
+# merges: an optional list bullet or number, an optional TICKED checkbox, then
+# exactly "No [BLOCKING] finding(s)" and an optional full stop, filling the
+# whole line. Anything else on the line ("... except the deadline gap", a
+# second marker after the full stop) keeps the line, and so the block. It is
+# matched against the already-normalized scan forms, so a disguised marker
+# that normalizes to ASCII is judged like the ASCII one, and one that does not
+# stays on the line for the wildcard backstop to catch.
+_CLEAN_NO_BLOCKING_LINE_RE = re.compile(
+    r"[ \t]*(?:(?:[-*+]|\d{1,3}[.)])[ \t]+)?(?:\[[xX]\][ \t]+)?"
+    r"No[ \t]+\[BLOCKING\][ \t]+findings?\.?[ \t\r]*",
+    re.IGNORECASE,
+)
+
+
+def is_clean_no_blocking_line(line: str) -> bool:
+    """True when *line*, a normalized scan-form line, only states that there are
+    no blocking findings (`_CLEAN_NO_BLOCKING_LINE_RE`)."""
+    return _CLEAN_NO_BLOCKING_LINE_RE.fullmatch(line) is not None
+
+
+def _without_clean_no_blocking_lines(text: str) -> str:
+    """*text* with every clean "No [BLOCKING] findings" line removed.
+
+    Splits on `\n` only, so a line joined to a real finding by any other
+    separator stays one line, fails the full-line match and still blocks.
+    """
+    return "\n".join(line for line in text.split("\n") if not is_clean_no_blocking_line(line))
 
 
 # `[BLOCKING] category: summary`, optionally wrapped in markdown emphasis as
