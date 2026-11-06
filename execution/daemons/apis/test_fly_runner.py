@@ -4841,6 +4841,113 @@ def test_fly_refusal_reason_labels(text, label):
     assert fly_runner.fly_refusal_reason(fly_runner.FlyApiError(412, text).detail) == label
 
 
+def _revert_event(reason, timestamp=2):
+    return {"type": "revert", "status": "reverted", "source": "flyd",
+            "timestamp": timestamp, "request": {"reason": reason}}  # fmt: skip
+
+
+def _refused_run_logs(fake, executor, caplog, *, api_text, count=1, expect_refusal=False):
+    """Run with the first *count* claims refused (412, *api_text*); return the
+    refusal log lines and everything logged (plus the refusal message)."""
+    claims = _claim_conflicts(fake, executor, "m-claude", _refuse_claims(count, api_text))
+    text = ""
+    with caplog.at_level(logging.INFO, logger="apis.fly_runner"):
+        if expect_refusal:
+            with pytest.raises(fly_runner.FlyRefusal) as exc:
+                asyncio.run(executor.run(_job()))
+            text = str(exc.value)
+        else:
+            rc, _, _ = asyncio.run(executor.run(_job()))
+            assert rc == 0
+    refused = [r.getMessage() for r in caplog.records if "refused the update" in r.getMessage()]
+    return claims, refused, "\n".join(r.getMessage() for r in caplog.records) + "\n" + text
+
+
+@pytest.mark.parametrize("reason", ["mem_overcommit_exceeded",
+                                    "insufficient memory available to fulfill request"])
+def test_refusal_label_comes_from_the_revert_event(fly_env, claude_login, fast_claim_retry,
+                                                   caplog, reason):  # fmt: skip
+    # Red on the parent head: the API text alone labelled this "other", from no source.
+    fake = _claude_fake()
+    fake.machines["m-claude"]["events"] = [
+        _revert_event("machine version changed", timestamp=1),  # older revert
+        {"type": "launch", "status": "created", "timestamp": 3},
+        _revert_event(reason, timestamp=2),
+    ]
+    executor, _, _ = make_executor(fake, record={"exit_code": 0})
+    claims, refused, _ = _refused_run_logs(
+        fake, executor, caplog, api_text=f"update replacing user {_FLY_TEXT_MARKER}")
+    assert len(claims) == 2 and len(refused) == 1
+    assert "HTTP 412, reason host_memory (from event)" in refused[0]
+
+
+def test_unknown_revert_reason_is_update_reverted_and_never_logged(
+        fly_env, claude_login, fast_claim_retry, caplog):  # fmt: skip
+    # Red on the parent head: the label was "other", and update_reverted did not exist.
+    fake = _claude_fake()
+    secret = f"flyd rolled back {_FLY_TEXT_MARKER} for its own reasons"
+    fake.machines["m-claude"]["events"] = [_revert_event(secret)]
+    executor, _, _ = make_executor(fake, record={"exit_code": 0})
+    _, refused, logged = _refused_run_logs(
+        fake, executor, caplog, api_text="update replacing user",
+        count=len(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS) + 1, expect_refusal=True)
+    assert refused and all("reason update_reverted (from event)" in m for m in refused)
+    assert "reason update_reverted" in logged.splitlines()[-1]  # the refusal message
+    assert _FLY_TEXT_MARKER not in logged and "rolled back" not in logged
+
+
+@pytest.mark.parametrize("events", [None, [], [{"type": "launch", "timestamp": 1}],
+                                    [{"type": "revert", "request": {}}]])
+def test_no_revert_event_falls_back_to_the_api_text(fly_env, claude_login, fast_claim_retry,
+                                                    caplog, events):  # fmt: skip
+    # Red on the parent head: the line carried no "(from api)" source.
+    fake = _claude_fake()
+    if events is not None:
+        fake.machines["m-claude"]["events"] = events
+    executor, _, _ = make_executor(fake, record={"exit_code": 0})
+    claims, refused, _ = _refused_run_logs(fake, executor, caplog,
+                                           api_text="insufficient memory on host")
+    assert len(claims) == 2  # the retry carried on and landed
+    assert "HTTP 412, reason host_memory (from api)" in refused[0]
+
+
+def test_a_failed_event_read_falls_back_and_the_retry_carries_on(
+        fly_env, claude_login, fast_claim_retry, caplog):  # fmt: skip
+    # Red on the parent head: the line carried no "(from api)" source.
+    fake = _claude_fake()
+    fake.machines["m-claude"]["events"] = [_revert_event("mem_overcommit_exceeded")]
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "CLAUDE OK"})
+    claims = _claim_conflicts(fake, executor, "m-claude",
+                              _refuse_claims(1, "machine version changed"))
+    routed = executor.client
+    failed = []
+
+    class FailingEventRead(fly_runner.FlyMachinesClient):
+        async def get(self, machine_id):
+            if len(claims) == 1 and not failed:  # the read right after the refusal
+                failed.append(True)
+                raise fly_runner.FlyApiError(500, f"boom {_FLY_TEXT_MARKER}")
+            return await routed.get(machine_id)
+
+    executor.client = FailingEventRead(executor.config, transport=routed._transport)
+    with caplog.at_level(logging.INFO, logger="apis.fly_runner"):
+        rc, out, _ = asyncio.run(executor.run(_job()))
+    assert failed and rc == 0 and b"CLAUDE OK" in out and len(claims) == 2
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "HTTP 412, reason version_conflict (from api)" in logged
+    assert _FLY_TEXT_MARKER not in logged
+
+
+def test_fly_revert_reason_labels():
+    ev = lambda reason, ts=1: {"type": "revert", "timestamp": ts, "request": {"reason": reason}}
+    assert fly_runner.fly_revert_reason({"events": [ev("mem_overcommit_exceeded")]}) == "host_memory"
+    assert fly_runner.fly_revert_reason({"events": [ev("odd thing")]}) == "update_reverted"
+    assert fly_runner.fly_revert_reason({"events": [ev("odd", 5), ev("insufficient memory", 1)]}) \
+        == "update_reverted"  # newest by timestamp wins
+    for machine in (None, {}, {"events": "x"}, {"events": [ev("")]}, {"events": [{"type": "revert"}]}):
+        assert fly_runner.fly_revert_reason(machine) is None
+
+
 def test_claim_stops_at_deadline_during_backoff(fly_env, claude_login, monkeypatch):
     clock = Clock()
     fake = _claude_fake()

@@ -195,6 +195,32 @@ def fly_refusal_reason(detail: str) -> str:
     return "other"
 
 
+def fly_revert_reason(machine: Any) -> str | None:
+    """The label for the reason on *machine*'s newest ``revert`` event, or
+    None when it has no such event with a readable reason. Fly records why it
+    reverted an update there (its API error may not say). The reason is
+    classified with ``fly_refusal_reason``; one matching none of its known
+    phrases is ``update_reverted``, so Fly's own words never leave here."""
+    events = machine.get("events") if isinstance(machine, dict) else None
+    if not isinstance(events, list):
+        return None
+    reverts = [e for e in events if isinstance(e, dict) and e.get("type") == "revert"]
+    if not reverts:
+        return None
+    # Fly lists events newest first; a numeric timestamp, where every revert
+    # has one, decides instead.
+    if all(isinstance(e.get("timestamp"), (int, float)) for e in reverts):
+        newest = max(reverts, key=lambda e: e["timestamp"])
+    else:
+        newest = reverts[0]
+    request = newest.get("request")
+    reason = request.get("reason") if isinstance(request, dict) else None
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    label = fly_refusal_reason(reason)
+    return "update_reverted" if label == "other" else label
+
+
 class FlyLeaseBusy(FlyApiError):
     """Another holder has the machine's lease."""
 
@@ -2954,13 +2980,14 @@ class FlyExecutor:
                                                          nonce, retry=attempt > 1)  # fmt: skip
             if refused is None:
                 break
+            label, source = await self._refusal_label(machine_id, refused, deadline)
             log.warning(f"[fly] run={job.run_id} Fly refused the update of login machine "
                         f"{machine_id} (attempt {attempt}): HTTP {refused.status}, "
-                        f"reason {fly_refusal_reason(refused.detail)}")  # fmt: skip
+                        f"reason {label} (from {source})")  # fmt: skip
             if not waits:
                 raise FlyRefusal(
                     f"Fly refused the {job.provider} login machine update "
-                    f"({refused.status}, reason {fly_refusal_reason(refused.detail)}); retry later",
+                    f"({refused.status}, reason {label}); retry later",
                     _render_wall(self._clock() + 300),
                 )
             wait = waits.pop(0)
@@ -2993,6 +3020,25 @@ class FlyExecutor:
                 f"{what}; nothing further was written or started; retry later",
                 _render_wall(self._clock() + 300),
             )
+
+    async def _refusal_label(self, machine_id: str, refused: FlyApiError,
+                             deadline: float) -> tuple[str, str]:  # fmt: skip
+        """``(label, source)`` for a refused update: the newest revert event's
+        reason (source ``event``) from one read of the machine, else Fly's API
+        text (source ``api``). The read is bounded by the time left and any
+        failure of it falls back to the API text, so it never changes whether
+        the claim retries or is refused."""
+        remaining = min(REFUSAL_EVENT_READ_SECONDS, deadline - self._clock())
+        if remaining > 0:
+            try:
+                machine = await asyncio.wait_for(self.client.get(machine_id), remaining)
+                label = fly_revert_reason(machine)
+                if label is not None:
+                    return label, "event"
+            except Exception as exc:  # noqa: BLE001 — a label is diagnostic only
+                log.warning(f"[fly] reading {machine_id}'s events for the refusal reason "
+                            f"failed: {type(exc).__name__}")  # fmt: skip
+        return fly_refusal_reason(refused.detail), "api"
 
     async def _within_deadline(self, coro, job: FlyJob, deadline: float, what: str) -> Any:
         """Await *coro* (reads only) for no longer than the time left before
@@ -3621,6 +3667,9 @@ LOGIN_SETTLE_POLL_SECONDS = 1.0
 # turn: one more update per wait, about four minutes in all, so a brief
 # condition on Fly's side clears before the claim gives up.
 LOGIN_CLAIM_BACKOFF_SECONDS = (2.0, 5.0, 15.0, 30.0, 60.0, 120.0)
+# The most one read of a refused machine's events (for the refusal's reason
+# label) may take; it is diagnostic, so it never holds the claim up longer.
+REFUSAL_EVENT_READ_SECONDS = 10.0
 # A short lease taken only to clear a stopped login machine whose run's own
 # lease has expired (recovery of an unconfirmed reservation).
 LOGIN_CLEANUP_LEASE_TTL = 120
