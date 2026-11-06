@@ -182,13 +182,17 @@ def _run(project, stdin, hook_path=HOOK_PATH):
     env = dict(os.environ, CLAUDE_PROJECT_DIR=str(project))
     return subprocess.run(
         [sys.executable, str(hook_path)],
-        input=stdin, capture_output=True, text=True, env=env, timeout=30,
+        input=stdin,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
     )
 
 
 def _notice_lines(out):
     assert out.startswith(BASELINE)
-    extra = out[len(BASELINE):]
+    extra = out[len(BASELINE) :]
     return [ln for ln in extra.splitlines() if ln.strip()]
 
 
@@ -240,8 +244,15 @@ class TestAssignedRole:
 
     @pytest.mark.parametrize(
         "kind",
-        ["corrupt", "array", "oversized", "role_type", "role_long", "record_bad",
-         "role_empty"],
+        [
+            "corrupt",
+            "array",
+            "oversized",
+            "role_type",
+            "role_long",
+            "record_bad",
+            "role_empty",
+        ],
     )
     def test_unreadable_record_gives_notice_without_content(self, tmp_path, kind):
         if kind == "corrupt":
@@ -270,8 +281,16 @@ class TestAssignedRole:
 
     @pytest.mark.parametrize(
         "stdin",
-        [{}, {"session_id": ""}, {"session_id": 123}, {"session_id": None},
-         {"session_id": ["x"]}, "", "not json at all", "[1, 2]"],
+        [
+            {},
+            {"session_id": ""},
+            {"session_id": 123},
+            {"session_id": None},
+            {"session_id": ["x"]},
+            "",
+            "not json at all",
+            "[1, 2]",
+        ],
     )
     def test_bad_session_id_or_stdin_gives_baseline(self, tmp_path, stdin):
         _write_record(tmp_path, "unknown", _good(session_id="unknown"))
