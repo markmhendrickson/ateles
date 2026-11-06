@@ -318,8 +318,8 @@ def test_neotoma_retry_count_resets_after_a_verdict(monkeypatch):
 
 def test_resumed_panel_reruns_lens_and_passes_run_start(monkeypatch):
     """A lens that already has a comment at this head runs again; its fresh
-    verdict is what is persisted, and the comment backfill is told when this run
-    started so the older comment cannot stand in for it."""
+    verdict is what is persisted, and the comment backfill is told which
+    comments were already on the thread so the older one cannot stand in."""
     calls: list = []
     d = tsd._pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**", calls=calls)
     _pm_panel(monkeypatch)
@@ -345,13 +345,17 @@ def test_resumed_panel_reruns_lens_and_passes_run_start(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
     monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_backfill)
-    before = datetime.now(timezone.utc).replace(microsecond=0)
+    baseline = swarm_dispatch.PanelCommentBaseline(frozenset({1}))
+    monkeypatch.setattr(
+        SwarmDispatcher, "_panel_comment_baseline",
+        lambda self, t: tsd._async_return(baseline),
+    )
     asyncio.run(d._handle_pr(tsd._trigger(kind="pr_synchronize", body="Closes #80.")))
 
     assert "pavo" in ran
     assert persisted == [("pm", "**REQUEST_CHANGES** fresh")]
     assert backfill["reviews"] == [("pm", "**REQUEST_CHANGES** fresh")]
-    assert backfill["posted_since"] is not None and backfill["posted_since"] >= before
+    assert backfill["baseline"] is baseline
 
 
 def test_backfill_posts_fresh_verdict_over_an_earlier_runs_comment(monkeypatch):
@@ -365,14 +369,14 @@ def test_backfill_posts_fresh_verdict_over_an_earlier_runs_comment(monkeypatch):
         [{"id": 1, "body": stale, "user": {"login": SWARM_LOGIN}, "created_at": old_time}]
     )
     _wire_github(monkeypatch, comments)
-    run_start = datetime.now(timezone.utc).replace(microsecond=0)
+    run_start = asyncio.run(_dispatcher()._panel_comment_baseline(tsd._trigger()))
     asyncio.run(
         _dispatcher()._post_missing_panel_comments(
             tsd._trigger(),
             [("pm", "**REQUEST_CHANGES** fresh")],
             {"pm": "pavo"},
             reviewed_head=HEAD,
-            posted_since=run_start,
+            baseline=run_start,
         )
     )
     assert len(comments.posted) == 1
@@ -389,10 +393,243 @@ def test_backfill_posts_fresh_verdict_over_an_earlier_runs_comment(monkeypatch):
             [("pm", "**REQUEST_CHANGES** fresh")],
             {"pm": "pavo"},
             reviewed_head=HEAD,
-            posted_since=run_start,
+            baseline=run_start,
         )
     )
     assert comments.posted == []
+
+
+def test_older_same_second_approval_does_not_stand_in_for_a_fresh_block(monkeypatch):
+    """Red before: run start and created_at were both whole seconds, so an
+    earlier run's APPROVE created in the same second as this run's start passed
+    `created >= posted_since`, counted as this run's comment, and the lens's
+    fresh REQUEST_CHANGES (which it could not post itself) was never posted."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stale = swarm_dispatch.compose_fallback_comment("pm", "pavo", "**APPROVE** stale", HEAD)
+    comments = _Comments(
+        [{"id": 1, "body": stale, "user": {"login": SWARM_LOGIN}, "created_at": now}]
+    )
+    _wire_github(monkeypatch, comments)
+    baseline = asyncio.run(_dispatcher()._panel_comment_baseline(tsd._trigger()))
+    assert baseline.ids == frozenset({1})
+    # The lens ran, returned a block, and posted nothing during the run.
+    asyncio.run(
+        _dispatcher()._post_missing_panel_comments(
+            tsd._trigger(),
+            [("pm", "**REQUEST_CHANGES** fresh block")],
+            {"pm": "pavo"},
+            reviewed_head=HEAD,
+            baseline=baseline,
+        )
+    )
+    assert len(comments.posted) == 1
+    assert "REQUEST_CHANGES" in comments.posted[0]
+    # The newest pm verdict at this head (the one Vanellus reads) is the block.
+    pm = [c for c in comments.comments if "review:pm" in c["body"]]
+    assert "fresh block" in pm[-1]["body"]
+    assert "APPROVE" not in pm[-1]["body"]
+
+
+def test_comment_with_unreadable_time_or_failed_baseline_is_not_this_runs():
+    fresh = {"id": 9, "body": "x", "created_at": "2026-11-06T10:00:00Z"}
+    known = swarm_dispatch.PanelCommentBaseline(frozenset({1}))
+    assert known.posted_this_run(fresh)
+    assert not known.posted_this_run({**fresh, "created_at": "garbled"})
+    assert not known.posted_this_run({**fresh, "created_at": None})
+    assert not known.posted_this_run({**fresh, "id": None})
+    assert not swarm_dispatch.PanelCommentBaseline(None).posted_this_run(fresh)
+
+
+# ── long threads: every page of comments is read ────────────────────────────
+
+
+class _PagedComments(_Comments):
+    """`_Comments` that serves GitHub's 100-per-page pagination and can fail
+    a chosen page."""
+
+    def __init__(self, comments=None, fail_page=None):
+        super().__init__(comments)
+        self.fail_page = fail_page
+        self.next_id = max((c["id"] for c in self.comments), default=0) + 1
+
+    def client(self):
+        store = self
+        base = super().client()
+
+        class _Client(base):
+            async def get(self, url, **kwargs):
+                params = kwargs.get("params") or {}
+                page = int(params.get("page", 1))
+                per_page = int(params.get("per_page", 30))
+                if page == store.fail_page:
+                    return tsd._FakeListResp([], status_code=502)
+                start = (page - 1) * per_page
+                return tsd._FakeListResp(list(store.comments[start:start + per_page]))
+
+            async def post(self, url, **kwargs):
+                body = kwargs.get("json", {}).get("body", "")
+                store.posted.append(body)
+                store.comments.append(
+                    {"id": store.next_id, "body": body,
+                     "user": {"login": SWARM_LOGIN},
+                     "created_at": datetime.now(timezone.utc).strftime(
+                         "%Y-%m-%dT%H:%M:%SZ")}
+                )
+                store.next_id += 1
+                return tsd._FakeResp(201)
+
+        return _Client
+
+
+def _chatter(n):
+    return [
+        {"id": i, "body": f"discussion {i}", "user": {"login": "someone"},
+         "created_at": "2026-11-01T10:00:00Z"}
+        for i in range(1, n + 1)
+    ]
+
+
+def _wire_long_thread(monkeypatch, comments):
+    _wire_github(monkeypatch, comments)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_swarm_comment_authors",
+        lambda self, repo, number: tsd._async_return(frozenset({SWARM_LOGIN})),
+    )
+
+
+def test_retry_limit_holds_on_a_thread_past_100_comments(monkeypatch):
+    """Red before: only the first 100 comments were read, so the marker (on a
+    later page) was never seen; every deferral said "retry 1 of 3" and "No
+    action needed", and the limit was never reached."""
+    monkeypatch.setenv("APIS_NEOTOMA_RETRY_LIMIT", "3")
+    comments = _PagedComments(_chatter(130))
+    _wire_long_thread(monkeypatch, comments)
+    notifier = tsd._StubNotifier()
+    d = _dispatcher(notifier)
+
+    def defer():
+        asyncio.run(
+            d._handle_panel_session_limit(
+                tsd._trigger(), None, "pm", "", "",
+                reason=swarm_dispatch.NEOTOMA_TEMPORARILY_UNAVAILABLE,
+            )
+        )
+
+    for attempt in (1, 2, 3):
+        defer()
+        markers = [
+            c["body"] for c in comments.comments
+            if SwarmDispatcher._REVIEW_DEFERRED_RE.search(c["body"])
+        ]
+        assert len(markers) == 1  # the older marker past page 1 was removed
+        assert SwarmDispatcher._NEOTOMA_DEFERRAL_RE.search(markers[0]).group(1) == str(attempt)
+        assert f"retry {attempt} of 3" in notifier.sent[-1]
+    assert notifier.priorities == [swarm_dispatch.Priority.INFO] * 3
+
+    defer()  # past the limit: stops for attention and names Neotoma
+    assert notifier.priorities[-1] == swarm_dispatch.Priority.BLOCKER
+    assert "neotoma availability" in notifier.sent[-1].lower()
+    assert "after 3 automatic retries" in notifier.sent[-1]
+    assert "no action needed" not in notifier.sent[-1].lower()
+    assert "operator attention is required" in comments.posted[-1].lower()
+    assert SwarmDispatcher._REVIEW_DEFERRED_RE.search(comments.posted[-1]) is None
+
+
+def test_failed_read_of_a_later_comment_page_stops_the_panel(monkeypatch):
+    """Red before: page 2 was never requested, so its failure went unseen and
+    the count restarted at zero (another "retry 1", no attention)."""
+    marker = (
+        SwarmDispatcher._REVIEW_DEFERRED_MARKER.format(iso="2026-11-06T10:00:00Z")
+        + "\n" + SwarmDispatcher._NEOTOMA_DEFERRAL_MARKER.format(attempt=1, head=HEAD)
+    )
+    comments = _PagedComments(
+        _chatter(120) + [{"id": 121, "body": marker, "user": {"login": SWARM_LOGIN}}],
+        fail_page=2,
+    )
+    _wire_long_thread(monkeypatch, comments)
+    notifier = tsd._StubNotifier()
+    d = _dispatcher(notifier)
+    assert asyncio.run(d._prior_neotoma_deferral_attempts(tsd._trigger())) is None
+    asyncio.run(
+        d._handle_panel_session_limit(
+            tsd._trigger(), None, "pm", "", "",
+            reason=swarm_dispatch.NEOTOMA_TEMPORARILY_UNAVAILABLE,
+        )
+    )
+    assert notifier.priorities == [swarm_dispatch.Priority.BLOCKER]
+    assert "neotoma availability" in notifier.sent[-1].lower()
+    assert "retry count could not be confirmed" in notifier.sent[-1]
+
+
+def test_deferred_sweep_sees_a_marker_past_the_first_page(monkeypatch):
+    """Red before: both sweep reads stopped at the first 100 comments."""
+    marker = SwarmDispatcher._REVIEW_DEFERRED_MARKER.format(iso="2026-11-06T10:00:00Z")
+    thread = _chatter(140) + [{"id": 141, "body": marker, "user": {"login": SWARM_LOGIN}}]
+    pr = {"number": 87, "head": {"sha": HEAD}}
+
+    class _Sweep(_PagedComments):
+        def client(self):
+            base = super().client()
+
+            class _Client(base):
+                async def get(self, url, **kwargs):
+                    if url.endswith("/pulls"):
+                        return tsd._FakeListResp([pr])
+                    return await super().get(url, **kwargs)
+
+            return _Client
+
+    comments = _Sweep(thread)
+    _wire_long_thread(monkeypatch, comments)
+    d = _dispatcher()
+    now = datetime(2026, 11, 6, 11, 0, tzinfo=timezone.utc)
+    result = asyncio.run(d._prs_with_matured_deferral("owner/repo", now))
+    assert result["due"] == [pr]
+
+    async def live():
+        async with httpx.AsyncClient() as client:
+            return await d._has_live_deferral_marker(client, "owner/repo", 87)
+
+    comments.comments.append(
+        {"id": 142, "body": "<!-- vanellus-aggregation -->\n**APPROVE**",
+         "user": {"login": SWARM_LOGIN}}
+    )
+    assert asyncio.run(live()) is False
+    comments.comments.pop()
+    assert asyncio.run(live()) is True
+
+
+# ── backoff ─────────────────────────────────────────────────────────────────
+
+
+def test_neotoma_retry_delay_backs_off_and_is_capped(monkeypatch):
+    """Red before: every attempt used the same flat delay."""
+    monkeypatch.setenv("APIS_NEOTOMA_RETRY_DELAY_SECONDS", "120")
+    schedule = [swarm_dispatch._neotoma_retry_delay_seconds(n) for n in range(1, 8)]
+    cap = swarm_dispatch._NEOTOMA_RETRY_MAX_DELAY_SECONDS
+    assert schedule == [120, 240, 480, 960, 1920, cap, cap]
+    assert cap == 3600
+
+
+def test_successive_deferrals_schedule_increasing_resume_times(monkeypatch):
+    monkeypatch.setenv("APIS_NEOTOMA_RETRY_LIMIT", "5")
+    monkeypatch.setenv("APIS_NEOTOMA_RETRY_DELAY_SECONDS", "120")
+    comments = _Comments()
+    _wire_github(monkeypatch, comments)
+    d = _dispatcher()
+    delays = []
+    for _ in range(4):
+        before = datetime.now(timezone.utc)
+        asyncio.run(
+            d._handle_panel_session_limit(
+                tsd._trigger(), None, "pm", "", "",
+                reason=swarm_dispatch.NEOTOMA_TEMPORARILY_UNAVAILABLE,
+            )
+        )
+        iso = SwarmDispatcher._REVIEW_DEFERRED_RE.search(comments.posted[-1]).group(1)
+        due = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        delays.append(round((due - before).total_seconds() / 60))
+    assert delays == [2, 4, 8, 16]
 
 
 # ── one panel per head at a time ────────────────────────────────────────────

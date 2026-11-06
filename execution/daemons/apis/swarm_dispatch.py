@@ -3583,6 +3583,26 @@ def _created_at_or_none(comment: dict) -> datetime | None:
         return None
 
 
+@dataclass(frozen=True)
+class PanelCommentBaseline:
+    """Comment ids already on a PR thread when a panel run started.
+
+    ``ids`` is None when that read failed: then no comment can be shown to be
+    this run's. Independent of clocks, so an older comment from the same
+    second as the run start is still recognised as older.
+    """
+
+    ids: frozenset[int] | None
+
+    def posted_this_run(self, comment: dict) -> bool:
+        if self.ids is None or not isinstance(comment, dict):
+            return False
+        cid = comment.get("id")
+        if not isinstance(cid, int) or isinstance(cid, bool) or cid in self.ids:
+            return False
+        return _created_at_or_none(comment) is not None
+
+
 def _neotoma_retry_limit() -> int:
     """Consecutive Neotoma deferrals allowed at one head before an operator is asked."""
     try:
@@ -3591,12 +3611,24 @@ def _neotoma_retry_limit() -> int:
         return 3
 
 
-def _neotoma_retry_delay_seconds() -> int:
-    """How far out a Neotoma deferral is scheduled; the 600s sweep picks it up."""
+# Ceiling for the Neotoma retry backoff below: however many consecutive
+# deferrals one head has had, the next one is never scheduled further out.
+_NEOTOMA_RETRY_MAX_DELAY_SECONDS = 3600
+
+
+def _neotoma_retry_delay_seconds(attempt: int = 1) -> int:
+    """How far out Neotoma deferral ``attempt`` (1-based) is scheduled.
+
+    Backoff (failure_posture.md rule 5): the base delay doubles with each
+    consecutive deferral recorded in the marker, capped at
+    ``_NEOTOMA_RETRY_MAX_DELAY_SECONDS``. The 600s sweep picks it up.
+    """
     try:
-        return max(60, int(os.environ.get("APIS_NEOTOMA_RETRY_DELAY_SECONDS", "120")))
+        base = max(60, int(os.environ.get("APIS_NEOTOMA_RETRY_DELAY_SECONDS", "120")))
     except ValueError:
-        return 120
+        base = 120
+    exponent = min(max(attempt, 1) - 1, 16)
+    return min(base * (2 ** exponent), _NEOTOMA_RETRY_MAX_DELAY_SECONDS)
 
 
 def incomplete_panel_reason(failures: list[str]) -> str:
@@ -6211,17 +6243,16 @@ class SwarmDispatcher:
         owns re-dispatching once it matures. This just needs to say "hands off,
         someone else's sweep is watching this one."
         """
-        c_url = f"https://api.github.com/repos/{repository}/issues/{number}/comments"
         try:
-            cresp = await client.get(
-                c_url,
-                params={"per_page": 100},
-                headers=self._github_headers(repository),
+            # Every page: the newest marker may lie past the first 100.
+            raw, complete = await self._issue_comments_scan(
+                repository, number, client
             )
-            cresp.raise_for_status()
         except Exception:
             # Cannot tell → assume a marker might be live so we don't double-
             # dispatch. Same "false negative costs a delay" bias as the caller.
+            return True
+        if not complete:
             return True
         latest_iso = None
         # ateles#430 audit: this scan is CORRECT and must stay last-write-wins.
@@ -6229,7 +6260,7 @@ class SwarmDispatcher:
         # the newest marker. Do NOT "optimise" this into an early return on the
         # first match — that is exactly the bug #430 fixed at the two sites that
         # did so. The ordering assumption is the same; the traversal is not.
-        for c in await self._swarm_authored(repository, number, cresp.json()):
+        for c in await self._swarm_authored(repository, number, raw):
             body = c.get("body", "")
             m = self._REVIEW_DEFERRED_RE.search(body)
             if m:
@@ -6614,17 +6645,16 @@ class SwarmDispatcher:
             resp.raise_for_status()
             for pr in resp.json():
                 num = pr.get("number")
-                c_url = (
-                    f"https://api.github.com/repos/{repository}/issues/{num}/comments"
-                )
                 try:
-                    cresp = await client.get(
-                        c_url,
-                        params={"per_page": 100},
-                        headers=self._github_headers(repository),
+                    # Every page: on a thread past 100 comments the newest
+                    # marker is on a later page. A thread that could not be
+                    # read to its end is skipped like an unreadable one.
+                    raw, complete = await self._issue_comments_scan(
+                        repository, num, client
                     )
-                    cresp.raise_for_status()
                 except Exception:
+                    continue
+                if not complete:
                     continue
                 # Walk comments in order. A deferral is LIVE only if it is the
                 # latest terminal marker — i.e. no aggregation verdict was posted
@@ -6632,7 +6662,7 @@ class SwarmDispatcher:
                 # old deferral is superseded and the PR stops being "due", so a
                 # resolved PR is not re-dispatched forever (Loxia #264 review).
                 latest_iso = None  # ISO of the most-recent still-live deferral
-                for c in await self._swarm_authored(repository, num, cresp.json()):
+                for c in await self._swarm_authored(repository, num, raw):
                     body = c.get("body", "")
                     m = self._REVIEW_DEFERRED_RE.search(body)
                     if m:
@@ -8581,9 +8611,12 @@ class SwarmDispatcher:
                     )
                     return
 
-        # A lens comment older than this is an earlier run's (a resumed panel
-        # at the same head), so this run's fresh verdict is posted over it.
-        panel_started_at = datetime.now(timezone.utc).replace(microsecond=0)
+        # The comments already on the thread when this run starts are an
+        # earlier run's (a resumed panel at the same head), so this run's fresh
+        # verdict is posted over them. Recorded by comment id, not by time:
+        # GitHub times are whole seconds, so an older comment from the same
+        # second as the start would otherwise pass for this run's.
+        panel_baseline = await self._panel_comment_baseline(trigger)
         reviews: list[tuple[str, str]] = []
         failed_lenses: list[tuple[str, str]] = []
         # Forward-looking (advisory) lenses that failed without a verdict.
@@ -8882,7 +8915,7 @@ class SwarmDispatcher:
                 agents_by_lens,
                 reviewed_head=review_head,
                 remote_lenses=frozenset(remote_lenses),
-                posted_since=panel_started_at,
+                baseline=panel_baseline,
             )
             await self._publish_expectation_updates(
                 trigger, parent, expectation_updates, agents_by_lens
@@ -15804,6 +15837,33 @@ class SwarmDispatcher:
 
         return True
 
+    async def _panel_comment_baseline(self, t: SwarmTrigger) -> "PanelCommentBaseline":
+        """The ids of every comment on the thread as a panel run starts.
+
+        A baseline that could not be read to the last page holds no ids, so
+        no comment counts as this run's and the fresh verdict is posted.
+        Never raises."""
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments, complete = await self._issue_comments_scan(
+                    t.repository, t.number, client
+                )
+        except Exception as exc:  # noqa: BLE001 — degrade to "nothing posted"
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: comment baseline "
+                f"unreadable ({type(exc).__name__}); fresh lens verdicts will "
+                "be posted"
+            )
+            return PanelCommentBaseline(None)
+        if not complete:
+            return PanelCommentBaseline(None)
+        ids: set[int] = set()
+        for c in comments:
+            cid = c.get("id") if isinstance(c, dict) else None
+            if isinstance(cid, int) and not isinstance(cid, bool):
+                ids.add(cid)
+        return PanelCommentBaseline(frozenset(ids))
+
     async def _post_missing_panel_comments(
         self,
         t: SwarmTrigger,
@@ -15812,15 +15872,17 @@ class SwarmDispatcher:
         *,
         reviewed_head: str = "",
         remote_lenses: frozenset[str] = frozenset(),
-        posted_since: datetime | None = None,
+        baseline: "PanelCommentBaseline | None" = None,
     ) -> None:
         """Backfill `review:<lens>` PR comments the panelists failed to post.
 
-        ``posted_since``: when this panel run started. A lens comment created
-        before it is an earlier run's verdict at this head, not this run's, so
-        it does not count as posted: the fresh verdict is posted after it and
-        is the newest one shown (the saved `pr_review` is the fresh one too).
-        A comment with no readable creation time cannot prove it is this run's.
+        ``baseline``: the comments on the thread when this panel run started.
+        A lens comment among them is an earlier run's verdict at this head, not
+        this run's, so it does not count as posted: the fresh verdict is posted
+        after it and is the newest one shown (the saved `pr_review` is the
+        fresh one too). A comment with no readable id or creation time, or any
+        comment when the baseline could not be read, cannot prove it is this
+        run's and does not count either.
 
         ``remote_lenses``: lenses whose prompt was return-only (they hold no
         GitHub write access, on Fly or after a Mac fallback). Their review is
@@ -15853,11 +15915,9 @@ class SwarmDispatcher:
                 posted_comments = lens_authors.scope_lens_comments(
                     resp.json(), await asyncio.to_thread(lens_comment_authors)
                 )
-                if posted_since is not None:
+                if baseline is not None:
                     posted_comments = [
-                        c for c in posted_comments
-                        if (created := _created_at_or_none(c)) is not None
-                        and created >= posted_since
+                        c for c in posted_comments if baseline.posted_this_run(c)
                     ]
                 bodies = [c.get("body", "") for c in posted_comments]
                 captured = dict(reviews)
@@ -16734,20 +16794,21 @@ class SwarmDispatcher:
         Read from the newest live deferral marker (the same last-write-wins walk
         the deferred sweep uses): 0 when there is none, when a verdict or a
         deferral of another kind followed it, or when it was for another head.
-        None when the comments cannot be read, so the caller fails closed.
+        None when any page of the comments cannot be read, so the caller fails
+        closed.
         """
         head = _normalise_full_sha(t.head_sha)
-        url = f"https://api.github.com/repos/{t.repository}/issues/{t.number}/comments"
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    url, params={"per_page": 100},
-                    headers=self._github_headers(t.repository),
+                # Every page: the newest marker sits on a later page once a
+                # thread passes 100 comments, and a first-page count restarts
+                # at zero there, so the bound would never be reached.
+                raw, complete = await self._issue_comments_scan(
+                    t.repository, t.number, client
                 )
-                resp.raise_for_status()
-                comments = await self._swarm_authored(
-                    t.repository, t.number, resp.json()
-                )
+                if not complete:
+                    raise RuntimeError("comment scan did not reach the last page")
+                comments = await self._swarm_authored(t.repository, t.number, raw)
         except Exception as exc:
             log.warning(
                 f"[{DAEMON_NAME}] {t.repository}#{t.number}: Neotoma retry "
@@ -16813,7 +16874,7 @@ class SwarmDispatcher:
         iso = ""
         if auto_resume:
             delay = (
-                _neotoma_retry_delay_seconds()
+                _neotoma_retry_delay_seconds(neotoma_attempt)
                 if neotoma_attempt
                 else parse_limit_reset_delay(stdout, stderr)
             )
@@ -16919,12 +16980,20 @@ class SwarmDispatcher:
                 # post the fresh one carrying the NEW reset ISO. Deleting first
                 # also keeps the "latest live marker" invariant the sweep relies
                 # on unambiguous.
-                resp = await client.get(
-                    url, params={"per_page": 100},
-                    headers=self._github_headers(t.repository),
+                # Every page, so a marker past the first 100 comments is
+                # removed too and never outlives the fresh one.
+                # A failed page raises and skips the post below. Hitting the
+                # page cap still posts: the fresh marker is the newest, which
+                # is the one the last-write-wins sweep reads.
+                existing, complete = await self._issue_comments_scan(
+                    t.repository, t.number, client
                 )
-                resp.raise_for_status()
-                for c in resp.json():
+                if not complete:
+                    log.warning(
+                        f"[{DAEMON_NAME}] {t.repository}#{t.number}: deferral "
+                        "markers past the comment page cap were not removed"
+                    )
+                for c in existing:
                     if self._REVIEW_DEFERRED_RE.search(c.get("body", "")):
                         del_url = (
                             f"https://api.github.com/repos/{t.repository}/issues/"
