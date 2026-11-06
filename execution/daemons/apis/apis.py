@@ -3627,16 +3627,20 @@ def _deny_checkpoint_release(checkpoint_id: str, *, reason: str) -> None:
     # If the purpose-built terminal state cannot be proven, consume the replay
     # claim as a last-resort durable deny. This field normally means a dispatch
     # happened, so use it only on terminalization failure and log the degraded
-    # representation loudly. If that write also fails, a host-persistent
-    # marker blocks this approval across daemon restarts and consumer processes.
+    # representation loudly. The host-persistent marker is written first: a
+    # bare stamp looks like a release interrupted before dispatch, which
+    # ``_stranded_release`` may resume, and the marker is what tells the two
+    # apart. It also blocks this approval if the stamp write fails.
+    marked = _persist_checkpoint_denial(checkpoint_id)
     if stamp_checkpoint_dispatched(
         checkpoint_id, handler=DAEMON_NAME, expected_version=None
     ):
         log.error(
             f"[{DAEMON_NAME}] checkpoint {checkpoint_id} denial could not be "
             "terminalized; consumed replay claim as a fail-closed fallback"
+            + ("" if marked else " (no host denial marker could be written)")
         )
-    elif _persist_checkpoint_denial(checkpoint_id):
+    elif marked:
         log.critical(
             f"[{DAEMON_NAME}] checkpoint {checkpoint_id} denial could not be "
             "persisted in Neotoma; wrote a durable host denial marker"
@@ -4299,6 +4303,68 @@ def _decision_consistent_with_approval(
 
 # Per-process claim guard: one lock per checkpoint_brief entity id.
 _checkpoint_locks: dict[str, asyncio.Lock] = {}
+# Checkpoints this process has already handed to dispatch_task (through the
+# stamp or through stranded-release recovery). Dispatch runs outside the lock,
+# so a replay arriving while the first dispatch is still writing must not read
+# the not-yet-moved task as stranded and launch it a second time.
+_checkpoints_released_here: set[str] = set()
+
+
+def _stranded_release(entity_id: str, checkpoint_record: dict) -> bool:
+    """Whether an approved, already-stamped checkpoint never reached its run.
+
+    ``handle_checkpoint_brief`` stamps ``resolved_dispatched`` and only then
+    calls ``dispatch_task``. A restart between the two leaves the stamp with no
+    run behind it, so every replay is a no-op and the task stays held forever.
+
+    True only on positive evidence that nothing started: this process has not
+    released the checkpoint; the task reads back at ``awaiting_approval`` at the
+    exact revision the approval was bound to (dispatch's first effect is a task
+    write, so any write since the hold means it may have started); no build
+    claim is registered for it; and the Fly ledger, read successfully, holds no
+    reservation or receipt for its delivery key. Any failed or unexpected read
+    is False: an unknown state keeps the no-op, never counts as "nothing ran".
+    """
+    if entity_id in _checkpoints_released_here:
+        return False
+    try:
+        checkpoint = _record_snapshot(checkpoint_record) or {}
+        task_id = str(checkpoint.get("task_entity_id") or "")
+        if not task_id:
+            return False
+        task_record = fetch_task_record(task_id)
+        task = _record_snapshot(task_record)
+        if task is None:
+            return False
+        if normalize_status(task.get("status")) != TaskStatus.AWAITING_APPROVAL.value:
+            return False
+        authorization = read_authenticated_checkpoint_authorization(
+            entity_id, checkpoint_record
+        )
+        if (
+            authorization is None
+            or authorization.get("task_entity_id") != task_id
+            or authorization.get("task_revision") != entity_record_digest(task_record)
+            or authorization.get("task_observation_count")
+            != task_record.get("observation_count")
+            or authorization.get("task_last_observation_at")
+            != task_record.get("last_observation_at")
+        ):
+            return False
+        if build_delivery.tracking_run_id(task) is not None:
+            return False
+        receipt_key = _fly_receipt_key(task, task_id)
+        # fly_delivery_blocker is non-empty for a reservation, a receipt, and
+        # an unreadable ledger alike.
+        if receipt_key and build_delivery.fly_delivery_blocker(receipt_key):
+            return False
+    except Exception:
+        log.exception(
+            f"[{DAEMON_NAME}] checkpoint {entity_id}: stranded-release check failed "
+            "— treating the release as started"
+        )
+        return False
+    return True
 
 
 async def handle_checkpoint_brief(
@@ -4317,7 +4383,9 @@ async def handle_checkpoint_brief(
 
     Idempotency: after deciding the resolution is actionable, the consumer must
     acquire the existing resolved_dispatched stamp before it dispatches. A
-    replayed approved/rejected event whose brief carries that stamp is a no-op.
+    replayed approved/rejected event whose brief carries that stamp is a no-op,
+    except an approval stranded by a restart between the stamp and dispatch
+    (``_stranded_release``), which resumes through the same checks.
     Re-dispatch is also safe because the task skill owns its own idempotency, but
     the stamp avoids spawning the work twice on SSE redelivery.
     """
@@ -4358,12 +4426,25 @@ async def handle_checkpoint_brief(
             )
             return False
 
+        # A stamped approval normally means the release ran. It is resumed only
+        # when the run provably never started (a restart between the stamp and
+        # dispatch_task); every check below still applies on that path.
+        recovering = False
         if checkpoint_already_dispatched(snapshot):
-            log.info(
-                f"[{DAEMON_NAME}] checkpoint_brief {entity_id} already dispatched "
-                f"(resolution={resolution}) — no-op on replay"
+            if resolution != "approved" or not _stranded_release(
+                entity_id, checkpoint_record
+            ):
+                log.info(
+                    f"[{DAEMON_NAME}] checkpoint_brief {entity_id} already dispatched "
+                    f"(resolution={resolution}) — no-op on replay"
+                )
+                return False
+            log.warning(
+                f"[{DAEMON_NAME}] checkpoint_brief {entity_id} is stamped dispatched but "
+                "its task is still held with no run, reservation or receipt — "
+                "resuming the interrupted release"
             )
-            return False
+            recovering = True
 
         task_id = snapshot.get("task_entity_id")
         if not task_id:
@@ -4646,20 +4727,23 @@ async def handle_checkpoint_brief(
         )
         # The stamp is the existing replay claim. If it does not land, this attempt
         # owns nothing and must not dispatch; a later consumer delivery may retry.
-        if not isinstance(version, str) or not version:
-            log.error(
-                f"[{DAEMON_NAME}] checkpoint {entity_id} has no entity_version "
-                "— cannot claim the release with a version-checked stamp"
-            )
-            return False
-        if not stamp_checkpoint_dispatched(
-            entity_id, handler=DAEMON_NAME, expected_version=version
-        ):
-            log.warning(
-                f"[{DAEMON_NAME}] checkpoint {entity_id} could not be stamped as "
-                "dispatched — not releasing task"
-            )
-            return False
+        # A recovered release already holds the stamp from the interrupted run.
+        if not recovering:
+            if not isinstance(version, str) or not version:
+                log.error(
+                    f"[{DAEMON_NAME}] checkpoint {entity_id} has no entity_version "
+                    "— cannot claim the release with a version-checked stamp"
+                )
+                return False
+            if not stamp_checkpoint_dispatched(
+                entity_id, handler=DAEMON_NAME, expected_version=version
+            ):
+                log.warning(
+                    f"[{DAEMON_NAME}] checkpoint {entity_id} could not be stamped as "
+                    "dispatched — not releasing task"
+                )
+                return False
+        _checkpoints_released_here.add(entity_id)
     lifecycle_binding = ({"_approved_correction_lifecycle": correction_lifecycle}
                          if correction_lifecycle is not None else {})
     dispatched = await dispatch_task(

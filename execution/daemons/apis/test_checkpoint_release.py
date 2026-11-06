@@ -346,6 +346,8 @@ def release_store(monkeypatch, tmp_path):
             return None
 
     monkeypatch.setattr(apis._activity, "started", lambda message: _Job())
+    # Each test is its own process lifetime for the in-process release guard.
+    monkeypatch.setattr(apis, "_checkpoints_released_here", set())
 
     return records, brief_id, task_id
 
@@ -2633,3 +2635,158 @@ async def test_replay_of_one_checkpoint_release_writes_routed_once(
     assert [w for w in writes if w[0] == "routed"] == [
         ("routed", f"approved-{brief_id}")
     ]
+
+
+# ── A release stranded by a restart between the stamp and dispatch ───────────
+
+
+class _FakeDeliveryLedger:
+    def __init__(self, receipts=None, error=None):
+        self.receipts = receipts or {}
+        self.error = error
+
+    def delivery_receipts(self):
+        if self.error is not None:
+            raise self.error
+        return dict(self.receipts)
+
+
+def _strand_release(monkeypatch, records, brief_id, ledger):
+    """The state an Apis restart leaves: approved and stamped, task still held."""
+    brief = records[brief_id]["snapshot"]
+    brief.update({"status": "approved", "resolved_dispatched": True})
+    monkeypatch.setattr(apis.build_delivery, "_delivery_ledger", lambda: ledger)
+    dispatches: list[str] = []
+    original_dispatch = apis.dispatch_task
+
+    async def spy_dispatch(entity_id, *args, **kwargs):
+        dispatches.append(entity_id)
+        await original_dispatch(entity_id, *args, **kwargs)
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+    return brief, dispatches
+
+
+@pytest.mark.asyncio
+async def test_replayed_stranded_approval_dispatches_once(monkeypatch, release_store):
+    """Red before the fix: the stamp alone made the replay a no-op, so
+    ``released`` was False, nothing dispatched and the task stayed held."""
+    records, brief_id, task_id = release_store
+    brief, dispatches = _strand_release(
+        monkeypatch, records, brief_id, _FakeDeliveryLedger()
+    )
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is True
+    assert dispatches == [task_id]
+    assert records[task_id]["snapshot"]["status"] == "routed"
+
+    # A second replay right after it does not dispatch again.
+    again = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+    assert again is False
+    assert dispatches == [task_id]
+
+
+@pytest.mark.asyncio
+async def test_second_replay_is_refused_even_while_task_still_reads_held(
+    monkeypatch, release_store
+):
+    """The in-process guard alone stops a second launch: the first dispatch may
+    not have moved the task yet when the replay arrives."""
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief.update({"status": "approved", "resolved_dispatched": True})
+    monkeypatch.setattr(
+        apis.build_delivery, "_delivery_ledger", lambda: _FakeDeliveryLedger()
+    )
+    dispatches: list[str] = []
+
+    async def slow_dispatch(entity_id, *args, **kwargs):
+        dispatches.append(entity_id)  # leaves the task at awaiting_approval
+
+    monkeypatch.setattr(apis, "dispatch_task", slow_dispatch)
+
+    await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+    await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+    assert dispatches == [task_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("receipt_status", ["launching", "launched"])
+async def test_stranded_replay_with_fly_reservation_or_receipt_does_not_dispatch(
+    monkeypatch, release_store, receipt_status
+):
+    """``launching`` is a reservation; any other status is a delivery receipt."""
+    records, brief_id, task_id = release_store
+    key = apis._fly_receipt_key(records[task_id]["snapshot"], task_id)
+    assert key
+    ledger = _FakeDeliveryLedger(
+        {key: {"status": receipt_status, "branch": "b", "run_id": "r"}}
+    )
+    brief, dispatches = _strand_release(monkeypatch, records, brief_id, ledger)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unreadable", ["task", "ledger_os", "ledger_corrupt", "ledger_config"])
+async def test_stranded_replay_with_unreadable_state_does_not_dispatch(
+    monkeypatch, release_store, unreadable
+):
+    records, brief_id, task_id = release_store
+    ledger = _FakeDeliveryLedger()
+    if unreadable == "ledger_os":
+        ledger = _FakeDeliveryLedger(error=OSError("disk"))
+    elif unreadable == "ledger_corrupt":
+        import fly_runner
+
+        ledger = _FakeDeliveryLedger(error=fly_runner.FlyLedgerError("malformed ledger"))
+    brief, dispatches = _strand_release(monkeypatch, records, brief_id, ledger)
+    if unreadable == "ledger_config":
+        def no_ledger():
+            raise RuntimeError("Fly configuration could not be read")
+
+        monkeypatch.setattr(apis.build_delivery, "_delivery_ledger", no_ledger)
+    if unreadable == "task":
+        monkeypatch.setattr(apis, "fetch_task_record", lambda entity_id: None)
+    notifier = _Notifier()
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, notifier)
+
+    assert released is False
+    assert dispatches == []
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+    # The replay stays today's silent no-op: it does not enter the release path
+    # (which would page "manual dispatch needed" for an unreadable task).
+    assert notifier.sent == []
+    assert brief["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_stranded_replay_after_a_task_write_does_not_dispatch(
+    monkeypatch, release_store
+):
+    """A task written since the hold may have started its run (dispatch's first
+    effect is a task write), so the stamp stays a no-op."""
+    records, brief_id, task_id = release_store
+    brief, dispatches = _strand_release(
+        monkeypatch, records, brief_id, _FakeDeliveryLedger()
+    )
+    records[task_id]["observation_count"] = 2
+    records[task_id]["last_observation_at"] = "2026-09-21T00:05:00Z"
+    notifier = _Notifier()
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, notifier)
+
+    assert released is False
+    assert dispatches == []
+    # Silent no-op: the consumed approval is not retired for a fresh one.
+    assert notifier.sent == []
+    assert brief["status"] == "approved"
