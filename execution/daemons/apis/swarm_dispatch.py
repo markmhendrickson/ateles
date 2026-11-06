@@ -8454,18 +8454,6 @@ class SwarmDispatcher:
                     )
                     return
 
-        # A deferred-review resume re-enters here after a panel stopped part
-        # way (a usage limit, provider exhaustion, a temporary Neotoma read
-        # failure). Lenses that already finished at THIS head keep their
-        # verdict and are not run again; only the missing ones run. `panel`
-        # itself stays whole, for the aggregation and merge readiness.
-        to_run = panel
-        reused_reviews: list[tuple[str, str]] = []
-        if (trigger.delivery_id or "").startswith(DEFERRED_RESUME_DELIVERY_PREFIX):
-            to_run, reused_reviews = await self._reuse_finished_lenses(
-                trigger, panel, review_head, forced=pending_gates
-            )
-
         reviews: list[tuple[str, str]] = []
         failed_lenses: list[tuple[str, str]] = []
         # Forward-looking (advisory) lenses that failed without a verdict.
@@ -8488,6 +8476,26 @@ class SwarmDispatcher:
         # alone left the always-seated pm owner running undenied. A failed or
         # unreadable read denies every pre-impl gate owner.
         live_gates = await self._live_gate_status(trigger.repository, parent)
+        # A deferred-review resume re-enters here after a panel stopped part
+        # way (a usage limit, provider exhaustion, a temporary Neotoma read
+        # failure). Lenses that already finished at THIS head keep their
+        # verdict and are not run again; only the missing ones run. A lens
+        # whose gate still awaits sign-off always runs, so its signed write is
+        # retried rather than lost with the reused verdict. `panel` itself
+        # stays whole, for the aggregation and merge readiness.
+        to_run = panel
+        reused_reviews: list[tuple[str, str]] = []
+        if (trigger.delivery_id or "").startswith(DEFERRED_RESUME_DELIVERY_PREFIX):
+            awaiting_sign_off = {
+                item.lens
+                for item in panel
+                if parent
+                and gate_awaits_sign_off(item.gate, live_gates, unproven=reverted_gates)
+            }
+            to_run, reused_reviews = await self._reuse_finished_lenses(
+                trigger, panel, review_head,
+                forced=pending_gates | awaiting_sign_off,
+            )
         # Tiering signals, measured once per panel run (not per lens): every
         # seat reviews the same head.
         panel_signals = await self._review_signals(

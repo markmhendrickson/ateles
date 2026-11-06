@@ -13,6 +13,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -9855,6 +9856,52 @@ def test_resumed_panel_runs_only_the_missing_lens(monkeypatch):
     # Only the fresh verdict is written again; the reused one is aggregated.
     assert persisted == [("security", "**APPROVE**")]
     assert len(vanellus_prompts) == 1 and "scope fine" in vanellus_prompts[0]
+
+
+def test_resumed_panel_reruns_a_finished_lens_whose_gate_awaits_sign_off(monkeypatch):
+    """A reused verdict would skip the dispatcher's signed gate write, so a
+    lens whose gate the live record still shows pending runs again."""
+    calls: list = []
+    d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**", calls=calls)
+    _two_lens_panel(monkeypatch)
+    head = "a" * 40
+    pm_body = f"<!-- review:pm commit={head} -->\n**APPROVE**\nscope fine"
+    ran: list[str] = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        ran.append(skill)
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        return SkillResult(skill, True, 0, "**APPROVE**", "")
+
+    async def fake_comments(self, repository, number, client):
+        return [{"body": pm_body, "created_at": "2026-11-06T07:50:00Z", "html_url": ""}]
+
+    async def fake_live(self, repository, parent):
+        return {"pm": "pending"}
+
+    async def fake_reprove(self, repository, parent):
+        return set(), set()
+
+    async def fake_sign_off(self, *args, **kwargs):
+        return SimpleNamespace(ok=True, error="", observed_state="signed_off")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_lens_scoped_comments", fake_comments)
+    monkeypatch.setattr(SwarmDispatcher, "_live_gate_status", fake_live)
+    monkeypatch.setattr(SwarmDispatcher, "_reprove_signed_off_gates", fake_reprove)
+    monkeypatch.setattr(swarm_dispatch.IssueGateStore, "sign_off", fake_sign_off)
+    monkeypatch.setattr(swarm_dispatch, "describe_sign_off_success", lambda ref, o: "signed")
+    _capture_panel_stop(monkeypatch)
+
+    resume = _trigger(
+        kind="pr_synchronize", action="synchronize", body="Closes #80.",
+        delivery_id=f"{swarm_dispatch.DEFERRED_RESUME_DELIVERY_PREFIX}87",
+    )
+    asyncio.run(d._handle_pr(resume))
+
+    assert ran.count("pavo") == 1
+    assert ran.count("falco") == 1
 
 
 @pytest.mark.parametrize("code", ["bad_response", "rejected", "not_found"])
