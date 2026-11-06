@@ -36,6 +36,16 @@ NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 
 SSE_RECONNECT_DELAY_BASE = 2  # seconds
 SSE_RECONNECT_DELAY_MAX = 60  # seconds
+# Longest the stream may go without delivering a single byte before it is
+# treated as dead and reconnected. Neotoma writes an `event: ping` heartbeat
+# every 25s on /events/stream, so a healthy quiet stream never comes close;
+# 90s tolerates two missed heartbeats. Without a limit (the old timeout=None)
+# a connection that went silent was never noticed: on 5 Nov 2026 Apis heard
+# nothing for 15 minutes while tasks kept being filed. Only the read limit is
+# set; connect, write and pool keep their previous (unlimited) behaviour. The
+# limit applies to each socket read, so time a handler spends on an event does
+# not count against it.
+SSE_READ_TIMEOUT_SECONDS = 90.0
 
 
 @dataclass
@@ -186,6 +196,17 @@ class SSEClient:
                 delay = SSE_RECONNECT_DELAY_BASE  # reset on clean disconnect
             except asyncio.CancelledError:
                 break
+            except httpx.ReadTimeout:
+                # str(ReadTimeout) is often empty, so say what happened.
+                log.warning(
+                    f"[{self.handler_name}] SSE stream silent for "
+                    f"{SSE_READ_TIMEOUT_SECONDS}s (no heartbeat) — "
+                    f"reconnecting in {delay}s"
+                )
+                if not reconnect:
+                    break
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, SSE_RECONNECT_DELAY_MAX)
             except Exception as exc:
                 log.warning(
                     f"[{self.handler_name}] SSE stream error: {exc} — "
@@ -236,7 +257,8 @@ class SSEClient:
             f"(entity_types={self.entity_types or 'all'})"
         )
 
-        async with httpx.AsyncClient(timeout=None) as client:
+        timeout = httpx.Timeout(None, read=SSE_READ_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream(
                 "GET", url, headers=headers, params=params
             ) as resp:

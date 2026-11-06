@@ -185,3 +185,156 @@ def test_prehydrated_event_short_circuits_as_hydrated(monkeypatch):
     )
     asyncio.run(hydrate_snapshot(ev))
     assert ev.hydrated is True
+
+
+# ── Stream liveness ──────────────────────────────────────────────────────────
+#
+# These drive SSEClient against a real local HTTP server (aiohttp), because the
+# read timeout is enforced by httpx's network layer: a fake client or a mock
+# transport would never raise ReadTimeout and so could not go red. Limits are
+# shrunk to fractions of a second via monkeypatch.
+
+import pytest  # noqa: E402
+
+aiohttp_web = pytest.importorskip("aiohttp.web")
+
+_PING = 'event: ping\ndata: {"t": 1}\n\n'
+
+
+def _task_event(entity_id: str) -> str:
+    return (
+        "id: 1\nevent: entity_created\n"
+        f'data: {{"event_type": "entity_created", "entity_type": "task", '
+        f'"entity_id": "{entity_id}", "action": "created"}}\n\n'
+    )
+
+
+async def _serve(behaviours):
+    """Start a server whose Nth connection runs ``behaviours[N]`` (the last
+    one repeats). Returns (runner, base_url, connection_counter, closing);
+    setting ``closing`` ends every open stream so cleanup is immediate."""
+    count = {"n": 0}
+    closing = asyncio.Event()
+
+    async def handler(request):
+        idx = min(count["n"], len(behaviours) - 1)
+        count["n"] += 1
+        resp = aiohttp_web.StreamResponse(
+            headers={"Content-Type": "text/event-stream"}
+        )
+        await resp.prepare(request)
+        body = asyncio.ensure_future(behaviours[idx](resp))
+        stop = asyncio.ensure_future(closing.wait())
+        await asyncio.wait({body, stop}, return_when=asyncio.FIRST_COMPLETED)
+        for t in (body, stop):
+            t.cancel()
+        await asyncio.gather(body, stop, return_exceptions=True)
+        return resp
+
+    app = aiohttp_web.Application()
+    app.router.add_get("/events/stream", handler)
+    runner = aiohttp_web.AppRunner(app)
+    await runner.setup()
+    site = aiohttp_web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    return runner, f"http://127.0.0.1:{port}", count, closing
+
+
+async def _run_until(behaviours, want: int, *, slow_first=0.0, guard=3.0):
+    """Run SSEClient until ``want`` task events arrive (or ``guard`` seconds
+    pass). Returns (entity ids received in order, connections opened)."""
+    runner, base, count, closing = await _serve(behaviours)
+    got: list[str] = []
+    done = asyncio.Event()
+
+    async def on_event(ev: NeotomaEvent):
+        if not ev.entity_id:  # the server's ping heartbeat parses as an empty event
+            return
+        got.append(ev.entity_id)
+        if len(got) == 1 and slow_first:
+            await asyncio.sleep(slow_first)
+        if len(got) >= want:
+            done.set()
+
+    client = sc.SSEClient(base_url=base, subscription_id="sub-test", bearer_token="t")
+    task = asyncio.create_task(client.stream(on_event))
+    try:
+        await asyncio.wait_for(done.wait(), guard)
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        client.stop()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        closing.set()
+        await runner.cleanup()
+    return got, count["n"]
+
+
+@pytest.fixture
+def short_limits(monkeypatch):
+    monkeypatch.setattr(sc, "SSE_READ_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(sc, "SSE_RECONNECT_DELAY_BASE", 0)
+
+
+def test_normal_event_reaches_its_handler(short_limits):
+    async def one_event(resp):
+        await resp.write(_task_event("ent_a").encode())
+        await asyncio.sleep(5)
+
+    got, conns = asyncio.run(_run_until([one_event], want=1))
+    assert got == ["ent_a"]
+    assert conns == 1
+
+
+def test_silent_stream_reconnects(short_limits):
+    async def then_silent(resp):
+        await resp.write(_task_event("ent_a").encode())
+        await asyncio.sleep(5)  # no bytes, no heartbeat: a dead stream
+
+    async def after_reconnect(resp):
+        await resp.write(_task_event("ent_b").encode())
+        await asyncio.sleep(5)
+
+    got, conns = asyncio.run(_run_until([then_silent, after_reconnect], want=2))
+    assert got == ["ent_a", "ent_b"]
+    assert conns == 2
+
+
+def test_heartbeats_keep_a_quiet_stream_open(short_limits):
+    async def quiet_with_pings(resp):
+        # 0.6s of nothing but heartbeats — three times the read limit —
+        # then a real event on the same connection.
+        for _ in range(12):
+            await resp.write(_PING.encode())
+            await asyncio.sleep(0.05)
+        await resp.write(_task_event("ent_a").encode())
+        await asyncio.sleep(5)
+
+    got, conns = asyncio.run(_run_until([quiet_with_pings], want=1))
+    assert got == ["ent_a"]
+    assert conns == 1
+
+
+def test_slow_handler_is_not_mistaken_for_a_silent_stream(short_limits):
+    # The read limit is per socket read, so time spent inside a handler must
+    # not trigger a reconnect: the next event is already buffered when it ends.
+    async def gap_while_handler_runs(resp):
+        await resp.write(_task_event("ent_a").encode())
+        # Longer than the read limit with no bytes at all, but spent while the
+        # handler is still busy with ent_a.
+        await asyncio.sleep(0.3)
+        await resp.write(_task_event("ent_b").encode())
+        while True:
+            await asyncio.sleep(0.05)
+            await resp.write(_PING.encode())
+
+    got, conns = asyncio.run(
+        _run_until([gap_while_handler_runs], want=2, slow_first=0.4)
+    )
+    assert got == ["ent_a", "ent_b"]
+    assert conns == 1
