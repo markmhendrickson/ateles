@@ -9697,17 +9697,16 @@ class SwarmDispatcher:
         ("hold", reason).
 
         "hold" means the round must not run here and cannot be filed on Fly:
-        the ledger is unreadable while deliveries are on Fly (whether the PR
-        came from Fly is unknown), or the PR came from Fly but deliveries are
-        no longer opted onto it."""
+        the ledger is missing or unreadable, so whether the PR came from Fly is
+        unknown (whether or not deliveries are opted onto Fly), or the PR came
+        from Fly but deliveries are no longer opted onto it. Only a readable
+        ledger that names the PR in no receipt keeps the local round."""
         opted_in = fly_runner.delivery_opted_in()
         facts = build_delivery.fly_delivered_pr(trigger.repository, trigger.number)
         if facts.delivered is None:
-            if not opted_in:
-                return "local", None
             return "hold", (
-                "the Fly delivery ledger could not be read, so whether this PR "
-                "came from Fly is unknown"
+                "the Fly delivery ledger is missing or could not be read, so "
+                "whether this PR came from Fly is unknown"
             )
         if not facts.delivered:
             return "local", None
@@ -9730,7 +9729,8 @@ class SwarmDispatcher:
         self.notifier.send(
             f"PR {ref}: {kind} round {n} was not started: {reason}. It was not "
             "run on this host either, because a Fly-delivered PR is corrected "
-            f"on Fly. Needs your attention. {trigger.html_url} Merge held.",
+            "on Fly and this PR's origin decides which. Needs your attention. "
+            f"{trigger.html_url} Merge held.",
             priority=Priority.OPERATOR_DECISION,
             handler=DAEMON_NAME,
             dedupe_key=f"fly-fix-hold:{ref}:{kind}:{n}:{head}",
@@ -9772,7 +9772,9 @@ class SwarmDispatcher:
     ) -> bool:
         """File this fix round as an existing-PR correction task for Fly.
 
-        Returns True once the task is stored and its id read back. On any
+        Returns True once the task is stored and read back by id with the
+        repository, PR number, head, branch, action type and `PART_OF` edge it
+        was filed with; a returned id alone is not proof. On any
         failure the PR stops for attention with the reason, and nothing runs
         locally. The task carries `open_or_merge_pr`, so the task path holds it
         at a PLAN checkpoint until a signed release; that gate is unchanged."""
@@ -9845,12 +9847,69 @@ class SwarmDispatcher:
                 "the correction task could not be stored in Neotoma",
             )
             return False
+        problem = await self._fly_correction_read_back(
+            task_id, task, branch=branch, part_of=facts.source_task
+        )
+        if problem:
+            self._hold_fix_round(
+                trigger, kind, round_n,
+                f"the stored correction task {task_id} did not read back as "
+                f"filed ({problem})",
+            )
+            return False
         log.info(
             f"[{DAEMON_NAME}] {ref}: {kind} round {round_n} filed as Fly "
             f"correction task {task_id} on {branch} at {head[:7]}; it waits at "
             "its PLAN checkpoint for a signed release"
         )
         return True
+
+    async def _fly_correction_read_back(
+        self, task_id: str, task: dict, *, branch: str, part_of: str
+    ) -> str:
+        """Why the stored correction does not match what was filed, or "".
+
+        Reads the task and its relationships back by id. A failed read is a
+        mismatch: the filing is unconfirmed."""
+        entity = await self._neotoma_get(f"entities/{task_id}")
+        if not isinstance(entity, dict):
+            return "the task could not be read back"
+        snapshot = entity.get("snapshot")
+        if isinstance(snapshot, dict) and isinstance(snapshot.get("snapshot"), dict):
+            snapshot = snapshot["snapshot"]
+        if not isinstance(snapshot, dict):
+            return "the task read back with no fields"
+        context = snapshot.get("context")
+        if isinstance(context, str):
+            try:
+                context = json.loads(context)
+            except ValueError:
+                context = None
+        stored_branch = context.get("branch") if isinstance(context, dict) else None
+        wrong = [
+            name for name, ok in (
+                ("repository", snapshot.get("repository") == task["repository"]),
+                ("PR number", str(snapshot.get("pr_number")) == str(task["pr_number"])),
+                ("head", snapshot.get("head_sha") == task["head_sha"]),
+                ("branch", stored_branch == branch),
+                ("action type", snapshot.get("action_type") == task["action_type"]),
+            ) if not ok
+        ]
+        if wrong:
+            return "wrong " + ", ".join(wrong)
+        if part_of:
+            rels = await self._neotoma_get(f"entities/{task_id}/relationships")
+            if not isinstance(rels, dict):
+                return "its relationships could not be read back"
+            if not any(
+                isinstance(r, dict)
+                and r.get("relationship_type") == "PART_OF"
+                and r.get("source_entity_id") == task_id
+                and r.get("target_entity_id") == part_of
+                for r in rels.get("relationships") or []
+            ):
+                return "missing its PART_OF edge"
+        return ""
 
     _ESCALATION_MARKER = "<!-- apis-escalated:{kind} -->"
 
@@ -10052,11 +10111,13 @@ class SwarmDispatcher:
         this_round = prior_rounds + 1
         # A Fly-delivered PR is corrected on Fly; decided before the round is
         # recorded, so a round that cannot start does not use up the budget.
+        # A Fly round is recorded only once its filing is confirmed.
         route, route_facts = self._fix_round_route(trigger)
         if route == "hold":
             self._hold_fix_round(trigger, "auto-fix", this_round, route_facts)
             return
-        await self._record_fix_round(trigger, this_round)
+        if route != "fly":
+            await self._record_fix_round(trigger, this_round)
 
         # Each lens agent proposes fix guidance for its own findings.
         guidance_blocks: list[str] = []
@@ -10119,10 +10180,11 @@ class SwarmDispatcher:
         if route == "fly":
             # The same guidance, as a correction on the PR's own branch. The
             # runner's push re-runs the panel; no commit is made on this host.
-            await self._file_fly_correction(
+            if await self._file_fly_correction(
                 trigger, kind="auto-fix", round_n=this_round,
                 body=consolidated, facts=route_facts,
-            )
+            ):
+                await self._record_fix_round(trigger, this_round)
             return
 
         # Snapshot the head so we can tell whether Cicada actually pushed
@@ -10694,18 +10756,21 @@ class SwarmDispatcher:
         if route == "hold":
             self._hold_fix_round(trigger, "CI-fix", this_round, route_facts)
             return
-        await self._record_fix_round(trigger, this_round)
         if route == "fly":
             failing = await self._failing_check_runs(trigger)
             checks = "\n".join(
                 f"- {c['name']}: {c.get('html_url') or 'no link'}"
                 for c in failing if c.get("name")
             ) or "- (the failing checks could not be listed; read the PR's checks)"
-            await self._file_fly_correction(
+            # Recorded only once the filing is confirmed: a failed filing
+            # does not use up a round.
+            if await self._file_fly_correction(
                 trigger, kind="CI-fix", round_n=this_round,
                 body=f"Failing required checks:\n{checks}", facts=route_facts,
-            )
+            ):
+                await self._record_fix_round(trigger, this_round)
             return
+        await self._record_fix_round(trigger, this_round)
         head_before = await self._pr_head_sha(trigger)
         ci_signals = await self._tier_signals(
             trigger, prior_attempt_failed=this_round > 1
@@ -15566,6 +15631,25 @@ class SwarmDispatcher:
             ) == sha
             for row in (data or {}).get("entities", [])
         )
+
+    async def _neotoma_get(self, path: str) -> dict | None:
+        """GET from Neotoma; the decoded response, or None on any failure."""
+        if not self.config.neotoma_token:
+            log.warning(
+                f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — {path} skipped"
+            )
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    f"{self.config.neotoma_base_url}/{path}",
+                    headers={"Authorization": f"Bearer {self.config.neotoma_token}"},
+                )
+                response.raise_for_status()
+                return response.json() if response.content else {}
+        except Exception as exc:
+            log.warning(f"[{DAEMON_NAME}] Neotoma GET {path} failed: {exc}")
+            return None
 
     async def _neotoma_post(self, path: str, payload: dict) -> dict | None:
         """POST to Neotoma and return the decoded response when available."""

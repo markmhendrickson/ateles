@@ -295,3 +295,22 @@ def _path_required_lenses_off_by_default(monkeypatch):
     for cls in classes - {None}:
         if hasattr(cls, "_path_required_lenses"):
             monkeypatch.setattr(cls, "_path_required_lenses", _none_extra)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fly_ledger(monkeypatch, tmp_path):
+    """Never let a test read the operator's live Fly ledger, and give it a
+    readable one with no receipts.
+
+    A fix round's route reads the ledger to tell whether the PR came from Fly,
+    and a missing or unreadable ledger holds the round (origin unknown), so a
+    test of the local round needs a readable ledger. Tests of the ledger, or
+    of a missing one, set their own path.
+    """
+    import fly_runner
+
+    path = tmp_path / "isolated-fly-ledger.json"
+    monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(path))
+    ledger = fly_runner.FlyLedger(path)
+    with ledger._locked():
+        ledger._save(ledger._load())

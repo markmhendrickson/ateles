@@ -1101,8 +1101,9 @@ def verified_parent_task(
 class FlyDeliveredPR:
     """Whether Apis's own ledger shows a pull request came from Fly.
 
-    ``delivered`` is True when a receipt names the PR, False when none does,
-    and None when the ledger could not be read (unknown, never "not Fly").
+    ``delivered`` is True when a receipt names the PR, False when a readable
+    ledger names it in none, and None when the ledger is missing or could not
+    be read (unknown, never "not Fly").
     ``branch``/``base_branch`` are what the receipts recorded, when they did;
     ``source_task`` is the task a first delivery was keyed by, when exactly one
     such receipt names the PR."""
@@ -1128,7 +1129,12 @@ def fly_delivered_pr(repository: object, pr_number: object) -> FlyDeliveredPR:
     if not number or not repo:
         return FlyDeliveredPR(False)
     try:
-        receipts = _delivery_ledger().delivery_receipts()
+        ledger = _delivery_ledger()
+        # A missing file is no evidence either way: `delivery_receipts` reads
+        # it as an empty map, which must not pass for "no Fly receipt".
+        if not ledger.path.exists():
+            return FlyDeliveredPR(None)
+        receipts = ledger.delivery_receipts()
     except (OSError, fly_runner.FlyLedgerError, ValueError):
         return FlyDeliveredPR(None)
     if not isinstance(receipts, dict):
