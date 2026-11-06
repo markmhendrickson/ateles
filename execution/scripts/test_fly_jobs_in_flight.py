@@ -249,7 +249,7 @@ _KILL_HOLDER_PY = (
     "want='fly_jobs_in_flight.py --hold '+sys.argv[1]\n"
     "for line in subprocess.run(['ps','-ax','-o','pid=,command='],capture_output=True,text=True).stdout.splitlines():\n"
     "    pid,_,cmd=line.strip().partition(' ')\n"
-    "    if cmd.strip().endswith(want): os.kill(int(pid),signal.SIGKILL)\n"
+    "    if want in cmd: os.kill(int(pid),signal.SIGKILL)\n"
 )
 
 _LAUNCHCTL_STUB = """#!/bin/bash

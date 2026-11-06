@@ -149,10 +149,18 @@ def _is_my_parent(parent: int) -> bool:
     return os.getppid() == parent and _parent_alive(parent)
 
 
-def _end_parent(parent: int) -> None:
-    """End the deploy script before the lock is released (limit reached)."""
+def _end_parent(parent: int, ending_file: str | None = None) -> None:
+    """End the deploy script before the lock is released (limit reached).
+
+    ``ending_file`` is created first so the script's EXIT handling knows the
+    holder is ending it and must not signal or wait for the holder."""
     if not _is_my_parent(parent):
         return  # already gone, or the pid is no longer our parent: signal nothing
+    if ending_file:
+        try:
+            Path(ending_file).touch()
+        except OSError:
+            pass
     try:
         os.kill(parent, signal.SIGTERM)
     except OSError:
@@ -172,7 +180,7 @@ def _end_parent(parent: int) -> None:
 
 
 def hold(parent: int, wait: float = LOCK_WAIT_SECONDS,
-         limit: float | None = None) -> int:
+         limit: float | None = None, ending_file: str | None = None) -> int:
     """Take the admission lock, report ``ok <count>`` or ``busy``, then keep
     the lock until SIGTERM, parent death or ``limit``."""
     def _stop(_sig, _frame):
@@ -202,7 +210,7 @@ def hold(parent: int, wait: float = LOCK_WAIT_SECONDS,
     while time.monotonic() < end and _parent_alive(parent):
         time.sleep(0.2)
     if _parent_alive(parent):
-        _end_parent(parent)  # limit reached with the deploy still running
+        _end_parent(parent, ending_file)  # limit reached with the deploy still running
     return 0  # the lock is released when the process exits
 
 
@@ -211,9 +219,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hold", type=int, metavar="PARENT_PID",
                         help="take and keep the admission lock for PARENT_PID")
     parser.add_argument("--wait", type=float, default=LOCK_WAIT_SECONDS)
+    parser.add_argument("--ending-file", default=None,
+                        help="created just before the holder ends its parent")
     args = parser.parse_args(argv)
     if args.hold is not None:
-        return hold(args.hold, wait=args.wait)
+        return hold(args.hold, wait=args.wait, ending_file=args.ending_file)
     count = count_in_flight(ledger_path(), time.time())
     if count > 0:
         print(count)

@@ -87,13 +87,15 @@ on_exit() {
   if [ "$MARKER_WRITTEN" -eq 1 ] && [ "$RESTARTS_DONE" -eq 0 ]; then
     log "DEPLOY DID NOT FINISH: restarts were not completed; the next run will complete it."
   fi
-  if [ "$status" -eq 143 ]; then
-    # Ended by SIGTERM, normally the holder's lifetime limit. Do not signal or
+  # bash 3.2 reports $? as 0 in an EXIT trap after a fatal signal, so the
+  # holder says it is ending us by creating this file before it sends SIGTERM.
+  if [ -n "$HOLDER_DIR" ] && [ -e "$HOLDER_DIR/ending" ]; then
+    # Ended by the holder's lifetime limit. Do not signal or
     # wait for the holder: it is mid-way through its own sequence (wait for this
     # script to be gone, then a settle for a kickstart already begun) and
-    # releases the lock when that is done. If the TERM came from elsewhere, the
-    # holder sees this process die and exits, so the lock is still released.
-    [ -n "$HOLDER_DIR" ] && rm -rf "$HOLDER_DIR" 2>/dev/null
+    # releases the lock when that is done. Any other exit (including a TERM
+    # from elsewhere) takes release_admission below.
+    rm -rf "$HOLDER_DIR" 2>/dev/null
   else
     release_admission
   fi
@@ -143,7 +145,7 @@ HOLDER_REPLY=""
 HOLDER_FAIL_OPEN=0
 if HOLDER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ateles-fly-hold.XXXXXX" 2>/dev/null)" \
    && mkfifo "$HOLDER_DIR/reply" 2>/dev/null; then
-  python3 "$SCRIPT_DIR/fly_jobs_in_flight.py" --hold "$$" \
+  python3 "$SCRIPT_DIR/fly_jobs_in_flight.py" --hold "$$" --ending-file "$HOLDER_DIR/ending" \
     >"$HOLDER_DIR/reply" 2>/dev/null </dev/null &
   HOLDER_PID=$!
   # The background child opens the fifo for writing before it execs python, so
