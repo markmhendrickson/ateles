@@ -3494,8 +3494,49 @@ def detect_auth_failure(*texts: str) -> bool:
     return any(sig in blob for sig in _AUTH_FAILURE_SIGNATURES)
 
 
+# A lens or Vanellus refused at launch because its agent_definition or
+# agent_policy could not be READ (Neotoma slow, unreachable or answering 5xx).
+# The refusal itself is right — no agent runs without its policy — but the
+# cause clears on its own, so the panel auto-resumes like a usage limit rather
+# than stopping for operator attention. A policy that was read and refuses, or
+# answered malformed, is not this class: it stays an execution failure.
+NEOTOMA_TEMPORARILY_UNAVAILABLE = "Neotoma temporarily unavailable"
+# The load-failure codes (`agent_loader.load_failure_code`) that mean "the read
+# did not complete": a timeout, a connection error, a server 5xx.
+_TRANSIENT_NEOTOMA_READ_CODES = frozenset({"timeout", "transport_error", "server_error"})
+# The fixed refusal texts of `AgentPolicyUnavailable` and
+# `AgentDefinitionUnavailable`; they carry only fixed stage/code tokens.
+_POLICY_READ_FAILURE_RE = re.compile(
+    r"agent_policy for .{1,80}? is unavailable \((?P<stage>[a-z_]+), (?P<code>[a-z_]+)\)"
+)
+_DEFINITION_READ_FAILURE_RE = re.compile(
+    r"agent_definition for .{1,80}? is unavailable \((?P<code>[a-z_]+), \d+ attempt"
+)
+
+
+def neotoma_read_failure_is_transient(result: SkillResult) -> bool:
+    """True when ``result`` is a launch refusal caused by an incomplete read.
+
+    Only a dispatch refused for an unreadable agent_definition or agent_policy
+    qualifies, and only for a timeout, transport error or server 5xx. Every
+    other code (not_found, refused_status, bad_response, rejected, ...) is a
+    real answer from Neotoma and stays fail-closed.
+    """
+    error = result.error or ""
+    if not (
+        getattr(result, "policy_unavailable", False)
+        or getattr(result, "definition_unavailable", False)
+        or error.startswith(("agent_policy unavailable", "agent_definition unavailable"))
+    ):
+        return False
+    match = _POLICY_READ_FAILURE_RE.search(error) or _DEFINITION_READ_FAILURE_RE.search(error)
+    return bool(match) and match.group("code") in _TRANSIENT_NEOTOMA_READ_CODES
+
+
 def review_failure_class(result: SkillResult) -> str:
     """Return a public-safe reason for one incomplete review invocation."""
+    if neotoma_read_failure_is_transient(result):
+        return NEOTOMA_TEMPORARILY_UNAVAILABLE
     if getattr(result, "cooled_until", "") or detect_session_limit(
         result.stdout, result.stderr, result.error
     ):
@@ -3521,6 +3562,57 @@ def review_failure_class(result: SkillResult) -> str:
     if detect_auth_failure(result.stdout, result.stderr, result.error):
         return "credential failure"
     return "execution failure"
+
+
+# Failure classes that clear without anyone acting: provider capacity returns,
+# and a Neotoma read that timed out answers on a later attempt.
+_CAPACITY_FAILURE_CLASSES = frozenset({"usage limit", "provider exhaustion"})
+_SELF_CLEARING_FAILURE_CLASSES = _CAPACITY_FAILURE_CLASSES | {
+    NEOTOMA_TEMPORARILY_UNAVAILABLE
+}
+
+
+def _neotoma_retry_limit() -> int:
+    """Consecutive Neotoma deferrals allowed at one head before an operator is asked."""
+    try:
+        return max(0, int(os.environ.get("APIS_NEOTOMA_RETRY_LIMIT", "3")))
+    except ValueError:
+        return 3
+
+
+# Ceiling for the Neotoma retry backoff below: however many consecutive
+# deferrals one head has had, the next one is never scheduled further out.
+_NEOTOMA_RETRY_MAX_DELAY_SECONDS = 3600
+
+
+def _neotoma_retry_delay_seconds(attempt: int = 1) -> int:
+    """How far out Neotoma deferral ``attempt`` (1-based) is scheduled.
+
+    Backoff (failure_posture.md rule 5): the base delay doubles with each
+    consecutive deferral recorded in the marker, capped at
+    ``_NEOTOMA_RETRY_MAX_DELAY_SECONDS``. The 600s sweep picks it up.
+    """
+    try:
+        base = max(60, int(os.environ.get("APIS_NEOTOMA_RETRY_DELAY_SECONDS", "120")))
+    except ValueError:
+        base = 120
+    exponent = min(max(attempt, 1) - 1, 16)
+    return min(base * (2 ** exponent), _NEOTOMA_RETRY_MAX_DELAY_SECONDS)
+
+
+def incomplete_panel_reason(failures: list[str]) -> str:
+    """The `_handle_panel_session_limit` reason for a panel's failed runs.
+
+    Auto-resumes only when EVERY failure clears on its own; any other failure
+    keeps the panel stopped for operator attention. A capacity failure wins over
+    a Neotoma one: its reset time is the later of the two, so resuming sooner
+    would only spend quota again and count against the Neotoma retry bound.
+    """
+    if not failures or not all(f in _SELF_CLEARING_FAILURE_CLASSES for f in failures):
+        return "incomplete review panel"
+    if any(f in _CAPACITY_FAILURE_CLASSES for f in failures):
+        return "provider capacity exhausted"
+    return NEOTOMA_TEMPORARILY_UNAVAILABLE
 
 
 def sign_off_failure_class(error: str) -> str:
@@ -5402,6 +5494,15 @@ class SwarmDispatcher:
                     ):
                         summary["label_gated"] = summary.get("label_gated", 0) + 1
                         continue
+                    if self._panel_running(trigger):
+                        summary["already_running"] = (
+                            summary.get("already_running", 0) + 1
+                        )
+                        log.info(
+                            f"[{DAEMON_NAME}] deferred-review sweep: {ref} "
+                            "panel already running for this head — skipped"
+                        )
+                        continue
                     log.info(
                         f"[{DAEMON_NAME}] deferred-review sweep: {ref} deferral "
                         "has matured — re-running the panel"
@@ -6111,17 +6212,16 @@ class SwarmDispatcher:
         owns re-dispatching once it matures. This just needs to say "hands off,
         someone else's sweep is watching this one."
         """
-        c_url = f"https://api.github.com/repos/{repository}/issues/{number}/comments"
         try:
-            cresp = await client.get(
-                c_url,
-                params={"per_page": 100},
-                headers=self._github_headers(repository),
+            # Every page: the newest marker may lie past the first 100.
+            raw, complete = await self._issue_comments_scan(
+                repository, number, client
             )
-            cresp.raise_for_status()
         except Exception:
             # Cannot tell → assume a marker might be live so we don't double-
             # dispatch. Same "false negative costs a delay" bias as the caller.
+            return True
+        if not complete:
             return True
         latest_iso = None
         # ateles#430 audit: this scan is CORRECT and must stay last-write-wins.
@@ -6129,7 +6229,7 @@ class SwarmDispatcher:
         # the newest marker. Do NOT "optimise" this into an early return on the
         # first match — that is exactly the bug #430 fixed at the two sites that
         # did so. The ordering assumption is the same; the traversal is not.
-        for c in await self._swarm_authored(repository, number, cresp.json()):
+        for c in await self._swarm_authored(repository, number, raw):
             body = c.get("body", "")
             m = self._REVIEW_DEFERRED_RE.search(body)
             if m:
@@ -6514,17 +6614,16 @@ class SwarmDispatcher:
             resp.raise_for_status()
             for pr in resp.json():
                 num = pr.get("number")
-                c_url = (
-                    f"https://api.github.com/repos/{repository}/issues/{num}/comments"
-                )
                 try:
-                    cresp = await client.get(
-                        c_url,
-                        params={"per_page": 100},
-                        headers=self._github_headers(repository),
+                    # Every page: on a thread past 100 comments the newest
+                    # marker is on a later page. A thread that could not be
+                    # read to its end is skipped like an unreadable one.
+                    raw, complete = await self._issue_comments_scan(
+                        repository, num, client
                     )
-                    cresp.raise_for_status()
                 except Exception:
+                    continue
+                if not complete:
                     continue
                 # Walk comments in order. A deferral is LIVE only if it is the
                 # latest terminal marker — i.e. no aggregation verdict was posted
@@ -6532,7 +6631,7 @@ class SwarmDispatcher:
                 # old deferral is superseded and the PR stops being "due", so a
                 # resolved PR is not re-dispatched forever (Loxia #264 review).
                 latest_iso = None  # ISO of the most-recent still-live deferral
-                for c in await self._swarm_authored(repository, num, cresp.json()):
+                for c in await self._swarm_authored(repository, num, raw):
                     body = c.get("body", "")
                     m = self._REVIEW_DEFERRED_RE.search(body)
                     if m:
@@ -8133,7 +8232,41 @@ class SwarmDispatcher:
         green = self._panel_checks_green.get(key, "")
         return head if head and green == head else ""
 
+    def _panel_run_key(self, trigger: SwarmTrigger) -> tuple[str, int, str]:
+        return (
+            trigger.repository.casefold(),
+            trigger.number,
+            _normalise_full_sha(trigger.head_sha or ""),
+        )
+
+    def _panel_running(self, trigger: SwarmTrigger) -> bool:
+        """True while a panel for this PR head is running in this process."""
+        running = self.__dict__.setdefault("_panels_running", set())
+        return self._panel_run_key(trigger) in running
+
     async def _handle_pr(self, trigger: SwarmTrigger) -> None:
+        """Run the review panel for one PR head, at most once at a time.
+
+        A sweep or webhook that arrives while a panel for the same head is
+        running is skipped: the running panel produces that head's verdict.
+        The guard is cleared when the panel ends, including when it raises.
+        """
+        running = self.__dict__.setdefault("_panels_running", set())
+        key = self._panel_run_key(trigger)
+        if key in running:
+            log.info(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: a panel "
+                f"for head {key[2][:7] or '(unknown)'} is already running — "
+                f"{trigger.kind or 'trigger'} skipped"
+            )
+            return
+        running.add(key)
+        try:
+            await self._handle_pr_panel(trigger)
+        finally:
+            running.discard(key)
+
+    async def _handle_pr_panel(self, trigger: SwarmTrigger) -> None:
         ref = f"{trigger.repository}#{trigger.number}"
         # A green reading belongs to one panel run: never carry an earlier
         # run's reading into this one.
@@ -8751,20 +8884,14 @@ class SwarmDispatcher:
             )
 
         if failed_lenses:
-            auto_resume = all(
-                failure in {"usage limit", "provider exhaustion"}
-                for _, failure in failed_lenses
-            )
             await self._handle_panel_session_limit(
                 trigger,
                 parent,
                 ", ".join(lens for lens, _ in failed_lenses),
                 "",
                 "",
-                reason=(
-                    "provider capacity exhausted"
-                    if auto_resume
-                    else "incomplete review panel"
+                reason=incomplete_panel_reason(
+                    [failure for _, failure in failed_lenses]
                 ),
                 completed_lenses=tuple(lens for lens, _ in reviews),
                 failed_lenses=tuple(failed_lenses),
@@ -8937,10 +9064,10 @@ class SwarmDispatcher:
         if not vanellus_result.ok:
             # No current invocation verdict exists. Historical issue comments
             # cannot turn provider exhaustion or process failure into a review.
+            failure = review_failure_class(vanellus_result)
             reason = (
-                "provider capacity exhausted"
-                if review_failure_class(vanellus_result)
-                in {"usage limit", "provider exhaustion"}
+                incomplete_panel_reason([failure])
+                if failure in _SELF_CLEARING_FAILURE_CLASSES
                 else "review execution failure"
             )
             await self._handle_panel_session_limit(
@@ -16573,6 +16700,70 @@ class SwarmDispatcher:
     _REVIEW_DEFERRED_MARKER = "<!-- review-deferred-until:{iso} -->"
     _REVIEW_DEFERRED_RE = re.compile(r"<!-- review-deferred-until:([^ ]+) -->")
 
+    # Rides in the same comment as a deferral marker when the deferral was a
+    # Neotoma read failure: the consecutive count at one head, so the retry
+    # bound survives restarts without a new store.
+    _NEOTOMA_DEFERRAL_MARKER = (
+        "<!-- review-deferred-neotoma attempt={attempt} head={head} -->"
+    )
+    _NEOTOMA_DEFERRAL_RE = re.compile(
+        r"<!-- review-deferred-neotoma attempt=(\d+) head=([0-9a-f]*) -->"
+    )
+    # Any Neotoma deferral marker, readable or not: one that carries this
+    # prefix but fails _NEOTOMA_DEFERRAL_RE has an unknown count.
+    _NEOTOMA_DEFERRAL_PREFIX = "<!-- review-deferred-neotoma"
+
+    async def _prior_neotoma_deferral_attempts(self, t: SwarmTrigger) -> int | None:
+        """Consecutive Neotoma deferrals already recorded for this PR head.
+
+        Read from the newest live deferral marker (the same last-write-wins walk
+        the deferred sweep uses): 0 when there is none, when a verdict or a
+        deferral of another kind followed it, or when it was for another head.
+        None when any page of the comments cannot be read, or when the newest
+        live Neotoma marker's count cannot be parsed, so the caller fails
+        closed.
+        """
+        head = _normalise_full_sha(t.head_sha)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # Every page: the newest marker sits on a later page once a
+                # thread passes 100 comments, and a first-page count restarts
+                # at zero there, so the bound would never be reached.
+                raw, complete = await self._issue_comments_scan(
+                    t.repository, t.number, client
+                )
+                if not complete:
+                    raise RuntimeError("comment scan did not reach the last page")
+                comments = await self._swarm_authored(t.repository, t.number, raw)
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: Neotoma retry "
+                f"count unreadable ({type(exc).__name__})"
+            )
+            return None
+        attempts: int | None = 0
+        for c in comments:
+            body = c.get("body", "")
+            if self._REVIEW_DEFERRED_RE.search(body):
+                m = self._NEOTOMA_DEFERRAL_RE.search(body)
+                if m:
+                    attempts = int(m.group(1)) if m.group(2) == head else 0
+                elif self._NEOTOMA_DEFERRAL_PREFIX in body:
+                    # A Neotoma marker whose count cannot be read: unknown,
+                    # not zero, or a malformed latest marker would reopen
+                    # retries an earlier marker had already exhausted.
+                    attempts = None
+                else:
+                    attempts = 0  # a deferral of another kind
+            elif _VANELLUS_COMMENT_MARKER in body:
+                attempts = 0
+        if attempts is None:
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: latest Neotoma "
+                "deferral marker has an unreadable retry count"
+            )
+        return attempts
+
     async def _handle_panel_session_limit(
         self,
         t: SwarmTrigger,
@@ -16587,16 +16778,45 @@ class SwarmDispatcher:
     ) -> None:
         """Surface an incomplete review without fabricating a verdict.
 
-        Usage limits and provider exhaustion get a durable retry marker because
-        capacity can recover. Stale-head, execution, and unverified-verdict
+        Usage limits, provider exhaustion and a Neotoma read that did not
+        complete get a durable retry marker because each can recover; the
+        Neotoma kind is bounded by ``APIS_NEOTOMA_RETRY_LIMIT`` consecutive
+        deferrals at one head, then stops for attention naming Neotoma. Stale-head, execution, and unverified-verdict
         failures require attention and must not borrow that self-clearing copy.
         Successful and failed lens names remain visible on partial panels.
         Best-effort; never raises.
         """
-        auto_resume = reason in {"usage limit", "provider capacity exhausted"}
+        neotoma_attempt = 0
+        if reason == NEOTOMA_TEMPORARILY_UNAVAILABLE:
+            # Bounded: count consecutive Neotoma deferrals at this head from the
+            # live deferral marker. Past the limit, or when the count cannot be
+            # read, stop for operator attention and name Neotoma availability.
+            limit = _neotoma_retry_limit()
+            prior = await self._prior_neotoma_deferral_attempts(t)
+            if prior is None or prior >= limit:
+                reason = (
+                    "Neotoma availability: the agent definition or policy "
+                    "could not be read"
+                    + (
+                        f" after {limit} automatic retries"
+                        if prior is not None
+                        else " and the retry count could not be confirmed"
+                    )
+                )
+            else:
+                neotoma_attempt = prior + 1
+        auto_resume = reason in {
+            "usage limit",
+            "provider capacity exhausted",
+            NEOTOMA_TEMPORARILY_UNAVAILABLE,
+        }
         iso = ""
         if auto_resume:
-            delay = parse_limit_reset_delay(stdout, stderr)
+            delay = (
+                _neotoma_retry_delay_seconds(neotoma_attempt)
+                if neotoma_attempt
+                else parse_limit_reset_delay(stdout, stderr)
+            )
             resume_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
             iso = resume_at.strftime("%Y-%m-%dT%H:%M:%SZ")
             log.warning(
@@ -16625,7 +16845,13 @@ class SwarmDispatcher:
             if auto_resume:
                 message = (
                     f"⏳ Swarm review on {t.repository}#{t.number} paused: "
-                    f"{reason}; auto-resumes at {iso}. No action needed."
+                    f"{reason}; auto-resumes at {iso}"
+                    + (
+                        f" (retry {neotoma_attempt} of {_neotoma_retry_limit()})"
+                        if neotoma_attempt
+                        else ""
+                    )
+                    + ". No action needed."
                 )
                 priority = Priority.INFO
             else:
@@ -16645,7 +16871,22 @@ class SwarmDispatcher:
         if not await self._require_github_write_credential(t.repository, "handle panel session limit"):
             return
         detail = completed_note + failed_note
-        if auto_resume:
+        if neotoma_attempt:
+            status_copy = (
+                "The agent was not run without its definition and policy. The "
+                "review will resume automatically once Neotoma answers again "
+                f"(scheduled ~`{iso}`, retry {neotoma_attempt} of "
+                f"{_neotoma_retry_limit()}); no operator action is required."
+            )
+            marker = (
+                self._REVIEW_DEFERRED_MARKER.format(iso=iso)
+                + "\n"
+                + self._NEOTOMA_DEFERRAL_MARKER.format(
+                    attempt=neotoma_attempt, head=_normalise_full_sha(t.head_sha)
+                )
+                + "\n"
+            )
+        elif auto_resume:
             status_copy = (
                 "The review will resume automatically when capacity is expected "
                 f"to return (scheduled ~`{iso}`); no operator action is required."
@@ -16678,12 +16919,20 @@ class SwarmDispatcher:
                 # post the fresh one carrying the NEW reset ISO. Deleting first
                 # also keeps the "latest live marker" invariant the sweep relies
                 # on unambiguous.
-                resp = await client.get(
-                    url, params={"per_page": 100},
-                    headers=self._github_headers(t.repository),
+                # Every page, so a marker past the first 100 comments is
+                # removed too and never outlives the fresh one.
+                # A failed page raises and skips the post below. Hitting the
+                # page cap still posts: the fresh marker is the newest, which
+                # is the one the last-write-wins sweep reads.
+                existing, complete = await self._issue_comments_scan(
+                    t.repository, t.number, client
                 )
-                resp.raise_for_status()
-                for c in resp.json():
+                if not complete:
+                    log.warning(
+                        f"[{DAEMON_NAME}] {t.repository}#{t.number}: deferral "
+                        "markers past the comment page cap were not removed"
+                    )
+                for c in existing:
                     if self._REVIEW_DEFERRED_RE.search(c.get("body", "")):
                         del_url = (
                             f"https://api.github.com/repos/{t.repository}/issues/"
