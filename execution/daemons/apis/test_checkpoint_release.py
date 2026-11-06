@@ -1172,6 +1172,11 @@ async def test_fast_successful_run_is_confirmed_after_reaching_done(
     monkeypatch.setattr(apis, "_spawn_harness_skill", succeed)
 
     result = await _resolve(brief_id, "approve")
+    # The MCP release returns once the task is accepted; the run itself is
+    # detached and checks its PR ref on a worker thread, so wait for it.
+    background = list(getattr(apis, "_background_dispatch_tasks", ()))
+    if background:
+        await asyncio.gather(*background)
 
     assert records[task_id]["snapshot"]["status"] == "done"
     assert records[task_id]["snapshot"]["result"] == _CICADA_PR_HEADER
