@@ -872,3 +872,218 @@ def test_the_approval_tool_and_apis_share_the_one_scope_reader():
     assert "review_scope.path_panel_for_pr" in inspect.getsource(tool.run)
     src = inspect.getsource(sd._REAL_PATH_REQUIRED_LENSES)
     assert "review_scope.fetch_scope" in src and "review_scope.path_panel_for_pr" in src
+
+
+# ── Apis requires the approval tool's floor as well as the path decision ───
+#
+# The tool's `--panel path` requires, on a full-panel decision, the five core
+# lenses AND its diff-derived floor (`review_panel.approval_floor`): `legal`
+# for a `LICENSE` or `package.json` change, a pre-registered contributor's
+# lens. Apis used to require only the core five, so at `APIS_PANEL_MAX=3` a
+# `LICENSE` change seated pm/arch/ux/qa/security and capped legal away, and
+# finished detection and the missing-lens sweep read that same short set.
+
+CORE_AND_LEGAL = FULL | {"legal"}
+PARENT = 7
+
+
+def _scripted_client(files, *, scope=REAL_SCOPE, issue_comments=(), open_prs=()):
+    """A GitHub stand-in for both Apis and the approval tool: the base-branch
+    scope file, the PR's file list, the default branch, the parent issue's
+    comments, and the open-PR list."""
+
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            if url.endswith("/contents/.github/review_scope.json"):
+                content = base64.b64encode(scope.encode()).decode()
+                return _Resp(200, {"type": "file", "encoding": "base64", "content": content})
+            if url.endswith(f"/pulls/{PR_NUMBER}/files"):
+                return _Resp(200, [{"filename": f} for f in files])
+            if url.endswith(f"/issues/{PARENT}/comments"):
+                return _Resp(200, [{"body": b} for b in issue_comments])
+            if url.endswith(f"/repos/{REPO}/pulls"):
+                return _Resp(200, list(open_prs))
+            if url.endswith(f"/repos/{REPO}"):
+                return _Resp(200, {"default_branch": "main"})
+            return _Resp(404, {})
+
+    return _Client
+
+
+def _pr_data(files, body=""):
+    return {"number": PR_NUMBER, "base": {"ref": "main"}, "head": {"sha": HEAD},
+            "changed_files": len(files), "body": body}
+
+
+def _script_apis(monkeypatch, files, *, body="", issue_comments=(), open_prs=()):
+    client = _scripted_client(files, issue_comments=issue_comments, open_prs=open_prs)
+
+    async def fetch_pr(self, repo, number):
+        return _pr_data(files, body)
+
+    monkeypatch.setattr(sd.httpx, "AsyncClient", client)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_fetch_pr", fetch_pr)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_github_headers", lambda self, repo=None: {})
+    monkeypatch.setattr(
+        sd.SwarmDispatcher, "_path_required_lenses", sd._REAL_PATH_REQUIRED_LENSES
+    )
+    return client
+
+
+def _tool_required(monkeypatch, files, *, body="", issue_comments=(), panel_max=6):
+    """The lens set `approve_pr_as_app.py --panel path` requires, from the
+    tool's own code against the same scripted GitHub."""
+    import approve_pr_as_app as tool
+
+    monkeypatch.setenv("APIS_PANEL_MAX", str(panel_max))
+    monkeypatch.setattr(tool, "_github_headers", lambda repo=None: {})
+    client = _scripted_client(files, issue_comments=issue_comments)()
+
+    async def go():
+        load = await tool.fetch_review_scope(client, REPO, "main")
+        decision = await review_scope.path_panel_for_pr(
+            client, api_base=tool.GITHUB_API, repo=REPO, pr=PR_NUMBER,
+            pr_data=_pr_data(files, body), headers={}, load=load,
+        )
+        lenses, _required, _excluded = await tool.resolve_path_lenses(
+            client, repo=REPO, pr=PR_NUMBER, pr_body=body, extra_lenses=[],
+            decision=decision,
+        )
+        return set(lenses)
+
+    return asyncio.run(go())
+
+
+def test_a_license_change_at_panel_max_3_seats_the_core_five_and_legal(monkeypatch):
+    # Red without the correction: required was the core five, and `select_panel`
+    # at max 3 ranked legal after them and capped it away:
+    # seated == {pm, arch, ux, qa, security}.
+    _script_apis(monkeypatch, ["LICENSE"])
+    d = _dispatcher(panel_max=3)
+    seated, required = _seated(d, ["LICENSE"])
+    assert set(required) == CORE_AND_LEGAL
+    assert seated == CORE_AND_LEGAL
+
+
+def test_a_package_json_change_seats_legal_with_the_core_five(monkeypatch):
+    # Red without the correction: required == the core five, without legal.
+    _script_apis(monkeypatch, ["package.json"])
+    d = _dispatcher(panel_max=3)
+    seated, required = _seated(d, ["package.json"])
+    assert set(required) == CORE_AND_LEGAL
+    assert CORE_AND_LEGAL <= seated
+
+
+@pytest.mark.parametrize("panel_max", [6, 3])
+@pytest.mark.parametrize(
+    "files,body,issue_comments",
+    [
+        pytest.param([FLY_RUNNER], "", (), id="code"),
+        pytest.param(["docs/notes.md"], "", (), id="docs-only"),
+        pytest.param(["LICENSE"], "", (), id="license"),
+        pytest.param(["package.json"], "", (), id="package-json"),
+        pytest.param(
+            ["docs/notes.md", "package.json", FLY_RUNNER, "LICENSE"], "", (), id="mixed"
+        ),
+        pytest.param(
+            [f"execution/daemons/apis/m{i}.py" for i in range(6)], "", (), id="six-files"
+        ),
+        pytest.param(
+            [FLY_RUNNER],
+            f"Closes #{PARENT}",
+            ("**review_expectation (legal)** — what buteo will verify",),
+            id="preregistered-contributor",
+        ),
+    ],
+)
+def test_apis_required_set_equals_the_approval_tools(
+    monkeypatch, files, body, issue_comments, panel_max
+):
+    # Red without the correction: license, package-json, mixed and
+    # preregistered-contributor differed by `legal` (Apis: the core five only).
+    _script_apis(monkeypatch, files, body=body, issue_comments=issue_comments)
+    d = _dispatcher(panel_max=panel_max)
+    trigger = _trigger()
+    apis = set(asyncio.run(d._path_required_lenses(trigger)))
+    tool = _tool_required(
+        monkeypatch, files, body=body, issue_comments=issue_comments, panel_max=panel_max
+    )
+    assert apis == tool
+    seated = {
+        lens.lens
+        for lens in select_panel(set(), files, panel_max, required_lenses=apis)
+    }
+    assert tool <= seated, "no required lens is capped away"
+
+
+def test_core_verdicts_without_legal_are_not_finished_and_recovery_seats_legal(
+    monkeypatch,
+):
+    # Red without the correction: legal was not required, so the five core
+    # verdicts read as a finished panel and the sweep found nothing to re-run.
+    comments = [_lens_comment(lens) for lens in sorted(FULL)]
+    pr = {"number": PR_NUMBER, "draft": False, "head": {"sha": HEAD, "ref": "f"},
+          "base": {"ref": "main"}, "title": "t", "user": {"login": "x"}, "body": ""}
+    _script_apis(monkeypatch, ["LICENSE"], open_prs=[pr])
+    d = _dispatcher(panel_max=3)
+    state = {"comments": comments}
+
+    async def scoped(self, repository, number, client):
+        return state["comments"]
+
+    async def files(self, trigger):
+        return ["LICENSE"]
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_lens_scoped_comments", scoped)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_changed_files", files)
+    assert asyncio.run(d._panel_finished_for_pr(_trigger())) is False
+    state["comments"] = comments + [_aggregation()]
+    assert asyncio.run(d._panel_finished_for_pr(_trigger())) is False
+    out = asyncio.run(d._prs_with_missing_lens(REPO))
+    assert [(p["number"], lenses) for p, lenses in out] == [(PR_NUMBER, ["legal"])]
+    state["comments"] = comments + [_lens_comment("legal"), _aggregation()]
+    assert asyncio.run(d._panel_finished_for_pr(_trigger())) is True
+
+
+def test_an_unreadable_required_set_seats_every_requirable_lens(monkeypatch):
+    # Red without the correction: the fallback was the core five, without legal.
+    async def fetch_pr(self, repo, number):
+        return None
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_fetch_pr", fetch_pr)
+    monkeypatch.setattr(
+        sd.SwarmDispatcher, "_path_required_lenses", sd._REAL_PATH_REQUIRED_LENSES
+    )
+    required = asyncio.run(_dispatcher()._path_required_lenses(_trigger()))
+    assert set(required) == CORE_AND_LEGAL
+    assert "content" not in required
+
+
+def test_the_approval_tool_and_apis_share_the_floor_and_contributor_reader():
+    import approve_pr_as_app as tool
+    import inspect
+
+    import review_panel
+
+    assert "review_panel.approval_floor" in inspect.getsource(tool.derive_required_lenses)
+    assert "review_panel.fetch_gate_contributors" in inspect.getsource(
+        tool._preregistered_gate_contributors
+    )
+    assert tool.BOOTSTRAP_EXCLUDED_LENSES is review_panel.APPROVAL_EXCLUDED_LENSES
+    assert tool._EXPECTATION_MARKER_RE is review_panel._EXPECTATION_MARKER_RE
+    # The shared marker reader matches what Apis posts.
+    assert f"**{sd.EXPECTATION_MARKER} (" in "**review_expectation (legal)**"
+    assert review_panel.gate_contributors_from_comments(
+        [f"**{sd.EXPECTATION_MARKER} (legal)** — what Buteo will verify"]
+    ) == {"buteo"}
+    src = inspect.getsource(sd._REAL_PATH_REQUIRED_LENSES)
+    assert "review_panel.approval_required_lenses" in src

@@ -230,9 +230,9 @@ import review_carry  # noqa: E402
 import review_rounds  # noqa: E402
 import review_scope  # noqa: E402
 import lens_authors  # noqa: E402
+import review_panel  # noqa: E402
 from review_panel import LENSES, Lens, select_panel  # noqa: E402
 from swarm_dispatch import (  # noqa: E402
-    EXPECTATION_MARKER,
     SwarmDispatcher,
     _mint_reviewer_app_installation_token,
     _normalise_full_sha,
@@ -309,7 +309,7 @@ BOOTSTRAP_PANEL_LENSES: frozenset[str] = review_scope.FULL_PANEL_LENSES
 # (rather than inlined into resolve_lenses) so a future bootstrap-only
 # exclusion has an obvious place to be added, and so tests can pin the exact
 # set the way TestBootstrapPanelLensesConstant already pins the roster.
-BOOTSTRAP_EXCLUDED_LENSES: frozenset[str] = frozenset({"content"})
+BOOTSTRAP_EXCLUDED_LENSES: frozenset[str] = review_panel.APPROVAL_EXCLUDED_LENSES
 
 _FAILING_CHECK_CONCLUSIONS = ("failure", "timed_out", "cancelled", "action_required")
 
@@ -353,11 +353,8 @@ _GITHUB_HOSTED_LABEL_RE = re.compile(
 
 GITHUB_API = "https://api.github.com"
 
-_EXPECTATION_MARKER_RE = re.compile(
-    rf"\*\*{EXPECTATION_MARKER} \((?P<lens>[\w-]+)\)\*\* — what "
-    r"(?P<agent>\w+) will verify",
-    re.I,
-)
+# The one pre-registration marker reader, shared with Apis (`review_panel`).
+_EXPECTATION_MARKER_RE = review_panel._EXPECTATION_MARKER_RE
 
 
 def _github_headers(repo: str | None = None) -> dict[str, str]:
@@ -584,32 +581,17 @@ async def fetch_review_scope(
 async def _preregistered_gate_contributors(
     client: httpx.AsyncClient, repo: str, issue_number: int
 ) -> set[str]:
-    """Agents that pre-registered a review_expectation on the parent issue.
-
-    Same marker and same regex `swarm_dispatch._preregistered_expectations`
-    reads (`EXPECTATION_MARKER`, imported, not retyped) — reproduced here
-    rather than calling the dispatcher method directly because that method is
-    an instance method requiring a live `SwarmDispatcher` (Notifier, gws
-    config, …) this standalone tool has no reason to construct.
-    """
-    out: set[str] = set()
-    page = 1
-    while True:
-        resp = await client.get(
-            f"{GITHUB_API}/repos/{repo}/issues/{issue_number}/comments",
-            headers=_github_headers(repo),
-            params={"per_page": 100, "page": page},
-        )
-        resp.raise_for_status()
-        rows = resp.json() or []
-        for c in rows:
-            m = _EXPECTATION_MARKER_RE.search(c.get("body") or "")
-            if m:
-                out.add(m.group("agent").lower())
-        if len(rows) < 100:
-            break
-        page += 1
-    return out
+    """Agents that pre-registered a review_expectation on the parent issue,
+    over every comment page: the shared reader
+    `review_panel.fetch_gate_contributors`, which Apis's required set uses
+    too. Raises on an HTTP error."""
+    return await review_panel.fetch_gate_contributors(
+        client,
+        api_base=GITHUB_API,
+        repo=repo,
+        issue_number=issue_number,
+        headers=_github_headers(repo),
+    )
 
 
 def _why_lens_selected(lens: Lens, *, changed_files: list[str], gate_contributors: set[str]) -> str:
@@ -750,20 +732,11 @@ async def derive_required_lenses(
     if parent_issue is not None:
         gate_contributors = await _preregistered_gate_contributors(client, repo, parent_issue)
 
-    panel = select_panel(
-        gate_contributors=gate_contributors,
-        changed_files=changed_files,
-        max_panel=panel_max,
-    )
-
-    # Defense in depth: union the always-on floor back in by lens name, in
-    # case select_panel's own behaviour ever changes. Order: always-on
-    # lenses first (they are the true floor), then whatever select_panel
-    # additionally selected, deduplicated by lens name.
-    by_name: dict[str, Lens] = {lens.lens: lens for lens in _always_required_lenses()}
-    for lens in panel:
-        by_name.setdefault(lens.lens, lens)
-
+    # `review_panel.approval_floor`: `select_panel` with the always-on floor
+    # unioned back in by name, in case select_panel's own behaviour ever
+    # changes. Always-on lenses first, then whatever select_panel additionally
+    # selected. Apis derives its required set from the same function
+    # (`review_panel.approval_required_lenses`).
     return [
         RequiredLens(
             lens.lens,
@@ -771,7 +744,7 @@ async def derive_required_lenses(
                 lens, changed_files=changed_files, gate_contributors=gate_contributors
             ),
         )
-        for lens in by_name.values()
+        for lens in review_panel.approval_floor(gate_contributors, changed_files, panel_max)
     ]
 
 

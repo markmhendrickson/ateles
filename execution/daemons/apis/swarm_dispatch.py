@@ -91,6 +91,7 @@ from review_learning import (
     parse_findings,
     propose_skill_updates,
 )
+import review_panel
 from review_panel import (
     LENSES,
     Lens,
@@ -14015,16 +14016,25 @@ class SwarmDispatcher:
         return await send(url, headers=headers, **kwargs)
 
     async def _path_required_lenses(self, t: SwarmTrigger) -> frozenset[str]:
-        """The lenses the panel-gated approval tool will require for this PR at
-        this head (`approve_pr_as_app.py --panel path`), by changed path.
+        """Every lens the panel-gated approval tool will require for this PR at
+        this head (`approve_pr_as_app.py --panel path`): the path decision's
+        lenses AND, on a full-panel decision, the tool's diff-derived floor
+        (`legal` for a `LICENSE` or `package.json` change, a pre-registered
+        contributor's lens).
 
-        Read and decided by the tool's own code, `review_scope.fetch_scope` and
-        `review_scope.path_panel_for_pr`: the scope file from the PR's BASE
-        branch, every changed path (renames count both sides), and the same
-        fail-closed rules. A missing, unreadable or malformed scope file, an
-        unreadable PR or file list, or any error here is the FULL panel, never a
-        smaller one; one log line names the reason. Seated by `select_panel`
-        alongside its own picks, so Apis never runs a panel whose approval the
+        Read and decided by the tool's own code: `review_scope.fetch_scope` and
+        `review_scope.path_panel_for_pr` for the path decision (the scope file
+        from the PR's BASE branch, every changed path with renames counting both
+        sides), `review_scope.fetch_pr_files` and
+        `review_panel.fetch_gate_contributors` for the floor's inputs, and
+        `review_panel.approval_required_lenses` for the set, at this daemon's
+        `panel_max` (the tool's `APIS_PANEL_MAX`). A missing, unreadable or
+        malformed scope file is the full panel; an unreadable PR, file list or
+        parent issue, or any error here, is every lens the tool could require
+        (`review_panel.every_requirable_lens`), never a smaller set; one log
+        line names the reason. Seated by `select_panel` alongside its own
+        picks, never capped away, and read by finished detection and the
+        missing-lens sweep, so Apis never finishes a panel whose approval the
         tool must refuse for a lens that was never seated.
         """
         ref = f"{t.repository}#{t.number}"
@@ -14033,25 +14043,49 @@ class SwarmDispatcher:
             if not isinstance(pr_data, dict):
                 raise RuntimeError("the PR could not be read")
             headers = self._github_headers(t.repository)
+            api_base = "https://api.github.com"
             base_ref = str((pr_data.get("base") or {}).get("ref") or "")
             async with httpx.AsyncClient(timeout=30) as client:
                 load = await review_scope.fetch_scope(
-                    client, api_base="https://api.github.com",
+                    client, api_base=api_base,
                     repo=t.repository, base_ref=base_ref, headers=headers,
                 )
                 decision = await review_scope.path_panel_for_pr(
-                    client, api_base="https://api.github.com",
+                    client, api_base=api_base,
                     repo=t.repository, pr=t.number, pr_data=pr_data,
                     headers=headers, load=load,
                 )
-        except Exception as exc:  # noqa: BLE001 — unknown: the full panel
+                changed_files: list[str] = []
+                contributors: set[str] = set()
+                if decision.full:
+                    # The tool's floor inputs, read the way the tool reads
+                    # them; a failed read raises into the fail-closed branch.
+                    changed_files, _rows = await review_scope.fetch_pr_files(
+                        client, api_base=api_base, repo=t.repository,
+                        pr=t.number, headers=headers,
+                    )
+                    parent = self._parent_issue_number(
+                        str(pr_data.get("body") or ""), t.repository
+                    )
+                    if parent is not None:
+                        contributors = await review_panel.fetch_gate_contributors(
+                            client, api_base=api_base, repo=t.repository,
+                            issue_number=parent, headers=headers,
+                        )
+            lenses = review_panel.approval_required_lenses(
+                decision,
+                gate_contributors=contributors,
+                changed_files=changed_files,
+                max_panel=self.config.panel_max,
+            )
+        except Exception as exc:  # noqa: BLE001 — unknown: every requirable lens
+            lenses = review_panel.every_requirable_lens()
             log.warning(
                 f"[{DAEMON_NAME}] {ref}: required panel unreadable "
-                f"({type(exc).__name__}: {exc}) — seating the full panel "
-                f"{sorted(review_scope.FULL_PANEL_LENSES)}"
+                f"({type(exc).__name__}: {exc}) — seating every lens the "
+                f"approval tool could require {sorted(lenses)}"
             )
-            return review_scope.FULL_PANEL_LENSES
-        lenses = review_scope.required_lenses(decision)
+            return lenses
         if load.scope is None:
             log.warning(
                 f"[{DAEMON_NAME}] {ref}: scope file unusable ({load.error}) — "
