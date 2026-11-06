@@ -125,6 +125,28 @@ def klass(b, t, newer=False):
             dq.LIVE_SESSION_OWNED,
         ),
         (brief(), task(owner="root01a18247 sole coordinator"), dq.LIVE_SESSION_OWNED),
+        # The assignee decides ownership, as it does for the dispatcher's router.
+        (brief(), task(assigned_to="Codex session billing"), dq.LIVE_SESSION_OWNED),
+        (
+            brief(),
+            task(assigned_to="apis@ateles-swarm", owner="Codex session"),
+            dq.LIVE_SESSION_OWNED,
+        ),
+        (brief(), task(assigned_to="cicada", owner="Codex session"), dq.LIVE_LOW),
+        # One marker word in a name does not make a session.
+        (brief(), task(owner="Claude Martin"), dq.LIVE_LOW),
+        (brief(), task(owner="Session Bank"), dq.LIVE_LOW),
+        (brief(), task(owner=123, assigned_to=456), dq.LIVE_LOW),
+        # So a real decision is no longer filed away under a person's name.
+        (
+            brief(
+                reason=UNSCORED_HIGH,
+                blast_radius="high",
+                plan_summary="Action: payment.",
+            ),
+            task(owner="Claude Martin", blocked_reason=UNSCORED_HIGH),
+            dq.LIVE_EFFECT,
+        ),
         (
             brief(
                 reason=UNSCORED_HIGH,

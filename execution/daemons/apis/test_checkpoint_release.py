@@ -2405,6 +2405,48 @@ async def test_confidence_lowered_after_approval_regates_even_if_revision_unchan
     assert brief["status"] == "approved_requires_fresh_approval"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dispatcher", ["apis", " APIS ", "Apis@ateles-swarm"])
+async def test_approved_hold_on_a_task_assigned_to_the_dispatcher_releases(
+    monkeypatch, release_store, dispatcher
+):
+    """`dispatch_task` routes it by its tags and holds it as that agent's work.
+
+    The release re-check read the dispatcher's name as the skill, found no such
+    agent's prior, and so saw a different action type from the one the hold bound:
+    an approved task could never release, and came back as a fresh checkpoint.
+    """
+    records, brief_id, task_id = release_store
+    task = records[task_id]["snapshot"]
+    task.pop("action_type", None)
+    task.update({"assigned_to": dispatcher, "tags": ["engineering"]})
+    policy = ExecutionPolicy(
+        entity_id="default",
+        confidence_threshold=0.2,
+        high_blast_action_types=frozenset({"open_or_merge_pr"}),
+        low_blast_action_types=frozenset({"local_edit"}),
+        loaded=True,
+    )
+    assert apis._task_gate_context(task)[1] == "open_or_merge_pr"
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type="open_or_merge_pr",
+        policy=policy,
+        declared=False,
+    )
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "approved"
+    dispatches = _spy_dispatch(monkeypatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is True
+    assert len(dispatches) == 1
+
+
 def test_replacement_checkpoint_for_unscored_task_carries_the_hold_estimate(
     monkeypatch,
 ):

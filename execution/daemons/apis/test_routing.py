@@ -7,6 +7,8 @@ Run with: pytest execution/daemons/apis/test_routing.py -v
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from routing import (
@@ -624,6 +626,53 @@ def test_router_and_shared_reader_agree_on_every_assignee_and_owner(tags) -> Non
         for owner in _PARITY_OWNERS
         if (resolve_skill(tags, assigned_to=form, owner=owner) == SESSION_OWNED)
         != session_owned(assignee, owner)
+    ]
+    assert disagreements == []
+
+
+@pytest.mark.parametrize("tags", [[], ["ops"]])
+def test_router_and_decision_queue_agree_on_every_assignee_and_owner(
+    tags, monkeypatch
+) -> None:
+    """The operator's daily count must not disagree with the dispatcher.
+
+    A hold on a task the router leaves to a session is that session's, not a
+    decision waiting on the operator, and a hold on anyone else's task is not to
+    be filed away as a session's. The queue reads the raw stored values.
+    """
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "scripts"))
+    import decision_queue as dq
+    from routing import ASSIGNED_TO_ROUTES, SESSION_OWNED
+
+    reason = dq.AUTOMATIC_REASON_PREFIXES[0]
+    brief = {
+        "handler": dq.GATE_HANDLER,
+        "checkpoint_name": dq.GATE_CHECKPOINT_NAME,
+        "gate_action": sorted(dq.GATE_ACTIONS)[0],
+        "reason": reason,
+    }
+
+    def queue_says_session(assignee, owner) -> bool:
+        task = {
+            "status": "awaiting_approval",
+            "blocked_reason": reason,
+            "title": "Tidy a helper",
+            "assigned_to": assignee,
+            "owner": owner,
+        }
+        return (
+            dq.classify_one(
+                brief, task, has_newer_open=False, person_owners=frozenset()
+            )
+            == dq.LIVE_SESSION_OWNED
+        )
+
+    disagreements = [
+        (assignee, owner)
+        for assignee in (*_PARITY_ASSIGNEES, *sorted(ASSIGNED_TO_ROUTES))
+        for owner in _PARITY_OWNERS
+        if (resolve_skill(tags, assigned_to=assignee, owner=owner) == SESSION_OWNED)
+        != queue_says_session(assignee, owner)
     ]
     assert disagreements == []
 
