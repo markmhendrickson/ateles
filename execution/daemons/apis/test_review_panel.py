@@ -1,6 +1,10 @@
 """Tests for review panel selection (neotoma#1640) and the shift-left
 expectation pass (ateles#81)."""
 
+from pathlib import Path
+
+import pytest
+
 from review_panel import LENSES, select_expectation_agents, select_panel
 
 
@@ -1087,3 +1091,49 @@ def test_the_approval_tool_and_apis_share_the_floor_and_contributor_reader():
     ) == {"buteo"}
     src = inspect.getsource(sd._REAL_PATH_REQUIRED_LENSES)
     assert "review_panel.approval_required_lenses" in src
+
+
+# ── Security concerns end proven, disproven, or unsettled ───────────────
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _normalized(text):
+    return " ".join(text.split())
+
+
+def test_apis_security_brief_requires_the_three_concern_outcomes():
+    security = next(lens for lens in LENSES if lens.lens == "security")
+    brief = _normalized(security.checks)
+    assert "Every concern must end in one of three states before your verdict" in brief
+    # Proven: a closed code path counts as proof, and it blocks.
+    assert "traced through a fully closed code path" in brief
+    assert "is CONFIRMED: block on it" in brief
+    # Disproven: dropped from the findings, with the checking shown.
+    assert (
+        "A concern you checked and refuted is dropped from the findings and "
+        "listed with what you checked" in brief
+    )
+    # Unsettled: only after trying, as a COMMENT saying what would settle it.
+    assert "tried and truly cannot settle" in brief
+    assert "give a COMMENT verdict" in brief
+    assert "what would settle it" in brief
+    # The earlier rule let an argued break pass with no verdict consequence.
+    assert "PLAUSIBLE and do not block" not in brief
+
+
+@pytest.mark.parametrize(
+    "document", ["docs/agents/falco.md", ".claude/skills/falco/SKILL.md"]
+)
+def test_falco_prompt_mirrors_map_each_outcome_to_its_verdict(document):
+    text = _normalized((_REPO_ROOT / document).read_text(encoding="utf-8"))
+    assert "must end in one of three states" in text
+    assert "A CONFIRMED break is `[BLOCKING]`, and your verdict is `REQUEST_CHANGES`" in text
+    assert "list it under **Checked and disproven**" in text
+    assert "It doesn't stand in the way of `APPROVE`" in text
+    assert "A PLAUSIBLE finding is marked `[NON-BLOCKING]`, and your verdict is `COMMENT`" in text
+    assert "A `COMMENT` still holds the merge" in text
+    assert (
+        "`REQUEST_CHANGES` on any CONFIRMED break; otherwise `COMMENT` only if "
+        "a concern truly can't be settled" in text
+    )
