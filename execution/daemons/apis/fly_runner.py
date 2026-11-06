@@ -1940,9 +1940,22 @@ def runner_argv(provider: str, cmd: list[str], mcp_config_path: str | None) -> l
     the Mac's temporary MCP config path (which may name the shared bearer)
     replaced by a placeholder ``run_job.py`` fills from the role's own token."""
     argv = [RUNNER_BINARIES[provider], *cmd[1:]]
-    if mcp_config_path:
-        argv = [MCP_CONFIG_PLACEHOLDER if a == mcp_config_path else a for a in argv]
+    slot = mcp_config_slot(argv, mcp_config_path)
+    if slot is not None:
+        argv[slot] = MCP_CONFIG_PLACEHOLDER
     return argv
+
+
+def mcp_config_slot(argv: list[str], mcp_config_path: str | None) -> int | None:
+    """The index of the ``--mcp-config`` flag's value when that value is
+    *mcp_config_path*, else ``None``. The path in any other position is no
+    slot: ``run_job.py`` supplies the config only through that flag."""
+    if not mcp_config_path:
+        return None
+    for i in range(1, len(argv) - 1):
+        if argv[i] == "--mcp-config" and argv[i + 1] == mcp_config_path:
+            return i + 1
+    return None
 
 
 # Providers whose CLI reaches Neotoma on Fly through the runner's loopback
@@ -2014,6 +2027,100 @@ def role_jwk_path(role: str) -> Path | None:
         return None
     path = Path(keys_dir) / f"{role}.jwk.json"
     return path if path.is_file() else None
+
+
+# How long `role_admission` trusts Neotoma's answer for one role key. A
+# refusal is re-checked sooner, so a newly activated grant is seen quickly.
+ADMISSION_ADMITTED_TTL_SECONDS = 600.0
+ADMISSION_REFUSED_TTL_SECONDS = 60.0
+ADMISSION_TIMEOUT_SECONDS = 5.0
+# The same short, safe label shape the runner's proxy repeats from Neotoma.
+_SAFE_ADMISSION_REASON = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+# (role, key thumbprint, Neotoma base URL) -> (expires_at, admitted, reason)
+_ADMISSION_CACHE: dict[tuple[str, str, str], tuple[float, bool, str]] = {}
+_ADMISSION_LOCK = threading.Lock()
+
+
+def _admission_http_client() -> httpx.Client:
+    """The client `role_admission` uses when none is given (tests replace it)."""
+    return httpx.Client(timeout=ADMISSION_TIMEOUT_SECONDS, follow_redirects=False)
+
+
+def _httpsig():
+    try:  # package import (daemon runtime) with script-import fallback
+        from lib.daemon_runtime import aauth_httpsig
+    except ImportError:  # pragma: no cover
+        import aauth_httpsig  # type: ignore
+    return aauth_httpsig
+
+
+def role_admission(role: str, jwk: dict, base_url: str, *, client: httpx.Client | None = None,
+                   clock: Callable[[], float] = time.time) -> tuple[bool, str]:  # fmt: skip
+    """Whether Neotoma admits *role*'s AAuth key: an active ``agent_grant``
+    pins it. Asked from the Mac with a signed ``GET /session``, so a job whose
+    key would be refused on the runner never launches.
+
+    Returns ``(admitted, reason)``. Cached per role, key and Neotoma instance
+    (*base_url*): an admission for
+    ``ADMISSION_ADMITTED_TTL_SECONDS``, a refusal for
+    ``ADMISSION_REFUSED_TTL_SECONDS``. A network failure, a 5xx or a 429 is
+    never cached. It blocks for up to ``ADMISSION_TIMEOUT_SECONDS``, so an
+    async caller runs ``build_job`` in a thread. The
+    reason is Neotoma's ``admission_reason`` when it is a short safe label,
+    never header or key material."""
+    httpsig = _httpsig()
+    try:
+        cache_key = (role, httpsig.jwk_thumbprint(httpsig.public_part_of(jwk)),
+                     base_url.rstrip("/"))
+    except (KeyError, httpsig.AAuthSigningError):
+        return False, "the role key has no public thumbprint"
+    now = clock()
+    with _ADMISSION_LOCK:
+        cached = _ADMISSION_CACHE.get(cache_key)
+    if cached is not None and now < cached[0]:
+        return cached[1], cached[2]
+    url = f"{base_url.rstrip('/')}/session"
+    try:
+        signer = httpsig.HttpSigSigner(
+            private_jwk=jwk, sub=str(jwk["sub"]),  # checked by `_validated_role_jwk`
+            iss=str(jwk.get("iss") or httpsig.DEFAULT_AAUTH_ISSUER),
+            kid=str(jwk.get("kid") or "").strip() or None,
+        )  # fmt: skip
+        headers = signer.sign_headers(method="GET", url=url, body=None, content_type=None)
+    except Exception as exc:  # noqa: BLE001 -- never echo key material
+        return False, f"the role key could not sign ({type(exc).__name__})"
+    http = client if client is not None else _admission_http_client()
+    try:
+        resp = http.request("GET", url, headers={"accept": "application/json", **headers})
+    except httpx.HTTPError:
+        return False, "Neotoma unreachable"
+    finally:
+        if client is None:
+            http.close()
+    admitted, reason = False, f"Neotoma /session answered {resp.status_code}"
+    if resp.status_code == 200:
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        aauth = data.get("aauth") if isinstance(data, dict) else None
+        raw = aauth.get("admission_reason") if isinstance(aauth, dict) else None
+        if raw is None and isinstance(data, dict):
+            raw = data.get("admission_reason")
+        admitted = isinstance(aauth, dict) and aauth.get("admitted") is True
+        if admitted:
+            reason = ""
+        elif raw is None:
+            reason = "Neotoma /session returned no readable admission decision"
+        else:
+            reason = raw if isinstance(raw, str) and _SAFE_ADMISSION_REASON.fullmatch(raw) \
+                else "unrecognized"
+    if resp.status_code >= 500 or resp.status_code == 429:
+        return False, reason  # a passing outage, like a network error: not cached
+    ttl = ADMISSION_ADMITTED_TTL_SECONDS if admitted else ADMISSION_REFUSED_TTL_SECONDS
+    with _ADMISSION_LOCK:
+        _ADMISSION_CACHE[cache_key] = (now + ttl, admitted, reason)
+    return admitted, reason
 
 
 def _validated_role_jwk(role: str, jwk: Any) -> bool:
@@ -2161,6 +2268,30 @@ def build_job(
     base_url = os.environ.get("NEOTOMA_BASE_URL", "").strip().rstrip("/")
     if not base_url.startswith("https://"):
         raise FlyIneligible("NEOTOMA_BASE_URL must be an https URL for a Fly run")
+    # A role granted Neotoma tools goes to Fly only when its tools can be
+    # given there: through the signing proxy with a key Neotoma admits, or the
+    # legacy own token on Claude. A seated run gets no Neotoma tools on Fly
+    # (see `without_neotoma_mcp`), so it is not judged here.
+    if neotoma_tools_granted and not owns_pending_gate:
+        # Both paths give the tools through the CLI's MCP config slot, which
+        # `runner_argv` turns into the placeholder the runner fills. A local
+        # config-write failure leaves no slot, and the job would run toolless.
+        if provider == "claude" and mcp_config_slot(cmd, mcp_config_path) is None:
+            raise FlyIneligible(
+                f"role {role!r} is granted Neotoma tools but its MCP config could not be "
+                "provided (no --mcp-config slot)")
+        if jwk_text:
+            if provider not in FLY_NEOTOMA_PROXY_PROVIDERS:
+                raise FlyIneligible(
+                    f"the Fly runner cannot yet give a {provider} job its Neotoma tools")
+            admitted, reason = role_admission(role, jwk, base_url)
+            if not admitted:
+                raise FlyIneligible(
+                    f"role {role!r}'s AAuth key is not admitted by Neotoma ({reason})")
+        elif not (own_token and provider == "claude"):
+            raise FlyIneligible(
+                f"role {role!r} is granted Neotoma tools but has no AAuth key or own "
+                "Neotoma identity")
 
     probe = list(dict.fromkeys([
         "NEOTOMA_BEARER_TOKEN", "TELEGRAM_BOT_TOKEN", "APIS_GITHUB_WEBHOOK_SECRET",
