@@ -2748,6 +2748,60 @@ def _requested_model(provider: str, cmd: list[str]) -> str | None:
     return None
 
 
+# ── Agent git identity for fix rounds ─────────────────────────────────────────
+# A fix round commits and pushes from a child whose HOME (and so ~/.gitconfig)
+# is the host's, so without this its commits carry the host owner's name and
+# email and are signed with the host owner's key. The agent identity comes from
+# the same configuration Apus already commits under; the name falls back to the
+# agent login exactly as there, the email has no fallback. Without an email the
+# fix round is refused rather than run under the host identity.
+AGENT_GIT_NAME_ENV = "ATELES_AGENT_GIT_NAME"
+AGENT_GIT_EMAIL_ENV = "ATELES_AGENT_GIT_EMAIL"
+_AGENT_GIT_DEFAULT_NAME = "ateles-agent"
+AGENT_GIT_IDENTITY_MISSING = (
+    f"no agent git identity configured ({AGENT_GIT_EMAIL_ENV} is unset): a fix "
+    "round would commit under the host's git identity, so it was refused"
+)
+
+
+def agent_git_identity_env(environ: dict[str, str] | None = None) -> dict[str, str] | None:
+    """The author and committer a fix-round child commits as, or None when no
+    agent identity is configured. Never reads the host's git configuration."""
+    source = os.environ if environ is None else environ
+    email = source.get(AGENT_GIT_EMAIL_ENV, "").strip()
+    if not email:
+        return None
+    name = source.get(AGENT_GIT_NAME_ENV, "").strip() or _AGENT_GIT_DEFAULT_NAME
+    return {
+        "GIT_AUTHOR_NAME": name,
+        "GIT_AUTHOR_EMAIL": email,
+        "GIT_COMMITTER_NAME": name,
+        "GIT_COMMITTER_EMAIL": email,
+    }
+
+
+def apply_agent_git_identity(env: dict[str, str], identity: dict[str, str]) -> None:
+    """Set *identity* on a child environment and turn commit and tag signing off.
+
+    Signing is disabled through ``GIT_CONFIG_COUNT`` entries, which git reads
+    above every configuration file, so a ``commit.gpgsign`` in the host's
+    global or the repository's local configuration cannot sign with a personal
+    key. Entries already present (local review sets some) are kept.
+    """
+    env.update(identity)
+    try:
+        count = int(env.get("GIT_CONFIG_COUNT", "0") or "0")
+    except ValueError:
+        # git rejects a non-numeric count outright, so no entry under it was
+        # ever in effect; replacing it with a valid count loses nothing.
+        count = 0
+    for key, value in (("commit.gpgsign", "false"), ("tag.gpgsign", "false")):
+        env[f"GIT_CONFIG_KEY_{count}"] = key
+        env[f"GIT_CONFIG_VALUE_{count}"] = value
+        count += 1
+    env["GIT_CONFIG_COUNT"] = str(count)
+
+
 def _subscription_only_env(
     env_extra: dict[str, str] | None = None,
     *,
@@ -2914,9 +2968,14 @@ async def _run_skill_once(
     repository: str = "",
     local_fallback_check=None,
     fly_delivery: dict | None = None,
+    agent_git_env: dict[str, str] | None = None,
 ) -> SkillResult:
     """
     Run one T4 agent to completion and return its output.
+
+    ``agent_git_env``: the agent's git author/committer (from
+    ``agent_git_identity_env``), set on the child with signing turned off.
+    ``run_skill`` supplies it only for a fix round; None leaves git untouched.
 
     ``runner`` / ``repository`` (ateles#1456): which executor runs the CLI.
     ``None`` (every call site that predates this) runs locally unless the
@@ -3822,6 +3881,8 @@ async def _run_skill_once(
     if github_token:
         subprocess_env["GITHUB_TOKEN"] = github_token
         subprocess_env["GH_TOKEN"] = github_token
+    if agent_git_env:
+        apply_agent_git_identity(subprocess_env, agent_git_env)
 
     # Stage 3 (ateles#94): inject the Neotoma AAuth client signer env vars so
     # the dispatched child can sign its own Neotoma writes as <role>@ateles-swarm.
@@ -4652,8 +4713,15 @@ async def run_skill(
     runner: str | None = None,
     repository: str = "",
     fly_delivery: dict | None = None,
+    agent_git_identity: bool = False,
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
+
+    ``agent_git_identity``: True for a fix round (a run that commits and
+    pushes to an existing pull request). The child commits as the configured
+    agent identity with signing off; with none configured the run is refused
+    before any provider is tried, so it never falls through to the host's git
+    identity. False leaves the child's environment exactly as before.
 
     ``runner`` / ``repository``: forwarded to every ``_run_skill_once``
     attempt; see that function (ateles#1456, the Fly executor).
@@ -4742,6 +4810,12 @@ async def run_skill(
     exactly as before.
     """
     model = model_tiering.validate_model_selector(model)
+    agent_git_env: dict[str, str] | None = None
+    if agent_git_identity:
+        agent_git_env = agent_git_identity_env()
+        if agent_git_env is None:
+            log.error(f"[apis] {skill}: {AGENT_GIT_IDENTITY_MISSING}")
+            return SkillResult(skill, False, None, "", "", error=AGENT_GIT_IDENTITY_MISSING)
     # One control, two reasons to apply it. The internal name stays
     # `owns_pending_gate` because `_run_skill_once`/`_run_provider_attempts`
     # use it only for the deny and deny-capable routing.
@@ -4797,6 +4871,7 @@ async def run_skill(
             model=fallback_model or model,
             precomputed_tier=precomputed_tier,
             inference_only=inference_only,
+            agent_git_env=agent_git_env,
             runner=runner,
             repository=repository,
             fly_delivery=fly_delivery,

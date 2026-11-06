@@ -5450,6 +5450,8 @@ class SwarmDispatcher:
                             trigger,
                             prior_attempt_failed=attempts > 0 or prior_fix_rounds > 0,
                         ),
+                        # A resumed fix round: commits as the agent, unsigned.
+                        agent_git_identity=True,
                     )
                     if not result.ok:
                         raise RuntimeError(
@@ -9380,6 +9382,8 @@ class SwarmDispatcher:
             # security finding makes it a security fix, which stays on top.
             action_class=model_tiering.repair_action_class(set(by_lens)),
             escalation_signals=fix_signals,
+            # Commits as the agent, unsigned; refused with no identity.
+            agent_git_identity=True,
         )
         # An auth-expired claude call can exit 0 with the 401 in stdout, so a
         # bare `ok` is not enough — reframe an auth failure as an infra page.
@@ -9944,6 +9948,8 @@ class SwarmDispatcher:
             work_class="ci_log_triage",
             action_class=model_tiering.ACTION_CI_LOG_TRIAGE,
             escalation_signals=ci_signals,
+            # Commits as the agent, unsigned; refused with no identity.
+            agent_git_identity=True,
         )
         if detect_auth_failure(cicada_result.stdout, cicada_result.stderr):
             await self._handle_panel_auth_failure(trigger, "cicada")
