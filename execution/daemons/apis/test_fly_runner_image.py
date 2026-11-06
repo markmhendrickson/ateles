@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -458,6 +459,151 @@ class TestRunJob:
         text, truncated = run_job.cap_stdout(data)
         assert truncated and text.endswith("VERDICT")
         assert len(text.encode()) == run_job.STDOUT_CAP_BYTES
+
+
+# ── Neotoma signing proxy for a key-only Claude job (slice 3c) ───────────────
+
+
+class _FakeProxyModule:
+    """Stands in for neotoma_proxy: records construction, start and stop."""
+
+    def __init__(self, health=None, port=43210):
+        self.health, self.port = health, port
+        self.constructed, self.stopped, self.signs = [], [], []
+        module = self
+
+        class Proxy:
+            def __init__(self, upstream_base, sign, *, allowed_peer_uid=None, **kw):
+                module.constructed.append((upstream_base, allowed_peer_uid))
+                module.signs.append(sign)
+
+            def start(self):
+                return module.port
+
+            def stop(self):
+                module.stopped.append(True)
+
+        self.NeotomaSigningProxy = Proxy
+
+    def health_check(self, upstream_base, sign):
+        return self.health
+
+
+_PROXY_ARGV = ["claude", "--print", "--mcp-config", run_job.MCP_CONFIG_PLACEHOLDER, "--other"]
+
+
+@pytest.fixture
+def proxy_job(tmp_path, monkeypatch):
+    pytest.importorskip("cryptography")
+    pytest.importorskip("jwt")
+    for name in run_job.DEFAULT_PROBE_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    job_dir = tmp_path / "job"
+    _write_job(job_dir, secrets={"NEOTOMA_AAUTH_PRIVATE_JWK": json.dumps(_test_jwk())},
+               spec={"neotoma_mcp": "proxy"}, argv=list(_PROXY_ARGV))  # fmt: skip
+    return job_dir
+
+
+def _use_proxy(monkeypatch, module, *, ident=(os.getuid(), os.getgid())):
+    monkeypatch.setattr(run_job, "_neotoma_proxy", lambda: module)
+    monkeypatch.setattr(run_job, "child_identity", lambda name: ident)
+
+
+class TestNeotomaProxyJob:
+    def test_neotoma_mcp_must_be_empty_or_proxy(self, tmp_path):
+        job_dir = tmp_path / "job"
+        _write_job(job_dir, secrets={"NEOTOMA_AAUTH_PRIVATE_JWK": json.dumps(_test_jwk())},
+                   spec={"neotoma_mcp": "bearer"})  # fmt: skip
+        with pytest.raises(run_job.JobError, match="neotoma_mcp"):
+            run_job.load_job(job_dir)
+
+    def test_proxy_needs_the_role_key(self, tmp_path):
+        job_dir = tmp_path / "job"
+        _write_job(job_dir, secrets={"LANIUS_NEOTOMA_TOKEN": "own-token-123"},
+                   spec={"neotoma_mcp": "proxy"})  # fmt: skip
+        with pytest.raises(run_job.JobError, match="AAuth key"):
+            run_job.load_job(job_dir)
+
+    def test_healthy_proxy_is_the_clis_mcp_server_with_no_credential(
+            self, proxy_job, monkeypatch):
+        module = _FakeProxyModule()
+        _use_proxy(monkeypatch, module)
+        seen, stored = {}, {}
+
+        def fake_runner(argv, env, stdin, timeout, cwd, ident=None, collect_by=None):
+            path = Path(argv[argv.index("--mcp-config") + 1])
+            seen["mode"] = stat.S_IMODE(path.stat().st_mode)
+            seen["cfg"] = json.loads(path.read_text())
+            seen["stopped_before_cli_ended"] = list(module.stopped)
+            return 0, b"ok", b"", False
+
+        rc = run_job.main(proxy_job, writer=lambda b, a, r: stored.setdefault("r", r) is not None,
+                          runner=fake_runner)  # fmt: skip
+        assert rc == 0, stored["r"]["refused"]
+        server = seen["cfg"]["mcpServers"]["mcpsrv_neotoma"]
+        assert server["url"] == "http://127.0.0.1:43210/mcp"
+        assert server["url"].startswith("http://127.0.0.1:")
+        assert "headers" not in server
+        assert seen["mode"] == 0o600
+        assert module.constructed == [("https://neotoma.example.test", os.getuid())]
+        # The proxy's signer signs with the role's key.
+        headers = {k.lower(): v for k, v in
+                   module.signs[0]("POST", "https://neotoma.example.test/mcp", b"{}",
+                                   "application/json").items()}  # fmt: skip
+        assert headers["signature"].startswith("aasig=:")
+        assert seen["stopped_before_cli_ended"] == []
+        assert module.stopped == [True]
+
+    def test_unhealthy_proxy_refuses_and_never_runs_the_cli(self, proxy_job, monkeypatch):
+        module = _FakeProxyModule(health="Neotoma /mcp answered 401")
+        _use_proxy(monkeypatch, module)
+        stored = {}
+        rc = run_job.main(
+            proxy_job, writer=lambda b, a, r: stored.setdefault("r", r) is not None,
+            runner=lambda *a, **k: pytest.fail("the CLI must not run"),
+        )  # fmt: skip
+        assert rc == run_job.EXIT_NEOTOMA_UNAVAILABLE
+        assert stored["r"]["refused"] == "Neotoma proxy not healthy: Neotoma /mcp answered 401"
+        assert not proxy_job.exists()
+        assert module.stopped == [True]
+
+    def test_without_a_separate_child_uid_the_proxy_never_starts(self, proxy_job, monkeypatch):
+        module = _FakeProxyModule()
+        _use_proxy(monkeypatch, module, ident=None)
+        stored = {}
+        rc = run_job.main(
+            proxy_job, writer=lambda b, a, r: stored.setdefault("r", r) is not None,
+            runner=lambda *a, **k: pytest.fail("the CLI must not run"),
+        )  # fmt: skip
+        assert rc != 0
+        assert "the Neotoma proxy needs a separate child uid" in stored["r"]["refused"]
+        assert module.constructed == []
+        assert not proxy_job.exists()
+
+    def test_the_proxy_stops_when_the_run_raises(self, proxy_job, monkeypatch):
+        module = _FakeProxyModule()
+        _use_proxy(monkeypatch, module)
+
+        def broken_runner(*a, **k):
+            raise RuntimeError("cli exploded")
+
+        with pytest.raises(RuntimeError, match="cli exploded"):
+            run_job._main(proxy_job, lambda *a: True, broken_runner, time.monotonic(),
+                          time.time() + 600, "")  # fmt: skip
+        assert module.stopped == [True]
+
+    def test_the_legacy_token_job_still_gets_its_bearer_config(self, tmp_path):
+        job_dir = tmp_path / "job"
+        _write_job(job_dir, secrets={"LANIUS_NEOTOMA_TOKEN": "own-token-123"},
+                   argv=list(_PROXY_ARGV))  # fmt: skip
+        job = run_job.load_job(job_dir)
+        assert job.neotoma_mcp == ""
+        home = tmp_path / "home"
+        home.mkdir()
+        argv, _ = run_job.prepare_child(job, home, {"PATH": "/usr/bin"})
+        cfg = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text())
+        server = cfg["mcpServers"]["mcpsrv_neotoma"]
+        assert server["headers"] == {"Authorization": "Bearer own-token-123"}
 
 
 # ── Sanitize job output before recording it (round 5) ────────────────────────
