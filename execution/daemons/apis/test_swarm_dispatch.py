@@ -9702,6 +9702,9 @@ def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
 # with no verdict, or a failed run, is still deferred or paged as before.
 
 
+_STEWARD_HEADER = "**\U0001f916 Vanellus — Ateles swarm, PR steward**"
+
+
 def _aggregation_outcomes(monkeypatch, *, vanellus_ok, vanellus_stdout, vanellus_stderr=""):
     calls = []
     d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout=vanellus_stdout, calls=calls)
@@ -9733,6 +9736,7 @@ def _aggregation_outcomes(monkeypatch, *, vanellus_ok, vanellus_stdout, vanellus
 
 def test_successful_aggregation_discussing_rate_limits_is_a_review(monkeypatch):
     stdout = (
+        _STEWARD_HEADER + "\n"
         "**APPROVE**\n"
         "The change backs off when GitHub returns a rate limit and retries "
         "after the window resets at the time the X-RateLimit-Reset header gives."
@@ -9747,6 +9751,7 @@ def test_successful_aggregation_discussing_rate_limits_is_a_review(monkeypatch):
 
 def test_successful_aggregation_mentioning_a_401_is_not_an_auth_failure(monkeypatch):
     stdout = (
+        _STEWARD_HEADER + "\n"
         "**REQUEST_CHANGES**\n"
         "[BLOCKING] arch: a 401 invalid authentication credentials response "
         "from the provider is swallowed instead of surfaced."
@@ -9819,6 +9824,7 @@ def test_successful_aggregation_mentioning_limits_with_empty_stderr_is_a_review(
     monkeypatch,
 ):
     stdout = (
+        _STEWARD_HEADER + "\n"
         "**APPROVE**\n"
         "The retry loop honours the usage limit and waits until the window "
         "resets at the time the provider reports."
@@ -9841,6 +9847,61 @@ def test_verdict_only_in_stderr_is_not_a_review(monkeypatch):
     )
     assert len(deferrals) == 1, deferrals
     assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+# Only Vanellus's verdict at the fixed position (header, then the verdict line
+# directly under it) makes a successful roll-up a review. A verdict token
+# anywhere else is incidental: the output still goes through both detectors.
+
+
+def test_limit_diagnostic_with_incidental_verdict_token_defers(monkeypatch):
+    stdout = (
+        "You've hit your session limit · resets 7:30pm (Europe/Madrid)\n"
+        "Last draft before the limit: **APPROVE**"
+    )
+    assert swarm_dispatch.parse_review_verdict(stdout) is not None  # token present
+    assert swarm_dispatch.lens_own_verdict(stdout, lens_agent="vanellus") is None
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][0] == "vanellus"
+    assert deferrals[0][1][0] == stdout
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_auth_diagnostic_with_incidental_verdict_token_pages(monkeypatch):
+    stdout = (
+        "API Error: 401 invalid authentication credentials\n"
+        "Partial output: **APPROVE**"
+    )
+    assert swarm_dispatch.detect_auth_failure(stdout)  # instrument check
+    assert not swarm_dispatch.detect_session_limit(stdout)
+    assert swarm_dispatch.parse_review_verdict(stdout) is not None
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert auth_pages == ["vanellus"], auth_pages
+    assert deferrals == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_well_formed_roll_up_mentioning_rate_limits_is_a_review(monkeypatch):
+    stdout = (
+        _STEWARD_HEADER + "\n"
+        "**APPROVE**\n"
+        "\n"
+        "Blocking: 0. The client hits the rate limit, backs off, and retries "
+        "once the usage limit resets at the time the provider reports."
+    )
+    assert swarm_dispatch.detect_session_limit(stdout)  # would match if read
+    assert swarm_dispatch.lens_own_verdict(stdout, lens_agent="vanellus") == "approve"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
 
 
 def test_parse_limit_reset_delay_reads_the_clock():

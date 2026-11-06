@@ -8856,16 +8856,21 @@ class SwarmDispatcher:
         #     that reads like a verdict) and schedule a resume after the reset,
         #     rather than paging the operator to fix nothing.
         #
-        #     A successful run whose STDOUT carries a readable verdict is a
-        #     review, so neither detector reads its stdout: a roll-up that
-        #     discusses rate limits or a 401 would otherwise match the broad
-        #     signatures, defer, and match again on every resume. Both still
-        #     read STDERR on that path, since a zero-exit run can carry a real
-        #     limit or auth diagnostic there; a verdict token found only in
-        #     stderr is not a verdict. Output with no verdict, and any failed
+        #     A successful run whose STDOUT carries Vanellus's verdict at the
+        #     fixed position (`lens_own_verdict`: the steward's header, the
+        #     verdict line directly under it) is a review, so neither detector
+        #     reads its stdout: a roll-up that discusses rate limits or a 401
+        #     would otherwise match the broad signatures, defer, and match
+        #     again on every resume. A verdict token anywhere else does not
+        #     count, so a provider diagnostic carrying an incidental token is
+        #     still detected. Both detectors still read STDERR on the review
+        #     path, since a zero-exit run can carry a real limit or auth
+        #     diagnostic there; a verdict token found only in stderr is not a
+        #     verdict. Output with no fixed-position verdict, and any failed
         #     run, is checked on both streams as before.
         aggregation_is_review = vanellus_result.ok and (
-            parse_review_verdict(vanellus_result.stdout) is not None
+            lens_own_verdict(vanellus_result.stdout, lens_agent="vanellus")
+            is not None
         )
         detector_stdout = "" if aggregation_is_review else vanellus_result.stdout
         if detect_session_limit(detector_stdout, vanellus_result.stderr):
