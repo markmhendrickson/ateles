@@ -12197,6 +12197,97 @@ class TestGateLaunchRefusalSurface:
         )
 
 
+# ── An advisory (forward-looking) lens failing must not stop a review ──────
+# The `content` lens is forward-looking: non-blocking, output to its own
+# queue. Its failure used to land in `failed_lenses`, post "Review
+# incomplete" and return before the roll-up, with every blocking lens done.
+class TestAdvisoryLensFailureDoesNotStopPanel:
+    _PANEL = [
+        Lens(agent="pavo", lens="pm", gate=None, checks="scope"),
+        Lens(
+            agent="corvus", lens="content", gate="", checks="story",
+            forward_looking=True,
+        ),
+    ]
+
+    def _run(self, monkeypatch, *, failing: set[str]):
+        calls: list = []
+        d = _pr_dispatcher_with_stubs(
+            monkeypatch, vanellus_stdout="**APPROVE**", calls=calls
+        )
+        monkeypatch.setattr(
+            swarm_dispatch, "select_panel", lambda **kwargs: list(self._PANEL)
+        )
+        vanellus_prompts: list[str] = []
+
+        async def fake_run_skill(skill, prompt, **kwargs):
+            if skill == "lanius":
+                return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+            if skill == "vanellus":
+                vanellus_prompts.append(prompt)
+                return SkillResult(skill, True, 0, "**APPROVE**", "")
+            if skill in failing:
+                return SkillResult(
+                    skill, False, 1, "", "boom", error="execution failure"
+                )
+            return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+        session_limit_calls: list = []
+
+        async def fake_session_limit(self, *args, **kwargs):
+            session_limit_calls.append(kwargs)
+
+        monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+        monkeypatch.setattr(
+            SwarmDispatcher, "_handle_panel_session_limit", fake_session_limit
+        )
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+        return calls, session_limit_calls, vanellus_prompts
+
+    def test_failed_advisory_lens_reaches_roll_up(self, monkeypatch, caplog):
+        with caplog.at_level("WARNING"):
+            calls, session_limit_calls, vanellus_prompts = self._run(
+                monkeypatch, failing={"corvus"}
+            )
+        assert session_limit_calls == []  # no "Review incomplete" notice
+        assert len(vanellus_prompts) == 1  # roll-up ran
+        assert ("gate", None) in calls
+        lens_line = next(
+            line for line in vanellus_prompts[0].splitlines()
+            if line.startswith("Parent issue:")
+        )
+        assert "pm" in lens_line and "content" not in lens_line
+        assert any(
+            "advisory lens content" in r.getMessage()
+            and "corvus" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_failed_blocking_lens_still_stops_panel(self, monkeypatch):
+        calls, session_limit_calls, vanellus_prompts = self._run(
+            monkeypatch, failing={"corvus", "pavo"}
+        )
+        assert vanellus_prompts == []
+        assert len(session_limit_calls) == 1
+        assert session_limit_calls[0]["reason"] == "incomplete review panel"
+        assert [lens for lens, _ in session_limit_calls[0]["failed_lenses"]] == [
+            "pm"
+        ]
+
+    def test_successful_advisory_lens_handled_as_before(self, monkeypatch):
+        calls, session_limit_calls, vanellus_prompts = self._run(
+            monkeypatch, failing=set()
+        )
+        assert session_limit_calls == []
+        assert len(vanellus_prompts) == 1
+        assert "### review:content" in vanellus_prompts[0]
+        lens_line = next(
+            line for line in vanellus_prompts[0].splitlines()
+            if line.startswith("Parent issue:")
+        )
+        assert "pm, content" in lens_line
+
+
 # ── Regression: other incomplete-panel causes keep their EXISTING message ──
 # unchanged (usage limit / provider exhaustion / head-changed / stale). Only
 # the two named launch-refusal classes on a GATE-OWNING lens move to the new
