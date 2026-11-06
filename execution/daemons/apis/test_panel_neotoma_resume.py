@@ -11,11 +11,13 @@ attention. A policy that was read and refuses still stops the panel.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from lib import github_app_token as _github_app_token
+from lib.daemon_runtime import AgentDefinitionUnavailable
+import skill_runner
 import swarm_dispatch
 from review_panel import Lens
 from skill_runner import SkillResult
@@ -203,6 +205,83 @@ def test_pavo_policy_timeout_schedules_resume_without_operator_notice(monkeypatc
     assert SwarmDispatcher._NEOTOMA_DEFERRAL_RE.search(body).group(1) == "1"
     assert "operator attention" not in body.lower()
     assert "operator attention" not in notifier.sent[0].lower()
+
+
+def test_pavo_definition_timeout_schedules_resume_without_operator_notice(monkeypatch):
+    """A definition read that timed out defers like a policy timeout. Red when
+    the definition classification is removed: the panel passed reason
+    "incomplete review panel" (operator attention) instead of deferring."""
+    # The exact refusal skill_runner builds from a definition-read timeout.
+    definition_timeout = (
+        f"{skill_runner.DEFINITION_UNAVAILABLE_PREFIX}: "
+        f"{AgentDefinitionUnavailable('pavo', 'timeout', 3)} — nothing was "
+        "dispatched; repair the load, the task is retried"
+    )
+    calls: list = []
+    d = tsd._pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**", calls=calls)
+    _pm_panel(monkeypatch)
+    ran: list[str] = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        ran.append(skill)
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "pavo":
+            return SkillResult(
+                skill, False, None, "", "", error=definition_timeout,
+                definition_unavailable=True,
+            )
+        raise AssertionError(f"{skill} must not run after the panel stopped")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    deferred = _capture_deferral(monkeypatch)
+    asyncio.run(d._handle_pr(tsd._trigger(body="Closes #80.")))
+
+    # No agent ran: pavo was refused at launch and nothing ran after it.
+    assert ran == ["lanius", "pavo"]
+    assert not [c for c in calls if c[0] in {"route", "gate"}]
+    assert deferred["reason"] == swarm_dispatch.NEOTOMA_TEMPORARILY_UNAVAILABLE
+
+    # The real deferral: INFO notice, resume marker, no operator attention.
+    pr = {"number": 87, "head": {"sha": HEAD}}
+
+    class _Sweep(_Comments):
+        def client(self):
+            base = super().client()
+
+            class _Client(base):
+                async def get(self, url, **kwargs):
+                    if url.endswith("/pulls"):
+                        return tsd._FakeListResp([pr])
+                    return await super().get(url, **kwargs)
+
+            return _Client
+
+    comments = _Sweep()
+    notifier = tsd._StubNotifier()
+    monkeypatch.undo()
+    _wire_github(monkeypatch, comments)
+    dispatcher = _dispatcher(notifier)
+    asyncio.run(
+        dispatcher._handle_panel_session_limit(
+            tsd._trigger(), None, "pm", "", "", reason=deferred["reason"],
+            failed_lenses=deferred["failed_lenses"],
+        )
+    )
+    assert notifier.priorities == [swarm_dispatch.Priority.INFO]
+    assert len(comments.posted) == 1
+    body = comments.posted[0]
+    assert "operator attention" not in body.lower()
+    assert "operator attention" not in notifier.sent[0].lower()
+    due_iso = SwarmDispatcher._REVIEW_DEFERRED_RE.search(body).group(1)
+    assert SwarmDispatcher._NEOTOMA_DEFERRAL_RE.search(body).group(1) == "1"
+
+    # A later sweep, after the marker matures, resumes the panel on this PR.
+    due = datetime.strptime(due_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    later = asyncio.run(
+        dispatcher._prs_with_matured_deferral("owner/repo", due + timedelta(seconds=1))
+    )
+    assert later["due"] == [pr]
 
 
 def test_vanellus_authority_read_timeout_schedules_resume(monkeypatch):
