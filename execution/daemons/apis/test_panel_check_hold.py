@@ -451,3 +451,266 @@ def test_the_real_reader_holds_red_pending_and_unreadable_and_releases_green(
 
     green = _real_gate(monkeypatch, [_run_row(1, "pytest"), _run_row(2, "lint")])
     assert green.green is True and green.reason == ""
+
+
+# ── a restart drops holds and in-flight panels; the startup sweep restores ──
+
+CANARY = "swarm-canary"
+
+
+def _labelled_pr(head=HEAD, labels=(CANARY,), number=PR, draft=False):
+    return {**_pr(head=head), "number": number, "draft": draft,
+            "labels": [{"name": name} for name in labels]}
+
+
+def _lens_comment(lens, head=HEAD, cid=1):
+    return {"id": cid, "created_at": f"2026-11-06T00:00:{cid:02d}Z",
+            "body": f"<!-- review:{lens} commit={head} -->\nlooks fine"}
+
+
+@pytest.fixture
+def sweep_world(world, monkeypatch):
+    """`world` after a restart: a fresh dispatcher with the label gate set,
+    GitHub's open-PR list and comment thread scripted."""
+    _, state = world
+    state.update(pr=_labelled_pr(), listed=[_labelled_pr()], comments=[],
+                 files=["docs/x.md"],
+                 list_error=None, comment_error=None)
+    d = sd.SwarmDispatcher(
+        _Notifier(),
+        sd.DispatchConfig(
+            neotoma_token="", github_token="", auto_merge=False,
+            auto_rereview_on_push=False, require_label=CANARY,
+        ),
+    )
+
+    async def ready(self, repos):
+        return None
+
+    async def comments(self, repository, number, client):
+        if state["comment_error"]:
+            raise state["comment_error"]
+        return state["comments"]
+
+    async def files(self, trigger):
+        return state["files"]
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_await_github_app_ready", ready)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_lens_scoped_comments", comments)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_changed_files", files)
+    # The real `_open_labelled_prs` runs, so its label and draft filter is the
+    # one under test; only GitHub's HTTP response is scripted.
+    class _ListResp:
+        def raise_for_status(self):
+            if state["list_error"]:
+                raise state["list_error"]
+
+        def json(self):
+            return state["listed"]
+
+    class _ListClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            return _ListResp()
+
+    monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **k: _ListClient())
+    monkeypatch.setattr(sd.SwarmDispatcher, "_github_headers", lambda self, repo=None: {})
+    return d, state
+
+
+def test_after_a_restart_a_labelled_pending_pr_is_held_then_runs_on_completion(
+    sweep_world, monkeypatch
+):
+    d, state = sweep_world
+    state["gate"] = PENDING
+    assert d._panel_ci_holds == {}, "a fresh process remembers no hold"
+
+    async def pending_ci(self, trigger):
+        return "pending"
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_required_ci_state", pending_ci)
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert summary["resumed"] == 1
+    assert state["seated"] == []
+    assert d._panel_ci_holds[KEY].head == HEAD, "the sweep rebuilt the hold"
+
+    state["gate"] = GREEN
+    with pytest.raises(_Seated):
+        _run(d._handle_ci_status(_ci_trigger()))
+    assert state["seated"] == ["lanius"], "the check completion ran the panel"
+
+
+def test_a_labelled_green_pr_with_no_panel_at_its_head_runs_from_the_sweep(
+    sweep_world,
+):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    # A verdict for an OLDER head is not a finished panel for this one.
+    state["comments"] = [
+        {"id": 1, "created_at": "2026-11-05T00:00:00Z",
+         "body": f"<!-- vanellus-aggregation commit={OTHER_HEAD} -->\nok"},
+    ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == ["lanius"]
+    assert summary["failed"] == 1, "the recorder's raise is caught, never escapes"
+
+
+@pytest.mark.parametrize("finished", ["aggregation", "every_lens"])
+def test_a_finished_panel_is_left_alone_and_an_unlabelled_pr_never_touched(
+    sweep_world, finished
+):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    required = {
+        lens.lens for lens in sd.select_panel(set(), state["files"], d.config.panel_max)
+    }
+    if finished == "aggregation":
+        state["comments"] = [{"id": 9, "created_at": "2026-11-06T00:00:09Z",
+                              "body": f"<!-- vanellus-aggregation commit={HEAD} -->"}]
+    else:
+        state["comments"] = [
+            _lens_comment(lens, cid=i) for i, lens in enumerate(sorted(required), 1)
+        ]
+    state["listed"] = [
+        _labelled_pr(),
+        _labelled_pr(number=PR + 1, labels=("other",)),
+        _labelled_pr(number=PR + 2, labels=()),
+    ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == []
+    assert state["gate_reads"] == 0, "no PR was driven into review"
+    assert summary["scanned"] == 1 and summary["finished"] == 1
+    assert d._panel_ci_holds == {}
+
+
+def test_one_missing_required_lens_is_not_a_finished_panel(sweep_world):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    required = sorted(
+        lens.lens for lens in sd.select_panel(set(), state["files"], d.config.panel_max)
+    )
+    assert len(required) > 1
+    state["comments"] = [_lens_comment(lens, cid=i) for i, lens in enumerate(required[1:], 1)]
+    _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == ["lanius"]
+
+
+def test_with_the_label_gate_unset_the_sweep_does_nothing(sweep_world):
+    d, state = sweep_world
+    d.config.require_label = ""
+    state["gate"] = GREEN
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert summary["scanned"] == 0
+    assert state["seated"] == [] and state["gate_reads"] == 0
+
+
+@pytest.mark.parametrize("where", ["list", "comments"])
+def test_a_github_read_failure_keeps_apis_running_and_starts_no_panel(
+    sweep_world, where
+):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    state[f"{'list' if where == 'list' else 'comment'}_error"] = httpx.ConnectError("down")
+    summary = _run(d.resume_labelled_panels([REPO]))  # must not raise
+    assert state["seated"] == [] and state["gate_reads"] == 0
+    assert d._panel_ci_holds == {}
+    if where == "comments":
+        assert summary["unreadable"] == 1
+
+
+def test_the_sweep_handles_at_most_twenty_prs(sweep_world, monkeypatch):
+    d, state = sweep_world
+    state["listed"] = [_labelled_pr(number=n) for n in range(1, 30)]
+    driven = []
+
+    async def handle_pr(self, trigger):
+        driven.append(trigger.number)
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_handle_pr", handle_pr)
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert len(driven) == 20 and summary["capped"] is True
+
+
+def test_apis_startup_runs_the_sweep_as_a_gather_sibling():
+    import inspect
+
+    import apis
+
+    src = inspect.getsource(apis.main)
+    assert "resume_labelled_panels" in src
+    gather = src[src.rfind("asyncio.gather("):]
+    assert "labelled_panel_sweep()" in gather
+
+
+# ── an admitted label add re-runs the review, a non-admitted one does not ──
+
+
+def _labeled_payload(label):
+    pr = {**_pr(), "body": "no parent here", "labels": [{"name": label}]}
+    return {"action": "labeled", "label": {"name": label},
+            "repository": {"full_name": REPO}, "pull_request": pr}
+
+
+def test_an_admitted_label_add_on_a_green_pr_with_no_parent_issue_runs_the_panel(
+    world, monkeypatch
+):
+    import github_gateway
+
+    d, state = world
+    d.config.auto_rereview_on_push = True
+    d.config.narrow_rereview = False
+    state["gate"] = GREEN
+    state["pr"] = {**_pr(), "body": "no parent here"}
+    monkeypatch.setattr(github_gateway, "_REQUIRE_LABEL", CANARY)
+
+    class _Result:
+        ok = True
+        stdout = "GATE_INHERITANCE: blocked\nGATE_PENDING: pm"
+
+    async def run_skill(agent, *args, **kwargs):
+        if agent == "lanius":
+            return _Result()
+        state["seated"].append(agent)
+        raise _Seated(agent)
+
+    async def nothing(*a, **k):
+        return None
+
+    async def no_files(*a, **k):
+        return []
+
+    async def reprove(*a, **k):
+        return set(), []
+
+    async def head(self, t):
+        return HEAD
+
+    async def gates(*a, **k):
+        return {}
+
+    monkeypatch.setattr(sd, "run_skill", run_skill)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_changed_files", no_files)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_post_gate_block", nothing)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_supersede_stale_verdicts", nothing)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_reprove_signed_off_gates", reprove)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_pr_head_sha", head)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_live_gate_status", gates)
+
+    rejected = github_gateway.parse_github_event(
+        "pull_request", _labeled_payload("other"), "d1"
+    )
+    assert rejected is None, "a label event that is not admitted builds no trigger"
+
+    trigger = github_gateway.parse_github_event(
+        "pull_request", _labeled_payload(CANARY), "d2"
+    )
+    assert trigger is not None and trigger.kind == "pr_labeled"
+    with pytest.raises(_Seated):
+        _run(d._handle_pr(trigger))
+    assert state["seated"], "the admitted label add seated the review panel"
+    assert "lanius" not in state["seated"]

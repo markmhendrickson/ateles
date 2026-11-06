@@ -4967,6 +4967,23 @@ async def main() -> None:
                 exc_info=True,
             )
 
+    # 7a2. Labelled-PR panel restore. A restart forgets panels held until
+    #    checks go green (in-memory holds), kills a panel mid-run and loses
+    #    webhooks delivered while down. With the label gate set, this one pass
+    #    re-enters review for each labelled open PR whose head has no finished
+    #    panel; the normal readiness logic rebuilds the hold or runs it.
+    #    Fire-and-forget and fail-open, like the sweeps around it.
+    async def labelled_panel_sweep() -> None:
+        try:
+            await dispatcher.resume_labelled_panels(
+                list(dispatcher.config.resume_repositories)
+            )
+        except Exception as exc:  # never let a sweep failure kill startup
+            log.error(
+                f"[{DAEMON_NAME}] startup panel sweep failed: {exc}",
+                exc_info=True,
+            )
+
     # 7b. Workflow gate-owner drift check (ateles#441). The workflow_definition
     #     entities name the agent owning each gate; dispatch picks agents from
     #     hardcoded rosters. Nothing compared them, so when two agents were
@@ -5153,6 +5170,7 @@ async def main() -> None:
         reconciler.run(reconcile_dispatch),
         deferred_recovery_sweep(),
         resume_sweep(),
+        labelled_panel_sweep(),
         clear_closed_issue_markers_sweep(),
         deferred_review_sweep(),
         workflow_drift_check(),
