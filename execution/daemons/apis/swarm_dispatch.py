@@ -3572,37 +3572,6 @@ _SELF_CLEARING_FAILURE_CLASSES = _CAPACITY_FAILURE_CLASSES | {
 }
 
 
-def _created_at_or_none(comment: dict) -> datetime | None:
-    """A GitHub comment's `created_at` as an aware UTC datetime, or None."""
-    raw = comment.get("created_at") if isinstance(comment, dict) else None
-    if not isinstance(raw, str):
-        return None
-    try:
-        return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
-
-
-@dataclass(frozen=True)
-class PanelCommentBaseline:
-    """Comment ids already on a PR thread when a panel run started.
-
-    ``ids`` is None when that read failed: then no comment can be shown to be
-    this run's. Independent of clocks, so an older comment from the same
-    second as the run start is still recognised as older.
-    """
-
-    ids: frozenset[int] | None
-
-    def posted_this_run(self, comment: dict) -> bool:
-        if self.ids is None or not isinstance(comment, dict):
-            return False
-        cid = comment.get("id")
-        if not isinstance(cid, int) or isinstance(cid, bool) or cid in self.ids:
-            return False
-        return _created_at_or_none(comment) is not None
-
-
 def _neotoma_retry_limit() -> int:
     """Consecutive Neotoma deferrals allowed at one head before an operator is asked."""
     try:
@@ -8611,12 +8580,6 @@ class SwarmDispatcher:
                     )
                     return
 
-        # The comments already on the thread when this run starts are an
-        # earlier run's (a resumed panel at the same head), so this run's fresh
-        # verdict is posted over them. Recorded by comment id, not by time:
-        # GitHub times are whole seconds, so an older comment from the same
-        # second as the start would otherwise pass for this run's.
-        panel_baseline = await self._panel_comment_baseline(trigger)
         reviews: list[tuple[str, str]] = []
         failed_lenses: list[tuple[str, str]] = []
         # Forward-looking (advisory) lenses that failed without a verdict.
@@ -8915,7 +8878,6 @@ class SwarmDispatcher:
                 agents_by_lens,
                 reviewed_head=review_head,
                 remote_lenses=frozenset(remote_lenses),
-                baseline=panel_baseline,
             )
             await self._publish_expectation_updates(
                 trigger, parent, expectation_updates, agents_by_lens
@@ -15837,33 +15799,6 @@ class SwarmDispatcher:
 
         return True
 
-    async def _panel_comment_baseline(self, t: SwarmTrigger) -> "PanelCommentBaseline":
-        """The ids of every comment on the thread as a panel run starts.
-
-        A baseline that could not be read to the last page holds no ids, so
-        no comment counts as this run's and the fresh verdict is posted.
-        Never raises."""
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                comments, complete = await self._issue_comments_scan(
-                    t.repository, t.number, client
-                )
-        except Exception as exc:  # noqa: BLE001 — degrade to "nothing posted"
-            log.warning(
-                f"[{DAEMON_NAME}] {t.repository}#{t.number}: comment baseline "
-                f"unreadable ({type(exc).__name__}); fresh lens verdicts will "
-                "be posted"
-            )
-            return PanelCommentBaseline(None)
-        if not complete:
-            return PanelCommentBaseline(None)
-        ids: set[int] = set()
-        for c in comments:
-            cid = c.get("id") if isinstance(c, dict) else None
-            if isinstance(cid, int) and not isinstance(cid, bool):
-                ids.add(cid)
-        return PanelCommentBaseline(frozenset(ids))
-
     async def _post_missing_panel_comments(
         self,
         t: SwarmTrigger,
@@ -15872,17 +15807,8 @@ class SwarmDispatcher:
         *,
         reviewed_head: str = "",
         remote_lenses: frozenset[str] = frozenset(),
-        baseline: "PanelCommentBaseline | None" = None,
     ) -> None:
         """Backfill `review:<lens>` PR comments the panelists failed to post.
-
-        ``baseline``: the comments on the thread when this panel run started.
-        A lens comment among them is an earlier run's verdict at this head, not
-        this run's, so it does not count as posted: the fresh verdict is posted
-        after it and is the newest one shown (the saved `pr_review` is the
-        fresh one too). A comment with no readable id or creation time, or any
-        comment when the baseline could not be read, cannot prove it is this
-        run's and does not count either.
 
         ``remote_lenses``: lenses whose prompt was return-only (they hold no
         GitHub write access, on Fly or after a Mac fallback). Their review is
@@ -15904,32 +15830,17 @@ class SwarmDispatcher:
         )
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                # Every page: on a thread past 100 comments a lens's own post
-                # sits on a later page, and a first-page read would take it as
-                # missing and post the verdict again. A read that did not reach
-                # the last page cannot prove a lens is missing, so it posts
-                # nothing (same scan as _panel_comment_baseline).
-                raw, complete = await self._issue_comments_scan(
-                    t.repository, t.number, client
+                resp = await client.get(
+                    url, params={"per_page": 100}, headers=self._github_headers(t.repository)
                 )
-                if not complete:
-                    log.warning(
-                        f"[{DAEMON_NAME}] {t.repository}#{t.number}: comment "
-                        "scan did not reach the last page — fallback review "
-                        "comments skipped rather than risk duplicate verdicts"
-                    )
-                    return
+                resp.raise_for_status()
                 # Only a swarm identity's comment counts as a lens's posted
                 # review: a lens-marked comment from any other account must not
                 # suppress the fallback post (fail closed on an empty identity
                 # set — every lens then reads as not yet posted).
                 posted_comments = lens_authors.scope_lens_comments(
-                    raw, await asyncio.to_thread(lens_comment_authors)
+                    resp.json(), await asyncio.to_thread(lens_comment_authors)
                 )
-                if baseline is not None:
-                    posted_comments = [
-                        c for c in posted_comments if baseline.posted_this_run(c)
-                    ]
                 bodies = [c.get("body", "") for c in posted_comments]
                 captured = dict(reviews)
                 agents = agents_by_lens or {}

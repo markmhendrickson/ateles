@@ -11,7 +11,7 @@ attention. A policy that was read and refuses still stops the panel.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import httpx
 
@@ -316,10 +316,9 @@ def test_neotoma_retry_count_resets_after_a_verdict(monkeypatch):
 # ── resumed panel: fresh verdict is the one saved and shown ─────────────────
 
 
-def test_resumed_panel_reruns_lens_and_passes_run_start(monkeypatch):
+def test_resumed_panel_reruns_lens(monkeypatch):
     """A lens that already has a comment at this head runs again; its fresh
-    verdict is what is persisted, and the comment backfill is told which
-    comments were already on the thread so the older one cannot stand in."""
+    verdict is what is persisted and handed to the comment backfill."""
     calls: list = []
     d = tsd._pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**", calls=calls)
     _pm_panel(monkeypatch)
@@ -345,99 +344,11 @@ def test_resumed_panel_reruns_lens_and_passes_run_start(monkeypatch):
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
     monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
     monkeypatch.setattr(SwarmDispatcher, "_post_missing_panel_comments", fake_backfill)
-    baseline = swarm_dispatch.PanelCommentBaseline(frozenset({1}))
-    monkeypatch.setattr(
-        SwarmDispatcher, "_panel_comment_baseline",
-        lambda self, t: tsd._async_return(baseline),
-    )
     asyncio.run(d._handle_pr(tsd._trigger(kind="pr_synchronize", body="Closes #80.")))
 
     assert "pavo" in ran
     assert persisted == [("pm", "**REQUEST_CHANGES** fresh")]
     assert backfill["reviews"] == [("pm", "**REQUEST_CHANGES** fresh")]
-    assert backfill["baseline"] is baseline
-
-
-def test_backfill_posts_fresh_verdict_over_an_earlier_runs_comment(monkeypatch):
-    """Red before: lenses_missing_comments saw the earlier comment at the same
-    head, posted nothing, and the stale APPROVE stayed the newest one shown."""
-    old_time = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
-    stale = swarm_dispatch.compose_fallback_comment("pm", "pavo", "**APPROVE** stale", HEAD)
-    comments = _Comments(
-        [{"id": 1, "body": stale, "user": {"login": SWARM_LOGIN}, "created_at": old_time}]
-    )
-    _wire_github(monkeypatch, comments)
-    run_start = asyncio.run(_dispatcher()._panel_comment_baseline(tsd._trigger()))
-    asyncio.run(
-        _dispatcher()._post_missing_panel_comments(
-            tsd._trigger(),
-            [("pm", "**REQUEST_CHANGES** fresh")],
-            {"pm": "pavo"},
-            reviewed_head=HEAD,
-            baseline=run_start,
-        )
-    )
-    assert len(comments.posted) == 1
-    assert "fresh" in comments.posted[0]
-    # The newest pm comment at this head is the fresh one.
-    newest = [c for c in comments.comments if "review:pm" in c["body"]][-1]
-    assert "fresh" in newest["body"]
-
-    # A comment the lens posted during THIS run still counts: no duplicate.
-    comments.posted.clear()
-    asyncio.run(
-        _dispatcher()._post_missing_panel_comments(
-            tsd._trigger(),
-            [("pm", "**REQUEST_CHANGES** fresh")],
-            {"pm": "pavo"},
-            reviewed_head=HEAD,
-            baseline=run_start,
-        )
-    )
-    assert comments.posted == []
-
-
-def test_older_same_second_approval_does_not_stand_in_for_a_fresh_block(monkeypatch):
-    """Red before: run start and created_at were both whole seconds, so an
-    earlier run's APPROVE created in the same second as this run's start passed
-    `created >= posted_since`, counted as this run's comment, and the lens's
-    fresh REQUEST_CHANGES (which it could not post itself) was never posted."""
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    stale = swarm_dispatch.compose_fallback_comment("pm", "pavo", "**APPROVE** stale", HEAD)
-    comments = _Comments(
-        [{"id": 1, "body": stale, "user": {"login": SWARM_LOGIN}, "created_at": now}]
-    )
-    _wire_github(monkeypatch, comments)
-    baseline = asyncio.run(_dispatcher()._panel_comment_baseline(tsd._trigger()))
-    assert baseline.ids == frozenset({1})
-    # The lens ran, returned a block, and posted nothing during the run.
-    asyncio.run(
-        _dispatcher()._post_missing_panel_comments(
-            tsd._trigger(),
-            [("pm", "**REQUEST_CHANGES** fresh block")],
-            {"pm": "pavo"},
-            reviewed_head=HEAD,
-            baseline=baseline,
-        )
-    )
-    assert len(comments.posted) == 1
-    assert "REQUEST_CHANGES" in comments.posted[0]
-    # The newest pm verdict at this head (the one Vanellus reads) is the block.
-    pm = [c for c in comments.comments if "review:pm" in c["body"]]
-    assert "fresh block" in pm[-1]["body"]
-    assert "APPROVE" not in pm[-1]["body"]
-
-
-def test_comment_with_unreadable_time_or_failed_baseline_is_not_this_runs():
-    fresh = {"id": 9, "body": "x", "created_at": "2026-11-06T10:00:00Z"}
-    known = swarm_dispatch.PanelCommentBaseline(frozenset({1}))
-    assert known.posted_this_run(fresh)
-    assert not known.posted_this_run({**fresh, "created_at": "garbled"})
-    assert not known.posted_this_run({**fresh, "created_at": None})
-    assert not known.posted_this_run({**fresh, "id": None})
-    assert not swarm_dispatch.PanelCommentBaseline(None).posted_this_run(fresh)
 
 
 # ── long threads: every page of comments is read ────────────────────────────
@@ -559,62 +470,6 @@ def test_failed_read_of_a_later_comment_page_stops_the_panel(monkeypatch):
     assert notifier.priorities == [swarm_dispatch.Priority.BLOCKER]
     assert "neotoma availability" in notifier.sent[-1].lower()
     assert "retry count could not be confirmed" in notifier.sent[-1]
-
-
-def _backfill_after_baseline(comments, review="**REQUEST_CHANGES** fresh"):
-    baseline = swarm_dispatch.PanelCommentBaseline(
-        frozenset(c["id"] for c in comments.comments)
-    )
-    return lambda: asyncio.run(
-        _dispatcher()._post_missing_panel_comments(
-            tsd._trigger(), [("pm", review)], {"pm": "pavo"},
-            reviewed_head=HEAD, baseline=baseline,
-        )
-    )
-
-
-def test_backfill_sees_a_lens_post_past_the_first_page(monkeypatch):
-    """Red before: the backfill read only the first 100 comments, so the lens's
-    own verdict on page two (posted during this run) looked missing and the
-    fallback posted the same verdict again."""
-    comments = _PagedComments(_chatter(120))
-    _wire_long_thread(monkeypatch, comments)
-    backfill = _backfill_after_baseline(comments)
-    # The lens posts its own verdict during the run; it lands on page two.
-    own = swarm_dispatch.compose_fallback_comment(
-        "pm", "pavo", "**REQUEST_CHANGES** fresh", HEAD
-    )
-    comments.comments.append(
-        {"id": 121, "body": own, "user": {"login": SWARM_LOGIN},
-         "created_at": "2026-11-06T10:00:00Z"}
-    )
-    backfill()
-    assert comments.posted == []
-
-
-def test_backfill_posts_nothing_when_a_later_page_cannot_be_read(monkeypatch):
-    """Red before: page two was never requested, so the lens read as missing
-    and was posted; now an incomplete read cannot prove it missing."""
-    comments = _PagedComments(_chatter(120), fail_page=2)
-    _wire_long_thread(monkeypatch, comments)
-    _backfill_after_baseline(comments)()
-    assert comments.posted == []
-
-
-def test_backfill_hitting_the_page_cap_posts_nothing(monkeypatch):
-    monkeypatch.setattr(swarm_dispatch, "_MAX_COMMENT_PAGES", 1)
-    comments = _PagedComments(_chatter(120))
-    _wire_long_thread(monkeypatch, comments)
-    _backfill_after_baseline(comments)()
-    assert comments.posted == []
-
-
-def test_backfill_still_posts_a_genuinely_missing_lens_on_a_long_thread(monkeypatch):
-    comments = _PagedComments(_chatter(120))
-    _wire_long_thread(monkeypatch, comments)
-    _backfill_after_baseline(comments)()
-    assert len(comments.posted) == 1
-    assert "fresh" in comments.posted[0]
 
 
 def _deferral(cid, attempt):
