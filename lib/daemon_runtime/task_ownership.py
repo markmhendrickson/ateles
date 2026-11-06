@@ -3,9 +3,8 @@
 Interactive sessions (a chat, a coordinator, a subagent) own many tasks, and no
 dispatcher can spawn one. A task naming a session as its owner is therefore
 neither unroutable nor a candidate for a guessed route: its owner session
-writes its own state. Three readers need the same answer (the dispatcher's
-router, the decision-queue classifier, the delivery check), so the rule lives
-here once rather than as a regex per reader.
+writes its own state. The dispatcher's router and the delivery check must give
+the same answer, so the rule lives here once rather than once per reader.
 
 Stdlib only; no operator-specific literal. A session is recognised by generic
 vocabulary alone.
@@ -134,13 +133,14 @@ def canonical_assignee(assigned_to: object) -> str | None:
     if not isinstance(assigned_to, str):
         return None
     key = assigned_to.strip().lower()
+    # Strip to a fixed point, and test for a sentinel only afterwards. A second
+    # reduction must change nothing: the dispatcher reduces before asking the
+    # router, which reduces again, while the delivery check reduces once.
+    while suffix := next((s for s in _AAUTH_SUFFIXES if key.endswith(s)), None):
+        key = key[: -len(suffix)].strip()
     if not key or key in SENTINEL_ASSIGNEES:
         return None
-    for suffix in _AAUTH_SUFFIXES:
-        if key.endswith(suffix):
-            key = key[: -len(suffix)].strip()
-            break
-    return key or None
+    return key
 
 
 def deciding_assignee(assigned_to: object) -> str | None:

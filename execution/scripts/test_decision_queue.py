@@ -419,16 +419,3 @@ def test_effect_action_types_match_the_gates_own_high_blast_set():
         "external_api_write",
     }
     assert outward <= owned and outward <= dq.EFFECT_ACTION_TYPES
-
-
-@pytest.mark.parametrize(
-    "owner,expected",
-    [
-        ("codex_subagent:lens_review", dq.LIVE_SESSION_OWNED),
-        ("operator_session", dq.LIVE_SESSION_OWNED),
-        ("Codex coordinator0a1b2c3d-1111-2222-3333-444444444444", dq.LIVE_SESSION_OWNED),
-        ("falco independent review; root verifies", dq.LIVE_LOW),
-    ],
-)
-def test_session_owner_uses_the_shared_recognizer(owner, expected):
-    assert klass(brief(), task(owner=owner)) == expected

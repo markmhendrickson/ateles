@@ -586,6 +586,11 @@ _PARITY_ASSIGNEES = (
     "coordinator chat0a1b2c3d",
     "Codex session@ateles-swarm",
     "ateles session@ateles-swarm",
+    "apis@ateles-swarm@ateles-swarm",
+    "apis@ateles@ateles-swarm",
+    "unassigned@ateles-swarm",
+    "none@ateles",
+    "ateles session@ateles-swarm@ateles",
 )
 _PARITY_OWNERS = (
     None,

@@ -135,6 +135,25 @@ def test_session_owned_reads_the_dispatcher_as_no_assignee(dispatcher):
     assert not session_owned(dispatcher, None)
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("apis@ateles-swarm@ateles-swarm", "apis"),
+        ("apis@ateles@ateles-swarm", "apis"),
+        ("cicada @ateles-swarm", "cicada"),
+        ("unassigned@ateles-swarm", None),
+        ("None@ateles", None),
+        ("@ateles@ateles-swarm", None),
+        ("Codex session@ateles", "codex session"),
+    ],
+)
+def test_canonical_assignee_reduces_all_the_way_in_one_pass(value, expected):
+    # The dispatcher reduces and the router reduces again, while the delivery
+    # check reduces once. A second pass must change nothing, or they disagree.
+    assert canonical_assignee(value) == expected
+    assert canonical_assignee(canonical_assignee(value)) == expected
+
+
 @pytest.mark.parametrize("value", [7, ["Codex session"], {"name": "Codex session"}, True])
 def test_non_string_assignee_counts_as_absent(value):
     assert canonical_assignee(value) is None
