@@ -119,7 +119,8 @@ def _role_restatement() -> None:
 
     unreadable = (
         f"[session-role] An assigned-role record exists for this session at {path} "
-        "but could not be read; role not restated."
+        "but it could not be read or is invalid; role not restated. Ask the "
+        "operator to restate the role or repair the file."
     )
     try:
         if path.stat().st_size > _MAX_RECORD_BYTES:
@@ -149,8 +150,8 @@ def _role_restatement() -> None:
     print(
         "[session-role] This session holds an assigned role, matched by its exact "
         f"session id: {role}\n"
-        f"Retrieve Neotoma record {record} before acting on the role. "
-        "The visible session name does not decide this."
+        f"Retrieve record {record} from the operator's prod Neotoma before "
+        "acting on the role."
     )
 
 

@@ -205,6 +205,8 @@ class TestAssignedRole:
         assert "[session-role]" in r.stdout
         assert ROLE in r.stdout
         assert RECORD_ID in r.stdout
+        assert "from the operator's prod Neotoma" in r.stdout
+        assert "does not decide" not in r.stdout
 
     def test_unassigned_session_is_byte_identical(self, tmp_path):
         _write_record(tmp_path, SID, _good())
@@ -275,7 +277,9 @@ class TestAssignedRole:
         assert SECRET not in r.stdout
         lines = _notice_lines(r.stdout)
         assert len(lines) == 1
-        assert "could not be read" in lines[0]
+        assert "could not be read or is invalid" in lines[0]
+        assert "role not restated" in lines[0]
+        assert "restate the role or repair the file" in lines[0]
         assert str(path) in lines[0]
         assert "[session-role]" in lines[0]
 
