@@ -300,7 +300,6 @@ class Trace:
     starts: list = field(default_factory=list)
     dispatch_events: list[str] = field(default_factory=list)
     capability_logs: list[str] = field(default_factory=list)
-    capability_notices: list[str] = field(default_factory=list)
     everything_sent: str = field(repr=False, default="")
 
 
@@ -424,6 +423,12 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         # key-only child has no Neotoma tools, and that loss is disclosed).
         monkeypatch.setattr(fly_runner, "FLY_NEOTOMA_PROXY_PROVIDERS",
                             frozenset(scenario["neotoma_proxy_providers"]))
+    # Neotoma's signed /session, asked from the Mac before a key-only job
+    # with Neotoma tools may launch: admitted unless the scenario says not.
+    admission = scenario.get("neotoma_admission", {"aauth": {"admitted": True}})
+    monkeypatch.setattr(fly_runner, "_ADMISSION_CACHE", {})
+    monkeypatch.setattr(fly_runner, "_admission_http_client", lambda: httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=admission))))
     if scenario["identity"] == "key":
         keys = tmp_path / "keys"
         keys.mkdir()
@@ -441,8 +446,11 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     if scenario.get("agent_prompt_bytes"):
         # A large agent definition, as real ones with their rule index are.
         role_prompt += "\n" + "Follow the rule. " * (int(scenario["agent_prompt_bytes"]) // 17)
+    # A Codex role is given no Neotoma tools: the Fly runner cannot give a
+    # Codex job its Neotoma tools yet, so a role granted them stays home.
+    tools = "Bash" if scenario.get("provider") == "codex" else "*"
     agent_def = AgentDefinition(entity_id="eval", name=ROLE, prompt_markdown=role_prompt,
-                                tool_allowlist="*", aauth_sub=f"{ROLE}@ateles-swarm")  # fmt: skip
+                                tool_allowlist=tools, aauth_sub=f"{ROLE}@ateles-swarm")  # fmt: skip
     monkeypatch.setattr(dispatch_role, "ATELES_REPO", tmp_path)
     monkeypatch.setattr(skill_runner, "ATELES_REPO", tmp_path)
     monkeypatch.setattr(skill_runner, "CLAUDE_BIN", cli)
@@ -625,13 +633,9 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
     # ── Drive the agent-facing CLI ───────────────────────────────────────────
     dispatch_events: list[str] = []
     capability_logs: list[str] = []
-    capability_notices: list[str] = []
     real_run = executor.run
 
     async def record_launch(job):
-        if scenario["fly"].get("raise_before_launch") == "ineligible":
-            dispatch_events.append("run_attempt")
-            raise fly_runner.FlyIneligible("eval: role cannot run on Fly")
         dispatch_events.append("launch")
         return await real_run(job)
 
@@ -650,17 +654,6 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         def emit(self, record):
             capability_logs.append(record.getMessage())
 
-    class Notifier:
-        def send(self, message, **kwargs):
-            capability_notices.append(message)
-
-    if scenario["expect"].get("local_key_only_correction"):
-        real_dispatch = dispatch_role.run_skill
-
-        async def dispatch_with_notifier(*args, **kwargs):
-            return await real_dispatch(*args, notifier=Notifier(), **kwargs)
-
-        monkeypatch.setattr(dispatch_role, "run_skill", dispatch_with_notifier)
     log_handler = CapabilityLog()
     skill_runner.log.addHandler(log_handler)
 
@@ -683,8 +676,6 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
                 envelopes.append({})
     finally:
         skill_runner.log.removeHandler(log_handler)
-        if scenario["expect"].get("local_key_only_correction"):
-            monkeypatch.setattr(dispatch_role, "run_skill", real_dispatch)
         for proc in others:
             proc.kill()
             proc.wait()
@@ -731,7 +722,6 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         starts=list(fake.starts),
         dispatch_events=dispatch_events,
         capability_logs=capability_logs,
-        capability_notices=capability_notices,
         argv_max_bytes=_longest_argument(fake.created_configs),
         claude_login_state=str(fake.machines.get("m-claude-login", {}).get("state", "")),
         claude_login_job_files_after=fly_runner._has_job_config(
@@ -824,24 +814,18 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
         problems.append(f"result stdout lacks {e['stdout_contains']!r}")
     if "dispatch_events" in e and trace.dispatch_events != e["dispatch_events"]:
         problems.append(f"dispatch events {trace.dispatch_events!r} != {e['dispatch_events']!r}")
-    if e.get("local_key_only_correction"):
-        correction = e["local_key_only_correction"]
-        for channel, messages in (("stderr", [trace.stderr_text]),
-                                  ("log", trace.capability_logs),
-                                  ("notifier", trace.capability_notices)):
-            if not any(correction in message for message in messages):
-                problems.append(f"local fallback correction was not emitted to {channel}")
-        visible = "\n".join((trace.stdout_text, trace.stderr_text,
-                             json.dumps(env), *trace.capability_logs,
-                             *trace.capability_notices))
-        if correction.startswith("This run was not eligible"):
-            visible += trace.everything_sent
-        if correction.startswith("This run was not eligible") and "The Fly launch failed" in visible:
-            problems.append("ineligible run falsely reported a failed Fly launch")
-        if fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE in str(env.get("stdout", "")):
+    if e.get("fly_ineligible_reason"):
+        # Refused before any launch: the local run says why, and never that it
+        # ran on Fly without its Neotoma tools.
+        expected = f"not eligible for Fly: {e['fly_ineligible_reason']}"
+        if not any(expected in message for message in trace.capability_logs):
+            problems.append(f"the local fallback did not log {expected!r}")
+        visible = "\n".join((trace.stdout_text, trace.stderr_text, json.dumps(trace.envelope),
+                             *trace.capability_logs))
+        if fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE in visible:
             problems.append("local result falsely says it ran on Fly key-only")
-        if "LANIUS_NEOTOMA_TOKEN" in visible or SHARED_BEARER in visible:
-            problems.append("discarded token name or bearer appeared in the local result or notice")
+        if SHARED_BEARER in visible:
+            problems.append("the shared bearer appeared in the local result or log")
     if "reason_contains" in e:
         reason = f"{env.get('reason', '')} {env.get('error', '')} {env.get('stderr', '')}"
         if e["reason_contains"] not in reason:
@@ -960,9 +944,9 @@ def judge(scenario: dict, trace: Trace) -> list[str]:
         problems.append("started job was not key-only without a bearer for the child MCP config")
     if e.get("key_only_no_agent_mcp") and trace.key_only_child_has_mcp is not False:
         problems.append("key-only runner child received a Neotoma MCP config or token")
-    if e.get("key_only_no_agent_mcp") and fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE not in str(
-            env.get("stdout", "")):
-        problems.append("key-only Fly result did not disclose the missing Neotoma MCP tools")
+    if "job_neotoma_mcp" in e and (not trace.job_specs or any(
+            spec.get("neotoma_mcp", "") != e["job_neotoma_mcp"] for spec in trace.job_specs)):
+        problems.append(f"a started job's Neotoma MCP mode is not {e['job_neotoma_mcp']!r}")
     if e.get("result_record_aauth_key") and not any(
         spec.get("neotoma_jwk_name") == fly_runner.AAUTH_JWK_JOB_NAME
         for spec in trace.job_specs
