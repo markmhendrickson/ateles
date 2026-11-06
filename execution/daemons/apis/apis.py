@@ -2012,6 +2012,48 @@ def _never_started(status) -> bool:
     return normalize_status(status) in _NOT_STARTED_STATUSES
 
 
+def _stored_tags(snapshot: dict) -> list:
+    """The tags the task itself carries (set by neotoma-agent hygiene)."""
+    tags = snapshot.get("tags", []) or []
+    if isinstance(tags, str):
+        import json as _json
+
+        try:
+            tags = _json.loads(tags)
+        except (ValueError, TypeError):
+            return []
+    return tags if isinstance(tags, list) else []
+
+
+def _routing_tags(snapshot: dict) -> list:
+    """The tags that route a task: stored, plus inferred when those cannot route.
+
+    `dispatch_task` routes on this and the readings after a hold judge on it, so
+    they name the same skill.
+
+    Inference used to run only when the stored tags were EMPTY, which made tags
+    that are present but unmapped strictly worse than no tags at all: they
+    suppressed inference entirely and the task went straight to BLOCKED. That
+    is not hypothetical — a well-formed task carrying
+    ['apis','swarm','gates','observability','ateles-682'] (action_type=fix,
+    confidence=0.9) blocked on exactly this, because none of those five is a
+    DOMAIN_ROUTES key. Tags a human or agent wrote for their own bookkeeping
+    are not a routing decision; asking the text is what we already do when the
+    field is blank, and an unroutable tag set is the same state of knowledge.
+
+    Inference AUGMENTS rather than replaces: the stored tags are kept ahead of
+    the inferred ones so an explicit routable tag always keeps precedence, and
+    so the escalation reason still reports what the task actually carried.
+    """
+    tags = _stored_tags(snapshot)
+    if any(tag in _DOMAIN_ROUTES for tag in tags):
+        return tags
+    title = snapshot.get("title", "(untitled)")
+    body = snapshot.get("body", "") or snapshot.get("description", "")
+    inferred = _infer_tags_from_text(title, body)
+    return tags + [tag for tag in inferred if tag not in tags]
+
+
 def _guessed_owner_is_low_stakes(skill: str, snapshot: dict) -> bool:
     """True only when leaving a guessed-owner task as filed is safe.
 
@@ -2213,50 +2255,20 @@ async def dispatch_task(
     if snapshot_hydrated:
         _unroutable.clear_unreadable(entity_id)
 
-    # Prefer tags already in snapshot (set by neotoma-agent hygiene)
-    existing_tags: list[str] = snapshot.get("tags", []) or []
-    if isinstance(existing_tags, str):
-        import json as _json
-
-        try:
-            existing_tags = _json.loads(existing_tags)
-        except (ValueError, TypeError):
-            existing_tags = []
-
     # What the task itself carried, before inference adds guesses (guard B below).
-    stored_routable_tag = any(tag in _DOMAIN_ROUTES for tag in existing_tags)
-
-    # Fall back to local inference when the tags we have cannot route.
-    #
-    # This used to run only when `existing_tags` was EMPTY, which made tags that
-    # are present but unmapped strictly worse than no tags at all: they
-    # suppressed inference entirely and the task went straight to BLOCKED. That
-    # is not hypothetical — a well-formed task carrying
-    # ['apis','swarm','gates','observability','ateles-682'] (action_type=fix,
-    # confidence=0.9) blocked on exactly this, because none of those five is a
-    # DOMAIN_ROUTES key. Tags a human or agent wrote for their own bookkeeping
-    # are not a routing decision; asking the text is what we already do when the
-    # field is blank, and an unroutable tag set is the same state of knowledge.
-    #
-    # Inference AUGMENTS rather than replaces: the stored tags are kept ahead of
-    # the inferred ones so an explicit routable tag always keeps precedence, and
-    # so the escalation reason still reports what the task actually carried.
-    if not any(tag in _DOMAIN_ROUTES for tag in existing_tags):
-        body = snapshot.get("body", "") or snapshot.get("description", "")
-        inferred = _infer_tags_from_text(title, body)
-        existing_tags = existing_tags + [
-            tag for tag in inferred if tag not in existing_tags
-        ]
+    stored_routable_tag = any(tag in _DOMAIN_ROUTES for tag in _stored_tags(snapshot))
+    existing_tags = _routing_tags(snapshot)
 
     # An explicit assigned_to (set by Sylvia/Turdus) wins over tag inference.
     # Canonicalize first: a stored value may carry capitalization, whitespace,
     # or an AAuth-subject suffix, and the "unassigned" sentinel family must read
-    # as absence rather than as an owner. Doing this here (not only inside
-    # resolve_skill) matters because `assigned_to` is ALSO used as a bare
-    # truthiness test for the readiness gate below — the literal string
-    # "unassigned" is truthy, so it used to satisfy `has_owner` while naming
-    # nobody any dispatcher could resolve.
+    # as absence rather than as an owner. `assigned_to` is what this function
+    # reports, so it keeps the name the task carries.
     assigned_to = _canonical_assignee(snapshot.get("assigned_to"))
+    # Whether anybody owns the task is a different question, and every reader of
+    # task ownership takes it from `deciding_assignee`: a task assigned to the
+    # dispatcher names no owner, because the dispatcher is what is asking.
+    deciding_assignee = _deciding_assignee(snapshot.get("assigned_to"))
     # `owner` is read only to recognise a session (see the session-owned block
     # below). The `build_released` re-dispatch and `existing_pr_correction`
     # lifecycles own their own handling, so for them it is not consulted.
@@ -2367,7 +2379,7 @@ async def dispatch_task(
     # held, and guard A has already let it through.
     if (
         skill is not None
-        and not assigned_to
+        and not deciding_assignee
         and not stored_routable_tag
         and snapshot_hydrated is not False
         and trigger != "build_released"
@@ -2516,7 +2528,7 @@ async def dispatch_task(
     if READINESS_GATE and not gate_override:
         assessment = assess_readiness(
             snapshot,
-            has_owner=bool(assigned_to) or skill is not None,
+            has_owner=bool(deciding_assignee) or skill is not None,
             relationship_count=int(snapshot.get("relationship_count", 0) or 0),
         )
         if not assessment.ready:
@@ -2569,7 +2581,7 @@ async def dispatch_task(
             action_type.strip().lower()
             in (policy.low_blast_action_types | policy.high_blast_action_types)
         )
-        has_owner = bool(assigned_to) or skill is not None
+        has_owner = bool(deciding_assignee) or skill is not None
         relationship_count = int(snapshot.get("relationship_count", 0) or 0)
         # ateles#1142: a task nobody scored gets a real producer score on a
         # cheap tier BEFORE the gate reads it, so the gate decides on a
@@ -3756,22 +3768,24 @@ def _gate_confidence(
     )
 
 
+def _gate_skill(task_snapshot: dict) -> str | None:
+    """The skill a task is judged under after it was held.
+
+    The hold was signed under the policy and action of the skill `dispatch_task`
+    resolved, and an approved release goes back through `dispatch_task`, so the
+    readings in between must name that same skill. Reading stored tags alone
+    judged a task routed only by its words under no skill at all: the policy of
+    the agent that would run it did not bind the re-check or the replacement
+    checkpoint. A task assigned to the dispatcher names no owner, so its tags and
+    words decide here as they do there.
+    """
+    assignee = _deciding_assignee(task_snapshot.get("assigned_to"))
+    return assignee or _resolve_skill(_routing_tags(task_snapshot))
+
+
 def _task_gate_context(task_snapshot: dict, *, bound_confidence: float | None = None):
     """The skill, action type, live policy and gate decision for a task as it is."""
-    # A task assigned to the dispatcher names no owner, so its tags decide, as
-    # they do in `dispatch_task`.
-    assigned_to = _deciding_assignee(task_snapshot.get("assigned_to"))
-    skill = assigned_to
-    if not skill:
-        tags = task_snapshot.get("tags", []) or []
-        if isinstance(tags, str):
-            import json as _json
-
-            try:
-                tags = _json.loads(tags)
-            except (ValueError, TypeError):
-                tags = []
-        skill = _resolve_skill(tags, assigned_to=assigned_to)
+    skill = _gate_skill(task_snapshot)
     policy = resolve_policy_for_agent(skill)
     action_type = _resolve_gate_action_type(skill or "", task_snapshot, policy).value
     confidence, confidence_unscored = _gate_confidence(
@@ -4523,21 +4537,8 @@ async def handle_checkpoint_brief(
             GateAction.CHECKPOINT.value,
             GateAction.CHECKPOINT_WITH_ALTERNATIVES.value,
         }
-        # A task assigned to the dispatcher names no owner: judge it under the
-        # skill and policy `dispatch_task` held it under, not as "apis".
-        assigned_to = _deciding_assignee(task_snapshot.get("assigned_to"))
-        safety_skill = assigned_to
-        if not safety_skill:
-            task_tags = task_snapshot.get("tags", []) or []
-            if isinstance(task_tags, str):
-                import json as _json
-
-                try:
-                    task_tags = _json.loads(task_tags)
-                except (ValueError, TypeError):
-                    task_tags = []
-            safety_skill = _resolve_skill(task_tags, assigned_to=assigned_to)
-
+        # Judge the task under the skill and policy `dispatch_task` held it under.
+        safety_skill = _gate_skill(task_snapshot)
         current_policy = resolve_policy_for_agent(safety_skill)
         current_action_type = _resolve_gate_action_type(
             safety_skill or "", task_snapshot, current_policy

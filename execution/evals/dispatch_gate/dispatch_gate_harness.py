@@ -37,7 +37,7 @@ from lib.daemon_runtime import gating  # noqa: E402
 from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
 
-MUTATIONS = ("none", "no_producer", "round_before_gate", "skip_assessment", "no_content", "raw_preview", "no_session_branch")
+MUTATIONS = ("none", "no_producer", "round_before_gate", "skip_assessment", "no_content", "raw_preview", "no_session_branch", "dispatcher_counts_as_owner")
 BINDING = {"claude": {"local": "m-local", "mechanical": "m-mech", "mid": "m-mid", "top": "m-top"}}
 
 
@@ -279,6 +279,9 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
                 return None if skill == apis._SESSION_OWNED else skill
 
             mp.setattr(apis, "_resolve_skill", _no_session_answer)
+        if mutation == "dispatcher_counts_as_owner":
+            # The dispatcher's own name reads as a real owner again.
+            mp.setattr(apis, "_deciding_assignee", apis._canonical_assignee)
         if mutation == "no_producer":
             async def _nothing(*a, **k):
                 return producer_confidence.ScoreAttempt(None)

@@ -358,3 +358,116 @@ def test_every_other_agents_high_or_never_prior_still_holds(monkeypatch, agent, 
     monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda _s: _POLICY)
     # No declaration, no text: the resolved action is that agent's own prior.
     assert apis._guessed_owner_is_low_stakes(agent, {}) is False
+
+
+# ── B, for a task assigned to the dispatcher ─────────────────────────────────
+# The dispatcher's own name names no owner: it is what is asking who owns the
+# task. So the words alone are still the only route, and the guard must read
+# such a task exactly as it reads an unassigned one.
+
+
+@pytest.mark.parametrize(
+    "spelling", ["apis", "Apis", " APIS ", "apis@ateles-swarm", "Apis@ateles"]
+)
+def test_dispatcher_assigned_guessed_owner_is_left_as_filed(world, spelling):
+    notifier = _run(_guessed(assigned_to=spelling))
+    _nothing_happened(world, notifier)
+
+
+def test_dispatcher_assigned_guessed_owner_with_high_action_still_reaches_the_gate(world):
+    # The guard only reduces: the same action holds an unassigned task and this.
+    _run(_guessed(assigned_to="apis", action_type="payment"))
+    assert [s for _i, s, _r in world["statuses"]] == [
+        TaskStatus.ROUTED,
+        TaskStatus.AWAITING_APPROVAL,
+    ]
+    assert len(world["briefs"]) == 1
+
+
+def test_dispatcher_assigned_with_a_stored_routable_tag_is_routed(world):
+    # A stored tag is a real route, so the assignee being the dispatcher does
+    # not make it a guess.
+    _run(_guessed(assigned_to="apis", tags=["finance_analysis"]))
+    assert world["statuses"], "a task with a stored route was left as filed"
+
+
+# ── The readings after a hold name the skill dispatch_task runs ──────────────
+# An approved release goes back through `dispatch_task`, so the gate context
+# that judges it must resolve the same skill, however the task got its route.
+
+
+@pytest.mark.parametrize(
+    ("task", "skill"),
+    [
+        ({"title": "Pay the rent invoice", "body": "wire the payment"}, "monedula"),
+        (
+            {
+                "title": "Pay the rent invoice",
+                "body": "wire the payment",
+                "tags": ["bookkeeping", "ateles-682"],
+            },
+            "monedula",
+        ),
+        (
+            {"title": "Pay the rent invoice", "description": "wire the payment"},
+            "monedula",
+        ),
+        (
+            {
+                "title": "Pay the rent invoice",
+                "body": "wire the payment",
+                "assigned_to": "apis",
+            },
+            "monedula",
+        ),
+        (
+            {
+                "title": "Pay the rent invoice",
+                "body": "wire the payment",
+                "tags": ["engineering"],
+            },
+            "cicada",
+        ),
+        (
+            {
+                "title": "Pay the rent invoice",
+                "body": "wire the payment",
+                "tags": '["engineering"]',
+            },
+            "cicada",
+        ),
+        (
+            {
+                "title": "Pay the rent invoice",
+                "body": "wire the payment",
+                "assigned_to": "fringilla",
+            },
+            "fringilla",
+        ),
+    ],
+    ids=[
+        "words_only",
+        "unmapped_stored_tags",
+        "words_in_description",
+        "assigned_to_the_dispatcher",
+        "stored_tag_outranks_words",
+        "stored_tag_as_a_json_string",
+        "named_agent",
+    ],
+)
+def test_gate_context_names_the_skill_dispatch_runs(world, task, skill):
+    snapshot = {"status": "awaiting_approval", "confidence": 0.95, **task}
+    assert apis._task_gate_context(snapshot)[0] == skill
+
+    _run(snapshot, trigger="approved", override=True)
+
+    assert world["spawns"] == [(skill, "ent_t1")]
+
+
+@pytest.mark.parametrize("tags", ['"finance"', '{"finance": 1}', "not json", 7])
+def test_tags_that_are_not_a_list_read_as_no_tags(world, tags):
+    # They used to raise when the words were added, losing the dispatch event.
+    snapshot = _guessed(tags=tags)
+    assert apis._task_gate_context(snapshot)[0] == "fringilla"
+    notifier = _run(snapshot)
+    _nothing_happened(world, notifier)

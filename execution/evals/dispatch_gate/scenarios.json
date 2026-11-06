@@ -1030,6 +1030,36 @@
       "dispatch": {
         "gate_override": true
       }
+    },
+    {
+      "id": "dispatcher_assignee_with_guessable_words_is_left_as_filed",
+      "why": "the dispatcher's own name names no owner, so words that infer a route are still only a guess: left as filed, exactly like an unassigned task",
+      "task": {
+        "assigned_to": "apis",
+        "title": "Reconcile the payments ledger",
+        "body": "payments wage",
+        "action_type": null
+      },
+      "expect": {
+        "outcome": "left_as_filed",
+        "notifications": 0,
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "dispatcher_assignee_spelled_as_a_subject_is_left_as_filed",
+      "why": "the AAuth-subject spelling of the dispatcher is the same non-owner, and reading it as an owner would run the task on the guess",
+      "task": {
+        "assigned_to": "Apis@ateles-swarm",
+        "title": "Reconcile the payments ledger",
+        "body": "payments wage",
+        "action_type": null
+      },
+      "expect": {
+        "outcome": "left_as_filed",
+        "notifications": 0,
+        "scorer_called": false
+      }
     }
   ]
 }

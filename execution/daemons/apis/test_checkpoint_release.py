@@ -2447,6 +2447,140 @@ async def test_approved_hold_on_a_task_assigned_to_the_dispatcher_releases(
     assert len(dispatches) == 1
 
 
+def _words_only_payment_task(records, task_id, **over):
+    """A task routed to the payment agent by its words alone, as dispatch does."""
+    task = records[task_id]["snapshot"]
+    for field in ("action_type", "assigned_to", "tags"):
+        task.pop(field, None)
+    task.update(
+        {"title": "Pay the rent invoice", "body": "wire the payment", **over}
+    )
+    return task
+
+
+def _per_skill_policies(monkeypatch, **strict_over):
+    """A strict policy for the payment agent, as live, and another for the rest."""
+    strict = ExecutionPolicy(
+        **{
+            "entity_id": "ent_strict_policy",
+            "confidence_threshold": 0.2,
+            "high_blast_action_types": frozenset({"payment"}),
+            "low_blast_action_types": frozenset({"local_edit"}),
+            "loaded": True,
+            **strict_over,
+        }
+    )
+    general = ExecutionPolicy(
+        entity_id="default",
+        confidence_threshold=0.2,
+        high_blast_action_types=frozenset({"payment", "send_external_comms"}),
+        low_blast_action_types=frozenset({"local_edit"}),
+        loaded=True,
+    )
+    monkeypatch.setattr(
+        apis,
+        "resolve_policy_for_agent",
+        lambda skill: strict if skill == "monedula" else general,
+    )
+    return strict, general
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "over",
+    [{}, {"tags": ["bookkeeping"]}, {"assigned_to": "apis"}],
+    ids=["no_tags", "unmapped_tags", "assigned_to_the_dispatcher"],
+)
+async def test_approved_hold_on_a_task_routed_by_its_words_releases(
+    monkeypatch, release_store, over
+):
+    """It releases on the approval signed under the agent's own policy.
+
+    `dispatch_task` held it under the payment agent's policy and action. The
+    re-check read stored tags alone, so it saw no skill and the general policy,
+    refused, and asked again under the general policy.
+    """
+    records, brief_id, task_id = release_store
+    _words_only_payment_task(records, task_id, **over)
+    strict, _general = _per_skill_policies(monkeypatch)
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type="payment",
+        policy=strict,
+        declared=False,
+    )
+    _per_skill_policies(monkeypatch)
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "approved"
+    dispatches = _spy_dispatch(monkeypatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is True
+    assert len(dispatches) == 1
+    assert brief["status"] != "approved_requires_fresh_approval"
+
+
+@pytest.mark.asyncio
+async def test_approval_signed_under_another_policy_does_not_release_a_word_routed_task(
+    monkeypatch, release_store
+):
+    """The agent that would run the task decides which policy binds the release.
+
+    The envelope reads as a replacement checkpoint filed before this change did:
+    the task and its action as they are, under the general policy.
+    """
+    records, brief_id, task_id = release_store
+    _words_only_payment_task(records, task_id)
+    _strict, general = _per_skill_policies(monkeypatch)
+    _bind_v2_authorization(
+        monkeypatch,
+        records,
+        brief_id,
+        task_id,
+        action_type="payment",
+        policy=general,
+        declared=False,
+    )
+    _per_skill_policies(monkeypatch)
+    brief = records[brief_id]["snapshot"]
+    brief["status"] = "approved"
+    dispatches = _spy_dispatch(monkeypatch)
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert brief["status"] == "approved_requires_fresh_approval"
+
+
+def test_replacement_checkpoint_for_a_word_routed_task_binds_the_agents_policy(
+    monkeypatch,
+):
+    strict, _general = _per_skill_policies(monkeypatch)
+    task = {"title": "Pay the rent invoice", "body": "wire the payment"}
+
+    skill, action_type, policy, _decision = apis._task_gate_context(task)
+
+    assert (skill, action_type, policy) == ("monedula", "payment", strict)
+
+
+def test_a_word_routed_task_is_judged_by_what_the_agents_policy_reserves(monkeypatch):
+    # The agent's policy classifies nothing here, so approving could never
+    # release it; the general policy would have called it an ordinary hold.
+    _per_skill_policies(
+        monkeypatch,
+        high_blast_action_types=frozenset(),
+        low_blast_action_types=frozenset({"local_edit"}),
+    )
+    task = {"title": "Pay the rent invoice", "body": "wire the payment"}
+
+    assert apis._approval_cannot_release(task) == "unclassified"
+
+
 def test_replacement_checkpoint_for_unscored_task_carries_the_hold_estimate(
     monkeypatch,
 ):
