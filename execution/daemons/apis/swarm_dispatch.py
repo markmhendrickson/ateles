@@ -8916,9 +8916,29 @@ class SwarmDispatcher:
         #     diagnostic there; a verdict token found only in stderr is not a
         #     verdict. Output with no fixed-position verdict, and any failed
         #     run, is checked on both streams as before.
+        #
+        #     A successful run whose stdout lacks that form but which POSTED
+        #     its aggregation comment for this head during this run, with the
+        #     verdict at the fixed position of that comment
+        #     (`posted_comment_own_verdict`), is a review too: a run that
+        #     posts its own comment often ends with a summary of it in stdout
+        #     (seen on #1635 and #1645, both deferred ~3h because their
+        #     findings were about retry limits). The comment is read only
+        #     when stdout would otherwise match a detector.
         aggregation_is_review = vanellus_result.ok and (
             lens_own_verdict(vanellus_result.stdout, lens_agent="vanellus")
             is not None
+            or (
+                (
+                    detect_session_limit(vanellus_result.stdout)
+                    or detect_auth_failure(vanellus_result.stdout)
+                )
+                and await self._vanellus_posted_verdict_this_run(
+                    trigger,
+                    head_sha=review_head,
+                    started_at=aggregation_started_at,
+                )
+            )
         )
         detector_stdout = "" if aggregation_is_review else vanellus_result.stdout
         if detect_session_limit(detector_stdout, vanellus_result.stderr):
@@ -11256,6 +11276,48 @@ class SwarmDispatcher:
             state="APPROVED",
             principal=principal,
         )
+
+    async def _vanellus_posted_verdict_this_run(
+        self, t: SwarmTrigger, *, head_sha: str, started_at: datetime
+    ) -> bool:
+        """True when Vanellus's aggregation comment for *head_sha*, posted or
+        updated at or after *started_at*, carries its verdict at the fixed
+        position (`posted_comment_own_verdict`, the reader `panel_finished_at_head`
+        uses).
+
+        A roll-up that posts its own comment can end with stdout that is a
+        summary of what it posted, not the verdict at the fixed position, so
+        stdout alone cannot say the run was a review. Never raises: a read
+        failure, an unpinned head or an older comment returns False, which
+        leaves the limit and auth detectors reading stdout as before.
+        """
+        head = _normalise_full_sha(head_sha)
+        if not head:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._lens_scoped_comments(
+                    t.repository, t.number, client
+                )
+            comment = latest_aggregation_comment(comments, head_sha=head)
+            if comment is None:
+                return False
+            stamp = comment.get("updated_at") or comment.get("created_at")
+            posted = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            if posted.tzinfo is None or posted < started_at:
+                return False
+            return (
+                posted_comment_own_verdict(
+                    comment.get("body") or "", lens_agent="vanellus"
+                )
+                is not None
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: posted-aggregation "
+                f"read failed ({exc}) — limit detection reads stdout"
+            )
+            return False
 
     async def _resolve_review_verdict(
         self, t: SwarmTrigger, stdout: str, *,

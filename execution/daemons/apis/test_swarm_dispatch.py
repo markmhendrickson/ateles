@@ -9948,9 +9948,17 @@ def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
 _STEWARD_HEADER = "**\U0001f916 Vanellus — Ateles swarm, PR steward**"
 
 
-def _aggregation_outcomes(monkeypatch, *, vanellus_ok, vanellus_stdout, vanellus_stderr=""):
+def _aggregation_outcomes(
+    monkeypatch, *, vanellus_ok, vanellus_stdout, vanellus_stderr="",
+    posted_comments=(),
+):
     calls = []
     d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout=vanellus_stdout, calls=calls)
+
+    async def fake_scoped_comments(self, repository, number, client):
+        return list(posted_comments)
+
+    monkeypatch.setattr(SwarmDispatcher, "_lens_scoped_comments", fake_scoped_comments)
 
     async def fake_run_skill(skill, prompt, **kwargs):
         if skill == "lanius":
@@ -10145,6 +10153,82 @@ def test_well_formed_roll_up_mentioning_rate_limits_is_a_review(monkeypatch):
     )
     assert deferrals == [] and auth_pages == []
     assert ("review", "APPROVE") in calls, calls
+
+
+# A roll-up that posts its own comment can end with a stdout summary that is
+# not the verdict at the fixed position. When its aggregation comment for this
+# head landed during this run with the verdict at the comment's fixed position,
+# the run is a review and its stdout is not scanned. Stderr is still read, and
+# with no posted verdict stdout is still scanned (#1635, #1645).
+
+
+def _posted_aggregation(verdict_line, *, created_at="2999-01-01T00:00:00Z"):
+    body = (
+        f"<!-- vanellus-aggregation commit={'a' * 40} -->\n"
+        + _STEWARD_HEADER + "\n"
+        + verdict_line + "\n\n"
+        "[BLOCKING] qa: the retry loop ignores the rate limit reset header."
+    )
+    return {"id": 7, "body": body, "created_at": created_at, "updated_at": created_at}
+
+
+_SUMMARY_STDOUT = (
+    "Posted the roll-up comment on the PR. The blocking finding is that the "
+    "client hits the rate limit and retries before the usage limit resets."
+)
+
+
+def test_posted_verdict_with_stdout_discussing_rate_limits_does_not_defer(monkeypatch):
+    comment = _posted_aggregation("**REQUEST_CHANGES**")
+    assert swarm_dispatch.detect_session_limit(_SUMMARY_STDOUT)  # would match if read
+    assert swarm_dispatch.lens_own_verdict(_SUMMARY_STDOUT, lens_agent="vanellus") is None
+    assert swarm_dispatch.posted_comment_own_verdict(
+        comment["body"], lens_agent="vanellus"
+    ) == "request_changes"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_SUMMARY_STDOUT,
+        posted_comments=[comment],
+    )
+    assert deferrals == [] and auth_pages == []
+    # The verdict is then recovered from the posted comment and acted on.
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "request_changes") in calls, calls
+
+
+def test_posted_verdict_with_real_limit_in_stderr_still_defers(monkeypatch):
+    stderr = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_SUMMARY_STDOUT,
+        vanellus_stderr=stderr, posted_comments=[_posted_aggregation("**APPROVE**")],
+    )
+    assert len(deferrals) == 1, deferrals
+    agent, args, _kwargs = deferrals[0]
+    assert agent == "vanellus"
+    assert args == (_SUMMARY_STDOUT, stderr)
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+@pytest.mark.parametrize(
+    "posted",
+    [
+        [],
+        [_posted_aggregation("**APPROVE**", created_at="2000-01-01T00:00:00Z")],
+        [{"id": 8, "body": f"<!-- vanellus-aggregation commit={'a' * 40} -->\nreview incomplete",
+          "created_at": "2999-01-01T00:00:00Z"}],
+    ],
+    ids=["no_comment", "older_run_comment", "comment_without_verdict"],
+)
+def test_no_posted_verdict_with_limit_in_stdout_still_defers(monkeypatch, posted):
+    notice = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=notice, posted_comments=posted,
+    )
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][0] == "vanellus"
+    assert deferrals[0][1][0] == notice
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
 
 
 def test_parse_limit_reset_delay_reads_the_clock():
