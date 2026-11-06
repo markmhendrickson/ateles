@@ -300,9 +300,7 @@ LENS_AGENTS: dict[str, str] = {
 # non-bootstrap pipeline (`swarm_dispatch.py`'s canary-lane dispatch),
 # which calls `review_panel.select_panel` directly and never goes through
 # this tool or `BOOTSTRAP_PANEL_LENSES`.
-BOOTSTRAP_PANEL_LENSES: frozenset[str] = frozenset(
-    {"pm", "arch", "ux", "qa", "security"}
-)
+BOOTSTRAP_PANEL_LENSES: frozenset[str] = review_scope.FULL_PANEL_LENSES
 
 # Lenses bootstrap mode excludes outright, even when review_panel.select_panel
 # would otherwise derive them into a PR's floor for this diff (ateles#1317,
@@ -538,41 +536,18 @@ class NonRequiredBlock:
 
 # GitHub's PR files endpoint returns at most this many files; a list that long
 # may have been cut off, and a cut-off list silently reads as a smaller change.
-PR_FILES_API_CAP = 3000
+PR_FILES_API_CAP = review_scope.PR_FILES_API_CAP
 
 
 async def _pr_files(
     client: httpx.AsyncClient, repo: str, pr: int
 ) -> tuple[list[str], int]:
-    """(every path the PR touches, how many file ROWS the API returned).
-
-    A rename counts BOTH its new and its old path (`previous_filename`), the same
-    rule `review_delta.interdiff` applies: a rename out of a protected path moves
-    the path a pattern would have matched.
-    """
-    out: list[str] = []
-    rows_seen = 0
-    page = 1
-    while True:
-        resp = await client.get(
-            f"{GITHUB_API}/repos/{repo}/pulls/{pr}/files",
-            headers=_github_headers(repo),
-            params={"per_page": 100, "page": page},
-        )
-        resp.raise_for_status()
-        rows = resp.json() or []
-        rows_seen += len(rows)
-        for f in rows:
-            name = f.get("filename", "")
-            out.append(name)
-            previous = f.get("previous_filename")
-            if isinstance(previous, str) and previous and previous not in out:
-                out.append(previous)
-        if len(rows) < 100:
-            break
-        page += 1
-    return out, rows_seen
-
+    """(every path the PR touches, how many file ROWS the API returned): the
+    shared reader `review_scope.fetch_pr_files`, which Apis's panel also uses.
+    A rename counts BOTH its new and its old path."""
+    return await review_scope.fetch_pr_files(
+        client, api_base=GITHUB_API, repo=repo, pr=pr, headers=_github_headers(repo)
+    )
 
 async def _changed_files(client: httpx.AsyncClient, repo: str, pr: int) -> list[str]:
     """Paths touched by the PR (renames include the old path) — the endpoint
@@ -581,36 +556,15 @@ async def _changed_files(client: httpx.AsyncClient, repo: str, pr: int) -> list[
 
 
 def _file_list_problem(rows_seen: int, expected: object) -> str:
-    """Why the PR's file list cannot be trusted as complete, or "" when it can.
-
-    Fail closed: a list at the API cap may be truncated, and one that does not
-    match the PR's own `changed_files` count, or a PR that reports no count, is
-    not known to be complete.
-    """
-    if rows_seen >= PR_FILES_API_CAP:
-        return (
-            f"the PR lists {rows_seen} changed files, at or over the {PR_FILES_API_CAP}-file "
-            "limit of the GitHub files API, so the list may be truncated"
-        )
-    if isinstance(expected, bool) or not isinstance(expected, int):
-        return "the PR does not report how many files it changes, so the list cannot be checked"
-    if rows_seen != expected:
-        return (
-            f"the file list has {rows_seen} entries but the PR reports {expected} changed files"
-        )
-    return ""
-
+    """Why the PR's file list cannot be trusted as complete, or "" when it can
+    (`review_scope.file_list_problem`)."""
+    return review_scope.file_list_problem(rows_seen, expected)
 
 async def _default_branch(client: httpx.AsyncClient, repo: str) -> str:
     """The repository's default branch, or "" when it cannot be read."""
-    try:
-        resp = await client.get(f"{GITHUB_API}/repos/{repo}", headers=_github_headers(repo))
-        if resp.status_code >= 400:
-            return ""
-        return str((resp.json() or {}).get("default_branch") or "")
-    except Exception:  # noqa: BLE001 — unreadable: not the default
-        return ""
-
+    return await review_scope.fetch_default_branch(
+        client, api_base=GITHUB_API, repo=repo, headers=_github_headers(repo)
+    )
 
 async def fetch_review_scope(
     client: httpx.AsyncClient, repo: str, base_ref: str
@@ -619,27 +573,12 @@ async def fetch_review_scope(
     branch (never the PR head: a PR must not be able to downgrade its own
     panel). Never raises: any failure is a `ScopeLoad` with no scope and the
     reason, which every caller treats as "no declaration" (full panel for panel
-    selection; no scope-based carry)."""
-    source = f"{repo}@{base_ref or '(unknown base)'}:{review_scope.SCOPE_PATH} (base branch)"
-    if not base_ref:
-        return review_scope.ScopeLoad(None, source, "the PR's base branch is unknown")
-    try:
-        resp = await client.get(
-            f"{GITHUB_API}/repos/{repo}/contents/{review_scope.SCOPE_PATH}",
-            headers=_github_headers(repo),
-            params={"ref": base_ref},
-        )
-    except Exception as exc:  # noqa: BLE001 — unreadable: no declaration
-        return review_scope.ScopeLoad(None, source, f"read failed ({exc.__class__.__name__})")
-    if resp.status_code == 404:
-        return review_scope.ScopeLoad(None, source, "no scope file on the base branch")
-    if resp.status_code >= 400:
-        return review_scope.ScopeLoad(None, source, f"read failed (HTTP {resp.status_code})")
-    try:
-        payload = resp.json()
-    except Exception:  # noqa: BLE001
-        return review_scope.ScopeLoad(None, source, "the response was not JSON")
-    return review_scope.load_from_contents_payload(payload, source=source)
+    selection; no scope-based carry). The one reader, `review_scope.fetch_scope`,
+    is the one Apis's panel uses too."""
+    return await review_scope.fetch_scope(
+        client, api_base=GITHUB_API, repo=repo, base_ref=base_ref,
+        headers=_github_headers(repo),
+    )
 
 
 async def _preregistered_gate_contributors(
@@ -2430,31 +2369,18 @@ async def run(
         panel_note = ""
         try:
             if panel_mode == "path":
-                list_problem = ""
-                try:
-                    changed, rows_seen = await _pr_files(client, repo, pr)
-                    list_problem = _file_list_problem(rows_seen, pr_data.get("changed_files"))
-                except Exception:  # noqa: BLE001 — unreadable list: full panel
-                    changed = []
-                default_branch = await _default_branch(client, repo)
-                if not default_branch or default_branch != base_ref:
-                    # The scope file is read from the base branch; a PR aimed at any
-                    # other branch (or a repo whose default cannot be read) could be
-                    # retargeted after review, so it takes the full panel.
-                    decision = review_scope.PanelDecision(
-                        True, "",
-                        f"The PR's base branch ({base_ref or 'unknown'}) is not the repository's "
-                        f"default branch ({default_branch or 'unreadable'}), so the full panel applies.",
-                        scope_load.source,
-                    )
-                elif list_problem:
-                    # An incomplete list reads as a smaller change: the full panel.
-                    decision = review_scope.PanelDecision(
-                        True, "", f"The changed-file list cannot be trusted ({list_problem}), so the full panel applies.",
-                        scope_load.source,
-                    )
-                else:
-                    decision = review_scope.select_path_panel(changed, scope_load)
+                # The shared reader and decision Apis's panel uses
+                # (`review_scope.path_panel_for_pr`): a non-default base and an
+                # untrustworthy file list both take the full panel.
+                decision = await review_scope.path_panel_for_pr(
+                    client,
+                    api_base=GITHUB_API,
+                    repo=repo,
+                    pr=pr,
+                    pr_data=pr_data,
+                    headers=_github_headers(repo),
+                    load=scope_load,
+                )
                 panel_note = decision.describe()
                 print(panel_note)
                 lenses, required, excluded = await resolve_path_lenses(

@@ -272,6 +272,7 @@ def select_panel(
     changed_files: list[str],
     max_panel: int = 6,
     pending_gates: set[str] | None = None,
+    required_lenses: set[str] | frozenset[str] | None = None,
 ) -> list[Lens]:
     """
     Pick the review panel for a PR.
@@ -288,8 +289,18 @@ def select_panel(
     only agent that can re-evaluate it (its owning lens) would be dropped by
     the cap and never re-invoked (ateles#230 panel-assembly gap: PR #1944's
     arch gate stuck `pending` while pm/ux/legal/qa re-ran without arch).
+
+    `required_lenses` are the lens labels the panel-gated approval tool will
+    require for this PR at this head, chosen by changed path from the repo's
+    `.github/review_scope.json` (`review_scope.path_panel_for_pr`, the same
+    reader and decision the tool uses). The panel is the UNION of those and
+    the lenses picked here, and a required lens is never dropped by the cap:
+    it ranks with the pending-gate owners, and the cap only trims the rest. A
+    panel without one of them could only ever produce an approval the tool
+    refuses.
     """
     pending = pending_gates or set()
+    required = {name.strip().lower() for name in (required_lenses or ())}
     selected: list[Lens] = []
     for lens in LENSES:
         relevant = (
@@ -297,6 +308,7 @@ def select_panel(
             or lens.agent in gate_contributors
             or _matches_diff(lens, changed_files)
             or (lens.gate != "" and lens.gate in pending)
+            or lens.lens in required
         )
         if lens.forward_looking:
             # Size threshold is an additional opt-in path, not an override
@@ -315,7 +327,8 @@ def select_panel(
     gate_owners = [
         item
         for item in selected
-        if not item.forward_looking and item.gate != "" and item.gate in pending
+        if (not item.forward_looking and item.gate != "" and item.gate in pending)
+        or item.lens in required
     ]
     # The security lens owns no gate, so registry order alone would let the cap
     # drop it exactly when it matters most: a BROAD security-touching PR pulls
@@ -348,7 +361,11 @@ def select_panel(
         and item not in always_on
     ]
     forward = [item for item in selected if item.forward_looking]
-    panel = (gate_owners + security + always_on + other_blocking + forward)[:max_panel]
+    ranked = gate_owners + security + always_on + other_blocking + forward
+    panel = ranked[:max_panel]
+    # A lens the approval tool requires is never capped away: a panel without
+    # it cannot produce an approvable review.
+    panel += [item for item in ranked[max_panel:] if item.lens in required]
     dropped = [item.lens for item in selected if item not in panel]
     if dropped:
         log.info(f"[apis] review panel capped at {max_panel}; dropped: {dropped}")
