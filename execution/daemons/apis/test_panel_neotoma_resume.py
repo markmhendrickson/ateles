@@ -561,6 +561,110 @@ def test_failed_read_of_a_later_comment_page_stops_the_panel(monkeypatch):
     assert "retry count could not be confirmed" in notifier.sent[-1]
 
 
+def _backfill_after_baseline(comments, review="**REQUEST_CHANGES** fresh"):
+    baseline = swarm_dispatch.PanelCommentBaseline(
+        frozenset(c["id"] for c in comments.comments)
+    )
+    return lambda: asyncio.run(
+        _dispatcher()._post_missing_panel_comments(
+            tsd._trigger(), [("pm", review)], {"pm": "pavo"},
+            reviewed_head=HEAD, baseline=baseline,
+        )
+    )
+
+
+def test_backfill_sees_a_lens_post_past_the_first_page(monkeypatch):
+    """Red before: the backfill read only the first 100 comments, so the lens's
+    own verdict on page two (posted during this run) looked missing and the
+    fallback posted the same verdict again."""
+    comments = _PagedComments(_chatter(120))
+    _wire_long_thread(monkeypatch, comments)
+    backfill = _backfill_after_baseline(comments)
+    # The lens posts its own verdict during the run; it lands on page two.
+    own = swarm_dispatch.compose_fallback_comment(
+        "pm", "pavo", "**REQUEST_CHANGES** fresh", HEAD
+    )
+    comments.comments.append(
+        {"id": 121, "body": own, "user": {"login": SWARM_LOGIN},
+         "created_at": "2026-11-06T10:00:00Z"}
+    )
+    backfill()
+    assert comments.posted == []
+
+
+def test_backfill_posts_nothing_when_a_later_page_cannot_be_read(monkeypatch):
+    """Red before: page two was never requested, so the lens read as missing
+    and was posted; now an incomplete read cannot prove it missing."""
+    comments = _PagedComments(_chatter(120), fail_page=2)
+    _wire_long_thread(monkeypatch, comments)
+    _backfill_after_baseline(comments)()
+    assert comments.posted == []
+
+
+def test_backfill_hitting_the_page_cap_posts_nothing(monkeypatch):
+    monkeypatch.setattr(swarm_dispatch, "_MAX_COMMENT_PAGES", 1)
+    comments = _PagedComments(_chatter(120))
+    _wire_long_thread(monkeypatch, comments)
+    _backfill_after_baseline(comments)()
+    assert comments.posted == []
+
+
+def test_backfill_still_posts_a_genuinely_missing_lens_on_a_long_thread(monkeypatch):
+    comments = _PagedComments(_chatter(120))
+    _wire_long_thread(monkeypatch, comments)
+    _backfill_after_baseline(comments)()
+    assert len(comments.posted) == 1
+    assert "fresh" in comments.posted[0]
+
+
+def _deferral(cid, attempt):
+    return {
+        "id": cid,
+        "body": SwarmDispatcher._REVIEW_DEFERRED_MARKER.format(
+            iso="2026-11-06T10:00:00Z"
+        ) + "\n" + SwarmDispatcher._NEOTOMA_DEFERRAL_MARKER.format(
+            attempt=attempt, head=HEAD
+        ),
+        "user": {"login": SWARM_LOGIN},
+    }
+
+
+def test_malformed_latest_marker_after_one_at_the_limit_does_not_retry(monkeypatch):
+    """Red before: the malformed latest marker failed the count regex, so the
+    count read as 0 and a fresh "retry 1" was scheduled although an earlier
+    marker had already reached the limit."""
+    monkeypatch.setenv("APIS_NEOTOMA_RETRY_LIMIT", "2")
+    malformed = _deferral(2, "x")
+    assert SwarmDispatcher._NEOTOMA_DEFERRAL_RE.search(malformed["body"]) is None
+    comments = _Comments([_deferral(1, 2), malformed])
+    _wire_long_thread(monkeypatch, comments)
+    notifier = tsd._StubNotifier()
+    d = _dispatcher(notifier)
+    assert asyncio.run(d._prior_neotoma_deferral_attempts(tsd._trigger())) is None
+    asyncio.run(
+        d._handle_panel_session_limit(
+            tsd._trigger(), None, "pm", "", "",
+            reason=swarm_dispatch.NEOTOMA_TEMPORARILY_UNAVAILABLE,
+        )
+    )
+    assert notifier.priorities == [swarm_dispatch.Priority.BLOCKER]
+    assert "retry count could not be confirmed" in notifier.sent[-1]
+    assert SwarmDispatcher._REVIEW_DEFERRED_RE.search(comments.posted[-1]) is None
+
+
+def test_deferral_of_another_kind_still_counts_as_no_neotoma_retries(monkeypatch):
+    other = {
+        "id": 2,
+        "body": SwarmDispatcher._REVIEW_DEFERRED_MARKER.format(
+            iso="2026-11-06T10:00:00Z"
+        ),
+        "user": {"login": SWARM_LOGIN},
+    }
+    comments = _Comments([_deferral(1, 2), other])
+    _wire_long_thread(monkeypatch, comments)
+    assert asyncio.run(_dispatcher()._prior_neotoma_deferral_attempts(tsd._trigger())) == 0
+
+
 def test_deferred_sweep_sees_a_marker_past_the_first_page(monkeypatch):
     """Red before: both sweep reads stopped at the first 100 comments."""
     marker = SwarmDispatcher._REVIEW_DEFERRED_MARKER.format(iso="2026-11-06T10:00:00Z")

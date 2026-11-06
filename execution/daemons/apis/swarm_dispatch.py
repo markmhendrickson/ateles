@@ -15904,16 +15904,27 @@ class SwarmDispatcher:
         )
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    url, params={"per_page": 100}, headers=self._github_headers(t.repository)
+                # Every page: on a thread past 100 comments a lens's own post
+                # sits on a later page, and a first-page read would take it as
+                # missing and post the verdict again. A read that did not reach
+                # the last page cannot prove a lens is missing, so it posts
+                # nothing (same scan as _panel_comment_baseline).
+                raw, complete = await self._issue_comments_scan(
+                    t.repository, t.number, client
                 )
-                resp.raise_for_status()
+                if not complete:
+                    log.warning(
+                        f"[{DAEMON_NAME}] {t.repository}#{t.number}: comment "
+                        "scan did not reach the last page — fallback review "
+                        "comments skipped rather than risk duplicate verdicts"
+                    )
+                    return
                 # Only a swarm identity's comment counts as a lens's posted
                 # review: a lens-marked comment from any other account must not
                 # suppress the fallback post (fail closed on an empty identity
                 # set — every lens then reads as not yet posted).
                 posted_comments = lens_authors.scope_lens_comments(
-                    resp.json(), await asyncio.to_thread(lens_comment_authors)
+                    raw, await asyncio.to_thread(lens_comment_authors)
                 )
                 if baseline is not None:
                     posted_comments = [
@@ -16787,6 +16798,9 @@ class SwarmDispatcher:
     _NEOTOMA_DEFERRAL_RE = re.compile(
         r"<!-- review-deferred-neotoma attempt=(\d+) head=([0-9a-f]*) -->"
     )
+    # Any Neotoma deferral marker, readable or not: one that carries this
+    # prefix but fails _NEOTOMA_DEFERRAL_RE has an unknown count.
+    _NEOTOMA_DEFERRAL_PREFIX = "<!-- review-deferred-neotoma"
 
     async def _prior_neotoma_deferral_attempts(self, t: SwarmTrigger) -> int | None:
         """Consecutive Neotoma deferrals already recorded for this PR head.
@@ -16794,7 +16808,8 @@ class SwarmDispatcher:
         Read from the newest live deferral marker (the same last-write-wins walk
         the deferred sweep uses): 0 when there is none, when a verdict or a
         deferral of another kind followed it, or when it was for another head.
-        None when any page of the comments cannot be read, so the caller fails
+        None when any page of the comments cannot be read, or when the newest
+        live Neotoma marker's count cannot be parsed, so the caller fails
         closed.
         """
         head = _normalise_full_sha(t.head_sha)
@@ -16815,14 +16830,27 @@ class SwarmDispatcher:
                 f"count unreadable ({type(exc).__name__})"
             )
             return None
-        attempts = 0
+        attempts: int | None = 0
         for c in comments:
             body = c.get("body", "")
             if self._REVIEW_DEFERRED_RE.search(body):
                 m = self._NEOTOMA_DEFERRAL_RE.search(body)
-                attempts = int(m.group(1)) if m and m.group(2) == head else 0
+                if m:
+                    attempts = int(m.group(1)) if m.group(2) == head else 0
+                elif self._NEOTOMA_DEFERRAL_PREFIX in body:
+                    # A Neotoma marker whose count cannot be read: unknown,
+                    # not zero, or a malformed latest marker would reopen
+                    # retries an earlier marker had already exhausted.
+                    attempts = None
+                else:
+                    attempts = 0  # a deferral of another kind
             elif _VANELLUS_COMMENT_MARKER in body:
                 attempts = 0
+        if attempts is None:
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: latest Neotoma "
+                "deferral marker has an unreadable retry count"
+            )
         return attempts
 
     async def _handle_panel_session_limit(
