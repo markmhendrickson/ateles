@@ -37,6 +37,37 @@ SESSIONS = [
     "Codex reliability chat 0a1b2c3d-1111",
     "root0a1b2c3d",
     "root 0a1b2c3d",
+    "session",
+    "session-email-review",
+    "harness subagent (opus)",
+    "Codex root",
+    "codex_resume_audit",
+    "Foundation coordinator 0a1b2c3d-1111",
+    "theodore session (Claude Code)",
+]
+
+# A session verdict silences the dispatcher's only escalation, so a person, a
+# vendor, a job title or prose holding one marker word must stay unroutable.
+SINGLE_MARKER_WORD_IS_NOT_A_SESSION = [
+    "Claude Martin",
+    "claude",
+    "Marcus Chat",
+    "chat",
+    "Customer chat support",
+    "Chat support vendor",
+    "pavo chat",
+    "Session Bank",
+    "operator session notes",
+    "a session took this on",
+    "Marketing coordinator",
+    "coordinator",
+    "Existing platform coordinator; maintenance queue",
+    "operator (separate session)",
+    "operator (not performable in-session)",
+    # Ordinary words spelled in a-f are not ids.
+    "coordinator facade",
+    "chat decade",
+    "root facade",
 ]
 
 NOT_SESSIONS = [
@@ -70,6 +101,11 @@ def test_names_a_session(value):
 
 @pytest.mark.parametrize("value", NOT_SESSIONS)
 def test_does_not_name_a_session(value):
+    assert names_a_session(value) is False
+
+
+@pytest.mark.parametrize("value", SINGLE_MARKER_WORD_IS_NOT_A_SESSION)
+def test_one_marker_word_alone_does_not_name_a_session(value):
     assert names_a_session(value) is False
 
 

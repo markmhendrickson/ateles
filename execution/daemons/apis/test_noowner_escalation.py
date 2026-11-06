@@ -571,6 +571,15 @@ def test_person_assignee_with_session_owner_is_still_human_owned(_world):
                         "Codex provisions and verifies"},
         {"owner": "meeting: acme"},
         {},
+        # One marker word is not a session: a session verdict silences this page.
+        {"assigned_to": "Claude Martin"},
+        {"assigned_to": "Marcus Chat"},
+        {"assigned_to": "Session Bank"},
+        {"assigned_to": "Chat support vendor"},
+        {"assigned_to": "Marketing coordinator"},
+        {"assigned_to": "operator session notes"},
+        {"owner": "Claude Martin"},
+        {"owner": "Session Bank"},
     ],
 )
 def test_other_owners_still_block_and_page(_world, snapshot):
@@ -609,3 +618,15 @@ def test_pr_correction_and_build_released_do_not_read_owner(_world, trigger, ext
         _dispatch_with({"title": "Fix the flaky CI pipeline", "tags": ["ops"],
                         "owner": "Codex session", **extra}, _Notifier(), trigger=trigger)
     assert _world["started"], "routing should have proceeded as before"
+
+
+@pytest.mark.parametrize(
+    "trigger,extra",
+    [("created", {"task_type": "existing_pr_correction"}), ("build_released", {})],
+)
+def test_pr_correction_and_build_released_still_honor_a_session_assignee(_world, trigger, extra):
+    """Only `owner` is withheld there: a named session assignee is still its session's."""
+    n = _Notifier()
+    _dispatch_with({"title": "Fix the flaky CI pipeline", "tags": ["ops"],
+                    "assigned_to": "Codex session billing", **extra}, n, trigger=trigger)
+    _left_as_filed(_world, n)

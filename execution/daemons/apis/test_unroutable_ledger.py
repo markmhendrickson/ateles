@@ -361,6 +361,23 @@ def test_cleared_entry_stays_gone_after_reload(tmp_path):
     assert restarted.note_unreadable("ent_x", now=2000.0) is False
 
 
+def test_forgotten_task_stays_gone_after_reload(tmp_path):
+    """`forget` must survive `save()`'s merge with the copy already on disk."""
+    path = tmp_path / "l.json"
+    led = UnroutableLedger(path=path)
+    led.note("ent_x", "A title", [], "someone")
+    led.save()
+    assert "ent_x" in json.loads(path.read_text())["tasks"]
+
+    assert led.forget("ent_x") is True
+    assert "ent_x" not in json.loads(path.read_text())["tasks"], (
+        "the merge resurrected a deliberately forgotten task"
+    )
+    restarted = UnroutableLedger(path=path)
+    restarted.load()
+    assert "ent_x" not in restarted._seen
+
+
 def test_a_new_streak_after_a_clear_is_recorded_again(tmp_path):
     """The tombstone must not permanently blacklist the key."""
     path = tmp_path / "l.json"

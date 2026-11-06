@@ -273,11 +273,12 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
             # The session-owned answer is removed: a session owner reads as it
             # did before, as no route at all.
             real_skill = apis._resolve_skill
-            mp.setattr(
-                apis, "_resolve_skill",
-                lambda *a, **k: None if real_skill(*a, **k) == apis._SESSION_OWNED
-                else real_skill(*a, **k),
-            )
+
+            def _no_session_answer(*a, **k):
+                skill = real_skill(*a, **k)
+                return None if skill == apis._SESSION_OWNED else skill
+
+            mp.setattr(apis, "_resolve_skill", _no_session_answer)
         if mutation == "no_producer":
             async def _nothing(*a, **k):
                 return producer_confidence.ScoreAttempt(None)

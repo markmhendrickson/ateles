@@ -2331,7 +2331,8 @@ async def dispatch_task(
         if gate_override:
             notifier.send(
                 f"Approved task is session-owned and was not dispatched: "
-                f"{title[:70]}\n  task={entity_id}",
+                f"{title[:70]}\n  Its session continues it; message that session "
+                f"to move it.\n  task={entity_id}",
                 priority=Priority.INFO,
                 handler=DAEMON_NAME,
             )

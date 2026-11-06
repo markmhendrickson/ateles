@@ -26,39 +26,77 @@ SENTINEL_ASSIGNEES = frozenset({"unassigned", "none", "nobody", "tbd", "n/a", "-
 _SESSION_MARKERS = frozenset(
     {"session", "subagent", "codex", "claude", "chat", "coordinator"}
 )
-_HEX_ID = r"[0-9a-f]{6,}"
-# A marker run directly into a hex id (`chat0a1b2c3d`, `coordinator0a1b...`).
-_MARKER_WITH_ID = re.compile(
-    r"(?:" + "|".join(sorted(_SESSION_MARKERS)) + r")" + _HEX_ID
-)
 # `root` names a session only together with an id; bare `root` is a word.
-_ROOT_WITH_ID = re.compile(r"root" + _HEX_ID)
-_HEX_TOKEN = re.compile(_HEX_ID)
+_ID_PREFIXES = _SESSION_MARKERS | {"root"}
+_HEX_ID = re.compile(r"[0-9a-f]{6,}")
+# A marker run directly into an id (`chat0a1b2c3d`, `coordinator0a1b...`).
+_PREFIX_RUN_INTO_ID = re.compile(
+    r"(?:" + "|".join(sorted(_ID_PREFIXES)) + r")([0-9a-f]{6,})"
+)
 # Delimiters are anything non-alphanumeric. Underscore is a delimiter, which
 # `\b` would not make it, so tokens are split explicitly.
 _TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
 
 
+def _tokens(text: str) -> list[str]:
+    return [t for t in _TOKEN_SPLIT.split(text) if t]
+
+
+def _is_id(text: str) -> bool:
+    # A digit keeps ordinary words made of a-f (`facade`, `decade`) from reading
+    # as an id.
+    return bool(_HEX_ID.fullmatch(text)) and any(c.isdigit() for c in text)
+
+
+def _prefix_with_id(tokens: list[str]) -> bool:
+    for i, token in enumerate(tokens):
+        run = _PREFIX_RUN_INTO_ID.fullmatch(token)
+        if run and _is_id(run.group(1)):
+            return True
+        if token in _ID_PREFIXES and i + 1 < len(tokens) and _is_id(tokens[i + 1]):
+            return True
+    return False
+
+
 def names_a_session(value: object) -> bool:
     """True when ``value`` names an interactive session as the owner.
+
+    A session verdict silences the dispatcher's only escalation for a task, so
+    one common word is not enough: `Claude` and `Chat` are in people's names,
+    `Session Bank` is a vendor, and `Marketing coordinator` is a job title. All
+    of those must stay unroutable and reported. One of these is required:
+
+    - the value leads with `codex`, or contains `subagent`, words no person,
+      team or vendor here goes by;
+    - `session` is the head noun: the last word before any parenthetical
+      (`ateles session`, but not `session notes`);
+    - two different markers (`Claude Code session`, `coordinator chat`);
+    - a marker or `root` immediately followed by an id (`Foundation coordinator
+      0a1b2c3d`, `chat0a1b2c3d`);
+    - a space-free identifier starting with `session` (`session-email-review`).
 
     Only the first clause (text before the first ``;``) counts: the owner is
     named first, and what follows is commentary that may mention a session
     without the session owning anything. Non-strings and empty values are
-    False.
+    False. A value this misses is reported as unroutable, which is the safe way
+    to be wrong.
     """
     if not isinstance(value, str) or not value.strip():
         return False
-    first = value.split(";", 1)[0].lower()
-    tokens = [t for t in _TOKEN_SPLIT.split(first) if t]
-    for i, token in enumerate(tokens):
-        if token in _SESSION_MARKERS:
-            return True
-        if _MARKER_WITH_ID.fullmatch(token) or _ROOT_WITH_ID.fullmatch(token):
-            return True
-        if token == "root" and i + 1 < len(tokens) and _HEX_TOKEN.fullmatch(tokens[i + 1]):
-            return True
-    return False
+    first = value.split(";", 1)[0].lower().strip()
+    tokens = _tokens(first)
+    if not tokens:
+        return False
+    if tokens[0] == "codex" or "subagent" in tokens:
+        return True
+    head = _tokens(first.split("(", 1)[0])
+    if head and head[-1] == "session":
+        return True
+    if len(_SESSION_MARKERS.intersection(tokens)) >= 2:
+        return True
+    if _prefix_with_id(tokens):
+        return True
+    return tokens[0] == "session" and not any(c.isspace() for c in first)
 
 
 def _real_assignee(assigned_to: object) -> bool:

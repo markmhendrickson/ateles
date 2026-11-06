@@ -999,6 +999,21 @@
       }
     },
     {
+      "id": "person_named_like_a_session_word_still_blocks",
+      "why": "fail closed: one marker word in a person's name is not a session, so the page is not silenced",
+      "task": {
+        "assigned_to": "Claude Martin"
+      },
+      "expect": {
+        "outcome": "blocked",
+        "notifications": 1,
+        "any_notification_contains": [
+          "unroutable"
+        ],
+        "scorer_called": false
+      }
+    },
+    {
       "id": "approved_session_task_is_not_spawned",
       "why": "an approval is not consent to put a second worker on a session's task: not spawned, one INFO line",
       "task": {
