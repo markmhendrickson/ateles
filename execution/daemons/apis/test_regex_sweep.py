@@ -525,6 +525,7 @@ SEEDS = {
     "swarm_dispatch._BLOCKING_VERDICT_BOLD_RE": ["** REQUEST_CHANGES **"],
     "swarm_dispatch._BLOCKING_VERDICT_BARE_RE": ["verdict BLOCKED here"],
     "swarm_dispatch._BLOCKING_MARKER_RE": ["**[BLOCKING] scope:** summary"],
+    "swarm_dispatch._CLEAN_NO_BLOCKING_LINE_RE": ["- [x] No [BLOCKING] findings."],
     "swarm_dispatch._SPACED_LETTER_RUN_RE": [
         "[ B L O C K I N G ]",
         "[N O N - B L O C K I N G]",
