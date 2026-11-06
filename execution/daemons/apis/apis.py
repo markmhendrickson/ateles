@@ -572,6 +572,7 @@ from routing import (  # noqa: E402
     HUMAN_OWNED as _HUMAN_OWNED,
     SESSION_OWNED as _SESSION_OWNED,
     canonical_assignee as _canonical_assignee,
+    deciding_assignee as _deciding_assignee,
     infer_tags_from_text as _infer_tags_from_text,
     resolve_role as _resolve_role,
     resolve_skill as _resolve_skill,
@@ -3757,7 +3758,9 @@ def _gate_confidence(
 
 def _task_gate_context(task_snapshot: dict, *, bound_confidence: float | None = None):
     """The skill, action type, live policy and gate decision for a task as it is."""
-    assigned_to = _canonical_assignee(task_snapshot.get("assigned_to"))
+    # A task assigned to the dispatcher names no owner, so its tags decide, as
+    # they do in `dispatch_task`.
+    assigned_to = _deciding_assignee(task_snapshot.get("assigned_to"))
     skill = assigned_to
     if not skill:
         tags = task_snapshot.get("tags", []) or []
@@ -4520,7 +4523,9 @@ async def handle_checkpoint_brief(
             GateAction.CHECKPOINT.value,
             GateAction.CHECKPOINT_WITH_ALTERNATIVES.value,
         }
-        assigned_to = _canonical_assignee(task_snapshot.get("assigned_to"))
+        # A task assigned to the dispatcher names no owner: judge it under the
+        # skill and policy `dispatch_task` held it under, not as "apis".
+        assigned_to = _deciding_assignee(task_snapshot.get("assigned_to"))
         safety_skill = assigned_to
         if not safety_skill:
             task_tags = task_snapshot.get("tags", []) or []

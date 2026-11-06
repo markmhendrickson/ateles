@@ -605,6 +605,60 @@ def test_checkpoint_reissue_context_resolves_under_the_policy_it_evaluates_with(
     assert decision.blast_radius is BlastRadius.NEVER
 
 
+@pytest.mark.parametrize(
+    "dispatcher", ["apis", "APIS", " Apis ", "apis@ateles", "Apis@ateles-swarm"]
+)
+@pytest.mark.parametrize(
+    "tags, skill, action_type",
+    [
+        (["engineering"], "cicada", "open_or_merge_pr"),
+        (["finance"], "monedula", "payment"),
+    ],
+)
+def test_gate_context_reads_a_task_assigned_to_the_dispatcher_by_its_tags(
+    monkeypatch, dispatcher, tags, skill, action_type
+):
+    """`dispatch_task` routes such a task by its tags and holds it under that
+    agent's policy, so re-issue and the approval-cannot-release check must read
+    it the same way, not as an agent called "apis"."""
+    asked = []
+    policy = _policies()["prior_unclassified"]
+
+    def resolve(agent):
+        asked.append(agent)
+        return policy
+
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", resolve)
+    snapshot = {
+        "assigned_to": dispatcher,
+        "tags": tags,
+        "title": "Tidy a helper",
+        "confidence": 1.0,
+    }
+
+    got_skill, got_action, _policy, _decision = apis._task_gate_context(snapshot)
+
+    assert got_skill == skill == apis._resolve_skill(tags, assigned_to=dispatcher)
+    assert got_action == action_type
+    assert asked == [skill]
+
+
+def test_gate_context_gives_a_task_assigned_only_to_the_dispatcher_no_owner(
+    monkeypatch,
+):
+    """Nothing routes it, so it has no skill and earns no owner's confidence."""
+    monkeypatch.setattr(
+        apis, "resolve_policy_for_agent", lambda _skill: _policies()["prior_unclassified"]
+    )
+    skill, _action, _policy, decision = apis._task_gate_context(
+        {"assigned_to": "apis", "title": "Tidy a helper"}
+    )
+    assert skill is None
+    # The same mechanical score an unassigned task gets, not an owned task's.
+    _s, _a, _p, unassigned = apis._task_gate_context({"title": "Tidy a helper"})
+    assert decision.confidence == unassigned.confidence
+
+
 # ═══ D. confidence_drivers reaches the operator ══════════════════════════════
 
 _DRIVERS = "Only the calendar title is known; scope and owner are unverified."
