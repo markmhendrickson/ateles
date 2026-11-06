@@ -13484,6 +13484,9 @@ class SwarmDispatcher:
     def _lanius_pr_prompt(
         t: SwarmTrigger, parent: int | None, parent_task: str | None = None
     ) -> str:
+        # The verified-task wording applies only when no parent issue is
+        # identified; every other path keeps the issue-gate prompt unchanged.
+        task_only = bool(parent_task) and not parent
         if parent:
             parent_line = f"The PR body references parent issue #{parent}."
         elif parent_task:
@@ -13500,6 +13503,51 @@ class SwarmDispatcher:
                 "No parent issue reference found in the PR body — find it "
                 "yourself or treat gate inheritance as blocked."
             )
+        if task_only:
+            report_lines = (
+                "Report through the final GATE_INHERITANCE, GATE_PENDING and, "
+                "only for a missing parent issue, GATE_BLOCK_REASON lines"
+            )
+            retrieve_clause = (
+                "GATE-STATUS SOURCE OF TRUTH: when a parent issue is "
+                "identified, the parent issue's `gate_status` "
+                "lives on its NEOTOMA issue entity, NOT in the GitHub issue body "
+                "(the GitHub body never carries gate metadata). For an "
+                "identified parent issue, retrieve it "
+            )
+            blocked_clause = "For an identified issue, only emit `blocked` when "
+            override_clause = (
+                "publication steps in your role prompt. When a verified parent "
+                "task is supplied and no parent issue is identified, it also "
+                "overrides any role-prompt instruction to retrieve issue gates: "
+                "there is no issue entity to retrieve. Do NOT post a blocking "
+            )
+            routed_lines = "GATE_INHERITANCE, GATE_PENDING and GATE_BLOCK_REASON "
+            final_line = (
+                "End your reply with one verdict line: `GATE_INHERITANCE: clear` "
+            )
+            omit_clause = (
+                "Omit the line when clear or when no gate is pending. "
+                "Only a block solely for an absent parent issue may add "
+                "`GATE_BLOCK_REASON: missing_parent_issue`; omit it for all "
+                "other blocks."
+            )
+        else:
+            report_lines = "Report only through the final GATE_INHERITANCE and GATE_PENDING lines"
+            retrieve_clause = (
+                "GATE-STATUS SOURCE OF TRUTH: the parent issue's `gate_status` "
+                "lives on its NEOTOMA issue entity, NOT in the GitHub issue body "
+                "(the GitHub body never carries gate metadata). ALWAYS retrieve it "
+            )
+            blocked_clause = "Only emit `blocked` when "
+            override_clause = (
+                "publication steps in your role prompt. Do NOT post a blocking "
+            )
+            routed_lines = "GATE_INHERITANCE and GATE_PENDING "
+            final_line = (
+                "End your reply with exactly one line: `GATE_INHERITANCE: clear` "
+            )
+            omit_clause = "Omit the line when clear."
         return (
             "Invoke the lanius agent per your appended system prompt.\n\n"
             f"A pull request event ({t.action}) fired for "
@@ -13508,15 +13556,9 @@ class SwarmDispatcher:
             f"{parent_line}\n\n"
             "Run your PR-opened protocol: enforce PR gate inheritance from "
             "the parent issue. Do NOT post GitHub comments or assign reviewers "
-            "or make any other GitHub write. Report through the final "
-            "GATE_INHERITANCE, GATE_PENDING and, only for a missing parent issue, "
-            "GATE_BLOCK_REASON lines; the dispatcher posts the "
+            f"or make any other GitHub write. {report_lines}; the dispatcher posts the "
             "blocking comment and routes Vanellus into review when clear.\n\n"
-            "GATE-STATUS SOURCE OF TRUTH: when a parent issue is identified, "
-            "the parent issue's `gate_status` "
-            "lives on its NEOTOMA issue entity, NOT in the GitHub issue body "
-            "(the GitHub body never carries gate metadata). For an identified "
-            "parent issue, retrieve it "
+            f"{retrieve_clause}"
             "first: `retrieve_entity_by_identifier(entity_type='issue', "
             "identifier=<number>, identifier_field='github_number')` (scoped to "
             "this repo), and read `gate_status` from that entity's snapshot. "
@@ -13532,8 +13574,7 @@ class SwarmDispatcher:
             "emit `GATE_INHERITANCE: clear`. Legacy init MUST MERGE, never "
             "overwrite: if the entity already has a `gate_status` with any gate "
             "at `signed_off`/`waived`, PRESERVE those exactly — never downgrade "
-            "a `signed_off` gate to `pending`. For an identified issue, only "
-            "emit `blocked` when "
+            f"a `signed_off` gate to `pending`. {blocked_clause}"
             "`gate_status` exists AND a pre-impl gate is genuinely `pending` "
             "(unsigned). Merge stays operator-gated regardless, per the "
             "fail-open-for-review guardrail. To run the full issue pipeline on "
@@ -13541,26 +13582,19 @@ class SwarmDispatcher:
             "backfill via `trigger_swarm_pr.py issue <n>`.\n\n"
             f"{_agent_prompt_instruction('lanius', 'PR gate inheritance')}\n\n"
             "AUTHORITATIVE FOR THIS RUN: this instruction overrides the "
-            "publication steps in your role prompt. When a verified parent "
-            "task is supplied and no parent issue is identified, it also "
-            "overrides any role-prompt instruction to retrieve issue gates: "
-            "there is no issue entity to retrieve. Do NOT post a blocking "
+            f"{override_clause}"
             "comment, do NOT assign or request a reviewer, and make no other "
             "GitHub write. The dispatcher posts the gate-block comment and "
-            "routes Vanellus from your GATE_INHERITANCE, GATE_PENDING and "
-            "GATE_BLOCK_REASON "
+            f"routes Vanellus from your {routed_lines}"
             "lines.\n\n"
-            "End your reply with one verdict line: `GATE_INHERITANCE: clear` "
+            f"{final_line}"
             "or `GATE_INHERITANCE: blocked` so the dispatcher can route. When "
             "you emit `blocked`, add a SECOND line naming the unsigned pre-impl "
             "gates as a comma-separated list, e.g. `GATE_PENDING: arch,ux` — "
             "the dispatcher uses this to guarantee the lens agent that owns "
             "each pending gate a seat on the (capped) review panel, so a gate "
             "can never stay blocked because its owning lens was never "
-            "re-invoked. Omit the line when clear or when no gate is pending. "
-            "Only a block solely for an absent parent issue may add "
-            "`GATE_BLOCK_REASON: missing_parent_issue`; omit it for all other "
-            "blocks."
+            f"re-invoked. {omit_clause}"
         )
 
     @staticmethod
