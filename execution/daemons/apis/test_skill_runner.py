@@ -1997,6 +1997,137 @@ class TestSwarmGithubContractInjection:
         mock_write_harness.assert_not_called()
 
 
+# ── Host-run lens children cannot reach the host's own `gh` session ──────────
+
+
+def _effective_gh_config_dir(child_env: dict) -> str:
+    """The directory `gh` reads its accounts from, by gh's own precedence:
+    GH_CONFIG_DIR, else XDG_CONFIG_HOME/gh, else HOME/.config/gh."""
+    if child_env.get("GH_CONFIG_DIR"):
+        return child_env["GH_CONFIG_DIR"]
+    if child_env.get("XDG_CONFIG_HOME"):
+        return os.path.join(child_env["XDG_CONFIG_HOME"], "gh")
+    return os.path.join(child_env.get("HOME", ""), ".config", "gh")
+
+
+class TestLensGhConfigIsolation:
+    """A read-only review child run on the host (a lens, a carry-forward
+    check) keeps the host HOME, where the host owner's `gh` login lives. `gh`
+    treats an empty or unset GH_TOKEN as "use the keyring account", so a child
+    that drops its token would act as the host owner. Such a child gets an
+    empty GH_CONFIG_DIR of its own; its token, when it has one, is unchanged.
+    """
+
+    def setup_method(self) -> None:
+        skill_runner._agent_def_cache.clear()
+
+    def _host_home_with_gh_login(self, tmp_path, monkeypatch) -> str:
+        home = tmp_path / "host_home"
+        gh_dir = home / ".config" / "gh"
+        gh_dir.mkdir(parents=True)
+        (gh_dir / "hosts.yml").write_text("github.com:\n    user: host-owner\n")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("GH_CONFIG_DIR", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setenv("GITHUB_TOKEN", "ambient-operator-token")
+        monkeypatch.setenv("GH_TOKEN", "ambient-operator-token")
+        return str(gh_dir)
+
+    def _dispatch(self, MockLoader, role: str, **kwargs) -> tuple[object, dict, dict]:
+        fake_def = _make_def(prompt_markdown=f"Role: {role}.", tool_allowlist="*")
+        instance = _loader_with_no_policies()
+        instance.load.return_value = fake_def
+        MockLoader.return_value = instance
+        captured: dict = {}
+        seen: dict = {}
+
+        async def fake_exec(*cmd, **kw):
+            child_env = dict(kw.get("env", {}))
+            captured.update(child_env)
+            gh_dir = _effective_gh_config_dir(child_env)
+            seen["gh_dir"] = gh_dir
+            seen["gh_dir_entries"] = sorted(os.listdir(gh_dir)) if os.path.isdir(gh_dir) else None
+            proc = MagicMock()
+            proc.returncode = 0
+
+            async def _communicate(input=None):
+                return b"output", b""
+
+            proc.communicate = _communicate
+            return proc
+
+        with (
+            patch("skill_runner.CLAUDE_BIN", "/usr/bin/claude"),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value="skill md"),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch("os.path.exists", return_value=False),
+        ):
+            result = asyncio.run(
+                skill_runner.run_skill(
+                    role, "review the PR", role=role, task_entity_id="ent_abc", **kwargs
+                )
+            )
+        return result, captured, seen
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_host_run_lens_child_cannot_reach_host_gh_config(
+        self, MockLoader, mock_write_harness, monkeypatch, tmp_path
+    ) -> None:
+        host_gh_dir = self._host_home_with_gh_login(tmp_path, monkeypatch)
+        result, child_env, seen = self._dispatch(
+            MockLoader,
+            "pavo",
+            github_read_only=True,
+            include_github_contract=True,
+            github_token="lens-app-token",
+        )
+        assert result.ok
+        # Where the child's `gh` would look for an account: not the host's
+        # login, and an empty directory holding no account at all.
+        assert seen["gh_dir"] != host_gh_dir
+        assert seen["gh_dir_entries"] == []
+        assert child_env["HOME"] == str(tmp_path / "host_home")
+        # Created for the run and removed after it.
+        assert not os.path.isdir(seen["gh_dir"])
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_lens_child_with_agent_token_keeps_it_unchanged(
+        self, MockLoader, mock_write_harness, monkeypatch, tmp_path
+    ) -> None:
+        self._host_home_with_gh_login(tmp_path, monkeypatch)
+        result, child_env, _ = self._dispatch(
+            MockLoader,
+            "pavo",
+            github_read_only=True,
+            include_github_contract=True,
+            github_token="lens-app-token",
+        )
+        assert result.ok
+        assert child_env["GH_TOKEN"] == "lens-app-token"
+        assert child_env["GITHUB_TOKEN"] == "lens-app-token"
+        assert child_env.get("GH_CONFIG_DIR")
+
+    @patch("skill_runner._write_harness_event")
+    @patch("skill_runner.AgentLoader")
+    def test_non_lens_run_environment_unchanged(
+        self, MockLoader, mock_write_harness, monkeypatch, tmp_path
+    ) -> None:
+        host_gh_dir = self._host_home_with_gh_login(tmp_path, monkeypatch)
+        result, child_env, seen = self._dispatch(
+            MockLoader,
+            "cicada",
+            include_github_contract=True,
+            github_token="scoped-delivery-token",
+        )
+        assert result.ok
+        assert "GH_CONFIG_DIR" not in child_env
+        assert seen["gh_dir"] == host_gh_dir
+        assert child_env["GH_TOKEN"] == "scoped-delivery-token"
+
+
 # ── ateles#590 security repair (PR #1334): GitHub delivery credential boundary ─
 
 
