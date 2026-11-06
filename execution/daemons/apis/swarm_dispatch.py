@@ -8855,7 +8855,18 @@ class SwarmDispatcher:
         #     limit notice. Post a truthful REVIEW-INCOMPLETE marker (never a stub
         #     that reads like a verdict) and schedule a resume after the reset,
         #     rather than paging the operator to fix nothing.
-        if detect_session_limit(vanellus_result.stdout, vanellus_result.stderr):
+        #
+        #     A successful run that carries a readable verdict is a review, not
+        #     a limit or auth notice, so neither detector reads its text: a
+        #     roll-up that discusses rate limits or a 401 would otherwise match
+        #     the broad signatures, defer, and match again on every resume.
+        #     Output with no verdict, and any failed run, is checked as before.
+        aggregation_is_review = vanellus_result.ok and (
+            parse_review_verdict(vanellus_result.stdout) is not None
+        )
+        if not aggregation_is_review and detect_session_limit(
+            vanellus_result.stdout, vanellus_result.stderr
+        ):
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus",
                 vanellus_result.stdout, vanellus_result.stderr,
@@ -8865,7 +8876,9 @@ class SwarmDispatcher:
         #     auth (expired OAuth / missing ANTHROPIC_API_KEY), its "verdict" is
         #     just the 401. Reframe it as an infra failure and page the operator
         #     to re-auth, rather than posting the raw error as a review.
-        if detect_auth_failure(vanellus_result.stdout, vanellus_result.stderr):
+        if not aggregation_is_review and detect_auth_failure(
+            vanellus_result.stdout, vanellus_result.stderr
+        ):
             await self._handle_panel_auth_failure(trigger, "vanellus")
             return
         if not vanellus_result.ok:

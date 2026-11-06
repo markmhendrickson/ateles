@@ -9697,6 +9697,93 @@ def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
     assert deferred["reason"] == "incomplete review panel"
 
 
+# A successful roll-up that carries a verdict is a review, never a usage limit
+# or an auth failure, however much its text discusses limits or a 401. A notice
+# with no verdict, or a failed run, is still deferred or paged as before.
+
+
+def _aggregation_outcomes(monkeypatch, *, vanellus_ok, vanellus_stdout):
+    calls = []
+    d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout=vanellus_stdout, calls=calls)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(
+                skill, vanellus_ok, 0 if vanellus_ok else 1, vanellus_stdout, "",
+                error="" if vanellus_ok else "process failed",
+            )
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    deferrals, auth_pages = [], []
+
+    async def fake_deferral(self, trigger, parent, agent, *args, **kwargs):
+        deferrals.append((agent, args, kwargs))
+
+    async def fake_auth(self, trigger, agent):
+        auth_pages.append(agent)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_session_limit", fake_deferral)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_auth_failure", fake_auth)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    return calls, deferrals, auth_pages
+
+
+def test_successful_aggregation_discussing_rate_limits_is_a_review(monkeypatch):
+    stdout = (
+        "**APPROVE**\n"
+        "The change backs off when GitHub returns a rate limit and retries "
+        "after the window resets at the time the X-RateLimit-Reset header gives."
+    )
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
+    assert ("gate", None) in calls, calls
+
+
+def test_successful_aggregation_mentioning_a_401_is_not_an_auth_failure(monkeypatch):
+    stdout = (
+        "**REQUEST_CHANGES**\n"
+        "[BLOCKING] arch: a 401 invalid authentication credentials response "
+        "from the provider is swallowed instead of surfaced."
+    )
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert auth_pages == [] and deferrals == []
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "request_changes") in calls, calls
+
+
+@pytest.mark.parametrize("ok", [True, False], ids=["success_return", "failure_return"])
+def test_limit_notice_without_verdict_still_defers(monkeypatch, ok):
+    notice = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=ok, vanellus_stdout=notice
+    )
+    assert len(deferrals) == 1, deferrals
+    agent, args, _kwargs = deferrals[0]
+    assert agent == "vanellus"
+    assert args[0] == notice  # the limit notice is what the deferral reads
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_failed_aggregation_with_limit_notice_and_verdict_still_defers(monkeypatch):
+    # A failed run is never treated as a review, even if a verdict token appears.
+    stdout = "**APPROVE**\nusage limit reached, resets at 19:30"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=False, vanellus_stdout=stdout
+    )
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][1][0] == stdout
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
 def test_parse_limit_reset_delay_reads_the_clock():
     from datetime import datetime
     now = datetime(2026, 7, 23, 16, 45, 0)  # 4:45pm
