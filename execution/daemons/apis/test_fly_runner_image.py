@@ -504,9 +504,17 @@ def proxy_job(tmp_path, monkeypatch):
     return job_dir
 
 
-def _use_proxy(monkeypatch, module, *, ident=(os.getuid(), os.getgid())):
+# The test process's own uid stands in for the child's (so the CLI's HOME can
+# be chowned to it without root); the "parent" is then reported as another uid.
+_CHILD_IDENT = (os.getuid(), os.getgid())
+
+
+def _use_proxy(monkeypatch, module, *, ident=_CHILD_IDENT, parent_euid=None):
     monkeypatch.setattr(run_job, "_neotoma_proxy", lambda: module)
     monkeypatch.setattr(run_job, "child_identity", lambda name: ident)
+    if parent_euid is None:
+        parent_euid = _CHILD_IDENT[0] + 1
+    monkeypatch.setattr(run_job, "_parent_euid", lambda: parent_euid)
 
 
 class TestNeotomaProxyJob:
@@ -545,7 +553,7 @@ class TestNeotomaProxyJob:
         assert server["url"].startswith("http://127.0.0.1:")
         assert "headers" not in server
         assert seen["mode"] == 0o600
-        assert module.constructed == [("https://neotoma.example.test", os.getuid())]
+        assert module.constructed == [("https://neotoma.example.test", _CHILD_IDENT[0])]
         # The proxy's signer signs with the role's key.
         headers = {k.lower(): v for k, v in
                    module.signs[0]("POST", "https://neotoma.example.test/mcp", b"{}",
@@ -595,6 +603,46 @@ class TestNeotomaProxyJob:
         assert "the Neotoma proxy needs a separate child uid" in stored["r"]["refused"]
         assert module.constructed == []
         assert not proxy_job.exists()
+
+    @pytest.mark.parametrize("child_uid,parent_euid", [(0, 1000), (1000, 1000)],
+                             ids=["child_is_root", "child_is_the_parent"])  # fmt: skip
+    def test_a_child_uid_that_is_not_separate_and_unprivileged_is_refused(
+            self, proxy_job, monkeypatch, child_uid, parent_euid):
+        module = _FakeProxyModule()
+        _use_proxy(monkeypatch, module, ident=(child_uid, child_uid), parent_euid=parent_euid)
+        monkeypatch.setattr(run_job, "_role_signer",
+                            lambda job: pytest.fail("no signer may be built"))  # fmt: skip
+        # The record is still written as the role; only the proxy's signer is under test.
+        monkeypatch.setattr(run_job, "auth_headers_for", lambda job: lambda url, body: {})
+        monkeypatch.setattr(run_job, "_chown_tree", lambda root, ident: None)
+        stored = {}
+        rc = run_job.main(
+            proxy_job, writer=lambda b, a, r: stored.setdefault("r", r) is not None,
+            runner=lambda *a, **k: pytest.fail("the CLI must not run"),
+            hard_exit=lambda code: None,
+        )  # fmt: skip
+        assert rc == run_job.EXIT_NEOTOMA_UNAVAILABLE
+        assert stored["r"]["refused"] == "the Neotoma proxy needs a separate child uid"
+        assert module.constructed == []
+        assert module.stopped == []
+        assert not proxy_job.exists()
+
+    def test_a_proxy_job_with_no_running_proxy_gets_no_mcp_server(self, proxy_job, tmp_path):
+        job = run_job.load_job(proxy_job)
+        assert job.neotoma_mcp == "proxy"
+        home = tmp_path / "home"
+        home.mkdir()
+        argv, env = run_job.prepare_child(job, home, {"PATH": "/usr/bin"},
+                                          neotoma_proxy_port=None)  # fmt: skip
+        assert "--mcp-config" not in argv
+        assert run_job.MCP_CONFIG_PLACEHOLDER not in argv
+        assert argv == ["claude", "--print", "--other"]
+        assert not any(p.name.endswith(".json") and "mcp" in p.name.lower()
+                       for p in home.rglob("*"))  # fmt: skip
+        for path in home.rglob("*"):
+            if path.is_file():
+                assert "Bearer" not in path.read_text(errors="ignore"), path
+        assert not any("Bearer" in str(v) for v in env.values())
 
     def test_the_proxy_stops_when_the_run_raises(self, proxy_job, monkeypatch):
         module = _FakeProxyModule()

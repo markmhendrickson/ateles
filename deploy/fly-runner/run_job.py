@@ -1044,12 +1044,19 @@ def _role_signer(job: Job):
     )
 
 
+def _parent_euid() -> int:
+    return os.geteuid()
+
+
 def start_neotoma_proxy(job: Job, ident: tuple[int, int] | None):
     """Start the job's signing proxy and check Neotoma admits the key.
 
     Returns ``(proxy, port, problem)``. ``proxy`` is whatever was started (the
     caller stops it on every path); ``problem`` is a refusal reason, or ""."""
-    if ident is None:
+    # The proxy admits only the child's uid, so that uid must be a separate,
+    # unprivileged identity: root, or this process's own uid, could read the
+    # role's key and talk to the proxy as if it were the runner.
+    if ident is None or ident[0] == 0 or ident[0] == _parent_euid():
         return None, None, "the Neotoma proxy needs a separate child uid"
     try:
         module = _neotoma_proxy()
