@@ -5323,8 +5323,9 @@ class SwarmDispatcher:
         """Whether `trigger`'s head already has a finished panel; None if unreadable.
 
         The required lenses are the ones `select_panel` seats for the PR's
-        changed files. When the changed files cannot be read the required set
-        is left empty, so only an aggregation marker can count as finished.
+        changed files. `_changed_files` reports a failed read as an empty list;
+        the required set is then left empty, so only an aggregation marker can
+        count as finished and the PR is re-driven rather than skipped.
         """
         head = _normalise_full_sha(trigger.head_sha or "")
         if not head:
@@ -5341,9 +5342,18 @@ class SwarmDispatcher:
                 "alone"
             )
             return None
-        if latest_aggregation_comment(comments, head_sha=head) is not None:
+        # An aggregation at the head settles it without reading the diff.
+        if panel_finished_at_head(comments, head, set()):
             return True
-        changed_files = await self._changed_files(trigger)
+        try:
+            changed_files = await self._changed_files(trigger)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                f"[{DAEMON_NAME}] startup panel sweep: could not read changed "
+                f"files on {trigger.repository}#{trigger.number} ({exc}) — "
+                "leaving it alone"
+            )
+            return None
         required = (
             {
                 lens.lens
