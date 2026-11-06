@@ -263,8 +263,8 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     _snapshot_with_tenant,
     ExecutionPolicy,
     checkpoint_already_dispatched,
-    checkpoint_recovery_claim,
-    claim_checkpoint_recovery,
+    checkpoint_release_held_by,
+    checkpoint_release_owner,
     checkpoints_for_task,
     close_checkpoint_without_release,
     entity_record_digest,
@@ -284,6 +284,7 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     query_all_entities,
     require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
+    take_checkpoint_release,
     supersede_checkpoint,
 )
 from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
@@ -4311,13 +4312,55 @@ _checkpoint_locks: dict[str, asyncio.Lock] = {}
 # so a replay arriving while the first dispatch is still writing must not read
 # the not-yet-moved task as stranded and launch it a second time. This is only
 # a fast path inside one process: the durable guard across processes is the
-# version-checked recovery claim on the checkpoint record.
+# version-checked release owner on the checkpoint record.
 _checkpoints_released_here: set[str] = set()
 
+# Recovery may take over a release only when its owner took it longer ago than
+# this. Dispatch's first write normally lands within seconds of the stamp, so
+# an owner this old has stopped; a younger one may still be dispatching.
+RELEASE_TAKEOVER_AFTER_S = 15 * 60
 
-def _recovery_claim_token(entity_id: str) -> str:
-    """A token no other consumer, process or attempt can produce."""
-    return f"{DAEMON_NAME}:{os.getpid()}:{uuid.uuid4().hex}"
+# Identifies this process boot in a release owner token (a pid can be reused).
+_PROCESS_BOOT_ID = uuid.uuid4().hex
+
+
+def _release_clock() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _release_owner_token() -> str:
+    """A token no other consumer, process, boot or attempt can produce."""
+    return f"{DAEMON_NAME}:{os.getpid()}:{_PROCESS_BOOT_ID}:{uuid.uuid4().hex}"
+
+
+async def _still_holds_release(entity_id: str, owner_token: str) -> bool:
+    """Re-read the checkpoint immediately before dispatch: is it still ours?
+
+    A failed or unreadable re-read is False. A release taken over while this
+    consumer was stopped logs once and is False, so only the owner dispatches.
+    """
+    try:
+        record = await asyncio.to_thread(fetch_checkpoint_record, entity_id)
+    except Exception:
+        log.exception(
+            f"[{DAEMON_NAME}] checkpoint {entity_id}: release owner re-read failed "
+            "— not dispatching"
+        )
+        return False
+    snapshot = _record_snapshot(record)
+    if snapshot is None:
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint {entity_id}: release owner could not be "
+            "re-read — not dispatching"
+        )
+        return False
+    if not checkpoint_release_held_by(snapshot, owner_token):
+        log.warning(
+            f"[{DAEMON_NAME}] checkpoint {entity_id}: lost release ownership before "
+            "dispatch (another consumer took it over) — not dispatching"
+        )
+        return False
+    return True
 
 
 def _stranded_release(entity_id: str, checkpoint_record: dict) -> bool:
@@ -4328,7 +4371,9 @@ def _stranded_release(entity_id: str, checkpoint_record: dict) -> bool:
     run behind it, so every replay is a no-op and the task stays held forever.
 
     True only on positive evidence that nothing started: this process has not
-    released the checkpoint; the task reads back at ``awaiting_approval`` at the
+    released the checkpoint; its release owner is a normal release taken at
+    least ``RELEASE_TAKEOVER_AFTER_S`` ago (no owner, or an earlier recovery,
+    is never recovered); the task reads back at ``awaiting_approval`` at the
     exact revision the approval was bound to (dispatch's first effect is a task
     write, so any write since the hold means it may have started); no build
     claim is registered for it; and the Fly ledger, read successfully, holds no
@@ -4342,28 +4387,37 @@ def _stranded_release(entity_id: str, checkpoint_record: dict) -> bool:
         task_id = str(checkpoint.get("task_entity_id") or "")
         if not task_id:
             return False
-        # Recovery is taken at most once per checkpoint. A claim already on the
-        # record means some consumer took it; if the task still reads held, that
-        # consumer stopped between its claim and dispatch. Left held on purpose:
-        # a held task is safe and visible, a second run is not.
-        if checkpoint_recovery_claim(checkpoint) is not None:
-            task = _record_snapshot(fetch_task_record(task_id))
-            if (
-                task is None
-                or normalize_status(task.get("status"))
-                == TaskStatus.AWAITING_APPROVAL.value
-            ):
-                log.error(
-                    f"[{DAEMON_NAME}] checkpoint {entity_id}: recovery was already "
-                    f"claimed but task {task_id} still reads held — leaving it held; "
-                    "recovery is not retried"
-                )
-            return False
         task_record = fetch_task_record(task_id)
         task = _record_snapshot(task_record)
         if task is None:
             return False
         if normalize_status(task.get("status")) != TaskStatus.AWAITING_APPROVAL.value:
+            return False
+        owner = checkpoint_release_owner(checkpoint)
+        if owner is None:
+            # A stamp written before release ownership was recorded, or an
+            # unreadable owner: whoever holds it is unknown, so never guess.
+            log.warning(
+                f"[{DAEMON_NAME}] checkpoint {entity_id}: stamped with no readable "
+                f"release owner and task {task_id} still reads held — not recoverable"
+            )
+            return False
+        # Recovery is taken at most once per checkpoint. A recovery owner that
+        # left the task held stopped between its takeover and dispatch. Left
+        # held on purpose: a held task is safe and visible, a second run is not.
+        if owner.kind == "recovery":
+            log.error(
+                f"[{DAEMON_NAME}] checkpoint {entity_id}: recovery was already "
+                f"claimed but task {task_id} still reads held — leaving it held; "
+                "recovery is not retried"
+            )
+            return False
+        age_s = (_release_clock() - owner.taken_at).total_seconds()
+        if age_s < RELEASE_TAKEOVER_AFTER_S:
+            log.info(
+                f"[{DAEMON_NAME}] checkpoint {entity_id}: release owner took it "
+                f"{int(age_s)}s ago and may still be dispatching — not recovering"
+            )
             return False
         authorization = read_authenticated_checkpoint_authorization(
             entity_id, checkpoint_record
@@ -4409,7 +4463,9 @@ async def handle_checkpoint_brief(
     pending/unknown → no-op (waiting on the operator).
 
     Idempotency: after deciding the resolution is actionable, the consumer must
-    acquire the existing resolved_dispatched stamp before it dispatches. A
+    take the checkpoint's release owner and the existing resolved_dispatched
+    stamp before it dispatches, and still hold the owner on a re-read
+    immediately before dispatch. A
     replayed approved/rejected event whose brief carries that stamp is a no-op,
     except an approval stranded by a restart between the stamp and dispatch
     (``_stranded_release``), which resumes through the same checks.
@@ -4752,40 +4808,37 @@ async def handle_checkpoint_brief(
             f"[{DAEMON_NAME}] checkpoint {entity_id} APPROVED — re-dispatching task "
             f"{task_id} with gate override"
         )
-        # The stamp is the existing replay claim. If it does not land, this attempt
-        # owns nothing and must not dispatch; a later consumer delivery may retry.
-        # A recovered release already holds the stamp from the interrupted run;
-        # instead it takes the one durable recovery claim, version-checked on
-        # the same read every check above judged. Only the consumer whose claim
-        # reads back as its own dispatches; a lost race, a refused precondition,
-        # a failed write or an unreadable result leaves the checkpoint as it is.
-        if recovering:
-            if not isinstance(version, str) or not version:
-                log.error(
-                    f"[{DAEMON_NAME}] checkpoint {entity_id} has no entity_version "
-                    "— cannot claim recovery with a version-checked write"
-                )
-                return False
-            if not claim_checkpoint_recovery(
-                entity_id,
-                claim_token=_recovery_claim_token(entity_id),
-                expected_version=version,
-            ):
-                log.warning(
-                    f"[{DAEMON_NAME}] checkpoint {entity_id} recovery claim not "
-                    "acquired — another consumer owns it or the write failed; "
-                    "not releasing task"
-                )
-                return False
-        else:
-            if not isinstance(version, str) or not version:
-                log.error(
-                    f"[{DAEMON_NAME}] checkpoint {entity_id} has no entity_version "
-                    "— cannot claim the release with a version-checked stamp"
-                )
-                return False
+        # One owner across the normal release and recovery: both take the same
+        # release_owner field with a write version-checked on the read every
+        # check above judged, so a recovery and a release, or two recoveries,
+        # cannot both hold it. The normal release takes it and then stamps on
+        # the version its own write produced; recovery takes it over (the stamp
+        # is already there). A lost race, a refused precondition, a failed write
+        # or an unreadable result owns nothing and must not dispatch.
+        if not isinstance(version, str) or not version:
+            log.error(
+                f"[{DAEMON_NAME}] checkpoint {entity_id} has no entity_version "
+                "— cannot take the release with a version-checked write"
+            )
+            return False
+        owner_token = _release_owner_token()
+        owned_version = take_checkpoint_release(
+            entity_id,
+            kind="recovery" if recovering else "release",
+            owner_token=owner_token,
+            taken_at=_release_clock(),
+            expected_version=version,
+        )
+        if owned_version is None:
+            log.warning(
+                f"[{DAEMON_NAME}] checkpoint {entity_id} release ownership not "
+                "acquired — another consumer owns it or the write failed; "
+                "not releasing task"
+            )
+            return False
+        if not recovering:
             if not stamp_checkpoint_dispatched(
-                entity_id, handler=DAEMON_NAME, expected_version=version
+                entity_id, handler=DAEMON_NAME, expected_version=owned_version
             ):
                 log.warning(
                     f"[{DAEMON_NAME}] checkpoint {entity_id} could not be stamped as "
@@ -4793,6 +4846,10 @@ async def handle_checkpoint_brief(
                 )
                 return False
         _checkpoints_released_here.add(entity_id)
+    # Whichever path is dispatching proceeds only if it still holds the release:
+    # a consumer stopped long enough to be taken over must not dispatch too.
+    if not await _still_holds_release(entity_id, owner_token):
+        return False
     lifecycle_binding = ({"_approved_correction_lifecycle": correction_lifecycle}
                          if correction_lifecycle is not None else {})
     dispatched = await dispatch_task(

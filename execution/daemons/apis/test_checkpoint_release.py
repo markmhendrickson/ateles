@@ -21,6 +21,7 @@ import json
 import plistlib
 import sys
 import types
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -205,17 +206,25 @@ def release_store(monkeypatch, tmp_path):
         _bump_version(record)
         return True
 
-    def claim_recovery(checkpoint_entity_id, *, claim_token, expected_version):
-        # Models the version-checked /correct the real recovery claim sends: a
+    def take_release(
+        checkpoint_entity_id, *, kind, owner_token, taken_at, expected_version
+    ):
+        # Models the version-checked /correct the real ownership write sends: a
         # stale expected_version is refused and writes nothing; a committed
-        # write bumps the version; the claim counts only when it reads back as
-        # the caller's own token.
+        # write bumps the version; ownership counts only when it reads back as
+        # the caller's own token, and the read-back version is returned.
         record = records[checkpoint_entity_id]
         if not expected_version or expected_version != record.get("entity_version"):
-            return False
-        record["snapshot"]["release_recovery_claim"] = claim_token
+            return None
+        record["snapshot"]["release_owner"] = (
+            gating_module.encode_checkpoint_release_owner(kind, taken_at, owner_token)
+        )
         _bump_version(record)
-        return record["snapshot"].get("release_recovery_claim") == claim_token
+        if not gating_module.checkpoint_release_held_by(
+            record["snapshot"], owner_token
+        ):
+            return None
+        return record.get("entity_version")
 
     def close_without_release(checkpoint_entity_id, *, handler, reason):
         records[checkpoint_entity_id]["snapshot"]["status"] = "approved_no_release"
@@ -335,7 +344,11 @@ def release_store(monkeypatch, tmp_path):
         lambda entity_id, **kwargs: set_status(entity_id, "declined"),
     )
     monkeypatch.setattr(apis, "stamp_checkpoint_dispatched", stamp)
-    monkeypatch.setattr(apis, "claim_checkpoint_recovery", claim_recovery)
+    monkeypatch.setattr(apis, "take_checkpoint_release", take_release)
+    # An injected clock for release-ownership ages.
+    clock = {"now": datetime(2026, 9, 21, 1, 0, tzinfo=timezone.utc)}
+    records["_clock"] = clock
+    monkeypatch.setattr(apis, "_release_clock", lambda: clock["now"])
     monkeypatch.setattr(
         apis,
         "close_checkpoint_without_release",
@@ -970,7 +983,15 @@ async def test_two_consumers_reading_same_version_release_once(
     records, brief_id, _task_id = release_store
     records[brief_id]["snapshot"]["status"] = "approved"
     pre_stamp = json.loads(json.dumps(records[brief_id]))
-    monkeypatch.setattr(apis, "fetch_checkpoint_record", lambda entity_id: pre_stamp)
+    # Each consumer's first read is the pre-stamp record; the re-read
+    # immediately before dispatch sees the shared store.
+    reads = [0]
+
+    def fetch_checkpoint(entity_id):
+        reads[0] += 1
+        return pre_stamp if reads[0] != 2 else records[entity_id]
+
+    monkeypatch.setattr(apis, "fetch_checkpoint_record", fetch_checkpoint)
     dispatches: list[str] = []
 
     async def spy_dispatch(entity_id, *args, **kwargs):
@@ -2664,10 +2685,24 @@ class _FakeDeliveryLedger:
         return dict(self.receipts)
 
 
+def _stopped_owner(records, kind="release", age=timedelta(hours=1)):
+    """A release owner that took the checkpoint ``age`` ago and then stopped."""
+    return gating_module.encode_checkpoint_release_owner(
+        kind, records["_clock"]["now"] - age, "apis:1234:oldboot:deadbeef"
+    )
+
+
 def _strand_release(monkeypatch, records, brief_id, ledger):
-    """The state an Apis restart leaves: approved and stamped, task still held."""
+    """The state an Apis restart leaves: approved and stamped by an owner that
+    stopped long ago, task still held."""
     brief = records[brief_id]["snapshot"]
-    brief.update({"status": "approved", "resolved_dispatched": True})
+    brief.update(
+        {
+            "status": "approved",
+            "resolved_dispatched": True,
+            "release_owner": _stopped_owner(records),
+        }
+    )
     monkeypatch.setattr(apis.build_delivery, "_delivery_ledger", lambda: ledger)
     dispatches: list[str] = []
     original_dispatch = apis.dispatch_task
@@ -2694,8 +2729,9 @@ async def test_replayed_stranded_approval_dispatches_once(monkeypatch, release_s
     assert released is True
     assert dispatches == [task_id]
     assert records[task_id]["snapshot"]["status"] == "routed"
-    # The recovery took the durable claim on the checkpoint record.
-    assert brief["release_recovery_claim"]
+    # The recovery took the release over on the checkpoint record.
+    owner = gating_module.checkpoint_release_owner(brief)
+    assert owner is not None and owner.kind == "recovery"
 
     # A second replay right after it does not dispatch again.
     again = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
@@ -2711,7 +2747,13 @@ async def test_second_replay_is_refused_even_while_task_still_reads_held(
     not have moved the task yet when the replay arrives."""
     records, brief_id, task_id = release_store
     brief = records[brief_id]["snapshot"]
-    brief.update({"status": "approved", "resolved_dispatched": True})
+    brief.update(
+        {
+            "status": "approved",
+            "resolved_dispatched": True,
+            "release_owner": _stopped_owner(records),
+        }
+    )
     monkeypatch.setattr(
         apis.build_delivery, "_delivery_ledger", lambda: _FakeDeliveryLedger()
     )
@@ -2831,16 +2873,30 @@ async def test_two_processes_replaying_one_stranded_approval_dispatch_once(
     """
     records, brief_id, task_id = release_store
     brief = records[brief_id]["snapshot"]
-    brief.update({"status": "approved", "resolved_dispatched": True})
+    brief.update(
+        {
+            "status": "approved",
+            "resolved_dispatched": True,
+            "release_owner": _stopped_owner(records),
+        }
+    )
     monkeypatch.setattr(
         apis.build_delivery, "_delivery_ledger", lambda: _FakeDeliveryLedger()
     )
     # What each process read before either wrote: the same version, no claim.
+    # Only the first read in each process is that stale copy; the re-read
+    # immediately before dispatch sees the shared store.
     checkpoint_as_read = _frozen_copy(records[brief_id])
     task_as_read = _frozen_copy(records[task_id])
-    monkeypatch.setattr(
-        apis, "fetch_checkpoint_record", lambda entity_id: _frozen_copy(checkpoint_as_read)
-    )
+    stale_reads = [0]
+
+    def fetch_checkpoint(entity_id):
+        if stale_reads[0]:
+            stale_reads[0] -= 1
+            return _frozen_copy(checkpoint_as_read)
+        return _frozen_copy(records[entity_id])
+
+    monkeypatch.setattr(apis, "fetch_checkpoint_record", fetch_checkpoint)
     monkeypatch.setattr(
         apis, "fetch_task_record", lambda entity_id: _frozen_copy(task_as_read)
     )
@@ -2854,13 +2910,15 @@ async def test_two_processes_replaying_one_stranded_approval_dispatch_once(
     async def replay_in_its_own_process():
         monkeypatch.setattr(apis, "_checkpoints_released_here", set())
         monkeypatch.setattr(apis, "_checkpoint_locks", {})
+        stale_reads[0] = 1
         await apis.handle_checkpoint_brief(brief_id, dict(brief), _Notifier())
 
     await replay_in_its_own_process()  # the Apis daemon's event stream
     await replay_in_its_own_process()  # the MCP server's inline consumer
 
     assert dispatches == [task_id]
-    assert records[brief_id]["snapshot"]["release_recovery_claim"]
+    owner = gating_module.checkpoint_release_owner(records[brief_id]["snapshot"])
+    assert owner is not None and owner.kind == "recovery"
     assert records[brief_id]["entity_version"] == "v2"
 
 
@@ -2869,7 +2927,7 @@ def _claim_http(monkeypatch, records, brief_id, outcome):
     from types import SimpleNamespace
 
     def post(url, headers=None, json=None, timeout=None):
-        assert json["field"] == "release_recovery_claim"
+        assert json["field"] == "release_owner"
         if outcome == "write_fails":
             raise gating_module.httpx.ConnectError("connection refused")
         if outcome == "precondition":
@@ -2891,7 +2949,11 @@ def _claim_http(monkeypatch, records, brief_id, outcome):
             return None
         if outcome == "not_ours":
             record = _frozen_copy(records[entity_id])
-            record["snapshot"]["release_recovery_claim"] = "someone-else"
+            record["snapshot"]["release_owner"] = (
+                gating_module.encode_checkpoint_release_owner(
+                    "recovery", records["_clock"]["now"], "someone-else"
+                )
+            )
             return record
         return records[entity_id]
 
@@ -2899,7 +2961,7 @@ def _claim_http(monkeypatch, records, brief_id, outcome):
     monkeypatch.setattr(gating_module.httpx, "post", post)
     monkeypatch.setattr(gating_module, "_fetch_entity", fetch)
     monkeypatch.setattr(
-        apis, "claim_checkpoint_recovery", gating_module.claim_checkpoint_recovery
+        apis, "take_checkpoint_release", gating_module.take_checkpoint_release
     )
 
 
@@ -2935,7 +2997,6 @@ async def test_failed_or_refused_recovery_claim_does_not_dispatch(
     assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
     # The checkpoint stays exactly as it was: no field written or cleared.
     assert records[brief_id] == before
-    assert "release_recovery_claim" not in records[brief_id]["snapshot"]
 
 
 @pytest.mark.asyncio
@@ -2951,7 +3012,7 @@ async def test_existing_recovery_claim_with_task_still_held_does_not_dispatch(
     brief, dispatches = _strand_release(
         monkeypatch, records, brief_id, _FakeDeliveryLedger()
     )
-    brief["release_recovery_claim"] = "apis:1234:deadbeef"
+    brief["release_owner"] = _stopped_owner(records, kind="recovery")
     before = _frozen_copy(records[brief_id])
 
     with caplog.at_level(logging.INFO):
@@ -2966,3 +3027,238 @@ async def test_existing_recovery_claim_with_task_still_held_does_not_dispatch(
         if r.levelno >= logging.ERROR and "recovery was already claimed" in r.getMessage()
     ]
     assert len(errors) == 1
+
+
+# ── One release owner across the normal release and recovery ─────────────────
+#
+# Each test below drives two (or three) consumers as separate processes: each
+# has its own empty ``_checkpoints_released_here`` and locks, and they share
+# only the fixture store, whose ownership write and stamp really enforce the
+# version precondition. A consumer is "paused" right before its re-read of the
+# owner, which is the last step before ``dispatch_task`` changes the task.
+
+
+async def _in_own_process(brief_id, records):
+    saved = (apis._checkpoints_released_here, apis._checkpoint_locks)
+    apis._checkpoints_released_here, apis._checkpoint_locks = set(), {}
+    try:
+        return await apis.handle_checkpoint_brief(
+            brief_id, dict(records[brief_id]["snapshot"]), _Notifier()
+        )
+    finally:
+        apis._checkpoints_released_here, apis._checkpoint_locks = saved
+
+
+def _two_process_world(monkeypatch, records, brief_id, *, move_task=True):
+    """Approved, unstamped checkpoint; dispatches recorded by consumer name."""
+    records[brief_id]["snapshot"]["status"] = "approved"
+    monkeypatch.setattr(
+        apis.build_delivery, "_delivery_ledger", lambda: _FakeDeliveryLedger()
+    )
+    current = {"who": "A"}
+    dispatches: list[str] = []
+    original_dispatch = apis.dispatch_task
+
+    async def spy_dispatch(entity_id, *args, **kwargs):
+        dispatches.append(current["who"])
+        if move_task:
+            return await original_dispatch(entity_id, *args, **kwargs)
+        return None  # in flight: the task has not moved yet
+
+    monkeypatch.setattr(apis, "dispatch_task", spy_dispatch)
+    pause = {"fn": None}
+    real_holds = apis._still_holds_release
+
+    async def paused_holds(entity_id, owner_token):
+        fn, pause["fn"] = pause["fn"], None
+        if fn is not None:
+            await fn()
+        return await real_holds(entity_id, owner_token)
+
+    monkeypatch.setattr(apis, "_still_holds_release", paused_holds)
+    return current, dispatches, pause
+
+
+@pytest.mark.asyncio
+async def test_recovery_of_a_young_stamp_is_a_noop_and_the_owner_dispatches(
+    monkeypatch, release_store
+):
+    """Red before one owner: B read the newer stamped record while the task
+    still read held, claimed recovery on that version and dispatched, then A
+    resumed and dispatched too (``dispatches == ["B", "A"]``)."""
+    records, brief_id, task_id = release_store
+    current, dispatches, pause = _two_process_world(monkeypatch, records, brief_id)
+    clock = records["_clock"]
+
+    async def b_attempts_recovery():
+        clock["now"] += timedelta(minutes=1)
+        current["who"] = "B"
+        assert await _in_own_process(brief_id, records) is False
+        current["who"] = "A"
+
+    pause["fn"] = b_attempts_recovery
+    await _in_own_process(brief_id, records)
+
+    assert dispatches == ["A"]
+    assert records[task_id]["snapshot"]["status"] == "routed"
+    owner = gating_module.checkpoint_release_owner(records[brief_id]["snapshot"])
+    assert owner is not None and owner.kind == "release"
+
+
+@pytest.mark.asyncio
+async def test_takeover_past_the_bound_dispatches_once_and_old_owner_stands_down(
+    monkeypatch, release_store, caplog
+):
+    """Red before one owner: B's recovery and A's resumed release both
+    dispatched (``dispatches == ["B", "A"]``) and nothing logged a lost owner."""
+    import logging
+
+    records, brief_id, task_id = release_store
+    current, dispatches, pause = _two_process_world(monkeypatch, records, brief_id)
+    clock = records["_clock"]
+
+    async def b_takes_over():
+        clock["now"] += timedelta(seconds=apis.RELEASE_TAKEOVER_AFTER_S + 60)
+        current["who"] = "B"
+        await _in_own_process(brief_id, records)
+        current["who"] = "A"
+
+    pause["fn"] = b_takes_over
+    with caplog.at_level(logging.INFO):
+        a_released = await _in_own_process(brief_id, records)
+
+    assert a_released is False
+    assert dispatches == ["B"]
+    assert records[task_id]["snapshot"]["status"] == "routed"
+    owner = gating_module.checkpoint_release_owner(records[brief_id]["snapshot"])
+    assert owner is not None and owner.kind == "recovery"
+    lost = [r for r in caplog.records if "lost release ownership" in r.getMessage()]
+    assert len(lost) == 1
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_takeovers_dispatch_once(monkeypatch, release_store):
+    """O stamps and stops past the bound; A and B read the same version and
+    both try to take over while the first takeover's dispatch is in flight.
+
+    Red before one owner: A's recovery claim won and dispatched, and O, on its
+    own field, dispatched too when it resumed (``dispatches == ["A", "O"]``).
+    """
+    records, brief_id, task_id = release_store
+    current, dispatches, pause = _two_process_world(
+        monkeypatch, records, brief_id, move_task=False
+    )
+    clock = records["_clock"]
+    real_fetch_checkpoint = apis.fetch_checkpoint_record
+
+    async def a_and_b_take_over():
+        clock["now"] += timedelta(seconds=apis.RELEASE_TAKEOVER_AFTER_S + 60)
+        as_read = _frozen_copy(records[brief_id])
+        stale_reads = [0]
+
+        def fetch_checkpoint(entity_id):
+            if stale_reads[0]:
+                stale_reads[0] -= 1
+                return _frozen_copy(as_read)
+            return real_fetch_checkpoint(entity_id)
+
+        monkeypatch.setattr(apis, "fetch_checkpoint_record", fetch_checkpoint)
+        for who in ("A", "B"):
+            current["who"] = who
+            stale_reads[0] = 1  # both judge the same version
+            await _in_own_process(brief_id, records)
+        current["who"] = "O"
+
+    current["who"] = "O"
+    pause["fn"] = a_and_b_take_over
+    await _in_own_process(brief_id, records)
+
+    assert dispatches == ["A"]
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["unreadable", "raises"])
+async def test_failed_owner_reread_before_dispatch_does_not_dispatch(
+    monkeypatch, release_store, failure
+):
+    """Red before the re-read: the release dispatched on the stamp alone
+    (``dispatches == ["A"]``)."""
+    records, brief_id, task_id = release_store
+    _current, dispatches, _pause = _two_process_world(monkeypatch, records, brief_id)
+    real_fetch_checkpoint = apis.fetch_checkpoint_record
+    reads = [0]
+
+    def fetch_checkpoint(entity_id):
+        reads[0] += 1
+        if reads[0] == 2:  # the re-read immediately before dispatch
+            if failure == "raises":
+                raise RuntimeError("neotoma unreachable")
+            return None
+        return real_fetch_checkpoint(entity_id)
+
+    monkeypatch.setattr(apis, "fetch_checkpoint_record", fetch_checkpoint)
+
+    released = await _in_own_process(brief_id, records)
+
+    assert released is False
+    assert reads[0] == 2
+    assert dispatches == []
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_stamp_with_no_release_owner_is_not_recovered(
+    monkeypatch, release_store, caplog
+):
+    """A stamp written before ownership was recorded: its owner is unknown.
+
+    Red before one owner: recovery judged it stranded and dispatched
+    (``dispatches == [task_id]``)."""
+    import logging
+
+    records, brief_id, task_id = release_store
+    brief, dispatches = _strand_release(
+        monkeypatch, records, brief_id, _FakeDeliveryLedger()
+    )
+    del brief["release_owner"]
+    records["_clock"]["now"] += timedelta(days=1)
+    before = _frozen_copy(records[brief_id])
+
+    with caplog.at_level(logging.INFO):
+        released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+    assert records[brief_id] == before
+    lines = [r for r in caplog.records if "no readable release owner" in r.getMessage()]
+    assert len(lines) == 1
+
+
+@pytest.mark.asyncio
+async def test_normal_release_takes_ownership_and_dispatches_once_without_delay(
+    monkeypatch, release_store
+):
+    """Red before one owner: the stamp took no ownership record, so
+    ``checkpoint_release_owner`` read None."""
+    import time
+
+    records, brief_id, task_id = release_store
+    _current, dispatches, _pause = _two_process_world(monkeypatch, records, brief_id)
+    clock_at_start = records["_clock"]["now"]
+
+    started = time.monotonic()
+    released = await _in_own_process(brief_id, records)
+    elapsed = time.monotonic() - started
+
+    assert released is True
+    assert dispatches == ["A"]
+    brief = records[brief_id]["snapshot"]
+    assert brief["resolved_dispatched"] is True
+    owner = gating_module.checkpoint_release_owner(brief)
+    assert owner is not None and owner.kind == "release"
+    assert owner.taken_at == clock_at_start
+    # No wait for the takeover bound or anything else on the normal path.
+    assert elapsed < 5
+    assert records[task_id]["snapshot"]["status"] == "routed"
