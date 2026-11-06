@@ -8,6 +8,7 @@ Also covers the checkbox definition-of-done changes:
 """
 
 import asyncio
+import copy
 import inspect
 import json
 import logging
@@ -605,14 +606,17 @@ class _ReviewStoreNeotoma:
     is raised, an int is returned as that HTTP status, ``"ok"`` succeeds, and
     ``"lost_reply"`` stores the rows and THEN times out (a write that landed
     but whose reply never came back). Like Neotoma, a repeated idempotency key
-    replays the first result instead of creating rows again. ``pr_review``
-    queries read back what was stored; every other call answers ``{}``.
+    replays the first result instead of creating rows again, without
+    comparing bodies, so ``bodies`` keeps a deep copy of every attempt's
+    ``/store`` JSON for tests to compare. ``pr_review`` queries read back what
+    was stored; every other call answers ``{}``.
     """
 
     def __init__(self, script, *, store_reply_extra=None):
         self.script = list(script)
         self.store_reply_extra = store_reply_extra or {}
         self.attempts = []  # (time_limit, idempotency_key)
+        self.bodies = []  # deep copy of each attempt's /store JSON body
         self.created = []  # (entity_id, entity) — rows actually written
         self.by_key = {}
 
@@ -655,6 +659,7 @@ class _ReviewStoreClient:
         ):
             key = body["idempotency_key"]
             self.server.attempts.append((self.timeout, key))
+            self.server.bodies.append(copy.deepcopy(body))
             step = self.server.script.pop(0)
             if isinstance(step, Exception):
                 raise step
@@ -728,6 +733,25 @@ def _run_panel_with_review_store(monkeypatch, server, *, clock=None):
     return calls, stop_reasons, pauses
 
 
+def _assert_every_attempt_sent_the_stored_body(server):
+    """Every retry sent the first attempt's exact body, and what was stored
+    is that body: the same lenses, each at the trigger's exact head SHA."""
+    assert len(server.bodies) == len(server.attempts) >= 2
+    first = server.bodies[0]
+    assert all(body == first for body in server.bodies[1:])
+    submitted = [
+        entity for entity in first["entities"]
+        if entity.get("entity_type") == "pr_review"
+    ]
+    stored = [entity for _, entity in server.created]
+    assert stored == submitted
+    head = _trigger().head_sha
+    assert {entity["review_lens"] for entity in stored} == {
+        entity["review_lens"] for entity in submitted
+    }
+    assert stored and all(entity["head_sha"] == head for entity in stored)
+
+
 @pytest.mark.parametrize("first_failure", ["timeout", "lost_reply"])
 def test_review_store_timeout_then_success_stores_once_and_panel_finishes(
     monkeypatch, first_failure
@@ -747,6 +771,9 @@ def test_review_store_timeout_then_success_stores_once_and_panel_finishes(
     # only its reply was lost: the retry replayed the same idempotency key.
     lenses = [entity["review_lens"] for _, entity in server.created]
     assert lenses and len(lenses) == len(set(lenses))
+    # The retry resent the first attempt's body unchanged, including on the
+    # lost-reply path where the replayed key would hide a changed body.
+    _assert_every_attempt_sent_the_stored_body(server)
     # The read-back found those reviews, so the panel reached merge readiness
     # and no incomplete-review notice was posted.
     assert stop_reasons == []
@@ -761,6 +788,7 @@ def test_review_store_every_attempt_uses_the_same_idempotency_key(monkeypatch):
     keys = [key for _, key in server.attempts]
     assert len(keys) == 3
     assert len(set(keys)) == 1 and keys[0].startswith("pr-review-")
+    _assert_every_attempt_sent_the_stored_body(server)
     assert pauses == [2.0, 5.0]
     assert stop_reasons == []
 
