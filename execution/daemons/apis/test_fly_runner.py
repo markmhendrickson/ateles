@@ -714,6 +714,39 @@ def test_legacy_own_token_claude_job_without_mcp_config_is_ineligible(fly_env, m
         _bare_claude_job(neotoma_tools_granted=True)
 
 
+def test_mcp_config_path_outside_its_flag_is_no_slot(fly_env):
+    # The path sits in the argv, but not as the --mcp-config value: run_job.py
+    # would supply no config there, so the job would be proxy-marked and toolless.
+    for cmd in (
+        ["/opt/homebrew/bin/claude", "--print", "/tmp/apis_mcp_x.json"],
+        ["/opt/homebrew/bin/claude", "--mcp-config", "/tmp/other.json",
+         "--add-dir", "/tmp/apis_mcp_x.json"],
+        ["/opt/homebrew/bin/claude", "/tmp/apis_mcp_x.json", "--mcp-config"],
+    ):
+        with pytest.raises(fly_runner.FlyIneligible,
+                           match="its MCP config could not be provided"):
+            fly_runner.build_job(
+                provider="claude", role="lanius", cmd=cmd, stdin=b"t", timeout=60,
+                repository="owner/repo", github_requested=True,
+                mcp_config_path="/tmp/apis_mcp_x.json", neotoma_tools_granted=True)
+    assert _session(fly_env).requests == []
+
+
+def test_mcp_config_flag_with_its_path_is_a_slot(fly_env):
+    job = fly_runner.build_job(
+        provider="claude", role="lanius",
+        cmd=["/opt/homebrew/bin/claude", "--add-dir", "/tmp/apis_mcp_x.json",
+             "--mcp-config", "/tmp/apis_mcp_x.json", "--print"],
+        stdin=b"t", timeout=60, repository="owner/repo", github_requested=True,
+        mcp_config_path="/tmp/apis_mcp_x.json", neotoma_tools_granted=True)
+    assert job.neotoma_mcp == "proxy"
+    i = job.argv.index("--mcp-config")
+    assert job.argv[i + 1] == fly_runner.MCP_CONFIG_PLACEHOLDER
+    # Only the flag's value is rewritten; the same path elsewhere is left alone.
+    assert job.argv.count(fly_runner.MCP_CONFIG_PLACEHOLDER) == 1
+    assert job.argv[job.argv.index("--add-dir") + 1] == "/tmp/apis_mcp_x.json"
+
+
 @pytest.mark.parametrize("kw", [
     {},  # no Neotoma tools granted
     {"neotoma_tools_granted": True, "owns_pending_gate": True, "github_read_only": True},

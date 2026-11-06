@@ -1927,9 +1927,22 @@ def runner_argv(provider: str, cmd: list[str], mcp_config_path: str | None) -> l
     the Mac's temporary MCP config path (which may name the shared bearer)
     replaced by a placeholder ``run_job.py`` fills from the role's own token."""
     argv = [RUNNER_BINARIES[provider], *cmd[1:]]
-    if mcp_config_path:
-        argv = [MCP_CONFIG_PLACEHOLDER if a == mcp_config_path else a for a in argv]
+    slot = mcp_config_slot(argv, mcp_config_path)
+    if slot is not None:
+        argv[slot] = MCP_CONFIG_PLACEHOLDER
     return argv
+
+
+def mcp_config_slot(argv: list[str], mcp_config_path: str | None) -> int | None:
+    """The index of the ``--mcp-config`` flag's value when that value is
+    *mcp_config_path*, else ``None``. The path in any other position is no
+    slot: ``run_job.py`` supplies the config only through that flag."""
+    if not mcp_config_path:
+        return None
+    for i in range(1, len(argv) - 1):
+        if argv[i] == "--mcp-config" and argv[i + 1] == mcp_config_path:
+            return i + 1
+    return None
 
 
 # Providers whose CLI reaches Neotoma on Fly through the runner's loopback
@@ -2250,7 +2263,7 @@ def build_job(
         # Both paths give the tools through the CLI's MCP config slot, which
         # `runner_argv` turns into the placeholder the runner fills. A local
         # config-write failure leaves no slot, and the job would run toolless.
-        if provider == "claude" and not (mcp_config_path and mcp_config_path in cmd[1:]):
+        if provider == "claude" and mcp_config_slot(cmd, mcp_config_path) is None:
             raise FlyIneligible(
                 f"role {role!r} is granted Neotoma tools but its MCP config could not be "
                 "provided (no --mcp-config slot)")
