@@ -6,6 +6,7 @@ import pytest
 
 from lib.daemon_runtime.task_ownership import (
     SENTINEL_ASSIGNEES,
+    SESSION_WORDS,
     canonical_assignee,
     names_a_session,
     session_owned,
@@ -100,6 +101,20 @@ def test_names_a_session(value):
     assert names_a_session(value) is True
 
 
+@pytest.mark.parametrize("value", SESSIONS)
+def test_every_accepted_session_contains_a_search_word(value):
+    # A server-side `contains` narrowing on SESSION_WORDS must never miss a
+    # value the recognizer accepts.
+    assert names_a_session(value) is True
+    assert any(word in value.lower() for word in SESSION_WORDS)
+
+
+def test_session_words_are_lowercase_sorted_and_unique():
+    assert list(SESSION_WORDS) == sorted(set(SESSION_WORDS))
+    assert all(w == w.lower() for w in SESSION_WORDS)
+    assert {"session", "subagent", "codex", "root"} <= set(SESSION_WORDS)
+
+
 @pytest.mark.parametrize("value", NOT_SESSIONS)
 def test_does_not_name_a_session(value):
     assert names_a_session(value) is False
@@ -127,7 +142,8 @@ def test_session_owned_falls_back_to_owner_when_assignee_absent():
 
 
 @pytest.mark.parametrize(
-    "dispatcher", ["apis", "APIS", " Apis ", "apis@ateles", "Apis@ateles-swarm", "@ateles-swarm"]
+    "dispatcher",
+    ["apis", "APIS", " Apis ", "apis@ateles", "Apis@ateles-swarm", "@ateles-swarm"],
 )
 def test_session_owned_reads_the_dispatcher_as_no_assignee(dispatcher):
     assert session_owned(dispatcher, "Codex session")
@@ -154,7 +170,9 @@ def test_canonical_assignee_reduces_all_the_way_in_one_pass(value, expected):
     assert canonical_assignee(canonical_assignee(value)) == expected
 
 
-@pytest.mark.parametrize("value", [7, ["Codex session"], {"name": "Codex session"}, True])
+@pytest.mark.parametrize(
+    "value", [7, ["Codex session"], {"name": "Codex session"}, True]
+)
 def test_non_string_assignee_counts_as_absent(value):
     assert canonical_assignee(value) is None
     assert session_owned(value, "Codex session")

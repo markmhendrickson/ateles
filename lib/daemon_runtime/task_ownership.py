@@ -37,6 +37,13 @@ _SESSION_MARKERS = frozenset(
 )
 # `root` names a session only together with an id; bare `root` is a word.
 _ID_PREFIXES = _SESSION_MARKERS | {"root"}
+# Words a server-side `contains` filter can search on to narrow task rows to
+# the ones this recognizer might accept. Invariant: every value
+# `names_a_session` accepts contains one of these words, case-insensitively, as
+# a substring. It holds because each accepting rule needs a marker, `root` with
+# an id, `subagent`, `codex` or `session`, all of which are in `_ID_PREFIXES`.
+# Derived, not a second list, so a new marker widens the search automatically.
+SESSION_WORDS = tuple(sorted(_ID_PREFIXES))
 _HEX_ID = re.compile(r"[0-9a-f]{6,}")
 # A marker run directly into an id (`chat0a1b2c3d`, `coordinator0a1b...`).
 _PREFIX_RUN_INTO_ID = re.compile(
