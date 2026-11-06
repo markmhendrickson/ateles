@@ -57,10 +57,11 @@ left as any restart leaves an in-progress dispatch. The lock dies with the holde
 also exits if the script dies. After 15 minutes at most the holder ends the deploy
 before it lets go: it sends SIGTERM to the script (its own parent, and only while it
 is still its parent), waits up to 30 seconds for it to exit (then SIGKILL), waits a
-further 5 seconds so a `launchctl kickstart` already started can finish, and only
-then releases the lock. A deploy that has been ended cannot restart anything, so no
+further 5 seconds (a fixed allowance for a `launchctl kickstart` already started,
+not proof that it has finished), and only then releases the lock. Its signalling
+always re-checks that the pid is still its parent, so a reused pid is never signalled. A deploy that has been ended cannot restart anything, so no
 restart follows the release, and a hung deploy still cannot block Fly admission for
-ever. Before each `launchctl kickstart` the script also checks the holder is still
+ever. Before each `launchctl kickstart`, in both the `gui` and the `user` domain attempt, the script also checks the holder is still
 alive; if it is gone the script logs `Fly admission holder is gone`, restarts nothing
 more and exits non-zero. If the lock cannot be
 taken within 60 seconds (admission or the reaper is at work), the run logs
@@ -70,22 +71,15 @@ missing or unreadable ledger, or an entry with no readable deadline (including o
 too large to convert), never holds a deploy; a corrupt entry is skipped without
 hiding a live one.
 
-A pending-restart marker (`<LOCK_DIR>.pending-restart`, default
-`/tmp/ateles-rc-autodeploy.lock.d.pending-restart`) is written just before the
-fast-forward and removed only after the restart loop has run. While it exists, a run
-whose checkout is already at origin does not say "nothing to do": it goes through the
-same admission check and deferral, skips the merge, always refreshes the venv from the
-pin file, and restarts. So a deploy ended by the holder, or one that failed after the
-checkout moved (for example a failed `pip install`), is finished by the next run
-instead of leaving the daemons on old code. A run that ends after writing the marker
-and before finishing the restarts logs `DEPLOY DID NOT FINISH` and that the next run
-will complete it (this runs from the script's EXIT handling, which bash runs on
-SIGTERM too; there is deliberately no TERM trap, as bash would defer it until a
-foreground `pip` returned).
+Accepted limits of a deploy that is ended early:
 
-Accepted limit: if the holder ends a deploy while `pip` is running, that `pip` child
-may outlive the script and finish its install. It restarts nothing; the next run
-refreshes the venv again and restarts.
+- A deploy ended after the fast-forward (the holder's 15-minute limit during a long
+  dependency refresh, or a failed `pip install`) leaves the daemons on the old build:
+  the next run sees the checkout at origin and does nothing. The script logs
+  `DEPLOY DID NOT FINISH` saying so; the next merge to main, or a manual restart,
+  picks up the new build. This is how a failed `pip install` already behaved.
+- If the holder ends a deploy while `pip` is running, that `pip` child may outlive
+  the script and finish its install. It restarts nothing.
 
 What remains: consecutive Fly jobs can still defer a deploy for as long as they
 keep overlapping. This change stops admission only from the check to the restart;

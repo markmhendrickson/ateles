@@ -20,8 +20,9 @@ to the restart. The lock dies with the holder process.
 When the limit is reached the holder does not simply let go: a deploy that
 outlived the lock could restart Apis over a job admitted after the release. It
 first ends its parent (SIGTERM, then SIGKILL after ``PARENT_TERM_WAIT_SECONDS``),
-waits ``KICKSTART_SETTLE_SECONDS`` for a ``launchctl kickstart`` the parent had
-already started, and only then exits. It signals only the pid it was given, and
+waits ``KICKSTART_SETTLE_SECONDS`` (a fixed allowance for a ``launchctl
+kickstart`` the parent had already started, not proof that it has finished),
+and only then exits. It signals only the pid it was given, and
 only while that process is still its parent.
 
 Prints only the count, never ledger contents: entries hold internal tokens.
@@ -165,16 +166,18 @@ def _end_parent(parent: int, ending_file: str | None = None) -> None:
         os.kill(parent, signal.SIGTERM)
     except OSError:
         return
+    # Every check below is "still MY parent", not "pid alive": once our parent
+    # dies we are reparented, so a reused pid can never be signalled.
     deadline = time.monotonic() + PARENT_TERM_WAIT_SECONDS
-    while _parent_alive(parent) and time.monotonic() < deadline:
+    while _is_my_parent(parent) and time.monotonic() < deadline:
         time.sleep(0.1)
-    if _parent_alive(parent):
+    if _is_my_parent(parent):
         try:
             os.kill(parent, signal.SIGKILL)
         except OSError:
             pass
         end = time.monotonic() + PARENT_TERM_WAIT_SECONDS
-        while _parent_alive(parent) and time.monotonic() < end:
+        while _is_my_parent(parent) and time.monotonic() < end:
             time.sleep(0.1)
     time.sleep(KICKSTART_SETTLE_SECONDS)
 
