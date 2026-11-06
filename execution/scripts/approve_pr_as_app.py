@@ -231,7 +231,7 @@ import review_rounds  # noqa: E402
 import review_scope  # noqa: E402
 import lens_authors  # noqa: E402
 import review_panel  # noqa: E402
-from review_panel import LENSES, Lens, select_panel  # noqa: E402
+from review_panel import LENSES, Lens  # noqa: E402
 from swarm_dispatch import (  # noqa: E402
     SwarmDispatcher,
     _mint_reviewer_app_installation_token,
