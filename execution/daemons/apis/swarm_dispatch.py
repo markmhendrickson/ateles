@@ -8855,7 +8855,25 @@ class SwarmDispatcher:
         #     limit notice. Post a truthful REVIEW-INCOMPLETE marker (never a stub
         #     that reads like a verdict) and schedule a resume after the reset,
         #     rather than paging the operator to fix nothing.
-        if detect_session_limit(vanellus_result.stdout, vanellus_result.stderr):
+        #
+        #     A successful run whose STDOUT carries Vanellus's verdict at the
+        #     fixed position (`lens_own_verdict`: the steward's header, the
+        #     verdict line directly under it) is a review, so neither detector
+        #     reads its stdout: a roll-up that discusses rate limits or a 401
+        #     would otherwise match the broad signatures, defer, and match
+        #     again on every resume. A verdict token anywhere else does not
+        #     count, so a provider diagnostic carrying an incidental token is
+        #     still detected. Both detectors still read STDERR on the review
+        #     path, since a zero-exit run can carry a real limit or auth
+        #     diagnostic there; a verdict token found only in stderr is not a
+        #     verdict. Output with no fixed-position verdict, and any failed
+        #     run, is checked on both streams as before.
+        aggregation_is_review = vanellus_result.ok and (
+            lens_own_verdict(vanellus_result.stdout, lens_agent="vanellus")
+            is not None
+        )
+        detector_stdout = "" if aggregation_is_review else vanellus_result.stdout
+        if detect_session_limit(detector_stdout, vanellus_result.stderr):
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus",
                 vanellus_result.stdout, vanellus_result.stderr,
@@ -8865,7 +8883,7 @@ class SwarmDispatcher:
         #     auth (expired OAuth / missing ANTHROPIC_API_KEY), its "verdict" is
         #     just the 401. Reframe it as an infra failure and page the operator
         #     to re-auth, rather than posting the raw error as a review.
-        if detect_auth_failure(vanellus_result.stdout, vanellus_result.stderr):
+        if detect_auth_failure(detector_stdout, vanellus_result.stderr):
             await self._handle_panel_auth_failure(trigger, "vanellus")
             return
         if not vanellus_result.ok:
