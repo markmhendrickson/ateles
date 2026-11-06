@@ -170,7 +170,7 @@ def test_content_digest_changes_when_content_changes():
 def test_pr_harness_event_also_upserts_canonical_pull_request(monkeypatch):
     stored = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.append((entities, idempotency_key))
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -195,7 +195,7 @@ def test_panel_reviews_use_verified_pre_panel_head_not_stale_trigger(monkeypatch
     stored = []
     superseded = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.append((entities, idempotency_key))
         return {
             "entities": [
@@ -257,7 +257,7 @@ def test_panel_reviews_seed_round_from_max_of_all_live_priors(monkeypatch):
         ]
     }
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.append(entities)
         return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
 
@@ -297,7 +297,7 @@ def test_security_findings_store_only_declared_fields_and_require_readback(monke
     stored = []
     reviewed_head = "b" * 40
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
         return {
             "entities": [
@@ -351,7 +351,7 @@ def test_security_findings_store_only_declared_fields_and_require_readback(monke
 
 
 def test_security_finding_missing_readback_fails_closed(monkeypatch):
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
 
     async def no_readback(self, path, payload):
@@ -472,7 +472,7 @@ def test_panel_review_store_schema_loss_fails_before_supersession(
 ):
     calls = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         if entities and entities[0]["entity_type"] == "pr_review":
             return {
                 "entities": [{"observation_index": 0, "entity_id": "ent_new"}],
@@ -515,7 +515,7 @@ def test_panel_review_store_schema_loss_fails_before_supersession(
 
 
 def test_unverified_supersession_keeps_panel_durability_closed(monkeypatch):
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         if entities and entities[0]["entity_type"] == "pr_review":
             return {"entities": [{"observation_index": 0, "entity_id": "ent_new"}]}
         return {}
@@ -569,7 +569,7 @@ def test_failed_replacement_store_leaves_all_prior_reviews_live(monkeypatch):
         "snapshot": {"review_lens": "qa", "review_round": 2},
     }
 
-    async def failed_store(self, entities, idempotency_key):
+    async def failed_store(self, entities, idempotency_key, **_kwargs):
         return None
 
     async def fake_priors(self, trigger, lenses, current_sha):
@@ -593,6 +593,264 @@ def test_failed_replacement_store_leaves_all_prior_reviews_live(monkeypatch):
     )
 
     assert corrections == []
+
+
+# ── pr_review store: bounded retry of a temporary Neotoma failure ───────────
+
+
+class _ReviewStoreNeotoma:
+    """Fake Neotoma behind ``httpx.AsyncClient`` for the panel's review store.
+
+    ``pr_review`` stores follow ``script`` one item per attempt: an exception
+    is raised, an int is returned as that HTTP status, ``"ok"`` succeeds, and
+    ``"lost_reply"`` stores the rows and THEN times out (a write that landed
+    but whose reply never came back). Like Neotoma, a repeated idempotency key
+    replays the first result instead of creating rows again. ``pr_review``
+    queries read back what was stored; every other call answers ``{}``.
+    """
+
+    def __init__(self, script, *, store_reply_extra=None):
+        self.script = list(script)
+        self.store_reply_extra = store_reply_extra or {}
+        self.attempts = []  # (time_limit, idempotency_key)
+        self.created = []  # (entity_id, entity) — rows actually written
+        self.by_key = {}
+
+    def client(self, timeout=None, **_kwargs):
+        return _ReviewStoreClient(self, timeout)
+
+    def _reply(self, key, entities):
+        if key not in self.by_key:
+            rows = []
+            for index, entity in enumerate(entities):
+                entity_id = f"ent_review_{len(self.created)}"
+                self.created.append((entity_id, entity))
+                rows.append({"observation_index": index, "entity_id": entity_id})
+            self.by_key[key] = {"entities": rows, **self.store_reply_extra}
+        return self.by_key[key]
+
+
+class _ReviewStoreClient:
+    def __init__(self, server, timeout):
+        self.server = server
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    @staticmethod
+    def _response(url, status, payload):
+        return httpx.Response(
+            status, json=payload, request=httpx.Request("POST", url)
+        )
+
+    async def post(self, url, json=None, **_kwargs):
+        body = json or {}
+        entities = body.get("entities") or []
+        if url.endswith("/store") and any(
+            entity.get("entity_type") == "pr_review" for entity in entities
+        ):
+            key = body["idempotency_key"]
+            self.server.attempts.append((self.timeout, key))
+            step = self.server.script.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            if isinstance(step, int):
+                return self._response(url, step, {"error": "scripted"})
+            reply = self.server._reply(key, entities)
+            if step == "lost_reply":
+                raise httpx.ReadTimeout("")
+            return self._response(url, 200, reply)
+        if url.endswith("/entities/query") and body.get("entity_type") == "pr_review":
+            rows = [
+                {
+                    "entity_id": entity_id,
+                    "snapshot": _snapshot_for_review(entity),
+                }
+                for entity_id, entity in self.server.created
+            ]
+            return self._response(url, 200, {"entities": rows})
+        return self._response(url, 200, {})
+
+    async def get(self, url, **_kwargs):
+        return httpx.Response(200, json={}, request=httpx.Request("GET", url))
+
+
+def _run_panel_with_review_store(monkeypatch, server, *, clock=None):
+    """Drive ``_handle_pr`` with the REAL ``_persist_panel_reviews``.
+
+    Returns (calls, stop_reasons, pauses). Only the review store and its
+    read-back go through ``server``; the other durability legs are stubbed
+    confirmed, so the store is the one thing that decides the outcome.
+    """
+    calls = []
+    real_persist = SwarmDispatcher._persist_panel_reviews
+    dispatcher = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+    dispatcher.config.neotoma_token = "t"
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", real_persist)
+
+    async def no_priors(self, trigger, lenses, current_sha):
+        return {}
+
+    async def confirmed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(SwarmDispatcher, "_prior_live_reviews", no_priors)
+    monkeypatch.setattr(SwarmDispatcher, "_supersede_prior_reviews", confirmed)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_security_findings", confirmed)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_persist_and_confirm_pull_request", confirmed
+    )
+
+    stop_reasons = []
+
+    async def record_stop(self, trigger, parent, agent, stdout, stderr, **kwargs):
+        stop_reasons.append(kwargs.get("reason"))
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_session_limit", record_stop)
+    monkeypatch.setattr(swarm_dispatch.httpx, "AsyncClient", server.client)
+
+    pauses = []
+
+    async def no_sleep(seconds):
+        pauses.append(seconds)
+
+    monkeypatch.setattr(swarm_dispatch._neotoma_transient, "_asleep", no_sleep)
+    if clock is not None:
+        monkeypatch.setattr(swarm_dispatch._neotoma_transient, "_monotonic", clock)
+
+    asyncio.run(dispatcher._handle_pr(_trigger(body="Closes #80.")))
+    return calls, stop_reasons, pauses
+
+
+@pytest.mark.parametrize("first_failure", ["timeout", "lost_reply"])
+def test_review_store_timeout_then_success_stores_once_and_panel_finishes(
+    monkeypatch, first_failure
+):
+    first = httpx.ReadTimeout("") if first_failure == "timeout" else "lost_reply"
+    server = _ReviewStoreNeotoma([first, "ok"])
+
+    calls, stop_reasons, pauses = _run_panel_with_review_store(monkeypatch, server)
+
+    assert len(server.attempts) == 2
+    assert pauses == [2.0]
+    # The large store gets the longer per-attempt limit, not the default 30s.
+    assert [limit for limit, _ in server.attempts] == [
+        swarm_dispatch.PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS
+    ] * 2
+    # One row per lens, written once even when the first write landed and
+    # only its reply was lost: the retry replayed the same idempotency key.
+    lenses = [entity["review_lens"] for _, entity in server.created]
+    assert lenses and len(lenses) == len(set(lenses))
+    # The read-back found those reviews, so the panel reached merge readiness
+    # and no incomplete-review notice was posted.
+    assert stop_reasons == []
+    assert ("gate", None) in calls
+
+
+def test_review_store_every_attempt_uses_the_same_idempotency_key(monkeypatch):
+    server = _ReviewStoreNeotoma([httpx.ConnectError("refused"), 503, "ok"])
+
+    calls, stop_reasons, pauses = _run_panel_with_review_store(monkeypatch, server)
+
+    keys = [key for _, key in server.attempts]
+    assert len(keys) == 3
+    assert len(set(keys)) == 1 and keys[0].startswith("pr-review-")
+    assert pauses == [2.0, 5.0]
+    assert stop_reasons == []
+
+
+@pytest.mark.parametrize("status", [429, 502])
+def test_review_store_retries_429_and_5xx(monkeypatch, status):
+    server = _ReviewStoreNeotoma([status, "ok"])
+
+    _calls, stop_reasons, _pauses = _run_panel_with_review_store(monkeypatch, server)
+
+    assert len(server.attempts) == 2
+    assert stop_reasons == []
+
+
+@pytest.mark.parametrize("failure", [400, 422, "undeclared_fields"])
+def test_review_store_4xx_or_undeclared_fields_does_not_retry(
+    monkeypatch, caplog, failure
+):
+    if failure == "undeclared_fields":
+        server = _ReviewStoreNeotoma(
+            ["ok"], store_reply_extra={"unknown_fields_count": 1}
+        )
+    else:
+        server = _ReviewStoreNeotoma([failure])
+
+    with caplog.at_level("ERROR"):
+        calls, stop_reasons, pauses = _run_panel_with_review_store(
+            monkeypatch, server
+        )
+
+    assert [limit for limit, _ in server.attempts] == [
+        swarm_dispatch.PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS
+    ]
+    assert pauses == []
+    assert stop_reasons == ["durable exact-head review read-back failed"]
+    assert ("gate", None) not in calls
+    if failure != "undeclared_fields":
+        assert "HTTPStatusError" in caplog.text
+
+
+def test_review_store_attempts_spent_stops_and_logs_exception_type(
+    monkeypatch, caplog
+):
+    server = _ReviewStoreNeotoma([httpx.ReadTimeout("")] * 3)
+
+    with caplog.at_level("WARNING"):
+        calls, stop_reasons, pauses = _run_panel_with_review_store(
+            monkeypatch, server
+        )
+
+    assert len(server.attempts) == 3
+    assert pauses == [2.0, 5.0]
+    assert stop_reasons == ["durable exact-head review read-back failed"]
+    assert ("gate", None) not in calls
+    failed = [
+        record.getMessage()
+        for record in caplog.records
+        if "Neotoma store failed (pr-review-" in record.getMessage()
+    ]
+    assert failed and failed[0].endswith("ReadTimeout")
+
+
+def test_review_store_total_bound_caps_attempts_and_their_time_limits(
+    monkeypatch,
+):
+    # Each store attempt "takes" 200s on a fake clock; pauses take none.
+    now = [0.0]
+    server = _ReviewStoreNeotoma([httpx.ReadTimeout("")] * 3)
+    original_post = _ReviewStoreClient.post
+
+    async def slow_post(self, url, json=None, **kwargs):
+        try:
+            return await original_post(self, url, json=json, **kwargs)
+        finally:
+            if url.endswith("/store"):
+                now[0] += 200.0
+
+    monkeypatch.setattr(_ReviewStoreClient, "post", slow_post)
+
+    _calls, stop_reasons, pauses = _run_panel_with_review_store(
+        monkeypatch, server, clock=lambda: now[0]
+    )
+
+    attempt = swarm_dispatch.PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS
+    total = swarm_dispatch.PR_REVIEW_STORE_TOTAL_SECONDS
+    # The second attempt is granted only what the bound leaves, and no third
+    # attempt starts once the bound is spent.
+    assert [limit for limit, _ in server.attempts] == [attempt, total - 200.0]
+    assert pauses == [2.0]
+    assert stop_reasons == ["durable exact-head review read-back failed"]
 
 
 def test_panelist_prompt_uses_verified_pre_panel_head_not_stale_trigger():
@@ -628,7 +886,7 @@ def test_vanellus_prompt_uses_verified_pre_panel_head_not_stale_trigger():
 def test_panel_reviews_without_verified_head_fail_closed(monkeypatch, caplog):
     stored = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -2753,7 +3011,7 @@ def test_ci_check_failure_closed_posture_files_brief_and_notifies(monkeypatch):
     ))
     stored = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.append((entities, idempotency_key))
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -2784,7 +3042,7 @@ def test_ci_check_failure_open_posture_only_logs_no_brief(monkeypatch, caplog):
     monkeypatch.setattr(swarm_dispatch, "load_policy", lambda: pol)
     stored = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.append((entities, idempotency_key))
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -5032,7 +5290,7 @@ def test_confirm_gates_clear_on_pr_comment_retriggers_pr_pipeline(monkeypatch):
     async def fake_preregistered(self, repo, number):
         return {}
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs):
@@ -5562,7 +5820,7 @@ def test_github_trigger_pr_pipeline_passes_contract(monkeypatch):
     async def fake_preregistered(self, repo, number):
         return {}
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs):
@@ -6280,7 +6538,7 @@ def test_approve_from_operator_resolves_checkpoint_and_removes_reviewer(monkeypa
     stored: list[dict] = []
     http_client = _FakeHttpxClient()
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6323,7 +6581,7 @@ def test_approve_comment_body_has_no_command_tokens(monkeypatch):
     """/approve confirmation comment must not contain command tokens (self-trigger guard)."""
     comment_bodies: list[str] = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     class _CapturingClient:
@@ -6361,7 +6619,7 @@ def test_approve_from_non_operator_is_ignored(monkeypatch):
     stored: list = []
     http_calls: list = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6383,7 +6641,7 @@ def test_approve_from_bot_is_ignored(monkeypatch):
     """/approve from a bot identity must be silently ignored (self-trigger guard)."""
     stored: list = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6489,7 +6747,7 @@ def test_github_review_approved_from_operator_merges_when_flag_on(monkeypatch):
     """Operator 'Approve' review + flag ON → PR merged via the REST API."""
     client = _MergeAwareClient(merge_status=200, merged=True)
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6516,7 +6774,7 @@ def test_github_review_approved_flag_off_does_not_merge(monkeypatch):
     """Operator 'Approve' review + flag OFF → checkpoint resolved, NO merge."""
     client = _MergeAwareClient()
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6562,7 +6820,7 @@ def test_github_review_changes_requested_no_merge(monkeypatch):
     """Operator review with state != approved must not merge."""
     client = _MergeAwareClient()
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6579,7 +6837,7 @@ def test_merge_failure_reported_honestly(monkeypatch):
     """When GitHub refuses the merge (405), the swarm must NOT claim a merge."""
     client = _MergeAwareClient(merge_status=405)
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6608,7 +6866,7 @@ def test_email_approve_merges_when_flag_on(monkeypatch):
     """
     client = _MergeAwareClient(merge_status=200, merged=True)
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6650,7 +6908,7 @@ def test_approve_comment_merges_when_flag_on(monkeypatch):
     """The /approve issue comment shares the merge path (flag ON → merges)."""
     client = _MergeAwareClient(merge_status=200, merged=True)
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6815,7 +7073,7 @@ def test_reject_from_operator_records_reason_and_removes_reviewer(monkeypatch):
     stored: list[dict] = []
     http_client = _FakeHttpxClient()
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6861,7 +7119,7 @@ def test_reject_does_not_proceed_with_merge(monkeypatch):
         skill_calls.append(skill)
         return SkillResult(skill, True, 0, "", "")
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
@@ -6883,7 +7141,7 @@ def test_reject_from_non_operator_is_ignored(monkeypatch):
     """/reject from a non-operator is silently ignored."""
     stored: list = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6907,7 +7165,7 @@ def test_hold_acks_and_leaves_reviewer_in_place(monkeypatch):
     stored: list = []
     http_client = _FakeHttpxClient()
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6946,7 +7204,7 @@ def test_hold_from_non_operator_is_ignored(monkeypatch):
     stored: list = []
     http_client = _FakeHttpxClient()
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -6980,7 +7238,7 @@ def test_merge_checkpoint_requests_operator_as_reviewer(monkeypatch):
 
     http_client.post = recording_post
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         pass
 
     monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
@@ -7006,7 +7264,7 @@ def test_merge_checkpoint_reviewer_request_failure_is_non_fatal(monkeypatch):
     """A failing reviewer request must not prevent the checkpoint from being stored."""
     stored: list = []
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     class _FailingClient:
@@ -7090,7 +7348,7 @@ def test_confirm_gates_clear_wins_over_approve_when_both_present(monkeypatch):
         calls.append(skill)
         return SkillResult(skill, True, 0, "Gates waived.", "")
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         stored.extend(entities)
 
     monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
@@ -7417,7 +7675,7 @@ def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
 
     async def fake_changed_files(self, t): return []
     async def fake_preregistered(self, repo, number): return {}
-    async def fake_store(self, entities, idempotency_key): pass
+    async def fake_store(self, entities, idempotency_key, **_kwargs): pass
     async def fake_post_missing(self, t, reviews, agents_by_lens, **kwargs): pass
     async def fake_persist(self, t, reviews, agents_by_lens, **kwargs): pass
     async def fake_merge_checkpoint(self, t, parent, lenses): pass

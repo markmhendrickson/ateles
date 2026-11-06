@@ -124,6 +124,7 @@ from skill_runner import (
 
 from lib.daemon_runtime.checkpoint_posture import PostureOutcome, evaluate_with_posture
 from lib.daemon_runtime import label_gate as _label_gate
+from lib.daemon_runtime import neotoma_transient as _neotoma_transient
 from lib.daemon_runtime.gating import load_policy
 from lib.notify import Notifier, Priority
 from lib import github_app_token as _github_app_token
@@ -144,6 +145,13 @@ def _lens_return_only_on_fly(lens: Lens) -> bool:
 
 
 DAEMON_NAME = "apis"
+
+# The exact-head ``pr_review`` store carries the full text of every panel
+# review, so one attempt can outlast the 30s every other store gets. Each
+# attempt may take this long; the whole store, retries and pauses included,
+# never takes longer than the total (a panel must not wait without bound).
+PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS = 90.0
+PR_REVIEW_STORE_TOTAL_SECONDS = 240.0
 
 # Parent-issue resolution (ateles#434, ateles#613, ateles#300).
 #
@@ -14951,13 +14959,29 @@ class SwarmDispatcher:
     # ── Neotoma helpers ──────────────────────────────────────────────────────
 
     async def _store_entities(
-        self, entities: list[dict], idempotency_key: str
+        self,
+        entities: list[dict],
+        idempotency_key: str,
+        *,
+        retry_transient: bool = False,
     ) -> dict | None:
+        """POST ``entities`` to Neotoma ``/store``; None on any failure.
+
+        Default: one attempt with a 30s time limit, as every caller has always
+        had. ``retry_transient=True`` (the large ``pr_review`` store) uses the
+        shared bounded Neotoma retry instead: timeouts, connection errors, 429
+        and 5xx are retried with the same body and idempotency key, each
+        attempt may take up to ``PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS``,
+        and the whole store is capped at ``PR_REVIEW_STORE_TOTAL_SECONDS``.
+        Any other 4xx fails at once. A 2xx reporting undeclared fields is
+        returned as before, for the caller to refuse.
+        """
         if not self.config.neotoma_token:
             log.warning(f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — store skipped")
             return None
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
+
+        async def attempt(time_limit: float) -> dict:
+            async with httpx.AsyncClient(timeout=time_limit) as client:
                 resp = await client.post(
                     f"{self.config.neotoma_base_url}/store",
                     json={"entities": entities, "idempotency_key": idempotency_key},
@@ -14967,8 +14991,22 @@ class SwarmDispatcher:
                 )
                 resp.raise_for_status()
                 return resp.json() if resp.content else {}
+
+        try:
+            if not retry_transient:
+                return await attempt(30)
+            return await _neotoma_transient.acall_with_transient_retry(
+                attempt,
+                label=f"store {idempotency_key}",
+                attempt_timeout=PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS,
+                total_seconds=PR_REVIEW_STORE_TOTAL_SECONDS,
+                retry_status=True,
+            )
         except Exception as exc:
-            log.error(f"[{DAEMON_NAME}] Neotoma store failed ({idempotency_key}): {exc}")
+            log.error(
+                f"[{DAEMON_NAME}] Neotoma store failed ({idempotency_key}): "
+                f"{_neotoma_transient.describe(exc)}"
+            )
             return None
 
     async def _log_harness_event(self, t: SwarmTrigger) -> None:
@@ -15096,6 +15134,7 @@ class SwarmDispatcher:
                     f"pr-review-{t.repository}-{t.number}-{sha[:12]}-"
                     f"{content_digest(digest_basis)}"
                 ),
+                retry_transient=True,
             )
             expected_lenses = {entity["review_lens"] for entity in entities}
             review_store_confirmed = bool(store_result) and not (

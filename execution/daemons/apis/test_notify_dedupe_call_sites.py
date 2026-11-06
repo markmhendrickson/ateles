@@ -286,7 +286,7 @@ def _pr_dispatcher_learning(monkeypatch, tmp_path, sent, *, deliver_kw=None):
             return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
         return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
 
-    async def fake_store(self, entities, idempotency_key):
+    async def fake_store(self, entities, idempotency_key, **_kwargs):
         return {"entities": [{"entity_id": "ent_skill_1"}]}
 
     async def fake_emit(self, trigger, verdict, body, **kwargs):
