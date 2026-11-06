@@ -581,6 +581,7 @@ import github_gateway  # noqa: E402
 import build_delivery  # noqa: E402
 import model_tiering  # noqa: E402
 import producer_confidence  # noqa: E402
+from red_conditions import ApisNotifier  # noqa: E402
 from skill_runner import SkillResult, _redact_secrets, run_skill  # noqa: E402
 from swarm_dispatch import SwarmDispatcher, _token_for_agent_on_repo  # noqa: E402
 from task_reconciler import TaskReconciler  # noqa: E402
@@ -4858,7 +4859,7 @@ async def main() -> None:
         )
 
     # 3. Load notification rubric
-    notifier = Notifier.from_neotoma()
+    notifier = ApisNotifier.from_neotoma()
     notifier.send(
         f"{DAEMON_NAME} started (task dispatch, dry_run={DRY_RUN})",
         priority=Priority.INFO,
