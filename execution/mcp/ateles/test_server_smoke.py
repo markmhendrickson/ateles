@@ -60,14 +60,17 @@ def _send_and_collect(
     proc: subprocess.Popen,
     messages: list[dict],
     expect_ids: set[int],
-    timeout: float = REQUEST_TIMEOUT_SECONDS,
+    timeout: float | None = None,
 ) -> dict[int, dict]:
     """Write messages, then read responses with a wall-clock timeout.
 
     A plain readline() loop can hang forever if the server wedges — this
     kills the process and gives up rather than blocking the test run.
-    Pass `timeout=STARTUP_TIMEOUT_SECONDS` only for the first `initialize`.
+    `timeout` defaults to REQUEST_TIMEOUT_SECONDS, read at call time. Only
+    `_initialize` passes the startup allowance.
     """
+    if timeout is None:
+        timeout = REQUEST_TIMEOUT_SECONDS
     for msg in messages:
         proc.stdin.write(json.dumps(msg) + "\n")
     proc.stdin.flush()
@@ -96,6 +99,31 @@ def _send_and_collect(
     if timed_out.is_set():
         raise AssertionError(f"timed out after {timeout}s waiting for responses {expect_ids}")
     return responses
+
+
+def _initialize(proc: subprocess.Popen) -> dict[int, dict]:
+    """Send the first `initialize` with the startup allowance.
+
+    The reply to this request also covers process startup, so it alone gets
+    STARTUP_TIMEOUT_SECONDS. Every real test goes through here so the
+    allowance cannot silently revert to the request default. Both limits are
+    read at call time, so the slow-start test can patch them.
+    """
+    return _send_and_collect(
+        proc,
+        [
+            {
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "smoke-test", "version": "0.0.1"},
+                },
+            },
+        ],
+        expect_ids={1},
+        timeout=STARTUP_TIMEOUT_SECONDS,
+    )
 
 
 def _drain_stderr(proc: subprocess.Popen) -> None:
@@ -153,8 +181,12 @@ def _stop_server(proc: subprocess.Popen) -> None:
 
 
 def test_startup_allowance_covers_a_slow_start():
-    """A delayed initialize reply fits the startup limit, not the request limit."""
-    assert STARTUP_TIMEOUT_SECONDS > REQUEST_TIMEOUT_SECONDS
+    """The real `_initialize` waits out a slow start that a request would not.
+
+    Runs the real helper against a child that answers after a delay. The
+    module limits are patched down so the test stays fast; the delay sits
+    between them.
+    """
     child_code = (
         "import json, sys, time\n"
         "for line in sys.stdin:\n"
@@ -163,10 +195,9 @@ def test_startup_allowance_covers_a_slow_start():
         "    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], "
         "'result': {'ready': True}}), flush=True)\n"
     )
-    message = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
 
-    def collect_with_limit(limit: float) -> dict[int, dict]:
-        proc = subprocess.Popen(
+    def spawn() -> subprocess.Popen:
+        return subprocess.Popen(
             [sys.executable, "-u", "-c", child_code],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -174,49 +205,50 @@ def test_startup_allowance_covers_a_slow_start():
             text=True,
             bufsize=1,
         )
-        try:
-            return _send_and_collect(proc, [message], expect_ids={1}, timeout=limit)
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait(timeout=5)
-            proc.stdin.close()
-            proc.stdout.close()
-            proc.stderr.close()
 
-    # Scaled limits exercise both sides without waiting for the production
-    # 10-second request timeout or 60-second startup allowance.
-    request_limit = 0.1
-    startup_allowance = 1.0
-    assert request_limit < 0.4 < startup_allowance
+    def close(proc: subprocess.Popen) -> None:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+        proc.stdin.close()
+        proc.stdout.close()
+        proc.stderr.close()
+
+    module = sys.modules[__name__]
+    saved = (module.STARTUP_TIMEOUT_SECONDS, module.REQUEST_TIMEOUT_SECONDS)
+    module.STARTUP_TIMEOUT_SECONDS = 1.0
+    module.REQUEST_TIMEOUT_SECONDS = 0.1
     try:
-        collect_with_limit(request_limit)
-    except AssertionError as exc:
-        assert f"timed out after {request_limit}s" in str(exc), str(exc)
-    else:
-        raise AssertionError("slow initialize unexpectedly passed the request limit")
-    responses = collect_with_limit(startup_allowance)
-    assert responses[1]["result"]["ready"] is True
+        assert module.REQUEST_TIMEOUT_SECONDS < 0.4 < module.STARTUP_TIMEOUT_SECONDS
+        proc = spawn()
+        try:
+            responses = _initialize(proc)
+        finally:
+            close(proc)
+        assert responses[1]["result"]["ready"] is True
+
+        # A plain request on the same child uses the (patched) request limit.
+        proc = spawn()
+        try:
+            _send_and_collect(
+                proc,
+                [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}],
+                expect_ids={1},
+            )
+        except AssertionError as exc:
+            assert "timed out after 0.1s" in str(exc), str(exc)
+        else:
+            raise AssertionError("slow reply unexpectedly passed the request limit")
+        finally:
+            close(proc)
+    finally:
+        module.STARTUP_TIMEOUT_SECONDS, module.REQUEST_TIMEOUT_SECONDS = saved
 
 
 def test_initialize_and_tools_list():
     proc = _start_server()
     try:
-        responses = _send_and_collect(
-            proc,
-            [
-                {
-                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": {"name": "smoke-test", "version": "0.0.1"},
-                    },
-                },
-            ],
-            expect_ids={1},
-            timeout=STARTUP_TIMEOUT_SECONDS,
-        )
+        responses = _initialize(proc)
         assert 1 in responses, f"no initialize response, stderr={_stderr_tail(proc)}"
         result = responses[1].get("result", {})
         assert result.get("serverInfo", {}).get("name") == "ateles", f"got {result}"
@@ -248,21 +280,7 @@ def test_initialize_and_tools_list():
 def test_tool_call_degrades_gracefully_without_token():
     proc = _start_server()
     try:
-        _send_and_collect(
-            proc,
-            [
-                {
-                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": {"name": "smoke-test", "version": "0.0.1"},
-                    },
-                },
-            ],
-            expect_ids={1},
-            timeout=STARTUP_TIMEOUT_SECONDS,
-        )
+        _initialize(proc)
         proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}) + "\n")
         proc.stdin.flush()
 
@@ -293,21 +311,7 @@ def test_startup_allowance_does_not_widen_request_limit():
     """
     proc = _start_server()
     try:
-        responses = _send_and_collect(
-            proc,
-            [
-                {
-                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": {"name": "smoke-test", "version": "0.0.1"},
-                    },
-                },
-            ],
-            expect_ids={1},
-            timeout=STARTUP_TIMEOUT_SECONDS,
-        )
+        responses = _initialize(proc)
         assert 1 in responses, f"no initialize response, stderr={_stderr_tail(proc)}"
 
         # A notification gets no reply, so waiting for id 3 after it is a
