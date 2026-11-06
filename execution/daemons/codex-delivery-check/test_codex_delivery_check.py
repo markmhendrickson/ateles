@@ -279,6 +279,21 @@ def test_session_owned_task_due_today_is_flagged():
         assert "chat0a1b2c3d" not in f.message and f.needs_operator is False
 
 
+def test_session_task_assigned_to_the_dispatcher_is_flagged_when_due_today():
+    # The dispatcher leaves this task as filed, so this finding is its only signal.
+    rows = [
+        task(1, "2026-11-04", assigned_to="apis", owner="Codex session"),
+        task(2, "2026-11-04", assigned_to="Apis@ateles-swarm", owner="ateles session"),
+        task(3, "2026-11-04", assigned_to="apis", owner="Jane Doe"),
+        task(4, "2026-11-04", assigned_to="apis"),
+    ]
+    findings, _ = cdc.check_tasks(pager(rows), NOW)
+    assert [f.key for f in findings] == [
+        f"{cdc.KEY_PREFIX}:task-due:ent_1",
+        f"{cdc.KEY_PREFIX}:task-due:ent_2",
+    ]
+
+
 def test_task_due_today_without_a_session_owner_gets_no_due_finding():
     rows = [
         task(1, "2026-11-04", assigned_to="cicada"),

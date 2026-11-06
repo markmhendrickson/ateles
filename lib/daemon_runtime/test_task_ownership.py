@@ -6,6 +6,7 @@ import pytest
 
 from lib.daemon_runtime.task_ownership import (
     SENTINEL_ASSIGNEES,
+    canonical_assignee,
     names_a_session,
     session_owned,
 )
@@ -123,3 +124,19 @@ def test_session_owned_falls_back_to_owner_when_assignee_absent():
         assert session_owned(sentinel, "Codex session")
     assert not session_owned(None, "meeting: acme")
     assert not session_owned(None, None)
+
+
+@pytest.mark.parametrize(
+    "dispatcher", ["apis", "APIS", " Apis ", "apis@ateles", "Apis@ateles-swarm", "@ateles-swarm"]
+)
+def test_session_owned_reads_the_dispatcher_as_no_assignee(dispatcher):
+    assert session_owned(dispatcher, "Codex session")
+    assert not session_owned(dispatcher, "Jane Doe")
+    assert not session_owned(dispatcher, None)
+
+
+@pytest.mark.parametrize("value", [7, ["Codex session"], {"name": "Codex session"}, True])
+def test_non_string_assignee_counts_as_absent(value):
+    assert canonical_assignee(value) is None
+    assert session_owned(value, "Codex session")
+    assert not session_owned(value, None)

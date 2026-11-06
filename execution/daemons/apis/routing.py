@@ -499,19 +499,16 @@ def infer_tags_from_text(title: str, body: str = "") -> list[str]:
     return tags
 
 
-# `SENTINEL_ASSIGNEES` (values that encode "nobody owns this" as a string) lives
-# in lib.daemon_runtime.task_ownership as the single source; re-exported here so
-# `routing.SENTINEL_ASSIGNEES` keeps resolving.
+# The assignee rules (the sentinel family, the canonical form, which assignee
+# decides ownership) live in lib.daemon_runtime.task_ownership as the single
+# source, so the router and the delivery check give one answer; re-exported here
+# so `routing.SENTINEL_ASSIGNEES` and `routing.canonical_assignee` keep resolving.
 from lib.daemon_runtime.task_ownership import (  # noqa: E402
     SENTINEL_ASSIGNEES,
+    canonical_assignee,
+    deciding_assignee,
     names_a_session,
 )
-
-# AAuth subjects are written `<agent>@ateles-swarm` (lib/daemon_runtime/
-# aauth_signer.py builds them as f"{name}@ateles-swarm"). The local part IS the
-# agent name by construction, so an assignee carrying the suffix names the same
-# owner as the bare form and must resolve identically.
-_AAUTH_SUFFIXES = ("@ateles-swarm", "@ateles")
 
 # ── Human ownership is a routing ANSWER, not a routing miss ──────────────────
 #
@@ -550,34 +547,6 @@ def _human_assignee_keys() -> frozenset[str]:
     return frozenset(keys)
 
 
-def canonical_assignee(assigned_to: str | None) -> str | None:
-    """
-    Reduce an ``assigned_to`` value to the one form the dispatcher resolves.
-
-    The canonical form is not a preference — it is whatever
-    ``ASSIGNED_TO_ROUTES`` is keyed by: a bare, lowercase, stripped agent name
-    (the keys are derived from ``DOMAIN_ROUTES.values()``). This normalizes the
-    three mechanical variations observed in stored tasks — surrounding
-    whitespace, capitalization, and the AAuth-subject suffix — and maps the
-    "unassigned" sentinel family to ``None`` so absence has a single spelling.
-
-    Returns ``None`` for absence/sentinels, otherwise the reduced string. A
-    value that is not a known agent is returned reduced but unchanged: this
-    function normalizes *form*, and never invents or guesses an owner (a human
-    name, or prose, is left for the caller to treat as unroutable).
-    """
-    if not assigned_to:
-        return None
-    key = assigned_to.strip().lower()
-    if not key or key in SENTINEL_ASSIGNEES:
-        return None
-    for suffix in _AAUTH_SUFFIXES:
-        if key.endswith(suffix):
-            key = key[: -len(suffix)].strip()
-            break
-    return key or None
-
-
 def resolve_skill(
     tags: list[str],
     assigned_to: str | None = None,
@@ -612,15 +581,15 @@ def resolve_skill(
     `pavo` became a `cicada` code change. A named owner nobody can spawn must
     block visibly (#702).
     """
-    key = canonical_assignee(assigned_to)
-    if key and key != "apis":
+    key = deciding_assignee(assigned_to)
+    if key:
         skill = ASSIGNED_TO_ROUTES.get(key)
         if skill:
             return skill
         if key in _human_assignee_keys():
             # Deliberate human ownership — terminal, and not an escalation.
             return HUMAN_OWNED
-        if names_a_session(assigned_to):
+        if names_a_session(key):
             return SESSION_OWNED
         # A named owner that is neither an agent, the operator nor a session.
         # Stop here: tag inference would reassign work its creator explicitly

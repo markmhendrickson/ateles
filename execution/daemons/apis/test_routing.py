@@ -562,6 +562,80 @@ def test_session_owner_without_assignee_is_session_owned_and_beats_tags() -> Non
     assert resolve_role(["ops"], owner="Codex session") == SESSION_OWNED
 
 
+# Every spelling the two readers must agree on. Includes the dispatcher's own
+# name, which is an assignee in form but names no owner.
+_PARITY_ASSIGNEES = (
+    None,
+    "",
+    "  ",
+    "unassigned",
+    "TBD",
+    "apis",
+    "APIS",
+    " Apis ",
+    "apis@ateles",
+    "Apis@ateles-swarm",
+    "@ateles-swarm",
+    "operator",
+    "Jane Doe",
+    "Session Bank",
+    "Claude Martin",
+    "apis session",
+    "Codex session billing",
+    "ateles session",
+    "coordinator chat0a1b2c3d",
+    "Codex session@ateles-swarm",
+    "ateles session@ateles-swarm",
+)
+_PARITY_OWNERS = (
+    None,
+    "",
+    "operator",
+    "Jane Doe",
+    "Session Bank",
+    "Codex session",
+    "ateles session",
+    "coordinator chat0a1b2c3d",
+)
+
+
+@pytest.mark.parametrize("tags", [[], ["ops"]])
+def test_router_and_shared_reader_agree_on_every_assignee_and_owner(tags) -> None:
+    """The dispatcher and the delivery check must never answer differently.
+
+    A task the router leaves as filed but the delivery check does not call
+    session-owned gets neither the block nor the due-date finding: it vanishes.
+    """
+    from lib.daemon_runtime.task_ownership import session_owned
+    from routing import ASSIGNED_TO_ROUTES, SESSION_OWNED
+
+    assignees = (*_PARITY_ASSIGNEES, *sorted(ASSIGNED_TO_ROUTES))
+    # `dispatch_task` reduces the assignee before asking the router; the delivery
+    # check hands over the stored value. Both forms must give the same answer.
+    disagreements = [
+        (form, owner)
+        for assignee in assignees
+        for form in (assignee, canonical_assignee(assignee))
+        for owner in _PARITY_OWNERS
+        if (resolve_skill(tags, assigned_to=form, owner=owner) == SESSION_OWNED)
+        != session_owned(assignee, owner)
+    ]
+    assert disagreements == []
+
+
+@pytest.mark.parametrize(
+    "dispatcher", ["apis", "APIS", " Apis ", "apis@ateles", "Apis@ateles-swarm"]
+)
+def test_task_assigned_to_the_dispatcher_is_decided_by_owner(dispatcher) -> None:
+    from lib.daemon_runtime.task_ownership import session_owned
+    from routing import SESSION_OWNED
+
+    assert resolve_skill([], assigned_to=dispatcher, owner="Codex session") == SESSION_OWNED
+    assert session_owned(dispatcher, "Codex session")
+    assert resolve_skill([], assigned_to=dispatcher, owner="Jane Doe") is None
+    assert not session_owned(dispatcher, "Jane Doe")
+
+
 def test_owner_never_overrides_a_real_assignee() -> None:
     from routing import HUMAN_OWNED
 

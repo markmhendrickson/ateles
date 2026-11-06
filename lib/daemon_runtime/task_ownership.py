@@ -19,9 +19,19 @@ import re
 # They are worse than an empty field: `bool(assigned_to)` is True for them, so
 # they satisfy an owner check (`readiness.assess_readiness(has_owner=...)`) and
 # an `eq` filter without naming an owner any dispatcher can resolve.
-# `routing.canonical_assignee` maps them to None so absence is spelled exactly
-# one way. This is the single source; routing.py imports it.
+# `canonical_assignee` maps them to None so absence is spelled exactly one way.
+# This is the single source; routing.py imports it.
 SENTINEL_ASSIGNEES = frozenset({"unassigned", "none", "nobody", "tbd", "n/a", "-"})
+
+# AAuth subjects are written `<agent>@ateles-swarm` (lib/daemon_runtime/
+# aauth_signer.py builds them as f"{name}@ateles-swarm"). The local part IS the
+# agent name by construction, so an assignee carrying the suffix names the same
+# owner as the bare form and must resolve identically.
+_AAUTH_SUFFIXES = ("@ateles-swarm", "@ateles")
+
+# The dispatcher itself. A task assigned to it names no owner, because the
+# dispatcher is what is asking who owns the task.
+_DISPATCHER_ASSIGNEE = "apis"
 
 _SESSION_MARKERS = frozenset(
     {"session", "subagent", "codex", "claude", "chat", "coordinator"}
@@ -66,14 +76,19 @@ def names_a_session(value: object) -> bool:
     `Session Bank` is a vendor, and `Marketing coordinator` is a job title. All
     of those must stay unroutable and reported. One of these is required:
 
-    - the value leads with `codex`, or contains `subagent`, words no person,
-      team or vendor here goes by;
+    - the value leads with `codex`, or contains `subagent`;
     - `session` is the head noun: the last word before any parenthetical
       (`ateles session`, but not `session notes`);
     - two different markers (`Claude Code session`, `coordinator chat`);
     - a marker or `root` immediately followed by an id (`Foundation coordinator
       0a1b2c3d`, `chat0a1b2c3d`);
     - a space-free identifier starting with `session` (`session-email-review`).
+
+    This reads free text, so it can be wrong in both directions, and word order
+    matters: `Session Bank` is reported, while `Bank session`, `Training
+    session` and `Codex Smith` read as sessions. That is accepted because the
+    effect of a wrong yes is limited: nothing is spawned and no status is
+    written, but the task is not reported as unroutable.
 
     Only the first clause (text before the first ``;``) counts: the owner is
     named first, and what follows is commentary that may mention a session
@@ -99,20 +114,54 @@ def names_a_session(value: object) -> bool:
     return tokens[0] == "session" and not any(c.isspace() for c in first)
 
 
-def _real_assignee(assigned_to: object) -> bool:
-    return (
-        isinstance(assigned_to, str)
-        and bool(assigned_to.strip())
-        and assigned_to.strip().lower() not in SENTINEL_ASSIGNEES
-    )
+def canonical_assignee(assigned_to: object) -> str | None:
+    """
+    Reduce an ``assigned_to`` value to the one form the dispatcher resolves.
+
+    The canonical form is not a preference: it is whatever the router's
+    ``ASSIGNED_TO_ROUTES`` is keyed by, a bare, lowercase, stripped agent name.
+    This normalizes the three mechanical variations observed in stored tasks
+    (surrounding whitespace, capitalization, and the AAuth-subject suffix) and
+    maps the "unassigned" sentinel family to ``None`` so absence has a single
+    spelling.
+
+    Returns ``None`` for absence, sentinels and non-strings, otherwise the
+    reduced string. A value that is not a known agent is returned reduced but
+    unchanged: this function normalizes *form*, and never invents or guesses an
+    owner (a human name, or prose, is left for the caller to treat as
+    unroutable).
+    """
+    if not isinstance(assigned_to, str):
+        return None
+    key = assigned_to.strip().lower()
+    if not key or key in SENTINEL_ASSIGNEES:
+        return None
+    for suffix in _AAUTH_SUFFIXES:
+        if key.endswith(suffix):
+            key = key[: -len(suffix)].strip()
+            break
+    return key or None
+
+
+def deciding_assignee(assigned_to: object) -> str | None:
+    """The canonical assignee when it decides ownership, else ``None``.
+
+    ``None`` means ``owner`` is consulted: absence, a sentinel, or the dispatcher
+    itself. Every reader of task ownership takes this answer from here, so the
+    router and the delivery check cannot disagree about whether ``owner`` counts.
+    """
+    key = canonical_assignee(assigned_to)
+    return None if key == _DISPATCHER_ASSIGNEE else key
 
 
 def session_owned(assigned_to: object, owner: object) -> bool:
     """True when a session owns the task.
 
-    A real (non-sentinel) ``assigned_to`` decides alone: an assignee naming
+    An assignee that decides (see ``deciding_assignee``) decides alone: naming
     anyone else means ``owner`` is not consulted. Otherwise ``owner`` decides.
+    The reduced form is what is read, as the router reads it.
     """
-    if _real_assignee(assigned_to):
-        return names_a_session(assigned_to)
+    key = deciding_assignee(assigned_to)
+    if key:
+        return names_a_session(key)
     return names_a_session(owner)
