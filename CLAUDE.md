@@ -126,7 +126,7 @@ Two mechanisms re-inject after a compaction boundary, and only these two:
 
 `PreCompact` cannot do this — its stdout goes to the debug log, never into context. `UserPromptSubmit` does inject, but fires every turn and so pays the cost on turns that never needed it.
 
-`.claude/hooks/reinject_working_method.py` carries the short restatement. Note the failure it fixes: `session_start.py` was registered against `startup|resume|clear`, which **excludes `compact`** — so the hook meant to keep context alive was silent at precisely the moment context was lost. When adding a SessionStart hook, include `compact` in the matcher, or state why it is deliberately excluded.
+`.claude/hooks/reinject_working_method.py` carries the short restatement. It also restates a role for a session with a local assigned-role record matched by exact session id; details are in the hook's docstring. Note the failure it fixes: `session_start.py` was registered against `startup|resume|clear`, which **excludes `compact`** — so the hook meant to keep context alive was silent at precisely the moment context was lost. When adding a SessionStart hook, include `compact` in the matcher, or state why it is deliberately excluded.
 
 ### Standing session rules, set 2026-09-11
 

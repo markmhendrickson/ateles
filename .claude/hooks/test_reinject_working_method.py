@@ -1,7 +1,7 @@
 """Tests for the SessionStart(compact) working-method reinjection hook.
 
 Four original assertions plus the assigned-role group (TestAssignedRole,
-ten behaviours, 22 test cases), each guarding a distinct failure mode:
+twelve tests, 27 cases), each guarding a distinct failure mode:
 
 1. Happy path — the hook prints the reminder, including the five numbered
    rules, and exits 0. Substrings from REMINDER, not full-string equality,

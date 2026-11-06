@@ -32,10 +32,43 @@ restate the repo-hygiene rules (no writes to shared clones, no `git stash`)
 compaction, and in every subagent brief. Re-listing everything every time is
 its own failure mode; keep this to what compaction actually eats.
 
+ASSIGNED ROLE (per session, local)
+----------------------------------
+A session assigned a role also gets a short restatement of it, because a role
+given in conversation is lost at compaction like any other instruction. The
+match is on the harness's exact hook `session_id` (not the desktop app's
+`local_` id, and never the visible session name or title, which can be
+copied or reused). Every other session's output is unchanged.
+
+The record is a local gitignored JSON file, so no operator data or session
+ids enter this public repo:
+
+    .claude/.session_state/<hook session_id>-role.json
+    {"session_id": "<exact hook session_id>", "role": "<short restatement,
+     max 600 chars>", "record": "ent_<24 hex>"}
+
+`record` is the Neotoma entity holding the full role. To assign, write that
+JSON in the checkout the session runs from, then read it back by piping
+`{"session_id": "<id>"}` into this hook and checking for `[session-role]`.
+It is a sibling file, not part of `<id>.json`, because `session_start.py`
+rewrites `<id>.json` non-atomically in parallel on compact.
+
+A record that exists but is unreadable or malformed yields one notice line
+naming the file, never role content. An inner `session_id` that differs from
+the hook's (a copied file, or a sanitization collision such as `a.b` vs `ab`)
+matches nothing.
+
+Deliberate limits: compaction only, and a lost record silently falls back to
+the generic reminder, since there is no central list to say a role was
+expected. No network, Neotoma or credential access.
+
 Fail-open: stdlib only, any error exits 0. Never block a session resume.
 """
 
+import json
+import re
 import sys
+from pathlib import Path
 
 
 REMINDER = """\
@@ -68,8 +101,65 @@ Full role definition: `.claude/skills/ateles/SKILL.md`. Repo-wide constraints \
 are in CLAUDE.md, which Claude Code re-injects from disk on its own."""
 
 
+_MAX_RECORD_BYTES = 4096
+_MAX_ROLE_CHARS = 600
+_RECORD_RE = re.compile(r"ent_[0-9a-f]{24}")
+
+
+def _role_restatement() -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import _session_integrity as si  # lazy: an import failure must not lose REMINDER
+
+    session_id = si.read_hook_input().get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return
+    path = si.state_path(session_id + "-role")
+    if not path.exists():
+        return
+
+    unreadable = (
+        f"[session-role] An assigned-role record exists for this session at {path} "
+        "but could not be read; role not restated."
+    )
+    try:
+        if path.stat().st_size > _MAX_RECORD_BYTES:
+            raise ValueError("oversized")
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(rec, dict):
+            raise ValueError("not an object")
+    except Exception as exc:  # noqa: BLE001
+        si.log(f"role record unreadable: {type(exc).__name__}")
+        print(unreadable)
+        return
+
+    if rec.get("session_id") != session_id:
+        si.log("role record session_id differs from hook session_id; ignored")
+        return
+    role, record = rec.get("role"), rec.get("record")
+    if (
+        not isinstance(role, str)
+        or not role.strip()
+        or len(role) > _MAX_ROLE_CHARS
+        or not isinstance(record, str)
+        or not _RECORD_RE.fullmatch(record)
+    ):
+        print(unreadable)
+        return
+    role = " ".join(role.split())
+    print(
+        "[session-role] This session holds an assigned role, matched by its exact "
+        f"session id: {role}\n"
+        f"Retrieve Neotoma record {record} before acting on the role. "
+        "The visible session name does not decide this."
+    )
+
+
 def main() -> int:
     print(REMINDER)
+    try:
+        _role_restatement()
+    except Exception:  # noqa: BLE001 — never lose the generic reminder
+        pass
     return 0
 
 
