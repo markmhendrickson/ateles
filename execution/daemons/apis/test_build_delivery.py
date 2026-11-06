@@ -2479,3 +2479,151 @@ def test_a_write_that_returns_no_version_never_sends_an_unconditional_write(disp
     assert apis._write_deferral("ent_x", claim, 0) == "unversioned"
     assert [w["field"] for w in sent] == ["disposition"], "the chain went on without a token"
     assert all(w["expected_version"] for w in sent)
+
+
+# --- A further correction may supersede a settled ``not_delivered`` receipt ---
+#
+# Red on origin/main: ``supersedable_correction`` admitted only ``updated`` and
+# ``pr_failed``, so test_a_settled_undelivered_correction_is_superseded failed
+# with ``assert False`` (and the entrance kept refusing). Each refusal test
+# below passes only while its one condition is enforced.
+
+_PR_KEY = "markmhendrickson/ateles#77"
+_HEAD = "a" * 40
+_RUN = "run-not-delivered-1"
+
+
+class _FakeLedger:
+    def __init__(self, receipts, in_flight=(), fail=False):
+        self.receipts = receipts
+        self.in_flight = set(in_flight)
+        self.fail = fail
+
+    def delivery_receipts(self):
+        return self.receipts
+
+    def entry(self, run_id):
+        import fly_runner
+
+        if self.fail:
+            raise fly_runner.FlyLedgerError("unreadable")
+        return {"run_id": run_id} if run_id in self.in_flight else None
+
+
+def _undelivered_target(**over):
+    fields = {"number": 77, "branch": "cicada/fix-77", "base_branch": "main", "head_sha": _HEAD}
+    fields.update(over)
+    return build_delivery.ExistingPRTarget(**fields)
+
+
+def _undelivered_plan(target=None):
+    target = target or _undelivered_target()
+    return build_delivery.FlyDeliveryPlan(
+        repository="markmhendrickson/ateles", branch=target.branch, base_branch=target.base_branch,
+        key=_PR_KEY, issue_number=None, target=target)
+
+
+def _undelivered_receipt(**over):
+    entry = {"status": "not_delivered", "branch": "cicada/fix-77", "run_id": _RUN,
+             "commit": None, "token": "t" * 32,
+             "existing_pr": {"branch": "cicada/fix-77", "base_branch": "main",
+                             "pr_number": "77", "head_sha": _HEAD}}
+    entry.update(over)
+    return entry
+
+
+def _use_ledger(monkeypatch, entry, stored=_PR_KEY, **kw):
+    ledger = _FakeLedger({stored: entry}, **kw)
+    monkeypatch.setattr(build_delivery, "_delivery_ledger", lambda: ledger)
+    return ledger
+
+
+def test_a_settled_undelivered_correction_is_superseded(monkeypatch):
+    entry = _undelivered_receipt()
+    _use_ledger(monkeypatch, entry)
+    assert build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+    # The entrance applies the same rule, so it lets the correction through too.
+    monkeypatch.setattr(build_delivery, "fly_delivery_blocker", lambda key: "refused")
+    assert build_delivery.fly_delivery_entrance_blocker(
+        _PR_KEY, receipt_key=_PR_KEY, target=_undelivered_target()) == ""
+
+
+def test_an_empty_commit_string_counts_as_no_commit(monkeypatch):
+    entry = _undelivered_receipt(commit="")
+    _use_ledger(monkeypatch, entry)
+    assert build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_an_undelivered_receipt_found_through_an_association_is_not_superseded(monkeypatch):
+    other = "markmhendrickson/ateles#task:ent_other"
+    entry = _undelivered_receipt(associated_keys=[_PR_KEY])
+    _use_ledger(monkeypatch, entry, stored=other)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), other, entry)
+
+
+def test_an_undelivered_lens_receipt_is_not_superseded(monkeypatch):
+    entry = _undelivered_receipt(kind="lens")
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_an_undelivered_first_delivery_is_not_superseded(monkeypatch):
+    entry = _undelivered_receipt()
+    entry.pop("existing_pr")
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("pr_number", "78"), ("branch", "cicada/other"), ("base_branch", "release/v1"),
+])
+def test_an_undelivered_correction_of_another_target_is_not_superseded(monkeypatch, field, value):
+    entry = _undelivered_receipt()
+    entry["existing_pr"] = {**entry["existing_pr"], field: value}
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+@pytest.mark.parametrize("status", ["unknown", "push_failed", "no_changes", "no_time",
+                                    "launching", "unreported", "Not_Delivered"])
+def test_no_other_status_gets_the_undelivered_exception(monkeypatch, status):
+    entry = _undelivered_receipt(status=status)
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_an_undelivered_receipt_that_records_a_commit_is_not_superseded(monkeypatch):
+    entry = _undelivered_receipt(commit="b" * 40)
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(
+        _undelivered_plan(_undelivered_target(head_sha="b" * 40)), _PR_KEY, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_an_undelivered_receipt_admitted_against_another_head_is_not_superseded(monkeypatch):
+    entry = _undelivered_receipt()
+    _use_ledger(monkeypatch, entry)
+    plan = _undelivered_plan(_undelivered_target(head_sha="c" * 40))
+    assert not build_delivery.supersedable_correction(plan, _PR_KEY, entry)
+
+
+def test_an_undelivered_run_still_in_flight_is_not_superseded(monkeypatch):
+    entry = _undelivered_receipt()
+    _use_ledger(monkeypatch, entry, in_flight={_RUN})
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+    monkeypatch.setattr(build_delivery, "fly_delivery_blocker", lambda key: "refused")
+    assert build_delivery.fly_delivery_entrance_blocker(
+        _PR_KEY, receipt_key=_PR_KEY, target=_undelivered_target()) == "refused"
+
+
+@pytest.mark.parametrize("run_id", ["", None])
+def test_an_undelivered_receipt_naming_no_run_is_not_superseded(monkeypatch, run_id):
+    entry = _undelivered_receipt(run_id=run_id)
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_an_unreadable_ledger_keeps_the_undelivered_refusal(monkeypatch):
+    entry = _undelivered_receipt()
+    _use_ledger(monkeypatch, entry, fail=True)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
