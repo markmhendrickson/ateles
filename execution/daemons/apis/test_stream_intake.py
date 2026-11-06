@@ -58,7 +58,7 @@ def _task(entity_id: str, action: str = "created") -> NeotomaEvent:
 def _brief(brief_id: str, task_id: str) -> NeotomaEvent:
     return NeotomaEvent(
         event_type="entity_updated",
-        entity_type="checkpoint_brief",
+        entity_type="checkpoint_brief",  # vocab-ok: live entity type Apis subscribes to
         entity_id=brief_id,
         action="updated",
         snapshot={"task_entity_id": task_id, "status": "approved"},
@@ -328,7 +328,7 @@ def test_a_brief_whose_task_cannot_be_read_never_runs_beside_that_task(monkeypat
     monkeypatch.setattr(apis, "fetch_checkpoint_record", lambda _id: None)
 
     async def fake_hydrate(event):
-        if event.entity_type == "checkpoint_brief":
+        if event.entity_type == "checkpoint_brief":  # vocab-ok: live entity type Apis subscribes to
             event.hydrated = False  # the read failed: snapshot unknown
         return event
 
@@ -370,7 +370,7 @@ def test_a_brief_read_late_still_takes_its_tasks_lock(monkeypatch):
     )
 
     async def fake_hydrate(event):
-        if event.entity_type == "checkpoint_brief":
+        if event.entity_type == "checkpoint_brief":  # vocab-ok: live entity type Apis subscribes to
             event.hydrated = False
         return event
 
