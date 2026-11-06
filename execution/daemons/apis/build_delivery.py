@@ -1050,7 +1050,9 @@ _PARENT_TASK_STATUSES = frozenset({"opened", "updated"})
 _TASK_KEY_MARK = "#task:"
 
 
-def verified_parent_task(repository: object, pr_number: object, head_ref: str = "") -> str | None:
+def verified_parent_task(
+    repository: object, pr_number: object, head_ref: str, head_sha: str
+) -> str | None:
     """The task id a pull request was delivered from, or None.
 
     Read only from Apis's own delivery ledger, never from the PR body: a task
@@ -1059,7 +1061,7 @@ def verified_parent_task(repository: object, pr_number: object, head_ref: str = 
     after ``verify_fly_delivery`` read the PR back. A pull request counts as
     delivered from a task only when exactly one such receipt names it: same
     repository, status ``opened``/``updated``, read-back ``passed``, the same PR
-    number and, when *head_ref* is known, the same branch.
+    number, branch, and full commit SHA as the head under review.
 
     Fail closed: an unreadable or malformed ledger, no match, or more than one
     match returns None, and the caller keeps its no-parent behaviour."""
@@ -1067,7 +1069,7 @@ def verified_parent_task(repository: object, pr_number: object, head_ref: str = 
 
     number = _as_issue_number(pr_number)
     repo = canonical_repository(repository)
-    if not number or not repo:
+    if not number or not repo or not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
         return None
     try:
         receipts = _delivery_ledger().delivery_receipts()
@@ -1089,7 +1091,7 @@ def verified_parent_task(repository: object, pr_number: object, head_ref: str = 
                 or entry.get("readback") != "passed"
                 or _as_issue_number(entry.get("pr_number")) != number):
             continue
-        if head_ref and entry.get("branch") != head_ref:
+        if entry.get("branch") != head_ref or entry.get("commit") != head_sha:
             continue
         found.add(task_id)
     return found.pop() if len(found) == 1 else None

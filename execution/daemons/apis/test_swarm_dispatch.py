@@ -3777,7 +3777,7 @@ def test_lanius_pr_prompt_gate_inheritance_contract_snapshot():
     merge_not_overwrite = "Legacy init MUST MERGE, never overwrite"
     never_downgrade = "never downgrade a `signed_off` gate to `pending`"
     blocked_only_when_pending = (
-        "Only emit `blocked` when `gate_status` exists AND a pre-impl gate is "
+        "emit `blocked` when `gate_status` exists AND a pre-impl gate is "
         "genuinely `pending`"
     )
 
@@ -3995,7 +3995,7 @@ _TASK_BRANCH = "cicada/task-01234567-20261106T000000-abc123"
 def _task_receipt(**overrides):
     entry = {
         "status": "opened", "branch": _TASK_BRANCH, "run_id": "run-1",
-        "commit": "c" * 40, "pr_number": 87,
+        "commit": "a" * 40, "pr_number": 87,
         "pr_url": "https://github.com/owner/repo/pull/87", "readback": "passed",
         "readback_reason": "", "token": "t" * 32, "recorded_at": 1_700_000_000.0,
     }
@@ -4045,7 +4045,7 @@ def _task_pr_dispatcher(monkeypatch, *, lanius_stdout, vanellus_stdout):
     return d, calls, prompts, posted, blocks
 
 
-def test_verified_parent_task_suppresses_bypass_and_tells_the_steward(
+def test_verified_parent_task_missing_issue_block_proceeds(
     monkeypatch, task_ledger
 ):
     """A PR Apis delivered from a task (its own ledger says so) gets no bypass
@@ -4054,7 +4054,8 @@ def test_verified_parent_task_suppresses_bypass_and_tells_the_steward(
     # Lanius misjudges the missing issue as a block, as observed live.
     d, calls, prompts, posted, blocks = _task_pr_dispatcher(
         monkeypatch,
-        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm, arch",
+        lanius_stdout=("GATE_INHERITANCE: blocked\n"
+                       "GATE_BLOCK_REASON: missing_parent_issue"),
         vanellus_stdout="**APPROVE**\nlgtm",
     )
     asyncio.run(d._handle_pr(_trigger(body="A delivered change.", head_ref=_TASK_BRANCH)))
@@ -4063,11 +4064,46 @@ def test_verified_parent_task_suppresses_bypass_and_tells_the_steward(
     assert not any("bypassed the gated" in m for m in d.notifier.sent)
     assert blocks == []
     assert "VERIFIED PARENT TASK" in prompts["lanius"][0] and _TASK_ID in prompts["lanius"][0]
+    assert "overrides any role-prompt instruction to retrieve issue gates" in prompts["lanius"][0]
     steward = prompts["vanellus"][0]
     assert f"delivered from tracked task {_TASK_ID}" in steward
     assert "Parent issue: none." in steward and "#unknown" not in steward
     assert "do not record `block_kind=process`" in steward
     assert ("gate", None) in calls  # the panel ran and reached readiness
+
+
+def test_verified_parent_task_keeps_other_lanius_block(monkeypatch, task_ledger):
+    """A receipt cannot clear pending issue gates reported for another reason."""
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{_TASK_ID}", _task_receipt())
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm, arch",
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A delivered change.", head_ref=_TASK_BRANCH)))
+
+    assert posted == []
+    assert blocks == [(None, {"pm", "arch"})]
+    assert "vanellus" not in prompts
+    assert ("gate", None) not in calls
+
+
+def test_earlier_head_receipt_keeps_bypass_notice(monkeypatch, task_ledger):
+    """A later push on the same PR and branch has no verified parent receipt."""
+    assert task_ledger.reserve_delivery(
+        f"owner/repo#task:{_TASK_ID}", _task_receipt(commit="c" * 40)
+    )
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm",
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A later push.", head_ref=_TASK_BRANCH)))
+
+    assert posted == [87]
+    assert blocks == [(None, {"pm"})]
+    assert "VERIFIED PARENT TASK" not in prompts["lanius"][0]
+    assert "vanellus" not in prompts
 
 
 def test_no_issue_and_no_verified_task_keeps_notice_and_process_block(
@@ -4128,15 +4164,51 @@ def test_verified_parent_task_fails_closed(task_ledger, key, overrides, head_ref
     import build_delivery
 
     assert task_ledger.reserve_delivery(key, _task_receipt(**overrides))
-    assert build_delivery.verified_parent_task("owner/repo", 87, head_ref) is None
+    assert build_delivery.verified_parent_task("owner/repo", 87, head_ref, "a" * 40) is None
 
 
 def test_verified_parent_task_reads_the_ledger(task_ledger):
     import build_delivery
 
     assert task_ledger.reserve_delivery(f"owner/repo#task:{_TASK_ID}", _task_receipt())
-    assert build_delivery.verified_parent_task("Owner/Repo", 87, _TASK_BRANCH) == _TASK_ID
-    assert build_delivery.verified_parent_task("owner/repo", 88, _TASK_BRANCH) is None
+    assert build_delivery.verified_parent_task("Owner/Repo", 87, _TASK_BRANCH, "a" * 40) == _TASK_ID
+    assert build_delivery.verified_parent_task("owner/repo", 88, _TASK_BRANCH, "a" * 40) is None
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "c" * 40) is None
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "a" * 7) is None
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "") is None
+
+
+def test_verified_parent_task_rejects_ambiguous_tasks(task_ledger):
+    import build_delivery
+
+    other_task = "ent_abcdef0123456789abcdef01"
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{_TASK_ID}", _task_receipt())
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{other_task}", _task_receipt())
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "a" * 40) is None
+
+
+@pytest.mark.parametrize("ledger_result", [OSError("unreadable"), ["malformed"]])
+def test_verified_parent_task_unreadable_ledger(monkeypatch, task_ledger, ledger_result):
+    import build_delivery
+
+    def receipts():
+        if isinstance(ledger_result, Exception):
+            raise ledger_result
+        return ledger_result
+
+    monkeypatch.setattr(build_delivery, "_delivery_ledger", lambda: task_ledger)
+    monkeypatch.setattr(task_ledger, "delivery_receipts", receipts)
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "a" * 40) is None
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm",
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A fix, no issue link.", head_ref=_TASK_BRANCH)))
+    assert posted == [87]
+    assert "VERIFIED PARENT TASK" not in prompts["lanius"][0]
+    assert blocks == [(None, {"pm"})]
+    assert "vanellus" not in prompts
 
 
 def test_verified_parent_task_does_not_clear_a_content_block(monkeypatch, task_ledger):
