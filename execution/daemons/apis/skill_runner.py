@@ -1628,14 +1628,32 @@ def _redacted_env_var_names() -> list[str]:
     return names
 
 
-def _redact_secrets(text: str) -> str:
-    """Replace any known secret value appearing in child output."""
+_RUN_TOKEN_PLACEHOLDER = "<redacted:run-token>"
+
+
+def _redact_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
+    """Replace any known secret value appearing in child output.
+
+    ``extra_secrets`` are run-local values (a token minted for this one run)
+    supplied by the caller; unlike the environment ones they are removed
+    whatever their length, since the caller knows they are secret.
+    """
     out = text
     for var in _redacted_env_var_names():
         secret = os.environ.get(var, "")
         if secret and len(secret) >= 8:
             out = out.replace(secret, f"<redacted:{var}>")
+    for secret in extra_secrets:
+        if secret:
+            out = out.replace(secret, _RUN_TOKEN_PLACEHOLDER)
     return out
+
+
+def _remove_run_token(data: bytes, token: str | None) -> bytes:
+    """*data* with this run's own token value removed (bytes in, bytes out)."""
+    if not token or not data:
+        return data
+    return data.replace(token.encode("utf-8"), _RUN_TOKEN_PLACEHOLDER.encode("utf-8"))
 
 
 def _summarize_command(cmd: list[str]) -> str:
@@ -2896,7 +2914,7 @@ DISPATCHER_LENS_PUBLICATION_READY = True
 # gets (``fly_runner.mint_job_github_token``: contents and pull requests read,
 # one repository, a broader grant refused and revoked), minted for this run
 # alone, never cached, and revoked when the run ends. Minted and revoked off
-# the event loop. A failed mint keeps the caller's token, as before.
+# the event loop. A failed mint refuses the run; the caller's token is never used.
 
 # The agents that act as the PR-opener App; held equal to
 # ``swarm_dispatch._PR_OPENER_AGENTS`` by a test.
@@ -2926,6 +2944,41 @@ def _agent_has_own_github_identity(agent: str) -> bool:
     )
 
 
+def local_review_token_repository(
+    agent: str,
+    *,
+    repository: str,
+    github_read_only: bool,
+    seated_reviewer: bool,
+    local_review: bool,
+    has_delivery: bool,
+) -> str:
+    """The repository a local seated read-only run gets a read token for, or "".
+
+    The one rule for "this run is handed a read-only token instead of the
+    caller's": ``run_skill`` uses it to decide, and the dispatcher uses it to
+    pick the return-only prompt (the run cannot write, so the dispatcher
+    publishes), so the two cannot disagree. ``run_skill`` additionally requires
+    a non-empty caller token (an empty one is the caller refusing, and that
+    refusal stands); the dispatcher's prompt does not depend on it, since a
+    refused run never reads its prompt.
+    """
+    if (
+        github_read_only
+        and seated_reviewer
+        and not local_review
+        and not has_delivery
+        and "/" in (repository or "")
+        and not _agent_has_own_github_identity(agent)
+    ):
+        return repository
+    return ""
+
+
+class _ReviewTokenRefused(_LocalSpawnError):
+    """An eligible run got no valid read token: refused before any child."""
+
+
 def _revoke_review_token_quietly(token: str) -> None:
     try:
         fly_runner.revoke_job_github_token(token)
@@ -2933,14 +2986,16 @@ def _revoke_review_token_quietly(token: str) -> None:
         log.warning(f"[apis] read-scoped review token revocation failed ({type(exc).__name__})")
 
 
-async def _mint_review_token(repository: str) -> str | None:
-    """A fresh read-class token for *repository*, or None (logged, one line,
-    no token) when it cannot be minted. Minted in a worker thread; a token
-    whose mint finishes after this coroutine was cancelled is revoked then."""
+async def _mint_review_token(repository: str) -> str:
+    """A fresh read-class token for *repository*. Minted in a worker thread; a
+    token whose mint finishes after this coroutine was cancelled is revoked
+    then. A mint or validation failure raises ``_ReviewTokenRefused`` (a
+    spawn refusal: no child starts, and the caller's write token is never
+    used in its place); the text names the reason class, never a token."""
     fut = asyncio.ensure_future(asyncio.to_thread(
         fly_runner.mint_job_github_token, repository, fly_runner.review_github_app_prefix()))
     try:
-        return await asyncio.shield(fut)
+        token = await asyncio.shield(fut)
     except asyncio.CancelledError:
         def _revoke_late(done: "asyncio.Future[str]") -> None:
             if not done.cancelled() and done.exception() is None:
@@ -2950,9 +3005,16 @@ async def _mint_review_token(repository: str) -> str | None:
         raise
     except Exception as exc:  # noqa: BLE001
         reason = str(exc)[:200] if isinstance(exc, fly_runner.FlyIneligible) else type(exc).__name__
-        log.warning(f"[apis] no read-scoped review token for {repository} ({reason}); "
-                    "the run keeps the token its caller passed")
-        return None
+        raise _ReviewTokenRefused(
+            f"no read-scoped review token for {repository} ({reason}); the run is "
+            "refused rather than given a token that can write"
+        ) from None
+    if not token:
+        raise _ReviewTokenRefused(
+            f"no read-scoped review token for {repository} (empty token); the run is "
+            "refused rather than given a token that can write"
+        ) from None
+    return token
 
 
 async def _revoke_review_token(token: str) -> None:
@@ -4134,14 +4196,29 @@ async def _run_skill_once(
                     start_new_session=True,
                 )
             except OSError as exc:
-                raise _LocalSpawnError(str(exc)) from exc
-            out, err = await asyncio.wait_for(
-                proc.communicate(
-                    input=stdin_payload if stdin_payload is not None else prompt.encode()
-                ),
-                timeout=timeout,
+                raise _LocalSpawnError(
+                    _redact_secrets(str(exc), (review_token or "",))) from exc
+            try:
+                out, err = await asyncio.wait_for(
+                    proc.communicate(
+                        input=stdin_payload if stdin_payload is not None else prompt.encode()
+                    ),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                if review_token and proc is not None:
+                    # Enforce the deadline first: the child dies now, however
+                    # slow the revocation below turns out to be.
+                    await _kill_spawned_process_group(proc)
+                    proc = None  # already killed and drained: not again
+                raise
+            # This run's own token is removed before any consumer sees the
+            # output (verdict parsing, publication, diagnostics, logs).
+            return (
+                proc.returncode,
+                _remove_run_token(out, review_token),
+                _remove_run_token(err, review_token),
             )
-            return proc.returncode, out, err
         finally:
             if review_token:
                 await _revoke_review_token(review_token)
@@ -4876,16 +4953,17 @@ async def run_skill(
     fly_bound, fly_extra = _fly_routing(runner, action_class)
     _token_repo = github_token_repository or repository
     review_token_repository = (
-        _token_repo
-        if github_read_only
-        and seated_reviewer
-        and not local_review
-        and fly_delivery is None
+        local_review_token_repository(
+            role or skill,
+            repository=_token_repo,
+            github_read_only=github_read_only,
+            seated_reviewer=seated_reviewer,
+            local_review=local_review,
+            has_delivery=fly_delivery is not None,
+        )
         # An empty token is the caller refusing (a lens whose App is expected
         # but missing): that refusal stands, nothing is minted in its place.
-        and github_token
-        and "/" in _token_repo
-        and not _agent_has_own_github_identity(role or skill)
+        if github_token
         else ""
     )
 

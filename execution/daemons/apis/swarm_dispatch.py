@@ -141,6 +141,28 @@ def _lens_return_only_on_fly(lens: Lens) -> bool:
     )
 
 
+def _lens_gets_local_read_token(agent: str, repository: str) -> bool:
+    """True when a local run of *agent*'s lens on *repository* is handed a
+    read-only token (never one that can write). Same function ``run_skill``
+    decides with, so the prompt and the token cannot disagree."""
+    return bool(skill_runner.local_review_token_repository(
+        agent,
+        repository=repository,
+        github_read_only=True,
+        seated_reviewer=True,
+        local_review=False,
+        has_delivery=False,
+    ))
+
+
+def _lens_return_only(lens: Lens, repository: str) -> bool:
+    """The return-only prompt and dispatcher-owned publication: for a lens run
+    on Fly, and for a local run that gets a read-only token and so cannot write."""
+    return _lens_return_only_on_fly(lens) or _lens_gets_local_read_token(
+        lens.agent, repository
+    )
+
+
 DAEMON_NAME = "apis"
 
 # Parent-issue resolution (ateles#434, ateles#613, ateles#300).
@@ -2873,6 +2895,29 @@ def parse_returned_lens_review(
     if lens_own_verdict(review, lens_agent=lens_agent) is None:
         return None  # agreeing on "unreadable" is not acceptance
     return review, (update if update.strip() else None)
+
+
+def split_returned_expectation_update(block: str) -> tuple[str, str | None] | None:
+    """A combined-pass lens block of a read-only run, split into the review
+    text (the block without its expectation section) and the returned
+    expectation update. None when the block is malformed: an unmatched or
+    nested delimiter, a review section of its own, more than one update, an
+    oversized one, or any swarm marker inside it."""
+    if _DISPATCHER_DELIM_FAST_RE.search(block) is None:
+        return block, None
+    parsed = _returned_sections(block)
+    if parsed is None:
+        return None
+    found, outside = parsed
+    if found["review"] or len(found["expectation"]) > 1:
+        return None
+    update = found["expectation"][0].strip("\r\n") if found["expectation"] else ""
+    if len(update) > _MAX_RETURNED_TEXT or _FOREIGN_MARKER_RE.search(update):
+        return None
+    return outside.rstrip("\n") + "\n", (update if update.strip() else None)
+
+
+_DISPATCHER_DELIM_FAST_RE = re.compile(r"<<<(?:END_)?DISPATCHER_")
 
 
 def verified_remote_comment(lens: str, agent: str, review: str, head_sha: str) -> str | None:
@@ -5758,7 +5803,7 @@ class SwarmDispatcher:
         review_signals = await self._review_signals(
             trigger, changed_files=changed_files
         )
-        return_only = _lens_return_only_on_fly(lens)
+        return_only = _lens_return_only(lens, repository)
         try:
             result = await run_skill(
                 lens.agent,
@@ -8007,7 +8052,7 @@ class SwarmDispatcher:
                 qa_worktree = await prepare_pr_worktree(
                     trigger.repository, trigger.number, lens.agent
                 )
-            return_only = _lens_return_only_on_fly(lens)
+            return_only = _lens_return_only(lens, trigger.repository)
             try:
                 result = combined_results.get(lens.lens) or await run_skill(
                     lens.agent,
@@ -13972,11 +14017,15 @@ class SwarmDispatcher:
                 # A lens whose own prompt cannot be loaded cannot be reviewed
                 # in a pass that promises its full duties: run them one by one.
                 return {}
+            # A combined run that gets a read-only token cannot write: it returns
+            # its checklist updates and the dispatcher publishes them (never on
+            # Fly; the pass is pinned to the Mac below).
+            read_only = _lens_gets_local_read_token(first.agent, trigger.repository)
             result = await run_skill(
                 first.agent,
                 self._combined_prompt(
                     trigger, combinable, expectations, review_head, parent,
-                    changed_files,
+                    changed_files, read_only=read_only,
                 ),
                 github_token=_token_for_agent_on_repo(first.agent, trigger.repository),
                 github_token_repository=trigger.repository,
@@ -14006,12 +14055,27 @@ class SwarmDispatcher:
                 result.stdout, [item.lens for item in combinable]
             )
             accepted: dict[str, SkillResult] = {}
+            updates: dict[str, str] = {}
             for item in combinable:
                 block = blocks.get(item.lens)
+                if block is not None and read_only:
+                    split = split_returned_expectation_update(block)
+                    if split is None:
+                        continue  # malformed: this lens runs alone
+                    block, update = split
+                    if update:
+                        updates[item.lens] = update
                 if block is None or lens_own_verdict(block, lens_agent=item.agent) is None:
+                    updates.pop(item.lens, None)
                     continue
                 accepted[item.lens] = dataclasses.replace(result, stdout=block)
             posted = await self._post_combined_comments(trigger, accepted, review_head)
+            if read_only and updates:
+                await self._publish_expectation_updates(
+                    trigger, parent,
+                    {lens: text for lens, text in updates.items() if lens in posted},
+                    {item.lens: item.agent for item in combinable},
+                )
             return {lens: res for lens, res in accepted.items() if lens in posted}
         except Exception as exc:
             log.warning(

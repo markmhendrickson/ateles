@@ -139,9 +139,19 @@ def test_combined_prompt_return_only_and_local_contract(monkeypatch) -> None:
     assert "only write you make" not in read_only
 
 
+def _give_every_lens_its_own_identity(monkeypatch) -> None:
+    """A lens with a PAT of its own is not handed a read-only token, so it
+    keeps the local prompt: that is the contract these two tests pin."""
+    import review_panel
+
+    for lens in review_panel.LENSES:
+        monkeypatch.setenv(f"{lens.agent.upper()}_AGENT_PAT", f"own-pat-{lens.agent}-0000")
+
+
 def test_individual_lens_entrance_keeps_local_prompt_and_read_only_runner_contract(
     monkeypatch, fly_env, seam,
 ) -> None:
+    _give_every_lens_its_own_identity(monkeypatch)
     monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", False)
     calls = []
     dispatcher = _pr_dispatcher_with_stubs(
@@ -181,6 +191,7 @@ def test_individual_lens_entrance_keeps_local_prompt_and_read_only_runner_contra
 def test_combined_lens_entrance_keeps_local_prompt_and_read_only_runner_contract(
     monkeypatch, fly_env, seam,
 ) -> None:
+    _give_every_lens_its_own_identity(monkeypatch)
     monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", False)
     dispatcher = SwarmDispatcher(_StubNotifier(), _config())
     monkeypatch.setattr(
@@ -264,3 +275,160 @@ def test_read_only_lens_fly_refusal_and_existing_local_fallback(
     else:
         assert result.ok and result.stdout == "local output"
         assert len(spawned) == 1
+
+
+# ── a local run that gets a read-only token cannot write ─────────────────────
+
+
+@pytest.fixture
+def _no_own_identity(monkeypatch):
+    """No lens has an App or a PAT of its own: every local seated lens run is
+    handed a read-only token, so it must be told not to write."""
+    import os
+
+    for name in list(os.environ):
+        if name.endswith("_AGENT_PAT") or name.startswith("ATELES_APP_"):
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("ATELES_EXPECTED_LENS_APPS", raising=False)
+    monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES", raising=False)
+
+
+def _returned_reply(lens: str, agent: str) -> str:
+    header = swarm_dispatch.attribution_header(agent, f"{lens} lens panelist")
+    return (
+        f"{swarm_dispatch.DISPATCHER_REVIEW_BEGIN}\n{header}\n**APPROVE**\nlooks fine\n"
+        f"{swarm_dispatch.DISPATCHER_REVIEW_END}\n"
+        f"{swarm_dispatch.DISPATCHER_EXPECTATION_BEGIN}\n"
+        f"**{swarm_dispatch.EXPECTATION_MARKER} ({lens})**\n- [x] item\n"
+        f"{swarm_dispatch.DISPATCHER_EXPECTATION_END}\n"
+    )
+
+
+def _assert_told_not_to_write(prompt: str) -> None:
+    assert "<<<DISPATCHER_EXPECTATION_UPDATE>>>" in prompt
+    assert "gh api -X PATCH" not in prompt
+    assert "only write you make" not in prompt
+    assert "Post your review as a PR comment" not in prompt
+
+
+def test_local_read_token_individual_publishes_expectation_update(
+    monkeypatch, _no_own_identity,
+) -> None:
+    import review_panel
+
+    calls: list = []
+    dispatcher = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+    dispatcher.config.combined_review_pass = False
+
+    class _Everyone(dict):
+        def get(self, key, default=None):
+            return "- [ ] item"
+
+    async def expectations(self, repo, parent):
+        return _Everyone()
+
+    monkeypatch.setattr(SwarmDispatcher, "_preregistered_expectations", expectations)
+    published: list = []
+
+    async def record_publish(self, t, parent, updates, agents_by_lens):
+        published.append((parent, dict(updates)))
+
+    monkeypatch.setattr(SwarmDispatcher, "_publish_expectation_updates", record_publish)
+    by_agent = {lens.agent: lens for lens in review_panel.LENSES}
+    seen: list = []
+    stub = swarm_dispatch.run_skill  # the helper's fake: lanius, vanellus, panelists
+
+    async def run_skill_for_lenses(skill, prompt, **kwargs):
+        if str(kwargs.get("action_class", "")).startswith("lens_review:"):
+            seen.append((skill, prompt, kwargs))
+            lens = by_agent[skill]
+            return SkillResult(skill, True, 0, _returned_reply(lens.lens, skill), "")
+        return await stub(skill, prompt, **kwargs)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", run_skill_for_lenses)
+    asyncio.run(dispatcher._handle_pr(_trigger(body="Closes #80.")))
+    assert seen, "no lens was seated"
+    # The selection is the local read-token one, not the Fly one.
+    assert not any(swarm_dispatch._lens_return_only_on_fly(by_agent[s]) for s, _, _ in seen)
+    for _, prompt, kwargs in seen:
+        assert kwargs["github_read_only"] is True
+        _assert_told_not_to_write(prompt)
+    assert published, "the returned update never reached the dispatcher's publication"
+    parent, updates = published[-1]
+    assert parent == 80
+    assert set(updates) == {by_agent[s].lens for s, _, _ in seen}
+    assert all("- [x] item" in text for text in updates.values())
+
+
+def test_local_read_token_combined_publishes_expectation_updates(
+    monkeypatch, _no_own_identity,
+) -> None:
+    import review_carry
+    import review_panel
+
+    lenses = [l for l in review_panel.LENSES if l.lens in review_carry.COMBINED_LENSES][:2]
+    assert len(lenses) == 2
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config())
+    monkeypatch.setattr(
+        dispatcher, "_lens_agent_prompt",
+        lambda agent: "Review this lens. Post a PR comment with gh.",
+    )
+    monkeypatch.setattr(swarm_dispatch, "usable_providers_async", lambda: _async_providers())
+    monkeypatch.setattr(swarm_dispatch, "resolve_lens_provider", lambda *a, **k: "claude")
+    captured: list = []
+
+    def block(lens) -> str:
+        header = swarm_dispatch.attribution_header(lens.agent, f"{lens.lens} lens panelist")
+        return (
+            f"{review_carry.combined_delimiter(lens.lens)}\n{header}\n**APPROVE**\nfine\n"
+            f"{swarm_dispatch.DISPATCHER_EXPECTATION_BEGIN}\n"
+            f"**{swarm_dispatch.EXPECTATION_MARKER} ({lens.lens})**\n- [x] item\n"
+            f"{swarm_dispatch.DISPATCHER_EXPECTATION_END}\n"
+        )
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        captured.append((prompt, kwargs))
+        return SkillResult(skill, True, 0, "".join(block(l) for l in lenses), "")
+
+    posted_bodies: dict = {}
+
+    async def fake_post(self, trigger, accepted, review_head):
+        posted_bodies.update({lens: res.stdout for lens, res in accepted.items()})
+        return set(accepted)
+
+    published: list = []
+
+    async def record_publish(self, t, parent, updates, agents_by_lens):
+        published.append((parent, dict(updates), dict(agents_by_lens)))
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_post_combined_comments", fake_post)
+    monkeypatch.setattr(SwarmDispatcher, "_publish_expectation_updates", record_publish)
+    result = asyncio.run(dispatcher._run_combined_pass(
+        _trigger(), lenses, {l.agent: "- [ ] item" for l in lenses}, 80, "a" * 40,
+        pending_gates=set(), live_gates={}, signals=None,
+    ))
+    assert set(result) == {l.lens for l in lenses}
+    (prompt, kwargs), = captured
+    assert kwargs["github_read_only"] is True and kwargs["runner"] == "local"
+    _assert_told_not_to_write(prompt)
+    assert published, "the returned updates never reached the dispatcher's publication"
+    parent, updates, agents = published[-1]
+    assert parent == 80
+    assert set(updates) == {l.lens for l in lenses}
+    assert agents == {l.lens: l.agent for l in lenses}
+    # The update goes to publication, not into the posted verdict comment.
+    assert all("DISPATCHER_EXPECTATION" not in body for body in posted_bodies.values())
+    assert all(body.splitlines()[1] == "**APPROVE**" for body in posted_bodies.values())
+
+
+def test_prompt_selection_agrees_with_the_run_eligibility(monkeypatch, _no_own_identity) -> None:
+    import review_panel
+
+    lens = review_panel.LENSES[0]
+    assert swarm_dispatch._lens_return_only(lens, "owner/repo")
+    # An agent with an identity of its own keeps the local prompt and its own token.
+    monkeypatch.setenv(f"{lens.agent.upper()}_AGENT_PAT", "pat-of-its-own")
+    assert not swarm_dispatch._lens_return_only(lens, "owner/repo")
