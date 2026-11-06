@@ -18,6 +18,13 @@ SSE loop (no inline sleep in dispatch):
   * everything else   → left alone (terminal, awaiting_approval is operator-owned,
                         blocked already escalated, pending is the SSE create path).
 
+Tasks are read by state: one server-side status filter per watched status,
+paged by offset up to a stated bound (a bound that stops the read is logged at
+WARNING). A failed or stalled task is retried or escalated only when its last
+update is within RETRY_WINDOW_SECONDS (24h by default); older or ageless ones
+are left untouched and counted as ``skipped_old``, so the long-unseen backlog
+is not revived.
+
 The decision logic is pure (classify_task / should_retry_now) and unit-tested;
 the I/O (query Neotoma, re-dispatch, escalate) is thin and fail-open. Attempt
 counts are held in memory keyed by task id until a persistent task-schema
@@ -93,11 +100,31 @@ def stall_seconds(env=None) -> int:
 STALL_SECONDS = stall_seconds()
 # Watchdog sweep cadence.
 SWEEP_INTERVAL_SECONDS = max(60, int(os.environ.get("APIS_WATCHDOG_INTERVAL_SECONDS", "300")))
-# Max tasks pulled per sweep (client-side filtered). Pagination is a follow-up.
+# Rows per page of each status-filtered query.
 QUERY_LIMIT = max(50, int(os.environ.get("APIS_WATCHDOG_QUERY_LIMIT", "500")))
+# Pages read per watched status per sweep. The pages are read one at a time,
+# never concurrently, so a sweep costs at most
+# len(_WATCHED_STATUSES) * MAX_PAGES_PER_STATUS requests.
+MAX_PAGES_PER_STATUS = max(1, int(os.environ.get("APIS_WATCHDOG_MAX_PAGES", "5")))
+# Neotoma refuses a ``cursor`` beside ``snapshot_filters``
+# (ERR_CURSOR_COMBINATION) and an ``offset`` past 2000 (ERR_OFFSET_TOO_DEEP),
+# so a filtered listing is walked by offset (see lib/daemon_runtime/gating.py).
+MAX_QUERY_OFFSET = 2000
+# Only a task whose last update is this recent is retried or escalated. Older
+# failed or stalled tasks are left exactly as they are: making the backlog
+# visible must not revive it or page the operator about it.
+RETRY_WINDOW_SECONDS = max(
+    0, int(os.environ.get("APIS_WATCHDOG_RETRY_WINDOW_SECONDS", str(24 * 3600)))
+)
 
 # Statuses the watchdog actively manages.
 _RETRYABLE_INFLIGHT = frozenset({TaskStatus.ROUTED.value, TaskStatus.EXECUTING.value})
+# Every status the watchdog acts on; each is queried server-side by state.
+_WATCHED_STATUSES = (
+    TaskStatus.FAILED.value,
+    TaskStatus.VERIFIED.value,
+    *sorted(_RETRYABLE_INFLIGHT),
+)
 
 
 class WatchdogAction(str, Enum):
@@ -117,10 +144,25 @@ class _AttemptState:
 
 
 @dataclass
+class TaskQuery:
+    """The tasks one sweep read, and how complete that read was.
+
+    ``matched`` is per status: the server's own ``total`` when it reports one,
+    otherwise the rows read. ``truncated`` names each status whose paging was
+    stopped by a bound with matching tasks still unread.
+    """
+
+    rows: list[tuple[str, dict]] = field(default_factory=list)
+    matched: dict[str, int] = field(default_factory=dict)
+    truncated: list[str] = field(default_factory=list)
+
+
+@dataclass
 class TaskWatchdog:
     """Periodic sweeper. Holds per-task attempt state in memory."""
 
     stall_seconds: int = STALL_SECONDS
+    retry_window_seconds: int = RETRY_WINDOW_SECONDS
     _state: dict[str, _AttemptState] = field(default_factory=dict)
 
     # ── pure decision logic (unit-tested) ──────────────────────────────────
@@ -150,6 +192,13 @@ class TaskWatchdog:
         # escalated) → not the watchdog's job.
         return WatchdogAction.NONE
 
+    def is_recent(self, recency_seconds: float | None) -> bool:
+        """Whether a task was updated recently enough to retry or escalate.
+
+        No reliable age is treated as old: an ageless task is never revived.
+        """
+        return recency_seconds is not None and recency_seconds <= self.retry_window_seconds
+
     def should_retry_now(self, task_id: str, now: float) -> bool:
         """Respect exponential backoff between retries of the same task."""
         st = self._state.get(task_id)
@@ -176,11 +225,13 @@ class TaskWatchdog:
         """
         now = time.time()
         counts = {
+            "matched": 0,
             "scanned": 0,
             "retried": 0,
             "reconciled": 0,
             "escalated": 0,
             "skipped_backoff": 0,
+            "skipped_old": 0,
         }
         try:
             tasks = _query_tasks(QUERY_LIMIT)
@@ -188,13 +239,22 @@ class TaskWatchdog:
             log.warning("[watchdog] task query failed: %s", exc)
             return counts
 
-        for entity_id, snapshot in tasks:
+        counts["matched"] = sum(tasks.matched.values())
+        for entity_id, snapshot in tasks.rows:
             counts["scanned"] += 1
             status = snapshot.get("status", "")
             age = _age_seconds(snapshot, now)
             action = self.classify(entity_id, status, age)
 
             if action == WatchdogAction.NONE:
+                continue
+
+            if action in (WatchdogAction.RETRY, WatchdogAction.ESCALATE) and not self.is_recent(
+                _recency_seconds(snapshot, now)
+            ):
+                # Old (or ageless) failed/stalled work: no status change, no
+                # dispatch, no notification.
+                counts["skipped_old"] += 1
                 continue
 
             if action == WatchdogAction.RECONCILE:
@@ -235,8 +295,15 @@ class TaskWatchdog:
             except Exception as exc:  # noqa: BLE001
                 log.warning("[watchdog] re-dispatch of %s failed: %s", entity_id, exc)
 
-        if counts["scanned"]:
-            log.info("[watchdog] sweep: %s", counts)
+        log.info("[watchdog] sweep: %s matched_by_status=%s", counts, tasks.matched)
+        if tasks.truncated:
+            log.warning(
+                "[watchdog] sweep incomplete: paging bound (%d pages of %d, max offset %d) "
+                "stopped the read of status %s; matching tasks may remain unread "
+                "(matched=%s, scanned=%d)",
+                MAX_PAGES_PER_STATUS, QUERY_LIMIT, MAX_QUERY_OFFSET,
+                ",".join(tasks.truncated), tasks.matched, counts["scanned"],
+            )
         return counts
 
     async def run(self, notifier, dispatch_fn) -> None:
@@ -310,40 +377,87 @@ def _notify(notifier, entity_id: str, snapshot: dict, attempts: int) -> None:
         log.warning("[watchdog] notify failed for %s: %s", entity_id, exc)
 
 
-def _query_tasks(limit: int) -> list[tuple[str, dict]]:
-    """Return [(entity_id, snapshot), …] for tasks, via POST /entities/query.
+def _query_tasks(limit: int) -> TaskQuery:
+    """Read every task in a watched status, by state, via POST /entities/query.
 
-    Raises on transport error (the caller swallows it). Returns [] when no token.
+    One status at a time, filtered server-side with ``snapshot_filters``, each
+    walked by offset (the server refuses a cursor beside filters) until a page
+    comes back short or the page/offset bound is reached. Requests are
+    sequential, never concurrent. Raises on transport error (the caller
+    swallows it). Returns an empty read when no token.
     """
+    result = TaskQuery()
     if not NEOTOMA_BEARER_TOKEN:
         log.warning("[watchdog] no bearer token — cannot query tasks")
-        return []
-    resp = httpx.post(
-        f"{NEOTOMA_BASE_URL}/entities/query",
-        headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-        json={"entity_type": "task", "limit": limit},
-        timeout=20,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    rows = data.get("entities") or data.get("results") or []
-    out: list[tuple[str, dict]] = []
-    for row in rows:
-        eid = row.get("entity_id") or row.get("id")
-        snap = _unwrap_snapshot(row)
-        if eid and isinstance(snap, dict):
-            out.append((eid, snap))
-    return out
+        return result
+    seen: set[str] = set()
+    for status in _WATCHED_STATUSES:
+        offset = 0
+        read = 0
+        total: int | None = None
+        stopped_by_bound = False
+        for page_no in range(MAX_PAGES_PER_STATUS):
+            body: dict = {
+                "entity_type": "task",
+                "snapshot_filters": {"status": {"op": "eq", "value": status}},
+                "limit": limit,
+                "include_snapshots": True,
+            }
+            if offset:
+                body["offset"] = offset
+            resp = httpx.post(
+                f"{NEOTOMA_BASE_URL}/entities/query",
+                headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+                json=body,
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if total is None and isinstance(data.get("total"), int):
+                total = data["total"]
+            rows = data.get("entities") or data.get("results") or []
+            read += len(rows)
+            for row in rows:
+                eid = row.get("entity_id") or row.get("id")
+                snap = _unwrap_snapshot(row)
+                if eid and isinstance(snap, dict) and eid not in seen:
+                    seen.add(eid)
+                    result.rows.append((eid, snap))
+            if len(rows) < limit:
+                break
+            offset += len(rows)
+            if offset > MAX_QUERY_OFFSET or page_no == MAX_PAGES_PER_STATUS - 1:
+                stopped_by_bound = True
+                break
+        result.matched[status] = total if total is not None else read
+        if stopped_by_bound and (total is None or total > read):
+            result.truncated.append(status)
+    return result
+
+
+# Stamps that live at the ROW level of an EntitySnapshot, as siblings of
+# `snapshot` rather than inside it (openapi.yaml declares `computed_at` and
+# `last_observation_at` alongside `snapshot`). Without carrying them down, a
+# task whose snapshot holds no stamp of its own has no age at all.
+_ROW_LEVEL_STAMPS = ("last_observation_at", "computed_at")
 
 
 def _unwrap_snapshot(row: dict) -> dict:
-    """Tolerate the several snapshot nesting shapes Neotoma returns."""
+    """Tolerate the several snapshot nesting shapes Neotoma returns.
+
+    Row-level stamps are carried into the returned dict without shadowing a
+    stamp the snapshot already carries.
+    """
     snap = row.get("snapshot")
     if isinstance(snap, dict):
         inner = snap.get("snapshot")
-        if isinstance(inner, dict):
-            return inner
-        return snap
+        base = inner if isinstance(inner, dict) else snap
+        carried = {
+            k: row[k]
+            for k in _ROW_LEVEL_STAMPS
+            if k in row and k not in base and row[k] is not None
+        }
+        return {**base, **carried} if carried else base
     return row
 
 
@@ -352,6 +466,27 @@ def _age_seconds(snapshot: dict, now: float) -> float | None:
     for key in ("updated_at", "last_observation_at", "updated_date", "computed_at", "created_at"):
         ts = snapshot.get(key)
         parsed = _parse_ts(ts)
+        if parsed is not None:
+            return max(0.0, now - parsed)
+    return None
+
+
+# Stamps that move when the task is written, so they bound the last status
+# change from below. ``created_at`` (creation, not the failure) and
+# ``computed_at`` (when the snapshot was computed, which can be any read) are
+# deliberately absent: either could make an old task look recent or ageless.
+_RECENCY_STAMPS = ("updated_at", "last_observation_at", "updated_date")
+
+
+def _recency_seconds(snapshot: dict, now: float) -> float | None:
+    """Seconds since the task's last write, or None when no write stamp exists.
+
+    A task has no field stamped by its status change, so this is the last
+    observation of any field: never older than the status change, and possibly
+    newer when another field was written after it.
+    """
+    for key in _RECENCY_STAMPS:
+        parsed = _parse_ts(snapshot.get(key))
         if parsed is not None:
             return max(0.0, now - parsed)
     return None
