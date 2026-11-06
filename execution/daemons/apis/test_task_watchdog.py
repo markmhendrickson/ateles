@@ -380,14 +380,13 @@ def test_recent_failure_behind_old_backlog_is_retried_first_sweep(monkeypatch):
     reqs = _failed_requests(store)
     assert all(r["sort_by"] == "last_observation_at" and r["sort_order"] == "desc"
                for r in store.requests)
-    # The first page already ends older than the window: nothing more is read.
-    assert [r.get("offset", 0) for r in reqs] == [0]
+    # An old row never ends paging: the read runs to the safety bound.
+    assert [r.get("offset", 0) for r in reqs] == [0, 500, 1000, 1500, 2000]
 
 
-def test_paging_stops_at_first_page_ending_older_than_bound(monkeypatch):
-    """120 recent and 200 old failures, 50 per page. Pages 1-2 are recent,
-    page 3 ends old, so page 4 is never requested (red: offsets 0..200,
-    the whole safety bound, in id order)."""
+def test_paging_does_not_stop_at_a_page_ending_older_than_bound(monkeypatch):
+    """120 recent and 200 old failures, 50 per page. Page 3 ends old, but
+    paging continues to the safety bound: the sort is requested, not trusted."""
     tasks = {f"ent_r{i:03d}": {"status": "failed", "last_observation_at": _ago(60 + i)}
              for i in range(120)}
     tasks.update({f"ent_o{i:03d}": {"status": "failed", "last_observation_at": _ago(3 * 86400 + i)}
@@ -399,9 +398,9 @@ def test_paging_stops_at_first_page_ending_older_than_bound(monkeypatch):
 
     counts = asyncio.run(tw.TaskWatchdog(stall_seconds=3600).sweep(object(), dispatch_fn))
 
-    assert [r.get("offset", 0) for r in _failed_requests(store)] == [0, 50, 100]
+    assert [r.get("offset", 0) for r in _failed_requests(store)] == [0, 50, 100, 150, 200]
     assert sorted(dispatched) == sorted(f"ent_r{i:03d}" for i in range(120))
-    assert counts["scanned"] == 150 and counts["skipped_old"] == 30
+    assert counts["scanned"] == 250 and counts["skipped_old"] == 130
 
 
 def test_more_recent_rows_than_safety_limit_reports_truncated(monkeypatch, caplog):
@@ -425,26 +424,6 @@ def test_more_recent_rows_than_safety_limit_reports_truncated(monkeypatch, caplo
     assert any("incomplete" in m and "failed" in m for m in warnings), warnings
 
 
-def test_all_old_rows_retry_nothing_and_are_not_truncated(monkeypatch, caplog):
-    """300 old failures against a 2 x 50 safety limit: one page is read,
-    nothing is retried and no truncation is reported (red: both pages read
-    and the status reported truncated, though nothing unread could qualify)."""
-    tasks = {f"ent_{i:04d}": {"status": "failed", "last_observation_at": _ago(3 * 86400 + i)}
-             for i in range(300)}
-    store = _store(monkeypatch, tasks)
-    monkeypatch.setattr(tw, "QUERY_LIMIT", 50)
-    monkeypatch.setattr(tw, "MAX_PAGES_PER_STATUS", 2)
-    status_calls, notified, dispatched, dispatch_fn = _sweep_env(monkeypatch)
-
-    with caplog.at_level(logging.WARNING, logger="apis.watchdog"):
-        counts = asyncio.run(tw.TaskWatchdog(stall_seconds=3600).sweep(object(), dispatch_fn))
-
-    assert [r.get("offset", 0) for r in _failed_requests(store)] == [0]
-    assert dispatched == [] and status_calls == [] and notified == []
-    assert counts["skipped_old"] == 50
-    assert not any("incomplete" in r.getMessage() for r in caplog.records)
-
-
 def test_undated_rows_do_not_end_paging_and_are_not_retried(monkeypatch):
     """A first page of 50 failures with no `last_observation_at` (sorted
     first descending, as NULLs are) must not stop the read: the recent
@@ -462,7 +441,123 @@ def test_undated_rows_do_not_end_paging_and_are_not_retried(monkeypatch):
 
     counts = asyncio.run(tw.TaskWatchdog(stall_seconds=3600).sweep(object(), dispatch_fn))
 
-    assert [r.get("offset", 0) for r in _failed_requests(store)] == [0, 50]
+    assert [r.get("offset", 0) for r in _failed_requests(store)] == [0, 50, 100, 150, 200]
     assert dispatched == ["ent_c_recent"]
     assert counts["retried"] == 1
-    assert counts["skipped_old"] == 50 + 49
+    assert counts["skipped_old"] == 250 - 1
+
+
+# ── no early stop on old rows: a read cut short is always reported ───────────
+
+
+class _SortIgnoringStore(_FakeStore):
+    """A store that accepts `sort_by`/`sort_order` and ignores them, serving
+    rows in entity-id order."""
+
+    def post(self, url, *, headers=None, json=None, timeout=None):
+        unsorted = {k: v for k, v in json.items() if k not in ("sort_by", "sort_order")}
+        response = super().post(url, headers=headers, json=unsorted, timeout=timeout)
+        self.requests[-1] = json
+        return response
+
+
+_BOUNDED_STATUSES = ("failed", "routed", "executing")
+
+
+def _old_backlog_then_one_recent(recent_age):
+    """Per status: 3,000 old rows, then one recent row that sorts last by id."""
+    tasks: dict[str, dict] = {}
+    for status in _BOUNDED_STATUSES:
+        tasks.update({
+            f"ent_{status}_{i:04d}": {"status": status,
+                                      "last_observation_at": _ago(3 * 86400 + i)}
+            for i in range(3000)
+        })
+        tasks[f"ent_{status}_z_recent"] = {"status": status,
+                                           "last_observation_at": _ago(recent_age)}
+    return tasks
+
+
+def _record_reads(monkeypatch):
+    """Wrap `_query_tasks` so a test sees the read the sweep itself made."""
+    reads: list = []
+    original = tw._query_tasks
+
+    def recording(*args, **kwargs):
+        reads.append(original(*args, **kwargs))
+        return reads[-1]
+
+    monkeypatch.setattr(tw, "_query_tasks", recording)
+    return reads
+
+
+def _bound_500_by_5(monkeypatch):
+    monkeypatch.setattr(tw, "QUERY_LIMIT", 500)
+    monkeypatch.setattr(tw, "MAX_PAGES_PER_STATUS", 5)
+
+
+def test_sort_ignoring_server_reports_truncated_not_complete(monkeypatch, caplog):
+    """The server ignores the sort, so the newest-first assumption is false:
+    every page the bound allows is old and the recent row is never reached.
+    The read must be reported truncated in failed, routed and executing.
+    (Red on 1a1aa42: the first all-old page ended paging, so truncated was
+    [] and no warning was logged; the sweep looked complete.)"""
+    store = _SortIgnoringStore(_old_backlog_then_one_recent(recent_age=7200))
+    monkeypatch.setattr(tw.httpx, "post", store.post)
+    monkeypatch.setattr(tw, "NEOTOMA_BEARER_TOKEN", "test-token")
+    _bound_500_by_5(monkeypatch)
+    reads = _record_reads(monkeypatch)
+    _status_calls, _notified, dispatched, dispatch_fn = _sweep_env(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="apis.watchdog"):
+        counts = asyncio.run(tw.TaskWatchdog(stall_seconds=3600).sweep(object(), dispatch_fn))
+
+    assert sorted(reads[0].truncated) == sorted(_BOUNDED_STATUSES)
+    assert dispatched == []
+    assert counts["scanned"] == 3 * 2500
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("incomplete" in m and all(s in m for s in _BOUNDED_STATUSES)
+               for m in warnings), warnings
+
+
+def test_sort_honouring_server_retries_recent_and_still_reports_truncated(monkeypatch):
+    """Same rows, sort honoured: the recent task is on the first page and is
+    retried on the first sweep, and the status is still reported truncated
+    because the bound cut the read short. (Red on 1a1aa42: the read stopped
+    after page one, so truncated was [] though 501 rows per status were unread.)"""
+    store = _store(monkeypatch, _old_backlog_then_one_recent(recent_age=7200))
+    _bound_500_by_5(monkeypatch)
+    reads = _record_reads(monkeypatch)
+    _status_calls, _notified, dispatched, dispatch_fn = _sweep_env(monkeypatch)
+
+    counts = asyncio.run(tw.TaskWatchdog(stall_seconds=3600).sweep(object(), dispatch_fn))
+
+    assert sorted(dispatched) == sorted(f"ent_{s}_z_recent" for s in _BOUNDED_STATUSES)
+    assert counts["retried"] == 3
+    assert sorted(reads[0].truncated) == sorted(_BOUNDED_STATUSES)
+    for status in _BOUNDED_STATUSES:
+        offsets = [r.get("offset", 0) for r in store.requests
+                   if r["snapshot_filters"]["status"]["value"] == status]
+        assert offsets == [0, 500, 1000, 1500, 2000], (status, offsets)
+
+
+def test_all_old_rows_under_bound_read_to_short_page_and_not_truncated(monkeypatch, caplog):
+    """120 old failures, 50 per page, a 5-page bound: every page is read to
+    the short page, nothing is retried and nothing is reported truncated.
+    (Red on 1a1aa42: paging stopped after the first all-old page, offsets [0].)"""
+    tasks = {f"ent_{i:04d}": {"status": "failed", "last_observation_at": _ago(3 * 86400 + i)}
+             for i in range(120)}
+    store = _store(monkeypatch, tasks)
+    monkeypatch.setattr(tw, "QUERY_LIMIT", 50)
+    monkeypatch.setattr(tw, "MAX_PAGES_PER_STATUS", 5)
+    reads = _record_reads(monkeypatch)
+    status_calls, notified, dispatched, dispatch_fn = _sweep_env(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="apis.watchdog"):
+        counts = asyncio.run(tw.TaskWatchdog(stall_seconds=3600).sweep(object(), dispatch_fn))
+
+    assert [r.get("offset", 0) for r in _failed_requests(store)] == [0, 50, 100]
+    assert dispatched == [] and status_calls == [] and notified == []
+    assert counts["scanned"] == 120 and counts["skipped_old"] == 120
+    assert reads[0].truncated == []
+    assert not any("incomplete" in r.getMessage() for r in caplog.records)
