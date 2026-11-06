@@ -195,6 +195,33 @@ def fly_refusal_reason(detail: str) -> str:
     return "other"
 
 
+def fly_revert_reason(machine: Any) -> str | None:
+    """The label (``fly_refusal_reason``'s closed set) for why Fly reverted
+    the machine's newest update: the reason on its newest ``revert`` event,
+    or None when there is no such event with a readable reason. Fly lists
+    events newest first; where every revert carries a numeric timestamp,
+    the timestamp decides instead. A reason matching none of the known
+    phrases is ``update_reverted``, so Fly's own text never leaves here."""
+    events = machine.get("events") if isinstance(machine, dict) else None
+    if not isinstance(events, list):
+        return None
+    reverts = [e for e in events if isinstance(e, dict) and e.get("type") == "revert"]
+    if not reverts:
+        return None
+    stamps = [e.get("timestamp") for e in reverts]
+    if all(isinstance(t, (int, float)) and not isinstance(t, bool) for t in stamps):
+        newest = max(zip(stamps, range(len(reverts))), key=lambda pair: (pair[0], -pair[1]))
+        event = reverts[newest[1]]
+    else:
+        event = reverts[0]
+    request = event.get("request")
+    reason = request.get("reason") if isinstance(request, dict) else None
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    label = fly_refusal_reason(reason)
+    return "update_reverted" if label == "other" else label
+
+
 class FlyLeaseBusy(FlyApiError):
     """Another holder has the machine's lease."""
 
@@ -2908,7 +2935,7 @@ class FlyExecutor:
             for name in ("GITHUB_TOKEN", "GH_TOKEN"):
                 if name not in job.child_credential_names:
                     job.child_credential_names.append(name)
-        async with self._admission():
+        async with self._admission() as pause:
             # build_job refused a login provider with no machine configured.
             login_id = self.config.login_machines[job.provider] if job.login else ""
             self.ledger.reserve(self.config, run_id=job.run_id, owner=self.instance_id,
@@ -2939,7 +2966,10 @@ class FlyExecutor:
                         # cut short of the lease's expiry, and at the deadline
                         # the machine is stopped and the run settled.
                         deadline = min(deadline, expires - LEASE_SAFETY_SECONDS)
-                    await self._write_login_config(login_id, job, deadline, launch, nonce)
+                    # This run holds its login lock, lease and reservation, so
+                    # a refused claim may wait with the admission lock let go.
+                    await self._write_login_config(login_id, job, deadline, launch, nonce,
+                                                   pause=pause)  # fmt: skip
                     # Never start past the deadline: run() then clears the
                     # written config and releases the lease and reservation.
                     self._refuse_past_deadline(job, deadline, "start")
@@ -3050,7 +3080,8 @@ class FlyExecutor:
         return machine
 
     async def _write_login_config(self, machine_id: str, job: FlyJob, deadline: float,
-                                  launch: "_LaunchState", nonce: str) -> None:  # fmt: skip
+                                  launch: "_LaunchState", nonce: str, *,
+                                  pause: Callable[[float], Any]) -> None:  # fmt: skip
         """Install this run's job on a login machine, compare-and-set against
         the machine's LIVE state (the ledger is not the source of truth for
         what a machine is running: it can be lost, unshared, or on another
@@ -3064,35 +3095,55 @@ class FlyExecutor:
         precondition, and the stored config is read back afterwards: unless
         it is this run's, the launch fails closed before any start.
 
-        A version conflict (409/412) means the machine changed between the
-        read and the write, typically the previous job releasing it. Nothing
-        was stored, so the claim starts again from a fresh read, settle and
-        free check, up to ``LOGIN_CLAIM_ATTEMPTS`` updates in total; then it
-        is the same retry-later refusal as before. Nothing goes past
-        *deadline*: the retry's sleep, read and settle, and the read-back
-        after the update, are bounded by the time remaining, and the deadline
-        is checked again immediately before every update (and, in the caller,
-        before start). Past it, the claim is refused with nothing further
-        written, through the same cleanup as any other refusal.
+        Fly can refuse the update (409/412): the machine changed between the
+        read and the write, or, most often, Fly began the update and reverted
+        it because the host had no room for the machine just then. Nothing
+        was stored, so after each of ``LOGIN_CLAIM_BACKOFF_SECONDS`` in turn
+        the claim starts again from a fresh read, settle and free check; once
+        the waits are spent it is a retry-later refusal naming Fly's status
+        and a reason label. Each wait goes through *pause* (the admission
+        hold's), so unrelated dispatches and the reaper are not stalled; this
+        run's login lock, lease and reservation stay held, so no other job
+        can claim the machine meanwhile. Each refusal is logged with its
+        status and a closed-set reason label only (``_refusal_label``), never
+        Fly's text, the request body or the config.
+
+        Nothing goes past *deadline*: a wait that would reach it is not
+        started, the retry's read and settle, the reason read and the
+        read-back after the update are bounded by the time remaining, and the
+        deadline is checked again immediately before every update (and, in
+        the caller, before start). Past it, the claim is refused with nothing
+        further written, through the same cleanup as any other refusal.
         Every attempt sends the same lease nonce: it is this run's ownership
         token for the machine (still held across attempts), not a
         per-request replay guard, so a retried update is not a replay.
         """
-        for attempt in range(1, LOGIN_CLAIM_ATTEMPTS + 1):
-            if await self._try_write_login_config(machine_id, job, deadline, launch, nonce,
-                                                  retry=attempt > 1):  # fmt: skip
+        waits = LOGIN_CLAIM_BACKOFF_SECONDS
+        for attempt in range(1, len(waits) + 2):
+            refused = await self._try_write_login_config(machine_id, job, deadline, launch,
+                                                         nonce, retry=attempt > 1)  # fmt: skip
+            if refused is None:
                 break
-            if attempt == LOGIN_CLAIM_ATTEMPTS:
+            label, source = await self._refusal_label(machine_id, refused, deadline)
+            last = attempt > len(waits)
+            wait = 0.0 if last else waits[attempt - 1]
+            out_of_time = not last and self._clock() + wait >= deadline
+            log.warning(
+                f"[fly] run={job.run_id} login machine {machine_id} refused the claim update "
+                f"(attempt {attempt}, status {refused.status}, reason {label}, from {source})"
+                + ("; giving up" if last else
+                   "; the run's deadline comes first" if out_of_time else
+                   f"; retrying in {wait:g}s")
+            )
+            if last:
                 raise FlyRefusal(
-                    f"{job.provider} login machine changed while being claimed; retry later",
+                    f"Fly refused the {job.provider} login machine update "
+                    f"({refused.status}, reason {label}); retry later",
                     _render_wall(self._clock() + 300),
                 )
-            if self._clock() + LOGIN_CLAIM_RETRY_SECONDS >= deadline:
+            if out_of_time:
                 self._refuse_past_deadline(job, deadline, "another claim", now=deadline)
-            log.info(f"[fly] run={job.run_id} login machine {machine_id} changed while being "
-                     f"claimed (attempt {attempt}); re-reading")  # fmt: skip
-            await asyncio.sleep(min(LOGIN_CLAIM_RETRY_SECONDS,
-                                    max(0.0, deadline - self._clock())))  # fmt: skip
+            await pause(wait)
         # Read back once the update has settled (a transitional state right
         # after the write is not a refusal); one that never settles fails
         # closed before any start.
@@ -3132,12 +3183,32 @@ class FlyExecutor:
             self._refuse_past_deadline(job, deadline, what, now=deadline)
             raise  # unreachable: the refusal above always raises
 
+    async def _refusal_label(self, machine_id: str, refused: FlyApiError,
+                             deadline: float) -> tuple[str, str]:  # fmt: skip
+        """A closed-set label for why Fly refused a claim update, and where it
+        came from: the machine's newest revert event (``event``) from one
+        read bounded by ``REFUSAL_EVENT_READ_SECONDS`` and the time left
+        before *deadline*, else the API error's own text (``api``). A failed
+        or missing read only falls back; it never decides anything else."""
+        remaining = min(REFUSAL_EVENT_READ_SECONDS, deadline - self._clock())
+        if remaining > 0:
+            try:
+                machine = await asyncio.wait_for(self.client.get(machine_id), remaining)
+                label = fly_revert_reason(machine)
+                if label is not None:
+                    return label, "event"
+            except Exception as exc:  # noqa: BLE001 — the API text is the fallback
+                log.warning(f"[fly] reading {machine_id} for the refusal reason failed: "
+                            f"{type(exc).__name__}")  # fmt: skip
+        return fly_refusal_reason(refused.detail), "api"
+
     async def _try_write_login_config(self, machine_id: str, job: FlyJob, deadline: float,
                                       launch: "_LaunchState", nonce: str, *,
-                                      retry: bool = False) -> bool:  # fmt: skip
+                                      retry: bool = False) -> "FlyApiError | None":  # fmt: skip
         """One claim attempt for ``_write_login_config``: read, settle, refuse
-        unless free, then the version-checked update. False only on a version
-        conflict (nothing stored); every other outcome raises. On a *retry*
+        unless free, then the version-checked update. None once the update is
+        accepted; Fly's refusal (409/412, nothing stored) is returned for the
+        caller to retry; every other outcome raises. On a *retry*
         the read and settle are bounded by the time left before *deadline*;
         on every attempt the deadline is checked again just before the update."""
         async def read() -> dict | None:
@@ -3171,9 +3242,9 @@ class FlyExecutor:
             await self.client.update(machine_id, body, nonce=nonce)
         except FlyApiError as exc:
             if exc.status in (409, 412):
-                return False  # the machine changed between the check and the write
+                return exc  # refused (changed or reverted): nothing was stored
             raise
-        return True
+        return None
 
     async def _scrub_login_machine(self, machine_id: str, run_id: str, nonce: str = "", *,
                                    pause: Callable[[float], Any] | None = None) -> bool:  # fmt: skip
@@ -3833,12 +3904,17 @@ LOGIN_NOT_RUNNING_STATES = frozenset({"stopped", "created"})
 LOGIN_SETTLE_WAIT_SECONDS = 20
 LOGIN_SETTLE_POLLS = 5
 LOGIN_SETTLE_POLL_SECONDS = 1.0
-# A login claim whose version-checked update hits a conflict (409/412, the
-# machine changed between the read and the write, e.g. the previous job just
-# released it) starts again from a fresh read: at most this many updates in
-# total, this many seconds apart.
-LOGIN_CLAIM_ATTEMPTS = 3
-LOGIN_CLAIM_RETRY_SECONDS = 1.0
+# Fly can refuse the update that installs a job on a stopped login machine
+# (409/412). Most often nothing else touched the machine: Fly began the
+# update and reverted it, typically because the host had no memory for the
+# machine at that moment, which clears in a minute or two. The claim starts
+# again from a fresh read after each of these waits in turn (about four
+# minutes, seven updates in all), with the admission lock let go during
+# each wait. A wait that would reach the run's deadline is not started.
+LOGIN_CLAIM_BACKOFF_SECONDS = (2.0, 5.0, 15.0, 30.0, 60.0, 120.0)
+# The bound on the one machine read, after a refused claim update, that
+# looks for the reason on Fly's revert event.
+REFUSAL_EVENT_READ_SECONDS = 10.0
 # Fly can refuse the clean-up update of a stopped login machine (409/412, e.g.
 # "insufficient memory available to fulfill request" while the host has no
 # room for the machine's reservation); a later attempt can succeed. A run's

@@ -5167,7 +5167,8 @@ def _claim_conflicts(fake: FakeFly, executor, machine_id: str, on_conflict):
 
 @pytest.fixture
 def fast_claim_retry(monkeypatch):
-    monkeypatch.setattr(fly_runner, "LOGIN_CLAIM_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(fly_runner, "LOGIN_CLAIM_BACKOFF_SECONDS",
+                        (0.0,) * len(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS))  # fmt: skip
 
 
 def test_a_login_claim_retries_a_412_with_the_new_version(fly_env, claude_login,
@@ -5224,10 +5225,12 @@ def test_a_login_claim_that_always_conflicts_is_refused_after_the_bound(
     )
     job = _job()
     with pytest.raises(fly_runner.FlyRefusal,
-                       match="login machine changed while being claimed; retry later") as exc:
+                       match=r"Fly refused the claude login machine update \(409, reason "
+                             r"version_conflict\); retry later") as exc:  # fmt: skip
         asyncio.run(executor.run(job))
     assert exc.value.cooled_until
-    assert len(claims) == fly_runner.LOGIN_CLAIM_ATTEMPTS == 3
+    assert "changed while being claimed" not in str(exc.value)
+    assert len(claims) == len(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS) + 1 == 7
     assert not fake.calls("POST", "/start")  # nothing started
     assert not fly_runner._has_job_config(fake.machines["m-claude"]["config"])
     assert executor.ledger.entry(job.run_id) is None and "m-claude" not in fake.leases
@@ -5235,10 +5238,6 @@ def test_a_login_claim_that_always_conflicts_is_refused_after_the_bound(
 
 
 # ── A login claim never writes or starts past the run's deadline ────────────
-
-# A retry wait no other sleep in the runner uses, so a test can tell it apart.
-_CLAIM_RETRY_MARK = 0.0125
-
 
 def _past_deadline_refusal(executor, job, fake, claims, *, sent: int):
     """Run *job* to its deadline refusal, then assert what every such refusal
@@ -5253,21 +5252,17 @@ def _past_deadline_refusal(executor, job, fake, claims, *, sent: int):
     assert executor.ledger.entry(job.run_id) is None and "m-claude" not in fake.leases
 
 
-def test_a_deadline_passing_in_the_retry_sleep_stops_the_claim(fly_env, claude_login,
-                                                               monkeypatch):  # fmt: skip
+def test_a_deadline_passing_in_the_retry_sleep_stops_the_claim(fly_env, claude_login):
     clock = Clock()
     fake = _claude_fake()
     executor, _, _ = make_executor(fake, record={"exit_code": 0}, clock=clock)
-    monkeypatch.setattr(fly_runner, "LOGIN_CLAIM_RETRY_SECONDS", _CLAIM_RETRY_MARK)
-    real_sleep = asyncio.sleep
+    slept: list[float] = []
 
-    async def sleep(delay, *args, **kwargs):
-        if delay == _CLAIM_RETRY_MARK:
-            clock.now += 100_000  # the deadline passes while the retry waits
-            delay = 0
-        return await real_sleep(delay, *args, **kwargs)
+    async def sleep(seconds):  # the claim's backoff wait, through pause()
+        slept.append(seconds)
+        clock.now += 100_000  # the deadline passes while the retry waits
 
-    monkeypatch.setattr(fly_runner.asyncio, "sleep", sleep)
+    executor._sleep = sleep
 
     def first_conflicts(n):
         if n == 1:
@@ -5277,6 +5272,7 @@ def test_a_deadline_passing_in_the_retry_sleep_stops_the_claim(fly_env, claude_l
 
     claims = _claim_conflicts(fake, executor, "m-claude", first_conflicts)
     _past_deadline_refusal(executor, _job(), fake, claims, sent=1)
+    assert slept == [fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS[0]]
 
 
 def test_a_deadline_passing_in_the_retry_read_stops_the_claim(fly_env, claude_login,
@@ -5319,3 +5315,235 @@ def test_a_deadline_passing_after_the_claim_update_prevents_the_start(fly_env, c
 
     claims = _claim_conflicts(fake, executor, "m-claude", update_then_time_runs_out)
     _past_deadline_refusal(executor, _job(), fake, claims, sent=1)
+
+
+# ── A refused claim update backs off for minutes, and says why ──────────────
+
+# Fly's revert text when the host has no memory for the machine.
+_REVERT_MEMORY = ("failed to update machine: mem_overcommit_exceeded on host",
+                  "revert stopped flyd: insufficient memory available to fulfill request")
+_UNKNOWN_MARKER = "SYNTHETIC-REVERT-MARKER-7f3a"
+
+
+def _admission_free(executor) -> bool:
+    """Whether another dispatcher could take admission right now: both the
+    in-process lock and the cross-process flock."""
+    lock_path = executor.ledger.path.with_name(executor.ledger.path.name + ".admission.lock")
+    with open(lock_path, "a+") as fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except BlockingIOError:
+            return False
+    return not executor._admission_lock().locked()
+
+
+def _claim_backoff_executor(fake, *, record=None):
+    """An executor on a fake clock whose backoff waits take no real time,
+    recording each wait and whether admission was free during it."""
+    clock = Clock()
+    executor, _, revoked = make_executor(fake, record=record, clock=clock)
+    slept: list[float] = []
+    free: list[bool] = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+        free.append(_admission_free(executor))
+        clock.now += seconds
+
+    executor._sleep = sleep
+    return executor, clock, slept, free, revoked
+
+
+def _revert_events(reason: str, now: float) -> list[dict]:
+    # Newest first, as Fly lists them; an older revert carries another reason.
+    return [{"type": "update", "status": "failed", "timestamp": now},
+            {"type": "revert", "timestamp": now, "request": {"reason": reason}},
+            {"type": "revert", "timestamp": now - 600,
+             "request": {"reason": "machine version changed"}}]
+
+
+def _claim_refusals(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "refused the claim update" in r.getMessage()]
+
+
+def test_claim_outlasts_repeated_refused_updates(fly_env, claude_login):
+    fake = _claude_fake()
+    executor, _, slept, free, _ = _claim_backoff_executor(
+        fake, record={"exit_code": 0, "stdout": "CLAUDE OK"})
+    claims = _claim_conflicts(
+        fake, executor, "m-claude",
+        lambda n: httpx.Response(412, json={"error": "update reverted"}) if n <= 5 else None,
+    )
+    rc, out, _ = asyncio.run(executor.run(_job()))
+    assert rc == 0 and b"CLAUDE OK" in out
+    assert len(claims) == 6
+    assert slept == [2.0, 5.0, 15.0, 30.0, 60.0]
+    assert free == [True] * 5  # admission let go during every wait
+    nonces = {r.headers.get("fly-machine-lease-nonce") for r in claims}
+    assert len(nonces) == 1 and None not in nonces  # one lease, held throughout
+    assert len(fake.calls("POST", "/start")) == 1
+    assert executor.ledger.entry(_job().run_id) is None and "m-claude" not in fake.leases
+
+
+def test_claim_stops_at_deadline_during_backoff(fly_env, claude_login):
+    fake = _claude_fake()
+    executor, clock, slept, _, revoked = _claim_backoff_executor(fake, record={"exit_code": 0})
+    job = _job()  # timeout 60 + grace 120: a 180 s deadline
+    deadline = clock.now + job.timeout + fly_runner.APIS_DEADLINE_GRACE_SECONDS
+    sent_at: list[float] = []
+
+    def always_refused(n):
+        sent_at.append(clock.now)
+        return httpx.Response(412, json={"error": "update reverted"})
+
+    claims = _claim_conflicts(fake, executor, "m-claude", always_refused)
+    _past_deadline_refusal(executor, job, fake, claims, sent=6)
+    # 2+5+15+30+60 = 112 s; the 120 s wait would reach the deadline, so it
+    # is never started, and no update was sent at or past the deadline.
+    assert slept == [2.0, 5.0, 15.0, 30.0, 60.0]
+    assert all(t < deadline for t in sent_at)
+    assert clock.now < deadline
+    assert revoked == [MINTED]
+
+
+@pytest.mark.parametrize("reason", _REVERT_MEMORY)
+def test_refused_update_labels_from_revert_event(fly_env, claude_login, caplog, reason):
+    caplog.set_level(logging.DEBUG)
+    fake = _claude_fake()
+    executor, clock, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+
+    def refused_once(n):
+        if n == 1:
+            fake.machines["m-claude"]["events"] = _revert_events(reason, clock.now)
+            # The API text alone would say "version_conflict".
+            return httpx.Response(412, json={"error": "machine version check failed"})
+        return None
+
+    _claim_conflicts(fake, executor, "m-claude", refused_once)
+    rc, _, _ = asyncio.run(executor.run(_job()))
+    assert rc == 0
+    refusals = _claim_refusals(caplog)
+    assert len(refusals) == 1
+    assert "status 412" in refusals[0] and "reason host_memory, from event" in refusals[0]
+    assert reason not in caplog.text
+
+
+def test_fly_revert_reason_picks_the_newest_revert():
+    newest_first = {"events": [
+        {"type": "revert", "request": {"reason": "insufficient memory"}},
+        {"type": "revert", "request": {"reason": "machine version changed"}}]}
+    assert fly_runner.fly_revert_reason(newest_first) == "host_memory"
+    stamped = {"events": [
+        {"type": "revert", "timestamp": 1, "request": {"reason": "insufficient memory"}},
+        {"type": "revert", "timestamp": 2, "request": {"reason": "something new"}}]}
+    assert fly_runner.fly_revert_reason(stamped) == "update_reverted"
+    for absent in ({}, {"events": None}, {"events": [{"type": "update"}]},
+                   {"events": [{"type": "revert", "request": {}}]}, None):
+        assert fly_runner.fly_revert_reason(absent) is None
+
+
+def test_unknown_revert_reason_is_labelled_without_its_text(fly_env, claude_login, caplog):
+    caplog.set_level(logging.DEBUG)
+    fake = _claude_fake()
+    executor, clock, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+
+    def always_refused(n):
+        fake.machines["m-claude"]["events"] = _revert_events(
+            f"flyd said {_UNKNOWN_MARKER} and stopped", clock.now)
+        return httpx.Response(412, json={"error": f"update failed: {_UNKNOWN_MARKER}"})
+
+    claims = _claim_conflicts(fake, executor, "m-claude", always_refused)
+    # A long enough run that the waits are spent before its deadline.
+    with pytest.raises(fly_runner.FlyRefusal) as exc:
+        asyncio.run(executor.run(_job(timeout=600)))
+    assert str(exc.value).startswith(
+        "Fly refused the claude login machine update (412, reason update_reverted); retry later")
+    assert len(claims) == len(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS) + 1
+    refusals = _claim_refusals(caplog)
+    assert len(refusals) == len(claims)
+    assert all("reason update_reverted, from event" in m for m in refusals)
+    assert _UNKNOWN_MARKER not in caplog.text
+    assert _UNKNOWN_MARKER not in str(exc.value)
+    assert not fake.calls("POST", "/start")
+
+
+@pytest.mark.parametrize("read", ["no_event", "read_fails"])
+def test_refusal_label_falls_back_to_api_text(fly_env, claude_login, caplog, read):
+    caplog.set_level(logging.DEBUG)
+    fake = _claude_fake()
+    executor, _, slept, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+    refused = []
+
+    def refused_twice(n):
+        if n <= 2:
+            refused.append(n)
+            return httpx.Response(412, json={"error": FLY_REFUSAL})
+        return None
+
+    claims = _claim_conflicts(fake, executor, "m-claude", refused_twice)
+    routed = executor.client
+    failed_reads: list[int] = []
+
+    class FailingReasonRead(fly_runner.FlyMachinesClient):
+        async def get(self, machine_id):
+            # The first read after each refusal is the one for its reason.
+            if read == "read_fails" and len(failed_reads) < len(refused):
+                failed_reads.append(len(refused))
+                raise fly_runner.FlyApiError(500, "machines API unavailable")
+            return await routed.get(machine_id)
+
+    executor.client = FailingReasonRead(executor.config, transport=routed._transport)
+    rc, _, _ = asyncio.run(executor.run(_job()))
+    assert rc == 0  # the retry carried on
+    assert len(claims) == 3 and slept == [2.0, 5.0]
+    refusals = _claim_refusals(caplog)
+    assert len(refusals) == 2
+    assert all("reason host_memory, from api" in m for m in refusals)
+    assert failed_reads == ([1, 2] if read == "read_fails" else [])
+    assert "insufficient memory available" not in caplog.text
+
+
+@pytest.mark.parametrize("when", ["waiting", "retaking_locks"])
+def test_cancelled_during_claim_wait_leaves_admission_free(fly_env, claude_login, when):
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0})
+    _claim_conflicts(fake, executor, "m-claude",
+                     lambda n: httpx.Response(412, json={"error": "update reverted"}))
+
+    async def scenario():
+        entered = asyncio.Event()
+        lock = executor._admission_lock()
+
+        async def sleep(seconds):
+            if when == "retaking_locks":
+                # Another dispatcher takes admission during the wait, so
+                # pause() is blocked taking the locks back when cancelled.
+                await lock.acquire()
+                entered.set()
+                return
+            entered.set()
+            await asyncio.Event().wait()  # cancelled here
+
+        executor._sleep = sleep
+        task = asyncio.ensure_future(executor.run(_job()))
+        await asyncio.wait_for(entered.wait(), 10)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        task.cancel()
+        if when == "retaking_locks":
+            await asyncio.sleep(0)
+            lock.release()  # the other dispatcher finishes
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 10)
+        assert _admission_free(executor)
+
+        async def admit():
+            async with executor._admission():
+                return True
+
+        assert await asyncio.wait_for(admit(), 5)
+
+    asyncio.run(scenario())
+    assert not fake.calls("POST", "/start")
