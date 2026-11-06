@@ -124,6 +124,9 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
         mp.setenv("APIS_USAGE_PROBE", "off")
         mp.setattr(al.ns, "via_cli_enabled", lambda: False)
         mp.setattr(al, "NEOTOMA_BEARER_TOKEN", "eval-token-not-real")
+        # Scenarios script the list-query route; keep the committed agent docs'
+        # known ids out of them (a nonexistent dir means "no known id").
+        mp.setattr(al, "AGENT_DOCS_DIR", al.Path("/nonexistent/ateles-eval-agent-docs"))
         def _sleep(seconds):
             obs["sleeps"].append(seconds)
             vclock["now"] += seconds

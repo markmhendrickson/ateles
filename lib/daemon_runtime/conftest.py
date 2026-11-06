@@ -44,3 +44,16 @@ def _fresh_load_workers(monkeypatch):
     yield
     for pool in pools:
         pool.shutdown(wait=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_known_definition_ids(monkeypatch, tmp_path):
+    """The loader reads a definition's known id from the generated agent docs before
+    it tries the list query. Most tests script the list query alone, so by default
+    they see an empty docs directory; a test of the known-id path points
+    ``AGENT_DOCS_DIR`` at its own fixture. Both module objects are patched when present."""
+    empty = tmp_path / "no-agent-docs"
+    for name in ("agent_loader", "lib.daemon_runtime.agent_loader"):
+        mod = sys.modules.get(name)
+        if mod is not None and hasattr(mod, "AGENT_DOCS_DIR"):
+            monkeypatch.setattr(mod, "AGENT_DOCS_DIR", empty)

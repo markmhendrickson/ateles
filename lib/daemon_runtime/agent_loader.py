@@ -43,11 +43,13 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
 import httpx
 
@@ -482,6 +484,52 @@ _monotonic = time.monotonic
 _sleep = time.sleep
 
 
+# Where the loader finds a definition's KNOWN entity id when no
+# ``<AGENT>_AGENT_DEFINITION_ID`` is set: the generated agent docs, whose
+# frontmatter ``render_agent_docs.py`` writes from the same Neotoma entity. Only the
+# id is taken from the file, never the definition: the definition itself is still
+# read from Neotoma, through the single-record route (``GET /entities/{id}``),
+# which stays fast when list queries are slow. On 2026-11-06 list queries took 6 to
+# 16 seconds against a 10-second limit while the single-record read of the same
+# definition took 0.3 seconds, and Apis restarted for five minutes.
+AGENT_DOCS_DIR = Path(__file__).resolve().parents[2] / "docs" / "agents"
+_AGENT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_ENTITY_ID_RE = re.compile(r"^ent_[A-Za-z0-9]+$")
+
+
+def known_definition_id(agent_name: str, docs_dir: "Path | None" = None) -> str:
+    """The entity id the generated doc records for ``agent_name``, or ``""``.
+
+    The frontmatter must name this agent and type ``agent_definition`` and carry a
+    well-formed id; anything else (no file, unreadable, another agent, a malformed
+    id) is "not known", and the caller uses the list query instead.
+    """
+    name = agent_name.strip().lower()
+    if not _AGENT_NAME_RE.match(name):
+        return ""
+    try:
+        text = ((docs_dir or AGENT_DOCS_DIR) / f"{name}.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    fields: dict[str, str] = {}
+    in_frontmatter = False
+    for line in text.splitlines():
+        if line.strip() == "---":
+            if in_frontmatter:
+                break
+            in_frontmatter = True
+            continue
+        if in_frontmatter and ":" in line and not line.startswith((" ", "\t", "-")):
+            key, _, value = line.partition(":")
+            fields.setdefault(key.strip(), value.strip())
+    entity_id = fields.get("entity_id", "")
+    if (fields.get("entity_type") != "agent_definition"
+            or fields.get("name", "").lower() != name
+            or not _ENTITY_ID_RE.match(entity_id)):
+        return ""
+    return entity_id
+
+
 class AgentDefinitionUnavailable(RuntimeError):
     """An agent_definition could not be loaded. The caller must NOT run the agent.
 
@@ -793,8 +841,11 @@ class AgentLoader:
     Load an agent_definition entity from Neotoma by agent name.
 
     Priority of lookup:
-      1. AGENT_DEFINITION_ID env var (e.g. MONEDULA_AGENT_DEFINITION_ID)
-      2. Search by name field in agent_definition entities
+      1. AGENT_DEFINITION_ID env var (e.g. MONEDULA_AGENT_DEFINITION_ID): read by
+         id, no fallback (an explicit pin).
+      2. The id recorded in the generated agent doc (``known_definition_id``):
+         read by id; if that read fails, fall back to 3.
+      3. Search by name field in agent_definition entities (a list query).
 
     A load that cannot complete raises ``AgentDefinitionUnavailable`` (after a
     short bounded retry for a transient failure). There is no stand-in definition.
@@ -872,6 +923,19 @@ class AgentLoader:
         explicit_id = os.environ.get(f"{self._prefix}_AGENT_DEFINITION_ID", "")
         if explicit_id:
             return self._load_by_id(explicit_id, deadline)
+        known_id = known_definition_id(self.agent_name)
+        if known_id:
+            # The single-record read is the cheap one. If it fails for ANY reason
+            # (a stale id, a timeout, a validation failure) the list query decides,
+            # exactly as before; the same validation applies to both, so a failure
+            # of both still refuses.
+            try:
+                return self._load_by_id(known_id, deadline)
+            except Exception as exc:  # noqa: BLE001 — classified into a fixed code
+                log.warning(
+                    f"[{self.agent_name}] agent_definition read by known id failed "
+                    f"({load_failure_code(exc)}) — falling back to the list query"
+                )
         return self._load_by_name(deadline)
 
     def _neotoma(
