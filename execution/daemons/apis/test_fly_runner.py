@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import base64
 import contextlib
 import copy
+import fcntl
 import json
 import logging
 import math
@@ -2522,6 +2523,187 @@ def test_a_definite_start_failure_scrubs_before_it_releases(fly_env, monkeypatch
         asyncio.run(executor.run(_codex_job()))
     assert order == ["scrub", "release"]
     assert fake.machines["m-codex"]["config"]["files"] == []
+
+
+# ── A refused clean-up update: retried, logged, and settled without a launch ──
+
+FLY_REFUSAL = ("update replacing user: revert stopped flyd: insufficient memory available "
+               "to fulfill request")  # fmt: skip
+
+
+def _refusing_scrub(fake: FakeFly, times: int, on_refuse=None):
+    """A handler refusing the first *times* clean-up updates of m-codex with
+    412 and Fly's text; *on_refuse* runs as each refusal is answered."""
+    real = fake.handler
+    seen = {"scrubs": 0}
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/machines/m-codex"):
+            if json.loads(request.content)["config"].get("files") == []:
+                seen["scrubs"] += 1
+                if seen["scrubs"] <= times:
+                    if on_refuse is not None:
+                        on_refuse()
+                    return httpx.Response(412, json={"error": FLY_REFUSAL})
+        return real(request)
+
+    return handler, seen
+
+
+def _refused_scrub_executor(fake, times, on_refuse=None):
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock, record={"exit_code": 0, "stdout": "ok"})
+    handler, seen = _refusing_scrub(fake, times, on_refuse)
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(handler)
+    )
+    slept: list[float] = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+        clock.now += seconds  # a fake clock: the backoff takes no real time
+
+    executor._sleep = sleep
+    return executor, clock, seen, slept
+
+
+def _in_flight_count(executor, now) -> int:
+    scripts = str(_REPO_ROOT / "execution" / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import fly_jobs_in_flight
+
+    return fly_jobs_in_flight.count_in_flight(executor.ledger.path, now)
+
+
+def test_scrub_retries_a_refused_update(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    executor, clock, seen, slept = _refused_scrub_executor(fake, 2)
+    job = _codex_job()
+    rc, _, _ = asyncio.run(executor.run(job))
+    assert rc == 0 and job.remote_state == "terminated"
+    assert seen["scrubs"] == 3 and slept == [2.0, 5.0]
+    stored = fake.machines["m-codex"]["config"]
+    assert stored["files"] == [] and stored["env"] == {}
+    assert "ateles_run_id" not in stored.get("metadata", {})
+    assert executor.ledger.entry(job.run_id) is None  # settled, not marked
+    assert _in_flight_count(executor, clock.now) == 0
+    assert "m-codex" not in fake.leases
+
+
+def test_scrub_gives_up_after_its_bound(fly_env, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    fake = _codex_fake(monkeypatch)
+    executor, clock, seen, slept = _refused_scrub_executor(fake, 10_000)
+    job = _codex_job()
+    rc, _, _ = asyncio.run(executor.run(job))
+    assert rc == 0 and job.remote_state == "unconfirmed"
+    assert slept == list(fly_runner.SCRUB_RETRY_SECONDS)
+    assert seen["scrubs"] == len(fly_runner.SCRUB_RETRY_SECONDS) + 1
+    files = fake.machines["m-codex"]["config"]["files"]
+    assert files  # still there, still this run's
+    entry = executor.ledger.entry(job.run_id)
+    assert entry is not None and entry["unconfirmed"] is True
+    refusals = [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING and "refused the clean-up update" in r.getMessage()]
+    assert len(refusals) == seen["scrubs"]
+    assert all("status 412" in m and "insufficient memory available" in m for m in refusals)
+    text = caplog.text
+    for job_file in files:
+        assert job_file["raw_value"] not in text
+    for leaked in ("raw_value", "guest_path", "ATELES_RUN_ID", MINTED, *FORBIDDEN_VALUES):
+        assert leaked not in text
+
+
+def test_scrub_does_not_overwrite_another_runs_config_on_retry(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    newer = {"files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+             "env": {"ATELES_RUN_ID": "newer-run"},
+             "metadata": {"ateles_run_id": "newer-run"}}  # fmt: skip
+
+    def another_run_takes_it():
+        fake.machines["m-codex"]["config"] = copy.deepcopy(newer)
+        fake.machines["m-codex"]["instance_id"] = "v-newer"
+
+    executor, _, seen, slept = _refused_scrub_executor(fake, 1, another_run_takes_it)
+    rc, _, _ = asyncio.run(executor.run(_codex_job()))
+    assert rc == 0 and slept == [2.0]  # it did retry, from a fresh read
+    assert seen["scrubs"] == 1  # and wrote nothing over the other run's config
+    assert fake.machines["m-codex"]["config"] == newer
+
+
+def test_scrub_retry_does_not_hold_admission_while_it_waits(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    executor, _, _, _ = _refused_scrub_executor(fake, 2)
+    lock_path = executor.ledger.path.with_name(executor.ledger.path.name + ".admission.lock")
+    free: list[bool] = []
+
+    async def sleep(seconds):
+        with open(lock_path, "a+") as fh:  # what another dispatcher would take
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                taken = True
+            except BlockingIOError:
+                taken = False
+        free.append(taken and not executor._admission_lock().locked())
+
+    executor._sleep = sleep
+    job = _codex_job()
+    asyncio.run(executor.run(job))
+    assert free == [True, True]
+    assert job.remote_state == "terminated"
+
+
+def _seed_marked_login(executor, clock, *, run_id="ended-run", state="stopped", config=None):
+    executor.ledger.reserve(executor.config, run_id=run_id, owner=executor.instance_id,
+                            max_run_seconds=600, login=True, machine_id="m-codex",
+                            now=clock.now)  # fmt: skip
+    executor.ledger.mark_unconfirmed(run_id, reason="termination not confirmed")
+    return run_id
+
+
+def _job_config(run_id):
+    return {"mounts": [], "files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+            "env": {"ATELES_RUN_ID": run_id}, "metadata": {"ateles_run_id": run_id}}
+
+
+def test_periodic_step_settles_a_marked_reservation(fly_env, monkeypatch):
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    run_id = _seed_marked_login(executor, clock)
+    fake.machines["m-codex"]["config"] = _job_config(run_id)  # the clean-up Fly refused
+    assert _in_flight_count(executor, clock.now) == 1
+    monkeypatch.setattr(fly_runner, "_EXECUTOR", executor)  # what Apis's sweep reaches
+    assert asyncio.run(fly_runner.settle_marked_reservations()) == [run_id]
+    assert executor.ledger.entry(run_id) is None
+    assert _in_flight_count(executor, clock.now) == 0
+    assert fake.machines["m-codex"]["config"]["files"] == []
+    assert "m-codex" not in fake.leases  # the cleanup lease went with it
+    assert not fake.calls("POST", "/start") and not fake.calls("POST", "/v1/apps/runner-app/machines")
+
+
+@pytest.mark.parametrize("case", ["unreadable", "running", "another_run"])
+def test_periodic_step_keeps_a_reservation_it_cannot_prove_clean(fly_env, monkeypatch, case):
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    run_id = _seed_marked_login(executor, clock)
+    config = _job_config(run_id)
+    if case == "unreadable":
+        fake.bad["get"] = "null"
+    elif case == "running":
+        fake.machines["m-codex"]["state"] = "started"
+        fake.stop_effective = False  # it does not stop
+    else:
+        config = _job_config("another-run")
+    fake.machines["m-codex"]["config"] = copy.deepcopy(config)
+    assert asyncio.run(executor.settle_marked()) == []
+    entry = executor.ledger.entry(run_id)
+    assert entry is not None and entry["unconfirmed"] is True
+    assert _in_flight_count(executor, clock.now) == 1
+    assert fake.machines["m-codex"]["config"] == config
 
 
 def test_only_vetted_classes_can_be_opted_in(monkeypatch):

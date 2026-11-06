@@ -5046,6 +5046,22 @@ async def main() -> None:
 
     async def deferred_review_sweep() -> None:
         while True:
+            # 0. Fly reservations marked for the reaper. A run whose login
+            #    machine clean-up Fly refused keeps its reservation, marked,
+            #    and only a later launch's reaper would settle it, so
+            #    fly_jobs_in_flight.py kept holding daemon deploys behind a job
+            #    that had ended. Each pass retries the reaper's own recovery;
+            #    a machine that is unreadable, running or not provably this
+            #    run's keeps its reservation. Nothing to do without Fly.
+            try:
+                import fly_runner
+
+                await fly_runner.settle_marked_reservations()
+            except Exception as exc:  # noqa: BLE001 — never stop the loop
+                log.error(
+                    f"[{DAEMON_NAME}] Fly marked-reservation step failed: {exc}",
+                    exc_info=True,
+                )
             # Head-scoped review supersession (#507). Webhook synchronize and
             # reopen events retire stale verdicts synchronously; this pass is
             # the bounded backup for missed deliveries. It shares the review
