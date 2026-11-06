@@ -104,7 +104,12 @@ def test_same_condition_is_recorded_once_across_a_new_instance(state, base_sends
     make().send(ESCALATION, priority=Priority.BLOCKER)
     first = conditions(state)
     (key,) = first
-    first_entry = dict(first[key])
+    # Make the stored entry distinguishable, so a rewrite would show.
+    doc = json.loads(state.read_text())
+    doc["conditions"][key]["raised_at"] = "2026-01-01T00:00:00Z"
+    doc["conditions"][key]["backlog"] = True
+    state.write_text(json.dumps(doc))
+    first_entry = dict(doc["conditions"][key])
     restarted = make()
     restarted.send(ESCALATION, priority=Priority.BLOCKER)
     assert conditions(state) == {key: first_entry}
