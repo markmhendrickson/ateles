@@ -170,12 +170,17 @@ LENSES: tuple[Lens, ...] = (
             "sink; (3) find every branch where an error, an unset env var, a "
             "parse failure, or an unknown value yields ALLOW rather than DENY — "
             "name each fail-open default explicitly; (4) check that the change "
-            "does not narrow an existing protection anywhere else. Report a "
-            "break you demonstrated as CONFIRMED and block on it; report a "
-            "break you can argue but not demonstrate as PLAUSIBLE and do not "
-            "block. A review that finds nothing must state which sinks and "
-            "which encodings you actually checked — 'looks fine' is not a "
-            "security review."
+            "does not narrow an existing protection anywhere else. Every concern "
+            "must end in one of three states before your verdict. A break you "
+            "demonstrated, or traced through a fully closed code path with "
+            "named inputs, is CONFIRMED: block on it. A concern you checked "
+            "and refuted is dropped from the findings and listed with what "
+            "you checked. Only a concern you tried and truly cannot settle "
+            "with what you have is PLAUSIBLE: mark it non-blocking, give a "
+            "COMMENT verdict, and say what you tried and what would settle it. "
+            "A review that finds nothing must state which sinks and which "
+            "encodings you actually checked — 'looks fine' is not a security "
+            "review."
         ),
         diff_patterns=(
             # Path-level security surfaces, kept in lock-step with the CONCERNS
