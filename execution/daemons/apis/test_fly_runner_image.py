@@ -517,7 +517,205 @@ def _use_proxy(monkeypatch, module, *, ident=_CHILD_IDENT, parent_euid=None):
     monkeypatch.setattr(run_job, "_parent_euid", lambda: parent_euid)
 
 
+_UPSTREAM_MCP_REPLY = b'{"jsonrpc":"2.0","id":7,"result":{"tools":[{"name":"store"}]}}'
+
+
+def _loopback_tls_cert(tmp_path: Path) -> tuple[Path, Path]:
+    """A self-signed certificate for 127.0.0.1, so the stand-in upstream can
+    serve the https origin the proxy insists on."""
+    import datetime
+    import ipaddress
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder().subject_name(name).issuer_name(name)
+        .public_key(key.public_key()).serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(x509.SubjectAlternativeName(
+            [x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )  # fmt: skip
+    cert_path, key_path = tmp_path / "upstream.crt", tmp_path / "upstream.key"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()))  # fmt: skip
+    return cert_path, key_path
+
+
+def _start_stand_in_neotoma(cert_path: Path, key_path: Path):
+    """A loopback https server that records every request and answers like an
+    admitting Neotoma: /session admits the key, POST /mcp returns a fixed MCP
+    reply. Returns ``(server, port, requests)``."""
+    import ssl
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    requests: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            return
+
+        def _answer(self, status, body=b"", headers=None):
+            self.send_response(status)
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _record(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b""
+            requests.append({"method": self.command, "path": self.path, "body": body,
+                             "headers": {k.lower(): v for k, v in self.headers.items()}})  # fmt: skip
+            return body
+
+        def do_GET(self):
+            self._record()
+            if self.path == "/session":
+                return self._answer(200, b'{"aauth":{"admitted":true}}',
+                                    {"content-type": "application/json"})  # fmt: skip
+            self._answer(404)
+
+        def do_POST(self):
+            self._record()
+            if self.path != "/mcp":
+                return self._answer(404)
+            self._answer(200, _UPSTREAM_MCP_REPLY,
+                         {"content-type": "application/json", "mcp-session-id": "sess-1"})  # fmt: skip
+
+        def do_DELETE(self):
+            self._record()
+            self._answer(200)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(str(cert_path), str(key_path))
+    server.socket = ctx.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, server.server_address[1], requests
+
+
+def _assert_role_signed(request: dict, jwk: dict, authority: str) -> None:
+    """Verify the request's AAuth signature against the role's public key and
+    that its agent token names the role."""
+    import base64
+    import hashlib
+
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+
+    from lib.daemon_runtime import aauth_httpsig as httpsig
+
+    headers, body = request["headers"], request["body"]
+    assert headers["content-digest"] == (
+        "sha-256=:" + base64.b64encode(hashlib.sha256(body).digest()).decode() + ":")
+    sig_params = headers["signature-input"].split("=", 1)[1]
+    components = [c.strip('"') for c in sig_params[1:sig_params.index(")")].split()]
+    values = {"@method": request["method"], "@authority": authority, "@path": request["path"]}
+    lines = [f'"{c}": {values[c] if c in values else headers[c]}' for c in components]
+    lines.append(f'"@signature-params": {sig_params}')
+    raw = base64.b64decode(headers["signature"].split("=:", 1)[1].rstrip(":"))
+    public = ec.EllipticCurvePublicNumbers(
+        httpsig._b64url_to_int(jwk["x"]), httpsig._b64url_to_int(jwk["y"]), ec.SECP256R1(),
+    ).public_key()  # fmt: skip
+    public.verify(encode_dss_signature(int.from_bytes(raw[:32], "big"),
+                                       int.from_bytes(raw[32:], "big")),
+                  "\n".join(lines).encode(), ec.ECDSA(hashes.SHA256()))  # fmt: skip
+    token = headers["signature-key"].split('jwt="', 1)[1].rstrip('"')
+    claims_b64 = token.split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(claims_b64 + "=" * (-len(claims_b64) % 4)))
+    assert claims["sub"] == "lanius@ateles-swarm"
+
+
 class TestNeotomaProxyJob:
+    def test_a_request_through_the_configured_url_reaches_neotoma_role_signed(
+            self, tmp_path, monkeypatch):
+        """The job's own proxy start and CLI config, end to end: a request sent
+        to the URL the job wrote for the CLI reaches Neotoma signed with the
+        role's key, carries no bearer, and the CLI gets Neotoma's answer.
+        Faked: only the Claude CLI and the separate-uid switch."""
+        import http.client
+        import ssl
+        from urllib.parse import urlsplit
+
+        pytest.importorskip("cryptography")
+        pytest.importorskip("jwt")
+        if not Path("/proc/net/tcp").exists():
+            pytest.skip("the proxy's peer-uid check reads /proc/net/tcp")
+        for name in run_job.DEFAULT_PROBE_ENV_NAMES:
+            monkeypatch.delenv(name, raising=False)
+        cert_path, key_path = _loopback_tls_cert(tmp_path)
+        server, upstream_port, upstream_seen = _start_stand_in_neotoma(cert_path, key_path)
+        # The proxy's https client trusts the stand-in's certificate.
+        trusting = ssl.create_default_context(cafile=str(cert_path))
+        monkeypatch.setattr(ssl, "_create_default_https_context", lambda *a, **k: trusting)
+        jwk = _test_jwk()
+        job_dir = tmp_path / "job"
+        _write_job(job_dir, secrets={"NEOTOMA_AAUTH_PRIVATE_JWK": json.dumps(jwk)},
+                   spec={"neotoma_mcp": "proxy",
+                         "neotoma_base_url": f"https://127.0.0.1:{upstream_port}"},
+                   argv=list(_PROXY_ARGV))  # fmt: skip
+        # The real proxy module; the test's own uid is the allowed peer.
+        monkeypatch.setattr(run_job, "child_identity", lambda name: _CHILD_IDENT)
+        monkeypatch.setattr(run_job, "_parent_euid", lambda: _CHILD_IDENT[0] + 1)
+        cli_request = b'{"jsonrpc":"2.0","id":7,"method":"tools/list"}'
+        seen, stored = {}, {}
+
+        def fake_cli(argv, env, stdin, timeout, cwd, ident=None, collect_by=None):
+            cfg = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text())
+            server_cfg = cfg["mcpServers"]["mcpsrv_neotoma"]
+            seen["cfg"] = server_cfg
+            url = urlsplit(server_cfg["url"])
+            conn = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
+            try:
+                conn.request("POST", url.path, body=cli_request,
+                             headers={"content-type": "application/json",
+                                      "accept": "application/json, text/event-stream",
+                                      **server_cfg.get("headers", {})})  # fmt: skip
+                resp = conn.getresponse()
+                seen["status"], seen["body"] = resp.status, resp.read()
+            except OSError as exc:  # a CLI that cannot reach its server
+                seen["status"], seen["body"] = type(exc).__name__, b""
+            finally:
+                conn.close()
+            return 0, b"ok", b"", False
+
+        try:
+            rc = run_job.main(job_dir, writer=lambda b, a, r: stored.setdefault("r", r) is not None,
+                              runner=fake_cli, hard_exit=lambda code: None)  # fmt: skip
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert rc == 0, stored["r"]["refused"]
+        assert "headers" not in seen["cfg"]
+        # The caller gets the upstream's answer, relayed by the proxy.
+        assert seen["status"] == 200
+        assert seen["body"] == _UPSTREAM_MCP_REPLY
+        # The upstream saw the CLI's request, role-signed, with no bearer.
+        relayed = [r for r in upstream_seen if r["method"] == "POST" and r["body"] == cli_request]
+        assert len(relayed) == 1, [(r["method"], r["path"]) for r in upstream_seen]
+        request = relayed[0]
+        assert request["path"] == "/mcp"
+        assert "authorization" not in request["headers"]
+        assert not any("bearer" in v.lower() for v in request["headers"].values())
+        _assert_role_signed(request, jwk, f"127.0.0.1:{upstream_port}")
+
     def test_neotoma_mcp_must_be_empty_or_proxy(self, tmp_path):
         job_dir = tmp_path / "job"
         _write_job(job_dir, secrets={"NEOTOMA_AAUTH_PRIVATE_JWK": json.dumps(_test_jwk())},
