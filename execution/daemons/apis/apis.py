@@ -336,9 +336,12 @@ def _background_dispatch_done(task: asyncio.Task[None]) -> None:
     try:
         task.result()
     except asyncio.CancelledError:
-        log.warning("[%s] detached dispatch was cancelled", DAEMON_NAME)
+        log.warning(
+            "[%s] detached dispatch %s was cancelled", DAEMON_NAME, task.get_name()
+        )
     except Exception:
-        log.exception("[%s] detached dispatch failed", DAEMON_NAME)
+        # The task name carries the task id (apis-dispatch-<id>-<trigger>).
+        log.exception("[%s] detached dispatch %s failed", DAEMON_NAME, task.get_name())
 
 
 def _background_checkpoint_done(task: asyncio.Task[None]) -> None:
@@ -4775,7 +4778,12 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     log.info(f"[{DAEMON_NAME}] Event: {entity_type}/{entity_id} action={action}")
 
     if entity_type == "checkpoint_brief":
-        await handle_checkpoint_brief(entity_id, snapshot, notifier)
+        # Detach the released run: reading, the replay guard and the stamp stay
+        # on the stream, one event at a time; only the agent run itself (up to
+        # 30 minutes) leaves it, so the stream keeps hearing events meanwhile.
+        await handle_checkpoint_brief(
+            entity_id, snapshot, notifier, detach_after_accept=True
+        )
         return
 
     if entity_type != "task":
@@ -4820,12 +4828,15 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
                 priority=Priority.INFO,
                 handler=DAEMON_NAME,
             )
+        # Reading, scoring, the gate and the hold path stay on the stream; only
+        # the run after the task durably enters EXECUTING is detached.
         await dispatch_task(
             entity_id,
             snapshot,
             trigger="created",
             notifier=notifier,
             snapshot_hydrated=event.hydrated,
+            detach_after_accept=True,
         )
 
     elif action == "updated":
