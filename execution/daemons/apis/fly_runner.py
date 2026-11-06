@@ -3165,7 +3165,9 @@ class FlyExecutor:
         the caller's cleanup clears anything already written. The refusal
         names the recovery (``_refile_action``)."""
         if (self._clock() if now is None else now) >= deadline:
-            machine_id = self.config.login_machines.get(job.provider, "")
+            # Every caller is a login claim, so the provider has a login
+            # machine; an absent one is named as absent, not as a machine.
+            machine_id = self.config.login_machines.get(job.provider)
             raise FlyRefusal(
                 f"{job.provider} login machine claim reached the run's deadline before "
                 f"{what}; nothing further was written or started; "
@@ -3174,13 +3176,18 @@ class FlyExecutor:
             )
 
     @staticmethod
-    def _refile_action(job: FlyJob, machine_id: str) -> str:
+    def _refile_action(job: FlyJob, machine_id: str | None) -> str:
         """The recovery a refused claim needs, in the refusal's own text (so
         it survives filtered warnings): the task never launched and is not
         retried automatically, so it must be refiled. The job carries no task
-        id, so the run and machine name it."""
+        id, so the run and machine name it; a missing machine id is said to
+        be missing rather than given a placeholder name."""
+        if machine_id:
+            where = f"machine {machine_id}"
+        else:
+            where = f"no {job.provider} login machine configured"
         return (f"the task never launched and is not retried automatically: refile it "
-                f"(run {job.run_id}, machine {machine_id or 'unknown'})")
+                f"(run {job.run_id}, {where})")
 
     async def _within_deadline(self, coro, job: FlyJob, deadline: float, what: str) -> Any:
         """Await *coro* (reads only) for no longer than the time left before

@@ -5249,6 +5249,17 @@ def _assert_names_refile(text: str, job) -> None:
     assert f"run {job.run_id}, machine m-claude" in text
 
 
+def test_refile_action_names_a_missing_login_machine_as_missing(fly_env):
+    """An absent machine id is said to be absent, never given a placeholder
+    name that reads like a machine."""
+    job = _job()
+    text = fly_runner.FlyExecutor._refile_action(job, None)
+    assert "never launched and is not retried automatically: refile it" in text
+    assert f"run {job.run_id}, no claude login machine configured" in text
+    assert "unknown" not in text
+    assert "machine m-" not in text
+
+
 def _past_deadline_refusal(executor, job, fake, claims, *, sent: int):
     """Run *job* to its deadline refusal, then assert what every such refusal
     leaves: *sent* claim updates, no start, the job config cleared, and the
