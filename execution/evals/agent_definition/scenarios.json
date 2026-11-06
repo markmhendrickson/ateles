@@ -107,7 +107,7 @@
       ],
       "expect": {
         "exit_code": 1,
-        "requests": 3,
+        "requests": 6,
         "no_stand_in": true
       }
     },
@@ -174,15 +174,15 @@
     },
     {
       "id": "a_load_whose_every_request_hangs_ends_inside_the_deadline_counting_the_requests",
-      "why": "the 25 s cap is a real deadline: requests of 10 s, 10 s and the 3 s that are left, plus the two waits, end at exactly 25 s, not 32 s",
+      "why": "the 150 s startup budget is a real deadline: requests of 30 s, 30 s, 30 s, 30 s and the 15 s that are left, plus the waits of 1, 2, 4 and 8 s, end at exactly 150 s, not later",
       "kind": "startup",
       "neotoma": [
         "hang"
       ],
       "expect": {
         "exit_code": 1,
-        "requests": 3,
-        "max_seconds": 25
+        "requests": 5,
+        "max_seconds": 150
       }
     },
     {

@@ -34,6 +34,7 @@ Synthetic and public-safe: no key, no token, no operator data.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import sys
@@ -232,6 +233,7 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
             mp.setattr(al.AgentLoader, "_accept_bearer", lenient_bearer)
         if mutation == "no_retry":
             mp.setattr(al, "LOAD_BACKOFFS_S", ())
+            mp.setattr(al, "STARTUP_LOAD_BUDGET", dataclasses.replace(al.STARTUP_LOAD_BUDGET, backoffs_s=()))
         if mutation == "retry_rejected":
             mp.setattr(al, "_RETRYABLE_LOAD_CODES", al._RETRYABLE_LOAD_CODES | {"rejected"})
 

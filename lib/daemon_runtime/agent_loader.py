@@ -482,6 +482,46 @@ _monotonic = time.monotonic
 _sleep = time.sleep
 
 
+@dataclass(frozen=True)
+class LoadBudget:
+    """How long one definition load may take: its deadline, request limits and waits.
+
+    ``None`` fields mean "today's module limit", read when the load starts, so a
+    loader built without a budget behaves exactly as before.
+    """
+
+    total_s: "float | None" = None
+    signed_request_timeout_s: "float | None" = None
+    bearer_request_timeout_s: "float | None" = None
+    backoffs_s: "tuple[float, ...] | None" = None
+
+    def resolved(self) -> "LoadBudget":
+        return LoadBudget(
+            total_s=LOAD_TOTAL_CAP_S if self.total_s is None else self.total_s,
+            signed_request_timeout_s=(SIGNED_REQUEST_TIMEOUT_S
+                                      if self.signed_request_timeout_s is None
+                                      else self.signed_request_timeout_s),
+            bearer_request_timeout_s=(BEARER_REQUEST_TIMEOUT_S
+                                      if self.bearer_request_timeout_s is None
+                                      else self.bearer_request_timeout_s),
+            backoffs_s=tuple(LOAD_BACKOFFS_S if self.backoffs_s is None else self.backoffs_s),
+        )
+
+
+# A daemon's OWN startup load (``load_agent_definition_or_exit``) may wait longer
+# than a dispatch-time load: a slow Neotoma should delay startup, not stop it. On
+# 2026-11-06 list queries took 6 to 16 seconds against the 10-second request limit
+# and Apis restarted for five minutes. Nothing else holds the event loop at startup,
+# so the longer budget applies there only; every other load keeps the limits above.
+# When this budget runs out the daemon still refuses to start.
+STARTUP_LOAD_BUDGET = LoadBudget(
+    total_s=150.0,
+    signed_request_timeout_s=30.0,
+    bearer_request_timeout_s=30.0,
+    backoffs_s=(1.0, 2.0, 4.0, 8.0, 16.0),
+)
+
+
 class AgentDefinitionUnavailable(RuntimeError):
     """An agent_definition could not be loaded. The caller must NOT run the agent.
 
@@ -603,7 +643,9 @@ def enforce_status_or_exit(agent_def: "AgentDefinition", daemon_name: str) -> No
         log.warning(f"[{daemon_name}] Status check: {reason}")
 
 
-def load_agent_definition_or_exit(daemon_name: str) -> "AgentDefinition":
+def load_agent_definition_or_exit(
+    daemon_name: str, budget: "LoadBudget | None" = None
+) -> "AgentDefinition":
     """Load a daemon's OWN definition at startup; exit non-zero if it cannot be loaded.
 
     The status check (``enforce_status_or_exit``) is what stops a retired agent
@@ -611,9 +653,18 @@ def load_agent_definition_or_exit(daemon_name: str) -> "AgentDefinition":
     as if the check had passed. Exit is non-zero, like the revoked-grant and
     refusing-status cases, so the service manager restarts it. An unregistered
     daemon also refuses: absence supplies no authority to start.
+
+    ``budget`` defaults to ``STARTUP_LOAD_BUDGET``: a longer deadline, longer
+    requests and growing waits, so a slow Neotoma delays startup instead of
+    stopping it. The definition is still found only by the list query (or an
+    explicit ``<AGENT>_AGENT_DEFINITION_ID`` pin), with its duplicate-name refusal.
     """
+    if budget is None:
+        budget = STARTUP_LOAD_BUDGET
     try:
-        return admit_agent_definition(AgentLoader(daemon_name).load(), daemon_name)
+        return admit_agent_definition(
+            AgentLoader(daemon_name, budget=budget).load(), daemon_name
+        )
     except AgentDefinitionUnavailable as exc:
         log.error(
             f"[{daemon_name}] Refusing to start: agent_definition unavailable "
@@ -800,9 +851,12 @@ class AgentLoader:
     short bounded retry for a transient failure). There is no stand-in definition.
     """
 
-    def __init__(self, agent_name: str) -> None:
+    def __init__(self, agent_name: str, *, budget: "LoadBudget | None" = None) -> None:
         self.agent_name = agent_name.lower()
         self._prefix = agent_name.upper()
+        # Only a daemon's own startup passes a budget; every other caller keeps
+        # today's limits, read from the module when each load starts.
+        self._budget = budget or LoadBudget()
 
     def load(self, *, allow_undefined: bool = False) -> AgentDefinition:
         """
@@ -840,8 +894,10 @@ class AgentLoader:
             raise
 
     def _load_with_retry(self) -> AgentDefinition:
+        budget = self._budget.resolved()
+        backoffs = budget.backoffs_s
         started = _monotonic()
-        deadline = started + LOAD_TOTAL_CAP_S
+        deadline = started + budget.total_s
         attempt = 0
         while True:
             attempt += 1
@@ -853,11 +909,11 @@ class AgentLoader:
             except Exception as exc:  # noqa: BLE001 — classified into a fixed code
                 code = load_failure_code(exc)
                 retries_done = attempt - 1
-                if code not in _RETRYABLE_LOAD_CODES or retries_done >= len(LOAD_BACKOFFS_S):
+                if code not in _RETRYABLE_LOAD_CODES or retries_done >= len(backoffs):
                     raise AgentDefinitionUnavailable(
                         self.agent_name, code, attempt
                     ) from None
-                delay = LOAD_BACKOFFS_S[retries_done]
+                delay = backoffs[retries_done]
                 if _monotonic() + delay + MIN_ATTEMPT_TIMEOUT_S > deadline:
                     raise AgentDefinitionUnavailable(
                         self.agent_name, code, attempt
@@ -902,7 +958,7 @@ class AgentLoader:
                 result = _on_worker(
                     lambda remaining: ns.signed_request(
                         method, url, body, agent_name=self.agent_name,
-                        timeout=min(SIGNED_REQUEST_TIMEOUT_S, remaining),
+                        timeout=min(self._budget.resolved().signed_request_timeout_s, remaining),
                         deadline=deadline, clock=_monotonic,
                     ),
                     deadline,
@@ -943,7 +999,7 @@ class AgentLoader:
 
     def _bearer_request(self, method: str, url: str, body: "dict | None", deadline: float):
         def send(remaining: float):
-            timeout = min(BEARER_REQUEST_TIMEOUT_S, remaining)
+            timeout = min(self._budget.resolved().bearer_request_timeout_s, remaining)
             budget = httpx.Timeout(timeout)
             if method.upper() == "GET":
                 return httpx.get(url, headers=_auth_headers(), timeout=budget)
