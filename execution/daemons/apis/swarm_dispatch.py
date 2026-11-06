@@ -14980,23 +14980,13 @@ class SwarmDispatcher:
             log.warning(f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — store skipped")
             return None
 
-        async def attempt(time_limit: float) -> dict:
-            async with httpx.AsyncClient(timeout=time_limit) as client:
-                resp = await client.post(
-                    f"{self.config.neotoma_base_url}/store",
-                    json={"entities": entities, "idempotency_key": idempotency_key},
-                    headers={
-                        "Authorization": f"Bearer {self.config.neotoma_token}"
-                    },
-                )
-                resp.raise_for_status()
-                return resp.json() if resp.content else {}
-
         try:
             if not retry_transient:
-                return await attempt(30)
+                return await self._store_entities_once(entities, idempotency_key, 30)
             return await _neotoma_transient.acall_with_transient_retry(
-                attempt,
+                lambda time_limit: self._store_entities_once(
+                    entities, idempotency_key, time_limit
+                ),
                 label=f"store {idempotency_key}",
                 attempt_timeout=PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS,
                 total_seconds=PR_REVIEW_STORE_TOTAL_SECONDS,
@@ -15008,6 +14998,23 @@ class SwarmDispatcher:
                 f"{_neotoma_transient.describe(exc)}"
             )
             return None
+
+    async def _store_entities_once(
+        self, entities: list[dict], idempotency_key: str, time_limit: float
+    ) -> dict:
+        """One Neotoma ``/store`` POST; raises on any failure.
+
+        A named method rather than a nested function so the dispatcher's
+        GitHub-write guard test can allow exactly this Neotoma write by name.
+        """
+        async with httpx.AsyncClient(timeout=time_limit) as client:
+            resp = await client.post(
+                f"{self.config.neotoma_base_url}/store",
+                json={"entities": entities, "idempotency_key": idempotency_key},
+                headers={"Authorization": f"Bearer {self.config.neotoma_token}"},
+            )
+            resp.raise_for_status()
+            return resp.json() if resp.content else {}
 
     async def _log_harness_event(self, t: SwarmTrigger) -> None:
         entities = [
