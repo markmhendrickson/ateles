@@ -12903,3 +12903,122 @@ class TestLabelGate:
         # confirms an operator who never sets ATELES_SWARM_REQUIRE_LABEL gets
         # exactly today's behaviour, not a hidden non-empty default.
         assert DispatchConfig(neotoma_token="", github_token="").require_label == ""
+
+
+
+# ── the check gate's green reading reaches the combined pass and Vanellus ────
+#
+# Apis holds the panel until the head's checks are green, then seats it. When
+# the gate read green for the reviewed head in this panel run, the combined
+# pm/qa/ux prompt and Vanellus's aggregation prompt state that head's SHA, so a
+# lens that could not read check status itself is not left to block on a fact
+# Apis already held. No reading, or a reading for a head that has since moved,
+# states nothing.
+
+_GREEN_NOTE = "CURRENT-HEAD CI EVIDENCE"
+
+
+def _drive_panel_with_check_gate(monkeypatch, *, real_gate, review_head="a" * 40):
+    """Run `_handle_pr` with the combined pass on; return {skill: [prompts]}.
+
+    *real_gate* runs the REAL `_hold_panel_until_checks_green` against a live
+    PR at head ``a*40`` whose checks read green; otherwise the conftest stub
+    (no gate reading at all) stays in place. *review_head* is the head the
+    dispatcher reads before seating the panel (a different value is a head
+    that moved after the gate's reading).
+    """
+    import types
+
+    import panel_check_gate
+
+    calls: list = []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls
+    )
+    d.config.combined_review_pass = True
+    prompts: dict[str, list[str]] = {}
+
+    async def record_skill(skill, prompt, **kwargs):
+        prompts.setdefault(skill, []).append(prompt)
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", record_skill)
+    monkeypatch.setattr(
+        type(d), "_pr_head_sha", lambda self, t: _async_return(review_head)
+    )
+    monkeypatch.setattr(type(d), "_lens_agent_prompt", lambda self, agent: "lens prompt")
+    if real_gate:
+        head = "a" * 40
+
+        async def fetch_pr(repo, num):
+            return {
+                "number": num, "state": "open", "draft": False,
+                "head": {"sha": head, "ref": "feat/x"}, "base": {"ref": "main"},
+            }
+
+        async def read_gate(repository, head_sha, base_ref):
+            return panel_check_gate.CheckGate(head=head_sha, green=head_sha == head)
+
+        monkeypatch.setattr(d, "_fetch_pr", fetch_pr)
+        monkeypatch.setattr(d, "_read_head_check_gate", read_gate)
+        monkeypatch.setattr(
+            d,
+            "_hold_panel_until_checks_green",
+            types.MethodType(swarm_dispatch._REAL_HOLD_PANEL_UNTIL_CHECKS_GREEN, d),
+        )
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    return prompts
+
+
+def _combined_prompts(prompts):
+    return [p for ps in prompts.values() for p in ps if "IN ONE PASS" in p]
+
+
+def test_a_panel_released_on_a_green_reading_states_the_head_to_combined_pass_and_vanellus(
+    monkeypatch,
+):
+    prompts = _drive_panel_with_check_gate(monkeypatch, real_gate=True)
+    combined = _combined_prompts(prompts)
+    assert combined, "the combined pm/qa/ux pass must run"
+    note = f"read every gating check on head `{'a' * 40}` as green"
+    assert all(_GREEN_NOTE in p and note in p for p in combined)
+    assert prompts.get("vanellus"), "Vanellus must aggregate"
+    assert _GREEN_NOTE in prompts["vanellus"][-1]
+    assert note in prompts["vanellus"][-1]
+
+
+def test_a_panel_with_no_gate_reading_states_nothing(monkeypatch):
+    prompts = _drive_panel_with_check_gate(monkeypatch, real_gate=False)
+    combined = _combined_prompts(prompts)
+    assert combined and prompts.get("vanellus")
+    assert not any(_GREEN_NOTE in p for ps in prompts.values() for p in ps)
+
+
+def test_a_head_that_moved_after_the_green_reading_states_nothing(monkeypatch):
+    # The gate read `a*40` green, but the head the panel reviews is `b*40`.
+    prompts = _drive_panel_with_check_gate(
+        monkeypatch, real_gate=True, review_head="b" * 40
+    )
+    combined = _combined_prompts(prompts)
+    assert combined and prompts.get("vanellus")
+    assert not any(_GREEN_NOTE in p for ps in prompts.values() for p in ps)
+
+
+def test_a_green_reading_from_an_earlier_panel_run_is_not_carried_forward():
+    # A stale entry left from a previous run must not be read as this run's.
+    d = SwarmDispatcher(_StubNotifier(), _config())
+    t = _trigger()
+    d._panel_checks_green[(t.repository.casefold(), t.number)] = "a" * 40
+    assert d._checks_green_head(t, "a" * 40) == "a" * 40
+    assert d._checks_green_head(t, "b" * 40) == ""
+
+    async def held(trigger, *, source):
+        return True
+
+    d._hold_panel_until_checks_green = held
+    asyncio.run(d._handle_pr(t))
+    assert d._checks_green_head(t, "a" * 40) == ""
