@@ -3118,17 +3118,27 @@ def panel_finished_at_head(
 ) -> bool:
     """True when the review panel has already finished on exactly ``head_sha``.
 
-    Finished means a non-superseded Vanellus aggregation marker pinned to the
-    head, or a non-superseded ``review:<lens> commit=<head>`` marker for every
-    lens in ``required_lenses``. ``comments`` must already be scoped to swarm
-    identities (`_lens_scoped_comments`). An empty required set never counts as
-    finished through the lens path: "no lens known to be required" is not
-    "every required lens reported".
+    Finished means a non-superseded Vanellus aggregation pinned to the head
+    that carries a verdict token (`parse_review_verdict`, the reader the
+    approval path applies to the aggregation), or, for every lens in
+    ``required_lenses``, a non-superseded ``review:<lens> commit=<head>``
+    comment whose verdict reads at the fixed position (`lens_own_verdict`).
+    A marker alone is not a finished panel: a marker-only or malformed comment
+    is exactly what a review that died mid-post leaves, and it must be
+    recovered, not skipped. Any readable verdict is terminal, a blocking one
+    included: a panel that finished with REQUEST_CHANGES is finished.
+    ``comments`` must already be scoped to swarm identities
+    (`_lens_scoped_comments`). An empty required set never counts as finished
+    through the lens path: "no lens known to be required" is not "every
+    required lens reported".
     """
     head = _normalise_full_sha(head_sha)
     if not head:
         return False
-    if latest_aggregation_comment(comments, head_sha=head) is not None:
+    # The NEWEST aggregation at the head decides: a newer marker-only one is a
+    # later run that died, and an older verdict must not stand in for it.
+    aggregation = latest_aggregation_comment(comments, head_sha=head)
+    if aggregation is not None and parse_review_verdict(aggregation.get("body") or ""):
         return True
     if not required_lenses:
         return False
@@ -3136,8 +3146,12 @@ def panel_finished_at_head(
     for comment in comments:
         body = comment.get("body") or ""
         match = _LENS_MARKER_RE.search(body)
-        if match and comment_verdict_matches_current_head(body, head):
-            reported.add(match.group("lens").lower())
+        if not match or not comment_verdict_matches_current_head(body, head):
+            continue
+        known = lens_by_name(match.group("lens"))
+        if known is None or lens_own_verdict(body, lens_agent=known.agent) is None:
+            continue
+        reported.add(match.group("lens").lower())
     return {lens.lower() for lens in required_lenses} <= reported
 
 
@@ -5301,7 +5315,13 @@ class SwarmDispatcher:
     async def _open_labelled_prs(self, repository: str, label: str) -> list[dict]:
         """Open, non-draft PRs in `repository` carrying `label` on the PR itself.
 
-        Raises on an HTTP error so the caller leaves the repository alone.
+        Bound: this reads only the FIRST page of open pull requests (100, no
+        pagination), and `resume_labelled_panels` examines at most
+        `_STARTUP_PANEL_SWEEP_MAX` (20) labelled PRs in one sweep. A labelled
+        PR beyond either limit is not recovered by this sweep; it waits for its
+        next event (a push, a reopen, an admitted label add) or the review
+        sweeps. Raises on an HTTP error so the caller leaves the repository
+        alone.
         """
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(
@@ -5325,7 +5345,8 @@ class SwarmDispatcher:
         The required lenses are the ones `select_panel` seats for the PR's
         changed files. `_changed_files` reports a failed read as an empty list;
         the required set is then left empty, so only an aggregation marker can
-        count as finished and the PR is re-driven rather than skipped.
+        count as finished (when it carries a verdict) and the PR is re-driven
+        rather than skipped.
         """
         head = _normalise_full_sha(trigger.head_sha or "")
         if not head:

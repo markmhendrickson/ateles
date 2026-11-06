@@ -463,9 +463,25 @@ def _labelled_pr(head=HEAD, labels=(CANARY,), number=PR, draft=False):
             "labels": [{"name": name} for name in labels]}
 
 
-def _lens_comment(lens, head=HEAD, cid=1):
+def _lens_comment(lens, head=HEAD, cid=1, verdict="**SIGNED_OFF**"):
+    """A lens comment at `head` in the contract shape: marker, header, verdict.
+
+    `verdict=None` gives a marker-only comment (what a review that died
+    mid-post leaves); any other string is placed on the fixed verdict line.
+    """
+    agent = sd.lens_by_name(lens).agent
+    if verdict is None:
+        text = "looks fine"
+    else:
+        text = f"**🤖 {agent.capitalize()} — Ateles swarm, {lens} lens**\n{verdict}\n\nlooks fine"
     return {"id": cid, "created_at": f"2026-11-06T00:00:{cid:02d}Z",
-            "body": f"<!-- review:{lens} commit={head} -->\nlooks fine"}
+            "body": f"<!-- review:{lens} commit={head} -->\n{text}"}
+
+
+def _aggregation_comment(head=HEAD, cid=9, verdict="**APPROVE**"):
+    text = "" if verdict is None else f"\n{verdict}\n\nBlocking: 0"
+    return {"id": cid, "created_at": f"2026-11-06T00:00:{cid:02d}Z",
+            "body": f"<!-- vanellus-aggregation commit={head} -->{text}"}
 
 
 @pytest.fixture
@@ -570,8 +586,7 @@ def test_a_finished_panel_is_left_alone_and_an_unlabelled_pr_never_touched(
         lens.lens for lens in sd.select_panel(set(), state["files"], d.config.panel_max)
     }
     if finished == "aggregation":
-        state["comments"] = [{"id": 9, "created_at": "2026-11-06T00:00:09Z",
-                              "body": f"<!-- vanellus-aggregation commit={HEAD} -->"}]
+        state["comments"] = [_aggregation_comment()]
     else:
         state["comments"] = [
             _lens_comment(lens, cid=i) for i, lens in enumerate(sorted(required), 1)
@@ -586,6 +601,55 @@ def test_a_finished_panel_is_left_alone_and_an_unlabelled_pr_never_touched(
     assert state["gate_reads"] == 0, "no PR was driven into review"
     assert summary["scanned"] == 1 and summary["finished"] == 1
     assert d._panel_ci_holds == {}
+
+
+@pytest.mark.parametrize("finished", ["aggregation", "every_lens"])
+def test_a_panel_finished_with_a_blocking_verdict_is_left_alone(sweep_world, finished):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    required = sorted(
+        lens.lens for lens in sd.select_panel(set(), state["files"], d.config.panel_max)
+    )
+    if finished == "aggregation":
+        state["comments"] = [_aggregation_comment(verdict="**REQUEST_CHANGES**")]
+    else:
+        state["comments"] = [
+            _lens_comment(lens, cid=i, verdict="**REQUEST_CHANGES**" if i == 1 else "**SIGNED_OFF**")
+            for i, lens in enumerate(required, 1)
+        ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == [] and state["gate_reads"] == 0
+    assert summary["finished"] == 1
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["aggregation_marker_only", "aggregation_malformed", "newer_aggregation_marker_only",
+     "lens_marker_only", "lens_malformed"],
+)
+def test_a_marker_without_a_verdict_at_the_head_is_recovered(sweep_world, shape):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    required = sorted(
+        lens.lens for lens in sd.select_panel(set(), state["files"], d.config.panel_max)
+    )
+    if shape == "aggregation_marker_only":
+        state["comments"] = [_aggregation_comment(verdict=None)]
+    elif shape == "newer_aggregation_marker_only":
+        state["comments"] = [_aggregation_comment(cid=8), _aggregation_comment(cid=9, verdict=None)]
+    elif shape == "aggregation_malformed":
+        state["comments"] = [_aggregation_comment(verdict="Verdict: looks good to me")]
+    else:
+        # Every lens but the first reports properly; the first leaves a marker
+        # with no verdict, or a verdict that is not on the fixed line.
+        broken = None if shape == "lens_marker_only" else "no verdict line here\n**SIGNED_OFF**"
+        state["comments"] = [
+            _lens_comment(lens, cid=i, verdict=broken if i == 1 else "**SIGNED_OFF**")
+            for i, lens in enumerate(required, 1)
+        ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == ["lanius"], "the unfinished panel was re-driven"
+    assert summary["finished"] == 0
 
 
 def test_one_missing_required_lens_is_not_a_finished_panel(sweep_world):
