@@ -2720,6 +2720,9 @@ class FlyExecutor:
                         # the machine is stopped and the run settled.
                         deadline = min(deadline, expires - LEASE_SAFETY_SECONDS)
                     await self._write_login_config(login_id, job, deadline, launch, nonce)
+                    # Never start past the deadline: run() then clears the
+                    # written config and releases the lease and reservation.
+                    self._refuse_past_deadline(job, deadline, "start")
                     await self._request(launch, self.client.start(login_id, nonce=nonce), job)
                     machine_id, instance_id = login_id, ""
                 else:
@@ -2844,43 +2847,89 @@ class FlyExecutor:
         A version conflict (409/412) means the machine changed between the
         read and the write, typically the previous job releasing it. Nothing
         was stored, so the claim starts again from a fresh read, settle and
-        free check, up to ``LOGIN_CLAIM_ATTEMPTS`` updates in total and never
-        past *deadline*; then it is the same retry-later refusal as before.
+        free check, up to ``LOGIN_CLAIM_ATTEMPTS`` updates in total; then it
+        is the same retry-later refusal as before. Nothing goes past
+        *deadline*: the retry's sleep, read and settle, and the read-back
+        after the update, are bounded by the time remaining, and the deadline
+        is checked again immediately before every update (and, in the caller,
+        before start). Past it, the claim is refused with nothing further
+        written, through the same cleanup as any other refusal.
         Every attempt sends the same lease nonce: it is this run's ownership
         token for the machine (still held across attempts), not a
         per-request replay guard, so a retried update is not a replay.
         """
         for attempt in range(1, LOGIN_CLAIM_ATTEMPTS + 1):
-            if await self._try_write_login_config(machine_id, job, deadline, launch, nonce):
+            if await self._try_write_login_config(machine_id, job, deadline, launch, nonce,
+                                                  retry=attempt > 1):  # fmt: skip
                 break
-            if (attempt == LOGIN_CLAIM_ATTEMPTS
-                    or self._clock() + LOGIN_CLAIM_RETRY_SECONDS >= deadline):  # fmt: skip
+            if attempt == LOGIN_CLAIM_ATTEMPTS:
                 raise FlyRefusal(
                     f"{job.provider} login machine changed while being claimed; retry later",
                     _render_wall(self._clock() + 300),
                 )
+            if self._clock() + LOGIN_CLAIM_RETRY_SECONDS >= deadline:
+                self._refuse_past_deadline(job, deadline, "another claim", now=deadline)
             log.info(f"[fly] run={job.run_id} login machine {machine_id} changed while being "
                      f"claimed (attempt {attempt}); re-reading")  # fmt: skip
-            await asyncio.sleep(LOGIN_CLAIM_RETRY_SECONDS)
+            await asyncio.sleep(min(LOGIN_CLAIM_RETRY_SECONDS,
+                                    max(0.0, deadline - self._clock())))  # fmt: skip
         # Read back once the update has settled (a transitional state right
         # after the write is not a refusal); one that never settles fails
         # closed before any start.
-        after = await self.client.get(machine_id)
-        if after is not None:
-            after = await self._settle_login_machine(after)
+        async def read_back() -> dict | None:
+            after = await self.client.get(machine_id)
+            if after is not None:
+                after = await self._settle_login_machine(after)
+            return after
+
+        after = await self._within_deadline(read_back(), job, deadline, "start")
         if after is None or after["state"] in LOGIN_SETTLING_STATES:
             raise FlyApiError(409, "login machine did not settle to stopped after the write")
         if after["state"] != "stopped" or _config_run_id(after["config"]) != job.run_id:
             raise FlyApiError(409, "login machine config is not this run's after the write")
 
+    def _refuse_past_deadline(self, job: FlyJob, deadline: float, what: str, *,
+                              now: float | None = None) -> None:  # fmt: skip
+        """Refuse (retry later) once the run's *deadline* has come, before
+        *what* is sent; the caller's cleanup clears anything already written."""
+        if (self._clock() if now is None else now) >= deadline:
+            raise FlyRefusal(
+                f"{job.provider} login machine claim reached the run's deadline before "
+                f"{what}; nothing further was written or started; retry later",
+                _render_wall(self._clock() + 300),
+            )
+
+    async def _within_deadline(self, coro, job: FlyJob, deadline: float, what: str) -> Any:
+        """Await *coro* (reads only) for no longer than the time left before
+        *deadline*; a run out of time is ``_refuse_past_deadline``'s refusal."""
+        remaining = deadline - self._clock()
+        if remaining <= 0:
+            coro.close()
+            self._refuse_past_deadline(job, deadline, what, now=deadline)
+        try:
+            return await asyncio.wait_for(coro, remaining)
+        except asyncio.TimeoutError:
+            self._refuse_past_deadline(job, deadline, what, now=deadline)
+            raise  # unreachable: the refusal above always raises
+
     async def _try_write_login_config(self, machine_id: str, job: FlyJob, deadline: float,
-                                      launch: "_LaunchState", nonce: str) -> bool:  # fmt: skip
+                                      launch: "_LaunchState", nonce: str, *,
+                                      retry: bool = False) -> bool:  # fmt: skip
         """One claim attempt for ``_write_login_config``: read, settle, refuse
         unless free, then the version-checked update. False only on a version
-        conflict (nothing stored); every other outcome raises."""
-        machine = await self._read_login_machine(machine_id, job)  # re-read under the lease
-        if machine is not None:
-            machine = await self._settle_login_machine(machine)
+        conflict (nothing stored); every other outcome raises. On a *retry*
+        the read and settle are bounded by the time left before *deadline*;
+        on every attempt the deadline is checked again just before the update."""
+        async def read() -> dict | None:
+            machine = await self._read_login_machine(machine_id, job)  # re-read under the lease
+            if machine is not None:
+                machine = await self._settle_login_machine(machine)
+            return machine
+
+        if retry:
+            machine = await self._within_deadline(read(), job, deadline, "another claim")
+        else:
+            machine = await read()
         if machine is None:
             raise FlyApiError(404, f"{job.provider} login machine not found")
         self._refuse_unless_free(machine, job)
@@ -2896,6 +2945,7 @@ class FlyExecutor:
         # already refused a machine whose answer carried no usable version.
         body: dict = {"config": cfg, "skip_launch": True,
                       "current_version": machine["instance_id"]}  # fmt: skip
+        self._refuse_past_deadline(job, deadline, "another claim" if retry else "the claim")
         launch.config_written = True  # from here the stored config may hold this job
         try:
             await self.client.update(machine_id, body, nonce=nonce)

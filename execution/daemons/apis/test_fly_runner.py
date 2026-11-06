@@ -4634,3 +4634,90 @@ def test_a_login_claim_that_always_conflicts_is_refused_after_the_bound(
     assert not fly_runner._has_job_config(fake.machines["m-claude"]["config"])
     assert executor.ledger.entry(job.run_id) is None and "m-claude" not in fake.leases
     assert revoked == [MINTED]
+
+
+# ── A login claim never writes or starts past the run's deadline ────────────
+
+# A retry wait no other sleep in the runner uses, so a test can tell it apart.
+_CLAIM_RETRY_MARK = 0.0125
+
+
+def _past_deadline_refusal(executor, job, fake, claims, *, sent: int):
+    """Run *job* to its deadline refusal, then assert what every such refusal
+    leaves: *sent* claim updates, no start, the job config cleared, and the
+    reservation and lease released."""
+    with pytest.raises(fly_runner.FlyRefusal, match="reached the run's deadline") as exc:
+        asyncio.run(executor.run(job))
+    assert exc.value.cooled_until
+    assert len(claims) == sent
+    assert not fake.calls("POST", "/start")
+    assert not fly_runner._has_job_config(fake.machines["m-claude"]["config"])
+    assert executor.ledger.entry(job.run_id) is None and "m-claude" not in fake.leases
+
+
+def test_a_deadline_passing_in_the_retry_sleep_stops_the_claim(fly_env, claude_login,
+                                                               monkeypatch):  # fmt: skip
+    clock = Clock()
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0}, clock=clock)
+    monkeypatch.setattr(fly_runner, "LOGIN_CLAIM_RETRY_SECONDS", _CLAIM_RETRY_MARK)
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay, *args, **kwargs):
+        if delay == _CLAIM_RETRY_MARK:
+            clock.now += 100_000  # the deadline passes while the retry waits
+            delay = 0
+        return await real_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(fly_runner.asyncio, "sleep", sleep)
+
+    def first_conflicts(n):
+        if n == 1:
+            fake.machines["m-claude"]["instance_id"] = "v2"
+            return httpx.Response(412, json={"error": "machine version changed"})
+        return None
+
+    claims = _claim_conflicts(fake, executor, "m-claude", first_conflicts)
+    _past_deadline_refusal(executor, _job(), fake, claims, sent=1)
+
+
+def test_a_deadline_passing_in_the_retry_read_stops_the_claim(fly_env, claude_login,
+                                                              fast_claim_retry):  # fmt: skip
+    clock = Clock()
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0}, clock=clock)
+    conflicted = []
+
+    def first_conflicts(n):
+        if n == 1:
+            conflicted.append(True)
+            fake.machines["m-claude"]["instance_id"] = "v2"
+            return httpx.Response(412, json={"error": "machine version changed"})
+        return None
+
+    claims = _claim_conflicts(fake, executor, "m-claude", first_conflicts)
+    routed = executor.client
+
+    class SlowReads(fly_runner.FlyMachinesClient):
+        async def get(self, machine_id):
+            answer = await routed.get(machine_id)
+            if conflicted and len(claims) == 1:
+                clock.now += 100_000  # the retry's read / settle uses up the time
+            return answer
+
+    executor.client = SlowReads(executor.config, transport=routed._transport)
+    _past_deadline_refusal(executor, _job(), fake, claims, sent=1)
+
+
+def test_a_deadline_passing_after_the_claim_update_prevents_the_start(fly_env, claude_login,
+                                                                      fast_claim_retry):  # fmt: skip
+    clock = Clock()
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0}, clock=clock)
+
+    def update_then_time_runs_out(n):
+        clock.now += 100_000  # the update lands, then the deadline passes
+        return None
+
+    claims = _claim_conflicts(fake, executor, "m-claude", update_then_time_runs_out)
+    _past_deadline_refusal(executor, _job(), fake, claims, sent=1)
