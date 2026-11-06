@@ -684,6 +684,96 @@ def test_admission_reason_is_only_a_safe_label(fly_env):
                                      client=session.client()) == (False, "unrecognized")
 
 
+def _bare_claude_job(**kw):
+    """A Claude job whose local --mcp-config write failed: no slot in the argv."""
+    return fly_runner.build_job(
+        provider="claude", role="lanius", cmd=["/opt/homebrew/bin/claude", "--print"],
+        stdin=b"the task", timeout=60, repository="owner/repo", github_requested=True,
+        mcp_config_path=None, **kw)  # fmt: skip
+
+
+def test_granted_claude_job_without_mcp_config_is_ineligible(fly_env):
+    with pytest.raises(fly_runner.FlyIneligible,
+                       match="its MCP config could not be provided"):
+        _bare_claude_job(neotoma_tools_granted=True)
+    # A path that the argv does not carry is no slot either.
+    with pytest.raises(fly_runner.FlyIneligible,
+                       match="its MCP config could not be provided"):
+        fly_runner.build_job(
+            provider="claude", role="lanius", cmd=["/opt/homebrew/bin/claude", "--print"],
+            stdin=b"t", timeout=60, repository="owner/repo", github_requested=True,
+            mcp_config_path="/tmp/apis_mcp_x.json", neotoma_tools_granted=True)
+    assert _session(fly_env).requests == []  # refused before asking Neotoma
+
+
+def test_legacy_own_token_claude_job_without_mcp_config_is_ineligible(fly_env, monkeypatch):
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    with pytest.raises(fly_runner.FlyIneligible,
+                       match="its MCP config could not be provided"):
+        _bare_claude_job(neotoma_tools_granted=True)
+
+
+@pytest.mark.parametrize("kw", [
+    {},  # no Neotoma tools granted
+    {"neotoma_tools_granted": True, "owns_pending_gate": True, "github_read_only": True},
+], ids=["not-granted", "seated"])
+def test_no_mcp_slot_is_fine_without_granted_tools_or_when_seated(fly_env, kw):
+    assert _bare_claude_job(**kw).neotoma_mcp == ""
+
+
+def test_admission_is_not_shared_across_neotoma_instances(fly_env):
+    session = _session(fly_env)
+    jwk = _valid_role_jwk()
+    session.answer = {"aauth": {"admitted": True}}
+    assert fly_runner.role_admission("lanius", jwk, "https://a.example.test",
+                                     client=session.client()) == (True, "")
+    session.answer = {"aauth": {"admitted": False, "admission_reason": "no_match"}}
+    assert fly_runner.role_admission("lanius", jwk, "https://b.example.test",
+                                     client=session.client()) == (False, "no_match")
+    assert [r.url.host for r in session.requests] == ["a.example.test", "b.example.test"]
+    # Each instance's own answer stays cached for it.
+    assert fly_runner.role_admission("lanius", jwk, "https://a.example.test/",
+                                     client=session.client()) == (True, "")
+    assert len(session.requests) == 2
+
+
+def test_a_429_is_not_cached_and_is_retried(fly_env):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(429, text="slow down")
+        return httpx.Response(200, json={"aauth": {"admitted": True}})
+
+    def ask():
+        return fly_runner.role_admission(
+            "lanius", _valid_role_jwk(), "https://n.example.test",
+            client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    assert ask() == (False, "Neotoma /session answered 429")
+    assert ask() == (True, "")
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("response", [
+    httpx.Response(200, text="not json"),
+    httpx.Response(200, json=["a", "list"]),
+    httpx.Response(200, json={"aauth": "yes"}),
+    httpx.Response(200, json={"aauth": {"admitted": "true"}}),
+], ids=["not-json", "list", "aauth-not-object", "admitted-not-bool"])
+def test_a_malformed_200_is_refused(fly_env, response):
+    def handler(request):
+        return response
+
+    admitted, reason = fly_runner.role_admission(
+        "lanius", _valid_role_jwk(), "https://n.example.test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert admitted is False
+    assert reason == "Neotoma /session returned no readable admission decision"
+
+
 @pytest.mark.parametrize("kw", [
     {},  # no Neotoma tools granted
     {"neotoma_tools_granted": True, "owns_pending_gate": True, "github_read_only": True},
@@ -1329,6 +1419,26 @@ def test_seam_forced_fly_returns_the_machine_result(fly_env, seam, monkeypatch):
     assert argv[0] == "claude" and fly_runner.MCP_CONFIG_PLACEHOLDER in argv
     assert json.loads(files["/run/job/job.json"])["neotoma_mcp"] == "proxy"
     assert SHARED_BEARER not in _all_request_text(fake)
+
+
+def test_seam_mcp_config_write_failure_refuses_fly_instead_of_running_toolless(
+        fly_env, seam, monkeypatch):
+    spawned, fake_exec = seam
+    real_mkstemp = skill_runner.tempfile.mkstemp
+
+    def failing_mkstemp(*a, **kw):
+        if kw.get("prefix") == "apis_mcp_":
+            raise OSError("injected: no space left on device")
+        return real_mkstemp(*a, **kw)
+
+    monkeypatch.setattr(skill_runner.tempfile, "mkstemp", failing_mkstemp)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: pytest.fail("Fly reached"))
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(runner="fly", repository="owner/repo", github_token="")
+    assert not result.ok and spawned == []
+    assert result.error.startswith("fly runner refused: not eligible for Fly: ")
+    assert "its MCP config could not be provided" in result.error
+    assert _session(fly_env).requests == []
 
 
 def test_seam_key_only_job_without_the_proxy_is_refused_not_run_toolless(

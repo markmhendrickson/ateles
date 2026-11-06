@@ -2010,8 +2010,8 @@ ADMISSION_REFUSED_TTL_SECONDS = 60.0
 ADMISSION_TIMEOUT_SECONDS = 5.0
 # The same short, safe label shape the runner's proxy repeats from Neotoma.
 _SAFE_ADMISSION_REASON = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
-# (role, key thumbprint) -> (expires_at, admitted, reason)
-_ADMISSION_CACHE: dict[tuple[str, str], tuple[float, bool, str]] = {}
+# (role, key thumbprint, Neotoma base URL) -> (expires_at, admitted, reason)
+_ADMISSION_CACHE: dict[tuple[str, str, str], tuple[float, bool, str]] = {}
 _ADMISSION_LOCK = threading.Lock()
 
 
@@ -2034,7 +2034,8 @@ def role_admission(role: str, jwk: dict, base_url: str, *, client: httpx.Client 
     pins it. Asked from the Mac with a signed ``GET /session``, so a job whose
     key would be refused on the runner never launches.
 
-    Returns ``(admitted, reason)``. Cached per role and key: an admission for
+    Returns ``(admitted, reason)``. Cached per role, key and Neotoma instance
+    (*base_url*): an admission for
     ``ADMISSION_ADMITTED_TTL_SECONDS``, a refusal for
     ``ADMISSION_REFUSED_TTL_SECONDS``. A network failure, a 5xx or a 429 is
     never cached. It blocks for up to ``ADMISSION_TIMEOUT_SECONDS``, so an
@@ -2043,7 +2044,8 @@ def role_admission(role: str, jwk: dict, base_url: str, *, client: httpx.Client 
     never header or key material."""
     httpsig = _httpsig()
     try:
-        cache_key = (role, httpsig.jwk_thumbprint(httpsig.public_part_of(jwk)))
+        cache_key = (role, httpsig.jwk_thumbprint(httpsig.public_part_of(jwk)),
+                     base_url.rstrip("/"))
     except (KeyError, httpsig.AAuthSigningError):
         return False, "the role key has no public thumbprint"
     now = clock()
@@ -2245,6 +2247,13 @@ def build_job(
     # legacy own token on Claude. A seated run gets no Neotoma tools on Fly
     # (see `without_neotoma_mcp`), so it is not judged here.
     if neotoma_tools_granted and not owns_pending_gate:
+        # Both paths give the tools through the CLI's MCP config slot, which
+        # `runner_argv` turns into the placeholder the runner fills. A local
+        # config-write failure leaves no slot, and the job would run toolless.
+        if provider == "claude" and not (mcp_config_path and mcp_config_path in cmd[1:]):
+            raise FlyIneligible(
+                f"role {role!r} is granted Neotoma tools but its MCP config could not be "
+                "provided (no --mcp-config slot)")
         if jwk_text:
             if provider not in FLY_NEOTOMA_PROXY_PROVIDERS:
                 raise FlyIneligible(
