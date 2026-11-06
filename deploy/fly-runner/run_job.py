@@ -1060,8 +1060,10 @@ def start_neotoma_proxy(job: Job, ident: tuple[int, int] | None):
     def sign(m, u, b, ct):
         return signer.sign_headers(method=m, url=u, body=b, content_type=ct)
 
-    proxy = module.NeotomaSigningProxy(job.neotoma_base_url, sign, allowed_peer_uid=ident[0])
+    proxy = None
     try:
+        proxy = module.NeotomaSigningProxy(job.neotoma_base_url, sign,
+                                           allowed_peer_uid=ident[0])  # fmt: skip
         port = proxy.start()
         reason = module.health_check(job.neotoma_base_url, sign)
     except Exception as exc:  # noqa: BLE001 — never echo key material

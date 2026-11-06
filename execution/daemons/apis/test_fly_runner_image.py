@@ -567,6 +567,22 @@ class TestNeotomaProxyJob:
         assert not proxy_job.exists()
         assert module.stopped == [True]
 
+    def test_a_proxy_that_cannot_be_built_is_a_recorded_refusal(self, proxy_job, monkeypatch):
+        module = _FakeProxyModule()
+
+        def refuse(*a, **k):
+            raise ValueError("upstream base must be a bare https origin")
+
+        module.NeotomaSigningProxy = refuse
+        _use_proxy(monkeypatch, module)
+        stored = {}
+        rc = run_job.main(
+            proxy_job, writer=lambda b, a, r: stored.setdefault("r", r) is not None,
+            runner=lambda *a, **k: pytest.fail("the CLI must not run"),
+        )  # fmt: skip
+        assert rc == run_job.EXIT_NEOTOMA_UNAVAILABLE
+        assert stored["r"]["refused"] == "Neotoma proxy not healthy: check failed (ValueError)"
+
     def test_without_a_separate_child_uid_the_proxy_never_starts(self, proxy_job, monkeypatch):
         module = _FakeProxyModule()
         _use_proxy(monkeypatch, module, ident=None)
