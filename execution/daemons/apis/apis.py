@@ -4863,6 +4863,200 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             )
 
 
+# ── Stream intake: handle events off the SSE read loop ───────────────────────
+#
+# The shared SSE client awaits each handler before it reads the next event, and
+# `handle_event` can await a whole agent run (task.created → dispatch_task →
+# _finish_dispatch, up to 30 minutes), a producer-scoring agent run before the
+# gate, or an approved checkpoint's re-dispatch. Awaiting that on the stream
+# stopped Apis reading anything, keep-alive pings included, for as long as the
+# run lasted. So the stream callback only ACCEPTS the event and returns; the
+# handling runs as a background task through `_spawn_background`. The shared
+# client is unchanged for every other daemon.
+#
+# What the background handling preserves:
+#   * order: events for one entity run one after another, in arrival order (a
+#     FIFO chain claimed synchronously at acceptance, so a slow read of an early
+#     event cannot let a later one overtake it);
+#   * one dispatch per task at a time: task events and the checkpoint_brief
+#     that releases a task share a per-task lock, held until the handler —
+#     including the agent run it awaits — returns. A brief names its task only
+#     in its snapshot, so it joins that task's queue after its read: it never
+#     runs alongside the task's own events, but it may run before a task event
+#     still queued behind a held one. Every handler re-reads the task, and
+#     dispatch_task's terminal / held / deferred guards decide on that read;
+#   * dedupe: unchanged, `_seen_created` runs inside `handle_event` exactly as it
+#     did inline, and the per-entity chain keeps its check-then-claim sequential;
+#   * a limit: at most _STREAM_CONCURRENCY events that can start work (task
+#     created/due_today, checkpoint_brief) run at once; the rest wait for a free
+#     slot in `_stream_slot()`. The per-dispatch limits (the Fly ledger's
+#     concurrency cap and budget, the harness router) still apply inside each.
+#     Cheap events (task.updated) do not take a slot.
+def _stream_concurrency_from_env() -> int:
+    raw = os.environ.get("APIS_STREAM_CONCURRENCY", "").strip()
+    try:
+        return max(1, int(raw)) if raw else 3
+    except ValueError:
+        log.error(
+            f"[{DAEMON_NAME}] APIS_STREAM_CONCURRENCY={raw!r} is not an integer "
+            "— using 3"
+        )
+        return 3
+
+
+_STREAM_CONCURRENCY = _stream_concurrency_from_env()
+
+_stream_slots: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_stream_tails_by_loop: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_stream_task_locks_by_loop: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _stream_slot() -> asyncio.Semaphore:
+    return _per_loop(_stream_slots, lambda: asyncio.Semaphore(_STREAM_CONCURRENCY))
+
+
+def _stream_tails() -> "dict[str, asyncio.Future[None]]":
+    return _per_loop(_stream_tails_by_loop, dict)
+
+
+def _stream_task_locks() -> "dict[str, list]":
+    # task id -> [lock, users]; dropped when its last user leaves.
+    return _per_loop(_stream_task_locks_by_loop, dict)
+
+
+def _event_can_start_work(event: NeotomaEvent) -> bool:
+    if event.entity_type == "checkpoint_brief":
+        return True
+    return event.entity_type == "task" and event.action in ("created", "due_today")
+
+
+def _stream_task_key(event: NeotomaEvent) -> str:
+    """The task an event can dispatch: the task itself, or the one a brief releases."""
+    if event.entity_type == "checkpoint_brief":
+        task_id = (event.snapshot or {}).get("task_entity_id")
+        if isinstance(task_id, str) and task_id:
+            return task_id
+    return event.entity_id or ""
+
+
+_BRIEF_READ_DELAYS_S = (0.5, 1.0, 2.0)
+
+
+async def _brief_task_id(checkpoint_id: str) -> str:
+    """The task a brief releases, from a fresh read; "" if it cannot be read."""
+    for delay in (0.0, *_BRIEF_READ_DELAYS_S):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            record = await asyncio.to_thread(fetch_checkpoint_record, checkpoint_id)
+        except Exception:  # noqa: BLE001 — an unreadable brief is retried, then left
+            log.warning(
+                f"[{DAEMON_NAME}] reading checkpoint_brief {checkpoint_id} failed",
+                exc_info=True,
+            )
+            record = None
+        task_id = (_record_snapshot(record) or {}).get("task_entity_id")
+        if isinstance(task_id, str) and task_id:
+            return task_id
+    return ""
+
+
+async def _handle_stream_event(
+    event: NeotomaEvent,
+    notifier: Notifier,
+    previous: "asyncio.Future[None] | None",
+    done: "asyncio.Future[None]",
+    chain_key: str,
+) -> None:
+    try:
+        if previous is not None:
+            # shield: cancelling this waiter at shutdown must not cancel the
+            # earlier event's completion marker.
+            await asyncio.shield(previous)
+        # Read before choosing the task lock: a brief names its task only in its
+        # snapshot. hydrate_snapshot is a no-op once filled, so handle_event's
+        # own call does not read again.
+        await hydrate_snapshot(event)
+        task_key = _stream_task_key(event)
+        if event.entity_type == "checkpoint_brief" and task_key == event.entity_id:
+            task_key = await _brief_task_id(event.entity_id)
+            if not task_key:
+                # Without the task id there is no lock to take, and releasing a
+                # task outside its lock could run it twice. handle_checkpoint_brief
+                # would read this same record and do nothing when the read fails,
+                # so this is the inline outcome: the brief stays unstamped and a
+                # later delivery (or the MCP consumer) acts on it.
+                log.error(
+                    f"[{DAEMON_NAME}] checkpoint_brief {event.entity_id} could not "
+                    "be read to find its task — not acting on it; a later "
+                    "delivery will retry"
+                )
+                return
+        locks = _stream_task_locks()
+        entry = locks.setdefault(task_key, [asyncio.Lock(), 0])
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                if _event_can_start_work(event):
+                    async with _stream_slot():
+                        await handle_event(event, notifier)
+                else:
+                    await handle_event(event, notifier)
+        finally:
+            entry[1] -= 1
+            if entry[1] == 0 and locks.get(task_key) is entry:
+                del locks[task_key]
+    except asyncio.CancelledError:
+        log.warning(
+            f"[{DAEMON_NAME}] handling of {event.entity_type}/{event.entity_id} "
+            f"(action={event.action}) was cancelled"
+        )
+        raise
+    except Exception:
+        # The same outcome as an inline handler fault: logged with the entity,
+        # no extra state written. Whatever dispatch_task had already written
+        # (ROUTED, EXECUTING, FAILED) stands, and the watchdog and reconciler
+        # own recovery from there, exactly as after an inline failure.
+        log.exception(
+            f"[{DAEMON_NAME}] handler error for {event.entity_type}/"
+            f"{event.entity_id} (action={event.action})"
+        )
+    finally:
+        if not done.done():
+            done.set_result(None)
+        tails = _stream_tails()
+        if tails.get(chain_key) is done:
+            del tails[chain_key]
+
+
+def accept_stream_event(event: NeotomaEvent, notifier: Notifier) -> None:
+    """Take one SSE event off the stream and handle it in the background.
+
+    Returns at once, so the SSE client goes straight back to reading. The FIFO
+    position for the event's entity is claimed here, synchronously, so arrival
+    order is what decides the handling order for one entity.
+    """
+    chain_key = f"{event.entity_type}/{event.entity_id}"
+    tails = _stream_tails()
+    previous = tails.get(chain_key)
+    done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    tails[chain_key] = done
+    _spawn_background(
+        _handle_stream_event(event, notifier, previous, done, chain_key),
+        f"apis-event-{event.entity_type}-{event.entity_id}-{event.action}",
+    )
+
+
+def make_stream_dispatch(notifier: Notifier):
+    """The callback Apis hands the SSE client: accept the event and return, so
+    handling (which can await a 30-minute agent run) never holds up the read."""
+
+    async def dispatch(event: NeotomaEvent) -> None:
+        accept_stream_event(event, notifier)
+
+    return dispatch
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
@@ -5055,8 +5249,7 @@ async def main() -> None:
         handler_name=DAEMON_NAME,
     )
 
-    async def dispatch(event: NeotomaEvent) -> None:
-        await handle_event(event, notifier)
+    dispatch = make_stream_dispatch(notifier)
 
     # 6. Stall watchdog (task #2): out-of-band sweeper that retries FAILED tasks
     #    with backoff, resumes tasks left mid-flight by a restart, and escalates
