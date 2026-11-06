@@ -455,6 +455,26 @@ def test_the_git_environment_inherits_nothing(monkeypatch, tmp_path):
     assert TOKEN not in str(env)
 
 
+def test_the_runner_git_starts_no_background_maintenance(tmp_path):
+    # Git 2.47+ detaches auto-maintenance after commit and fetch; one still
+    # running when the job removes its work directory fails that cleanup.
+    env = rd.git_env(tmp_path, allow="file")
+    env.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+    trace = tmp_path / "trace"
+    env["GIT_TRACE"] = str(trace)
+    src, dst = tmp_path / "src", tmp_path / "dst.git"
+    for args in (["init", "-q", str(src)], ["init", "-q", "--bare", str(dst)],
+                 ["-C", str(src), "commit", "-q", "--allow-empty", "-m", "x"],
+                 ["-C", str(src), "bundle", "create", "-q", str(tmp_path / "b"), "HEAD"],
+                 ["-C", str(dst), "fetch", "-q", "--no-write-fetch-head", str(tmp_path / "b"),
+                  "HEAD:refs/q"]):
+        assert subprocess.run([rd.GIT, *args], env=env, capture_output=True).returncode == 0
+    traced = trace.read_text()
+    assert "built-in: git commit" in traced and "built-in: git fetch" in traced
+    assert "maintenance" not in traced and "built-in: git gc" not in traced
+
+
 def test_the_origin_repository_is_private_to_root(world):
     assert os.stat(world["work"].origin).st_mode & 0o077 == 0
 
