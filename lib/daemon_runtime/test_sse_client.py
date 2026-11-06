@@ -211,8 +211,10 @@ def _task_event(entity_id: str) -> str:
 
 async def _serve(behaviours):
     """Start a server whose Nth connection runs ``behaviours[N]`` (the last
-    one repeats). Returns (runner, base_url, connection_counter)."""
+    one repeats). Returns (runner, base_url, connection_counter, closing);
+    setting ``closing`` ends every open stream so cleanup is immediate."""
     count = {"n": 0}
+    closing = asyncio.Event()
 
     async def handler(request):
         idx = min(count["n"], len(behaviours) - 1)
@@ -221,10 +223,12 @@ async def _serve(behaviours):
             headers={"Content-Type": "text/event-stream"}
         )
         await resp.prepare(request)
-        try:
-            await behaviours[idx](resp)
-        except (ConnectionResetError, asyncio.CancelledError):
-            pass
+        body = asyncio.ensure_future(behaviours[idx](resp))
+        stop = asyncio.ensure_future(closing.wait())
+        await asyncio.wait({body, stop}, return_when=asyncio.FIRST_COMPLETED)
+        for t in (body, stop):
+            t.cancel()
+        await asyncio.gather(body, stop, return_exceptions=True)
         return resp
 
     app = aiohttp_web.Application()
@@ -234,13 +238,13 @@ async def _serve(behaviours):
     site = aiohttp_web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
-    return runner, f"http://127.0.0.1:{port}", count
+    return runner, f"http://127.0.0.1:{port}", count, closing
 
 
 async def _run_until(behaviours, want: int, *, slow_first=0.0, guard=3.0):
     """Run SSEClient until ``want`` task events arrive (or ``guard`` seconds
     pass). Returns (entity ids received in order, connections opened)."""
-    runner, base, count = await _serve(behaviours)
+    runner, base, count, closing = await _serve(behaviours)
     got: list[str] = []
     done = asyncio.Event()
 
@@ -266,6 +270,7 @@ async def _run_until(behaviours, want: int, *, slow_first=0.0, guard=3.0):
             await task
         except asyncio.CancelledError:
             pass
+        closing.set()
         await runner.cleanup()
     return got, count["n"]
 
