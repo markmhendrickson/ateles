@@ -397,7 +397,7 @@ async def test_watchdog_reconciles_terminal_provenance_without_repeating_effect(
 
     monkeypatch.setattr(apis, "_spawn_harness_skill", execute_effect)
     monkeypatch.setattr(
-        tw, "_query_tasks", lambda _limit: tw.TaskQuery(rows=[("ent_task", snapshot)])
+        tw, "_query_tasks", lambda *_a, **_k: tw.TaskQuery(rows=[("ent_task", snapshot)])
     )
     monkeypatch.setattr(tw, "set_task_status", write_status)
     monkeypatch.setattr(tw, "recover_run_session", lambda **_kwargs: run)

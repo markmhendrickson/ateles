@@ -27,7 +27,7 @@ def _recent(**fields):
 
 def _rows(*rows):
     """A `_query_tasks` fake returning exactly these rows."""
-    return lambda _limit: tw.TaskQuery(rows=list(rows))
+    return lambda *_a, **_k: tw.TaskQuery(rows=list(rows))
 
 
 # ── pure classification ──────────────────────────────────────────────────────
@@ -144,7 +144,7 @@ def test_sweep_leaves_unresolved_verified_effect_without_dispatch(monkeypatch):
 def test_sweep_fail_open_on_query_error(monkeypatch):
     wd = tw.TaskWatchdog()
 
-    def boom(limit):
+    def boom(*_a, **_k):
         raise RuntimeError("query down")
 
     monkeypatch.setattr(tw, "_query_tasks", boom)
@@ -195,9 +195,12 @@ def test_stall_outlasts_a_fly_queue_wait_plus_the_run():
 
 
 class _FakeStore:
-    """A task store behind `httpx.post` that honours the status filter and
-    offset paging the way Neotoma does: rows in entity-id order, a cursor
-    beside `snapshot_filters` refused, an offset past 2000 refused."""
+    """A task store behind `httpx.post` that honours the status filter,
+    sorting and offset paging the way Neotoma does: rows in entity-id order
+    by default, or by `sort_by` in `sort_order` (ties by entity id; an
+    undated row sorts first descending and last ascending, as NULLs do in
+    Postgres); `limit` and `offset` applied after sorting; a cursor beside
+    `snapshot_filters` refused, an offset past 2000 refused."""
 
     def __init__(self, tasks: dict[str, dict]):
         self.tasks = tasks
@@ -216,6 +219,16 @@ class _FakeStore:
         for key, cond in (json.get("snapshot_filters") or {}).items():
             assert cond["op"] == "eq"
             rows = [(e, t) for e, t in rows if t.get(key) == cond["value"]]
+        sort_by = json.get("sort_by", "entity_id")
+        desc = json.get("sort_order", "asc") == "desc"
+        if sort_by != "entity_id":
+            assert sort_by == "last_observation_at", sort_by
+            dated = [r for r in rows if r[1].get(sort_by) is not None]
+            undated = [r for r in rows if r[1].get(sort_by) is None]
+            dated.sort(key=lambda r: tw._parse_ts(r[1][sort_by]), reverse=desc)
+            rows = undated + dated if desc else dated + undated
+        elif desc:
+            rows.reverse()
         offset, limit = json.get("offset", 0), json["limit"]
         page = rows[offset:offset + limit]
         return httpx.Response(200, json={
@@ -332,3 +345,124 @@ def test_paging_stops_at_bound_and_warns(monkeypatch, caplog):
     assert counts["matched"] == 250
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("incomplete" in m and "failed" in m for m in warnings), warnings
+
+
+# ── newest-first reading: the recency window, not the id prefix, is read ─────
+
+
+def _ago(seconds):
+    return tw._iso(time.time() - seconds)
+
+
+def _failed_requests(store):
+    return [r for r in store.requests
+            if r["snapshot_filters"]["status"]["value"] == "failed"]
+
+
+def test_recent_failure_behind_old_backlog_is_retried_first_sweep(monkeypatch):
+    """2,500 old failed tasks sort ahead of one recent failure by id. Read in
+    id order, the five-page bound spent every request on the backlog
+    (red: matched=2501, scanned=2500, skipped_old=2500, retried=0). Read
+    newest first, the recent one is on the first page."""
+    tasks = {f"ent_{i:04d}": {"status": "failed", "last_observation_at": _ago(3 * 86400 + i)}
+             for i in range(2500)}
+    tasks["ent_9999_recent"] = {"status": "failed", "last_observation_at": _ago(300)}
+    store = _store(monkeypatch, tasks)
+    monkeypatch.setattr(tw, "QUERY_LIMIT", 500)
+    monkeypatch.setattr(tw, "MAX_PAGES_PER_STATUS", 5)
+    _status_calls, _notified, dispatched, dispatch_fn = _sweep_env(monkeypatch)
+
+    counts = asyncio.run(tw.TaskWatchdog(stall_seconds=3600).sweep(object(), dispatch_fn))
+
+    assert dispatched == ["ent_9999_recent"]
+    assert counts["retried"] == 1
+    assert counts["matched"] == 2501
+    reqs = _failed_requests(store)
+    assert all(r["sort_by"] == "last_observation_at" and r["sort_order"] == "desc"
+               for r in store.requests)
+    # The first page already ends older than the window: nothing more is read.
+    assert [r.get("offset", 0) for r in reqs] == [0]
+
+
+def test_paging_stops_at_first_page_ending_older_than_bound(monkeypatch):
+    """120 recent and 200 old failures, 50 per page. Pages 1-2 are recent,
+    page 3 ends old, so page 4 is never requested (red: offsets 0..200,
+    the whole safety bound, in id order)."""
+    tasks = {f"ent_r{i:03d}": {"status": "failed", "last_observation_at": _ago(60 + i)}
+             for i in range(120)}
+    tasks.update({f"ent_o{i:03d}": {"status": "failed", "last_observation_at": _ago(3 * 86400 + i)}
+                  for i in range(200)})
+    store = _store(monkeypatch, tasks)
+    monkeypatch.setattr(tw, "QUERY_LIMIT", 50)
+    monkeypatch.setattr(tw, "MAX_PAGES_PER_STATUS", 5)
+    _status_calls, _notified, dispatched, dispatch_fn = _sweep_env(monkeypatch)
+
+    counts = asyncio.run(tw.TaskWatchdog(stall_seconds=3600).sweep(object(), dispatch_fn))
+
+    assert [r.get("offset", 0) for r in _failed_requests(store)] == [0, 50, 100]
+    assert sorted(dispatched) == sorted(f"ent_r{i:03d}" for i in range(120))
+    assert counts["scanned"] == 150 and counts["skipped_old"] == 30
+
+
+def test_more_recent_rows_than_safety_limit_reports_truncated(monkeypatch, caplog):
+    """250 recent failures against a 2 x 50 safety limit: the newest 100 are
+    read and the status is reported truncated (red: the id-ordered read took
+    the 100 OLDEST recent rows, ids being assigned oldest first)."""
+    tasks = {f"ent_{i:04d}": {"status": "failed", "last_observation_at": _ago(10_000 - i * 10)}
+             for i in range(250)}
+    store = _store(monkeypatch, tasks)
+    monkeypatch.setattr(tw, "QUERY_LIMIT", 50)
+    monkeypatch.setattr(tw, "MAX_PAGES_PER_STATUS", 2)
+    _status_calls, _notified, dispatched, dispatch_fn = _sweep_env(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="apis.watchdog"):
+        counts = asyncio.run(tw.TaskWatchdog(stall_seconds=3600).sweep(object(), dispatch_fn))
+
+    assert [r.get("offset", 0) for r in _failed_requests(store)] == [0, 50]
+    assert counts["scanned"] == 100
+    assert sorted(dispatched) == sorted(f"ent_{i:04d}" for i in range(150, 250))
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("incomplete" in m and "failed" in m for m in warnings), warnings
+
+
+def test_all_old_rows_retry_nothing_and_are_not_truncated(monkeypatch, caplog):
+    """300 old failures against a 2 x 50 safety limit: one page is read,
+    nothing is retried and no truncation is reported (red: both pages read
+    and the status reported truncated, though nothing unread could qualify)."""
+    tasks = {f"ent_{i:04d}": {"status": "failed", "last_observation_at": _ago(3 * 86400 + i)}
+             for i in range(300)}
+    store = _store(monkeypatch, tasks)
+    monkeypatch.setattr(tw, "QUERY_LIMIT", 50)
+    monkeypatch.setattr(tw, "MAX_PAGES_PER_STATUS", 2)
+    status_calls, notified, dispatched, dispatch_fn = _sweep_env(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="apis.watchdog"):
+        counts = asyncio.run(tw.TaskWatchdog(stall_seconds=3600).sweep(object(), dispatch_fn))
+
+    assert [r.get("offset", 0) for r in _failed_requests(store)] == [0]
+    assert dispatched == [] and status_calls == [] and notified == []
+    assert counts["skipped_old"] == 50
+    assert not any("incomplete" in r.getMessage() for r in caplog.records)
+
+
+def test_undated_rows_do_not_end_paging_and_are_not_retried(monkeypatch):
+    """A first page of 50 failures with no `last_observation_at` (sorted
+    first descending, as NULLs are) must not stop the read: the recent
+    failure on page 2 is retried and the undated ones are not, as the
+    recency check treats an ageless task as old. (Red: the id-ordered read
+    spent its five pages on 300 old rows and never reached either.)"""
+    tasks = {f"ent_a{i:03d}": {"status": "failed", "last_observation_at": _ago(3 * 86400 + i)}
+             for i in range(300)}
+    tasks.update({f"ent_b{i:03d}": {"status": "failed"} for i in range(50)})
+    tasks["ent_c_recent"] = {"status": "failed", "last_observation_at": _ago(120)}
+    store = _store(monkeypatch, tasks)
+    monkeypatch.setattr(tw, "QUERY_LIMIT", 50)
+    monkeypatch.setattr(tw, "MAX_PAGES_PER_STATUS", 5)
+    status_calls, notified, dispatched, dispatch_fn = _sweep_env(monkeypatch)
+
+    counts = asyncio.run(tw.TaskWatchdog(stall_seconds=3600).sweep(object(), dispatch_fn))
+
+    assert [r.get("offset", 0) for r in _failed_requests(store)] == [0, 50]
+    assert dispatched == ["ent_c_recent"]
+    assert counts["retried"] == 1
+    assert counts["skipped_old"] == 50 + 49

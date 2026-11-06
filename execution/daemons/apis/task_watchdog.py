@@ -18,9 +18,10 @@ SSE loop (no inline sleep in dispatch):
   * everything else   → left alone (terminal, awaiting_approval is operator-owned,
                         blocked already escalated, pending is the SSE create path).
 
-Tasks are read by state: one server-side status filter per watched status,
-paged by offset up to a stated bound (a bound that stops the read is logged at
-WARNING). A failed or stalled task is retried or escalated only when its last
+Tasks are read by state, newest first: one server-side status filter per
+watched status, sorted by ``last_observation_at`` descending and paged by
+offset until the read passes the retry window, up to a stated safety bound (a
+bound that stops the read while still inside the window is logged at WARNING). A failed or stalled task is retried or escalated only when its last
 update is within RETRY_WINDOW_SECONDS (24h by default); older or ageless ones
 are left untouched and counted as ``skipped_old``, so the long-unseen backlog
 is not revived.
@@ -125,6 +126,10 @@ _WATCHED_STATUSES = (
     TaskStatus.VERIFIED.value,
     *sorted(_RETRYABLE_INFLIGHT),
 )
+# Statuses whose retry/escalation is bounded by RETRY_WINDOW_SECONDS, so their
+# newest-first read can stop once it passes the window. VERIFIED is reconciled
+# at any age and is read up to the safety limit only.
+_RECENCY_BOUNDED_STATUSES = frozenset({TaskStatus.FAILED.value, *_RETRYABLE_INFLIGHT})
 
 
 class WatchdogAction(str, Enum):
@@ -149,7 +154,8 @@ class TaskQuery:
 
     ``matched`` is per status: the server's own ``total`` when it reports one,
     otherwise the rows read. ``truncated`` names each status whose paging was
-    stopped by a bound with matching tasks still unread.
+    stopped by the safety bound with matching tasks still unread and, for a
+    recency-bounded status, with its last page still inside the window.
     """
 
     rows: list[tuple[str, dict]] = field(default_factory=list)
@@ -234,7 +240,7 @@ class TaskWatchdog:
             "skipped_old": 0,
         }
         try:
-            tasks = _query_tasks(QUERY_LIMIT)
+            tasks = _query_tasks(QUERY_LIMIT, self.retry_window_seconds)
         except Exception as exc:  # noqa: BLE001 — never let a query error kill the loop
             log.warning("[watchdog] task query failed: %s", exc)
             return counts
@@ -299,7 +305,8 @@ class TaskWatchdog:
         if tasks.truncated:
             log.warning(
                 "[watchdog] sweep incomplete: paging bound (%d pages of %d, max offset %d) "
-                "stopped the read of status %s; matching tasks may remain unread "
+                "stopped the newest-first read of status %s inside the recency window; "
+                "recent matching tasks may remain unread "
                 "(matched=%s, scanned=%d)",
                 MAX_PAGES_PER_STATUS, QUERY_LIMIT, MAX_QUERY_OFFSET,
                 ",".join(tasks.truncated), tasks.matched, counts["scanned"],
@@ -377,29 +384,46 @@ def _notify(notifier, entity_id: str, snapshot: dict, attempts: int) -> None:
         log.warning("[watchdog] notify failed for %s: %s", entity_id, exc)
 
 
-def _query_tasks(limit: int) -> TaskQuery:
-    """Read every task in a watched status, by state, via POST /entities/query.
+def _query_tasks(limit: int, recency_bound_seconds: float | None = None) -> TaskQuery:
+    """Read the tasks in each watched status, newest first, via POST /entities/query.
 
-    One status at a time, filtered server-side with ``snapshot_filters``, each
-    walked by offset (the server refuses a cursor beside filters) until a page
-    comes back short or the page/offset bound is reached. Requests are
-    sequential, never concurrent. Raises on transport error (the caller
+    One status at a time, filtered server-side with ``snapshot_filters`` and
+    sorted by ``last_observation_at`` descending, each walked by offset (the
+    server refuses a cursor beside filters or a non-default sort). Requests
+    are sequential, never concurrent. Raises on transport error (the caller
     swallows it). Returns an empty read when no token.
+
+    For a status whose action is bounded by recency (failed, routed,
+    executing), paging stops at the first page whose oldest dated row is
+    older than ``recency_bound_seconds``: the read is newest first, so no
+    later page can hold a task recent enough to act on. A row with no
+    readable ``last_observation_at`` never ends paging. ``verified`` is
+    reconciled regardless of age, so it is never cut short by recency.
+
+    The page and offset bounds remain a safety limit. A status counts as
+    truncated only when that limit stops its read while the last page still
+    reaches into the recency window (or carries no readable date), the one
+    case where a recent task may be left unread.
     """
     result = TaskQuery()
     if not NEOTOMA_BEARER_TOKEN:
         log.warning("[watchdog] no bearer token — cannot query tasks")
         return result
+    now = time.time()
     seen: set[str] = set()
     for status in _WATCHED_STATUSES:
+        bounded = recency_bound_seconds is not None and status in _RECENCY_BOUNDED_STATUSES
         offset = 0
         read = 0
         total: int | None = None
         stopped_by_bound = False
+        last_page_oldest: float | None = None
         for page_no in range(MAX_PAGES_PER_STATUS):
             body: dict = {
                 "entity_type": "task",
                 "snapshot_filters": {"status": {"op": "eq", "value": status}},
+                "sort_by": "last_observation_at",
+                "sort_order": "desc",
                 "limit": limit,
                 "include_snapshots": True,
             }
@@ -417,22 +441,49 @@ def _query_tasks(limit: int) -> TaskQuery:
                 total = data["total"]
             rows = data.get("entities") or data.get("results") or []
             read += len(rows)
+            ages: list[float] = []
             for row in rows:
                 eid = row.get("entity_id") or row.get("id")
                 snap = _unwrap_snapshot(row)
+                observed = _parse_ts(_row_observed_at(row, snap))
+                if observed is not None:
+                    ages.append(max(0.0, now - observed))
                 if eid and isinstance(snap, dict) and eid not in seen:
                     seen.add(eid)
                     result.rows.append((eid, snap))
+            # Age of the page's oldest dated row; None when no row is dated.
+            last_page_oldest = max(ages) if ages else None
             if len(rows) < limit:
+                break
+            if bounded and last_page_oldest is not None and last_page_oldest > recency_bound_seconds:
                 break
             offset += len(rows)
             if offset > MAX_QUERY_OFFSET or page_no == MAX_PAGES_PER_STATUS - 1:
                 stopped_by_bound = True
                 break
         result.matched[status] = total if total is not None else read
-        if stopped_by_bound and (total is None or total > read):
+        unread = total is None or total > read
+        if bounded:
+            # Old rows past the limit cannot qualify; only a page still in
+            # the window (or undated) leaves a recent task possibly unread.
+            unread = unread and (
+                last_page_oldest is None or last_page_oldest <= recency_bound_seconds
+            )
+        if stopped_by_bound and unread:
             result.truncated.append(status)
     return result
+
+
+def _row_observed_at(row: dict, snap) -> object:
+    """The ``last_observation_at`` the server sorts a row by.
+
+    It is an entity-level stamp, a sibling of ``snapshot`` on the row; a row
+    already flattened into its snapshot carries it there.
+    """
+    stamp = row.get("last_observation_at")
+    if stamp is None and isinstance(snap, dict):
+        stamp = snap.get("last_observation_at")
+    return stamp
 
 
 # Stamps that live at the ROW level of an EntitySnapshot, as siblings of
