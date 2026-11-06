@@ -369,9 +369,13 @@ def test_every_other_agents_high_or_never_prior_still_holds(monkeypatch, agent, 
 @pytest.mark.parametrize(
     "spelling", ["apis", "Apis", " APIS ", "apis@ateles-swarm", "Apis@ateles"]
 )
-def test_dispatcher_assigned_guessed_owner_is_left_as_filed(world, spelling):
-    notifier = _run(_guessed(assigned_to=spelling))
+def test_dispatcher_assigned_guessed_owner_is_left_as_filed(world, spelling, caplog):
+    with caplog.at_level("INFO"):
+        notifier = _run(_guessed(assigned_to=spelling))
     _nothing_happened(world, notifier)
+    # This log line is the only trace the task leaves, so it must stay true for
+    # a task that does name an assignee.
+    assert "no assignee that owns it" in caplog.text
 
 
 def test_dispatcher_assigned_guessed_owner_with_high_action_still_reaches_the_gate(world):

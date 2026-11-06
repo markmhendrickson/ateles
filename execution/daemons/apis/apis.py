@@ -2388,8 +2388,8 @@ async def dispatch_task(
         and _guessed_owner_is_low_stakes(skill, snapshot)
     ):
         log.info(
-            f"[{DAEMON_NAME}] task {entity_id!r} left as filed: no assignee and "
-            f"no stored routable tag, so the owner {skill!r} would only be a "
+            f"[{DAEMON_NAME}] task {entity_id!r} left as filed: no assignee that "
+            f"owns it and no stored routable tag, so the owner {skill!r} would only be a "
             f"guess from its text (trigger={trigger}) — not routing, gating or "
             "notifying"
         )
