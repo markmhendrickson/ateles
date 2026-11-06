@@ -540,6 +540,8 @@ def sweep_world(world, monkeypatch):
 
     monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **k: _ListClient())
     monkeypatch.setattr(sd.SwarmDispatcher, "_github_headers", lambda self, repo=None: {})
+    # The sweep paces itself between PRs; no test should really wait.
+    monkeypatch.setattr(sd.SwarmDispatcher, "_LABELLED_SWEEP_PACE_SECONDS", 0)
     return d, state
 
 
@@ -702,6 +704,241 @@ def test_the_sweep_handles_at_most_twenty_prs(sweep_world, monkeypatch):
     monkeypatch.setattr(sd.SwarmDispatcher, "_handle_pr", handle_pr)
     summary = _run(d.resume_labelled_panels([REPO]))
     assert len(driven) == 20 and summary["capped"] is True
+
+
+# ── a GitHub limit during the sweep is waited out, and what it leaves is retried ──
+
+
+def _gh(status, payload=None, headers=None, text=None):
+    """A real `httpx.Response`, so `raise_for_status` behaves as in production."""
+    request = httpx.Request("GET", "https://api.github.com/x")
+    if text is not None:
+        return httpx.Response(status, headers=headers or {}, text=text, request=request)
+    return httpx.Response(status, headers=headers or {}, json=payload, request=request)
+
+
+class _ScriptedGitHub:
+    """GitHub answering each GET from a per-path script (last answer repeats)."""
+
+    def __init__(self, script):
+        self.script = {k: list(v) for k, v in script.items()}
+        self.calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def get(self, url, headers=None, params=None):
+        assert "Authorization" not in (headers or {})
+        for suffix, answers in self.script.items():
+            if url.endswith(suffix):
+                self.calls.append(suffix)
+                return answers.pop(0) if len(answers) > 1 else answers[0]
+        raise AssertionError(f"unscripted GitHub read: {url}")
+
+
+@pytest.fixture
+def limit_sleeps(monkeypatch):
+    import github_rate_limit
+
+    waits = []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(github_rate_limit, "_sleep", sleep)
+    return waits
+
+
+def test_a_secondary_limit_403_with_retry_after_is_waited_out_and_the_read_succeeds(
+    sweep_world, monkeypatch, limit_sleeps
+):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    limited = _gh(
+        403,
+        {"message": "You have exceeded a secondary rate limit."},
+        headers={"Retry-After": "7", "x-ratelimit-remaining": "4800"},
+    )
+    github = _ScriptedGitHub({"/pulls": [limited, _gh(200, [_labelled_pr()])]})
+    monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **k: github)
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert limit_sleeps == [7.0], "the wait GitHub asked for was honoured"
+    assert github.calls == ["/pulls", "/pulls"], "one retry, then success"
+    assert summary["scanned"] == 1
+    assert state["seated"] == ["lanius"], "the PR's panel ran after the limit"
+    assert d._labelled_repos_due == {}
+
+
+def test_a_plain_permission_403_is_a_logged_failure_and_is_not_retried(
+    sweep_world, monkeypatch, limit_sleeps, caplog
+):
+    import github_rate_limit
+
+    d, state = sweep_world
+    state["gate"] = GREEN
+
+    async def real_comments(self, repository, number, client):
+        return (await self._issue_comments_scan(repository, number, client))[0]
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_lens_scoped_comments", real_comments)
+    refused = _gh(403, {"message": "Resource not accessible by integration"})
+    github = _ScriptedGitHub(
+        {"/pulls": [_gh(200, [_labelled_pr()])], "/comments": [refused]}
+    )
+    monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **k: github)
+    with caplog.at_level(logging.WARNING):
+        summary = _run(d.resume_labelled_panels([REPO]))
+    comment_reads = github.calls.count("/comments")
+    assert 1 <= comment_reads <= github_rate_limit.MAX_ATTEMPTS
+    assert comment_reads == 1 and limit_sleeps == [], "a real refusal is not retried"
+    assert summary["unreadable"] == 1 and summary["finished"] == 0
+    assert state["seated"] == [] and state["gate_reads"] == 0, "never read as green"
+    assert "could not read comments" in caplog.text and "403" in caplog.text
+    assert d._labelled_panels_due == {(REPO, PR): REPO}, "it stays due"
+
+
+def test_a_pr_the_startup_sweep_could_not_read_gets_its_panel_from_the_periodic_step(
+    sweep_world,
+):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    state["comment_error"] = httpx.HTTPStatusError(
+        "403", request=httpx.Request("GET", "u"), response=httpx.Response(403)
+    )
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert summary["unreadable"] == 1 and state["seated"] == []
+    assert (REPO, PR) in d._labelled_panels_due
+
+    # Still limited at the next periodic pass: nothing starts, it stays due.
+    _run(d.retry_due_labelled_panels())
+    assert state["seated"] == [] and (REPO, PR) in d._labelled_panels_due
+
+    state["comment_error"] = None  # the limit clears; no restart happens
+    _run(d.retry_due_labelled_panels())
+    assert state["seated"] == ["lanius"], "the periodic step ran the panel"
+    assert d._labelled_panels_due == {}
+
+
+def test_a_pr_that_never_becomes_readable_is_retried_a_bounded_number_of_times(
+    sweep_world, caplog
+):
+    d, state = sweep_world
+    state["comment_error"] = RuntimeError("gone")
+    _run(d.resume_labelled_panels([REPO]))
+    for _ in range(d._LABELLED_RETRY_MAX_MISSES - 1):
+        _run(d.retry_due_labelled_panels())
+        assert (REPO, PR) in d._labelled_panels_due
+    with caplog.at_level(logging.ERROR):
+        summary = _run(d.retry_due_labelled_panels())
+    assert summary["dropped"] == 1 and d._labelled_panels_due == {}
+    assert "no longer retried" in caplog.text
+    assert state["seated"] == [], "an unreadable PR never counts as green"
+
+
+def test_the_periodic_retry_keeps_due_the_prs_its_cap_did_not_reach(
+    sweep_world, monkeypatch
+):
+    d, state = sweep_world
+    state["list_error"] = RuntimeError("limited")
+    _run(d.resume_labelled_panels([REPO]))
+    assert d._labelled_repos_due == {REPO.casefold(): REPO}
+    state["list_error"] = None
+    state["listed"] = [_labelled_pr(number=n) for n in range(1, 26)]
+    driven = []
+
+    async def handle_pr(self, trigger):
+        driven.append(trigger.number)
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_handle_pr", handle_pr)
+    summary = _run(d.retry_due_labelled_panels())
+    assert summary["capped"] is True and len(driven) == 20
+    assert sorted(n for _, n in d._labelled_panels_due) == [21, 22, 23, 24, 25]
+
+
+def test_the_periodic_retry_runs_on_the_existing_review_sweep_loop():
+    import inspect
+
+    import apis
+
+    src = inspect.getsource(apis.main)
+    loop = src[src.index("async def deferred_review_sweep"):]
+    loop = loop[: loop.index("await asyncio.sleep(deferred_interval)")]
+    assert "retry_due_labelled_panels()" in loop
+
+
+def test_the_periodic_step_starts_no_second_panel_on_a_head_already_running(
+    sweep_world, monkeypatch
+):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    state["comment_error"] = RuntimeError("limited")
+    _run(d.resume_labelled_panels([REPO]))
+    assert (REPO, PR) in d._labelled_panels_due
+    state["comment_error"] = None
+    bodies, release = [], {}
+
+    async def body(self, trigger):
+        bodies.append(trigger.head_sha)
+        await release["event"].wait()
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_handle_pr_body", body)
+
+    async def scenario():
+        release["event"] = asyncio.Event()
+        running = asyncio.create_task(
+            d._handle_pr(d._pr_trigger_from_api(REPO, _labelled_pr()))
+        )
+        await asyncio.sleep(0)  # the webhook-driven panel is now in flight
+        summary = await d.retry_due_labelled_panels()
+        release["event"].set()
+        await running
+        return summary
+
+    summary = _run(scenario())
+    assert bodies == [HEAD], "only the panel already in flight ran"
+    assert summary["running"] == 1 and summary["resumed"] == 0
+    assert d._panels_running == set()
+
+
+def test_the_periodic_step_starts_no_second_panel_on_a_head_already_finished(
+    sweep_world,
+):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    state["comment_error"] = RuntimeError("limited")
+    _run(d.resume_labelled_panels([REPO]))
+    state["comment_error"] = None
+    state["comments"] = [_aggregation_comment()]  # the panel finished meanwhile
+    summary = _run(d.retry_due_labelled_panels())
+    assert state["seated"] == [] and state["gate_reads"] == 0
+    assert summary["finished"] == 1 and d._labelled_panels_due == {}
+
+
+def test_the_sweeps_github_requests_are_sequential_and_paced(sweep_world, monkeypatch):
+    d, state = sweep_world
+    state["listed"] = [_labelled_pr(number=n) for n in (1, 2, 3)]
+    events, in_flight, peak = [], [0], [0]
+
+    async def finished(self, trigger):
+        in_flight[0] += 1
+        peak[0] = max(peak[0], in_flight[0])
+        events.append(f"read {trigger.number}")
+        await asyncio.sleep(0)  # yield: a concurrent sweep would overlap here
+        in_flight[0] -= 1
+        return True
+
+    async def pause(self):
+        events.append("pause")
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_panel_finished_for_pr", finished)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_labelled_sweep_pause", pause)
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert summary["finished"] == 3
+    assert peak[0] == 1, "never two PR reads in flight at once"
+    assert events == ["read 1", "pause", "read 2", "pause", "read 3"]
 
 
 def test_apis_startup_runs_the_sweep_as_a_gather_sibling():

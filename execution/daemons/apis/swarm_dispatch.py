@@ -101,6 +101,7 @@ from review_panel import (
 )
 import build_delivery
 import fly_runner
+import github_rate_limit
 import lens_authors
 import lens_receipts
 import model_tiering
@@ -4538,7 +4539,8 @@ class DispatchConfig:
     #   - handle_trigger: issue_opened and PR (opened/reopened/synchronize/
     #     labeled) webhook deliveries;
     #   - resume_interrupted_pipelines (boot) -> _handle_issue_opened;
-    #   - resume_labelled_panels (boot) -> _handle_pr;
+    #   - resume_labelled_panels (boot) and retry_due_labelled_panels (600s
+    #     loop), both via _resume_one_labelled_panel -> _handle_pr;
     #   - resume_deferred_reviews, resume_stalled_reviews (600s sweep loop)
     #     -> _handle_pr;
     #   - resume_missing_lens_reviews (600s loop) -> one lens re-dispatch;
@@ -4628,6 +4630,20 @@ class SwarmDispatcher:
         # `_handle_pr` and on any hold, so it only ever names a reading taken
         # in the current panel run; see `_checks_green_head`.
         self._panel_checks_green: dict[tuple[str, int], str] = {}
+        # Labelled PRs (and repositories whose PR list failed) the startup panel
+        # sweep could not read, keyed by casefolded repository (and PR number);
+        # the value is the repository as configured. They stay due until a
+        # read succeeds: `retry_due_labelled_panels`, on the review-sweep
+        # cadence, tries them again without waiting for a restart.
+        self._labelled_panels_due: dict[tuple[str, int], str] = {}
+        self._labelled_repos_due: dict[str, str] = {}
+        # Consecutive retry passes each due PR stayed unreadable; bounded by
+        # `_LABELLED_RETRY_MAX_MISSES`.
+        self._labelled_retry_misses: dict[tuple[str, int], int] = {}
+        # (casefolded repository, PR number, head SHA) of every `_handle_pr`
+        # run in flight in this process, so a retry never seats a second panel
+        # on a head whose panel is already running.
+        self._panels_running: set[tuple[str, int, str]] = set()
         # (source, "owner/repo#N") pairs whose label-gate skip has already been
         # logged at WARNING by a periodic sweep — see `_label_gate_log`.
         self._label_gate_warned: set[tuple[str, str]] = set()
@@ -5348,6 +5364,11 @@ class SwarmDispatcher:
 
     # At most this many labelled PRs are examined by one startup panel sweep.
     _STARTUP_PANEL_SWEEP_MAX = 20
+    # Gap between two PRs in the labelled panel sweeps (startup and retry).
+    _LABELLED_SWEEP_PACE_SECONDS = 1.0
+    # Retry passes (600s apart by default) a due PR may stay unreadable
+    # before the retry stops asking for it.
+    _LABELLED_RETRY_MAX_MISSES = 6
 
     async def resume_labelled_panels(self, repositories: list[str]) -> dict:
         """Restore review panels a restart dropped, once, at startup.
@@ -5370,10 +5391,14 @@ class SwarmDispatcher:
         with green checks runs its panel.
 
         PRs are handled one at a time, at most `_STARTUP_PANEL_SWEEP_MAX` per
-        sweep. It never adds a label and never admits a PR the gate would not:
-        each candidate still passes `_label_gate_allows`. A GitHub read that
-        fails leaves that repository or PR alone. Never raises: a failed sweep
-        must not stop Apis from starting.
+        sweep, with `_LABELLED_SWEEP_PACE_SECONDS` between two PRs so the sweep
+        adds no burst of its own. It never adds a label and never admits a PR
+        the gate would not: each candidate still passes `_label_gate_allows`.
+        Reads go through `_github_get`, which waits out a GitHub temporary
+        limit. A read that still fails starts nothing and leaves that
+        repository or PR due: `retry_due_labelled_panels` tries it again on the
+        review-sweep cadence. Never raises: a failed sweep must not stop Apis
+        from starting.
         """
         summary = {
             "scanned": 0, "resumed": 0, "finished": 0, "unreadable": 0,
@@ -5396,11 +5421,14 @@ class SwarmDispatcher:
             try:
                 prs = await self._open_labelled_prs(repository, label)
             except Exception as exc:  # noqa: BLE001
+                self._labelled_repos_due[repository.casefold()] = repository
                 log.warning(
                     f"[{DAEMON_NAME}] startup panel sweep: could not list open "
-                    f"PRs in {repository} ({exc}) — leaving them alone"
+                    f"PRs in {repository} ({exc}) — leaving them due for the "
+                    "periodic retry"
                 )
                 continue
+            self._labelled_repos_due.pop(repository.casefold(), None)
             for pr in prs:
                 if summary["scanned"] >= self._STARTUP_PANEL_SWEEP_MAX:
                     summary["capped"] = True
@@ -5410,40 +5438,172 @@ class SwarmDispatcher:
                         "rest wait for their next event or the review sweeps"
                     )
                     break
+                if summary["scanned"]:
+                    # Pace the sweep: one PR at a time, a short gap between
+                    # them, so a burst of restarts does not add a burst of
+                    # reads on top of the other startup work.
+                    await self._labelled_sweep_pause()
                 summary["scanned"] += 1
-                ref = f"{repository}#{pr.get('number')}"
-                try:
-                    trigger = dataclasses.replace(
-                        self._pr_trigger_from_api(repository, pr),
-                        delivery_id=f"startup-panel-resume-{pr.get('number')}",
-                    )
-                    if not await self._label_gate_allows(
-                        trigger, source="resume_labelled_panels"
-                    ):
-                        continue
-                    finished = await self._panel_finished_for_pr(trigger)
-                    if finished is None:
-                        summary["unreadable"] += 1
-                        continue
-                    if finished:
-                        summary["finished"] += 1
-                        continue
-                    log.info(
-                        f"[{DAEMON_NAME}] startup panel sweep: {ref} head "
-                        f"{trigger.head_sha[:9]} has no finished panel — "
-                        "re-entering review"
-                    )
-                    await self._handle_pr(trigger)
-                    summary["resumed"] += 1
-                except Exception as exc:  # noqa: BLE001
-                    summary["failed"] += 1
-                    log.error(
-                        f"[{DAEMON_NAME}] startup panel sweep: {ref} failed "
-                        f"({exc})",
-                        exc_info=True,
-                    )
+                await self._resume_one_labelled_panel(
+                    repository, pr, summary, source="startup panel sweep"
+                )
         log.info(f"[{DAEMON_NAME}] startup panel sweep: {summary}")
         return summary
+
+    async def _labelled_sweep_pause(self) -> None:
+        await asyncio.sleep(self._LABELLED_SWEEP_PACE_SECONDS)
+
+    async def _resume_one_labelled_panel(
+        self, repository: str, pr: dict, summary: dict, *, source: str
+    ) -> None:
+        """Re-enter review for one labelled PR whose head has no finished panel.
+
+        Shared by the startup sweep and `retry_due_labelled_panels`. An
+        unreadable PR is recorded in `_labelled_panels_due` (never counted as
+        finished or green); any readable outcome clears it. A head whose panel
+        is already running in this process is left to that run. Never raises.
+        """
+        number = pr.get("number")
+        ref = f"{repository}#{number}"
+        due_key = (repository.casefold(), number)
+        try:
+            trigger = dataclasses.replace(
+                self._pr_trigger_from_api(repository, pr),
+                delivery_id=f"startup-panel-resume-{number}",
+            )
+            if not await self._label_gate_allows(
+                trigger, source="resume_labelled_panels"
+            ):
+                self._labelled_panels_due.pop(due_key, None)
+                return
+            if self._panel_run_key(trigger) in self._panels_running:
+                summary["running"] = summary.get("running", 0) + 1
+                self._labelled_panels_due.pop(due_key, None)
+                return
+            finished = await self._panel_finished_for_pr(trigger)
+            if finished is None:
+                summary["unreadable"] += 1
+                self._labelled_panels_due[due_key] = repository
+                return
+            self._labelled_panels_due.pop(due_key, None)
+            if finished:
+                summary["finished"] += 1
+                return
+            if self._panel_run_key(trigger) in self._panels_running:
+                # A panel started at this head while the comments were read.
+                summary["running"] = summary.get("running", 0) + 1
+                return
+            log.info(
+                f"[{DAEMON_NAME}] {source}: {ref} head "
+                f"{trigger.head_sha[:9]} has no finished panel — "
+                "re-entering review"
+            )
+            await self._handle_pr(trigger)
+            summary["resumed"] += 1
+        except Exception as exc:  # noqa: BLE001
+            summary["failed"] += 1
+            log.error(
+                f"[{DAEMON_NAME}] {source}: {ref} failed ({exc})",
+                exc_info=True,
+            )
+
+    async def retry_due_labelled_panels(self) -> dict:
+        """Try again the labelled PRs the startup sweep could not read.
+
+        Runs on the existing review-sweep cadence (`deferred_review_sweep` in
+        apis.py), so a PR the startup sweep left unreadable during a GitHub
+        limit gets its panel once reads work, without waiting for a restart.
+        With nothing due it makes no GitHub request. A repository whose PR list
+        failed is listed again; a single due PR is fetched again and must still
+        be open, non-draft and labelled. Each goes through
+        `_resume_one_labelled_panel`, so a head whose panel is running or
+        finished is left alone, and a PR still unreadable stays due. Never
+        raises.
+        """
+        summary = {
+            "scanned": 0, "resumed": 0, "finished": 0, "unreadable": 0,
+            "failed": 0, "capped": False,
+        }
+        label = self.config.require_label
+        if not label or not (self._labelled_panels_due or self._labelled_repos_due):
+            return summary
+        candidates: list[tuple[str, dict]] = []
+        for key, repository in list(self._labelled_repos_due.items()):
+            try:
+                prs = await self._open_labelled_prs(repository, label)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    f"[{DAEMON_NAME}] labelled panel retry: still cannot list "
+                    f"open PRs in {repository} ({exc}) — still due"
+                )
+                continue
+            self._labelled_repos_due.pop(key, None)
+            candidates.extend((repository, pr) for pr in prs)
+        listed = {(repo.casefold(), pr.get("number")) for repo, pr in candidates}
+        attempted = set(self._labelled_panels_due)
+        for (repo_key, number), repository in list(self._labelled_panels_due.items()):
+            if (repo_key, number) in listed:
+                continue
+            pr = await self._fetch_pr(repository, number)
+            if not isinstance(pr, dict):
+                summary["unreadable"] += 1
+                continue  # still due
+            if (
+                pr.get("state") != "open"
+                or pr.get("draft")
+                or not _label_gate.carries_label(label, _label_names(pr))
+            ):
+                self._labelled_panels_due.pop((repo_key, number), None)
+                continue
+            candidates.append((repository, pr))
+        for index, (repository, pr) in enumerate(candidates):
+            if summary["scanned"] >= self._STARTUP_PANEL_SWEEP_MAX:
+                summary["capped"] = True
+                # Not reached this pass: keep them due for the next one.
+                for rest_repo, rest_pr in candidates[index:]:
+                    self._labelled_panels_due[
+                        (rest_repo.casefold(), rest_pr.get("number"))
+                    ] = rest_repo
+                break
+            if summary["scanned"]:
+                await self._labelled_sweep_pause()
+            summary["scanned"] += 1
+            await self._resume_one_labelled_panel(
+                repository, pr, summary, source="labelled panel retry"
+            )
+        self._count_labelled_retry_misses(attempted, summary)
+        log.info(f"[{DAEMON_NAME}] labelled panel retry: {summary}")
+        return summary
+
+    def _count_labelled_retry_misses(
+        self, attempted: set[tuple[str, int]], summary: dict
+    ) -> None:
+        """Bound the retry: a PR still unreadable after
+        `_LABELLED_RETRY_MAX_MISSES` passes is dropped, logged at ERROR.
+
+        A temporary limit clears in minutes; a PR deleted or no longer readable
+        by the swarm never does, and without a bound it would be requested every
+        pass for the life of the process. A dropped PR is still recovered by its
+        next event or the next restart's sweep.
+        """
+        for key in list(self._labelled_retry_misses):
+            if key not in self._labelled_panels_due:
+                self._labelled_retry_misses.pop(key, None)
+        for key in attempted:
+            if key not in self._labelled_panels_due:
+                continue
+            misses = self._labelled_retry_misses.get(key, 0) + 1
+            if misses < self._LABELLED_RETRY_MAX_MISSES:
+                self._labelled_retry_misses[key] = misses
+                continue
+            repository = self._labelled_panels_due.pop(key)
+            self._labelled_retry_misses.pop(key, None)
+            summary["dropped"] = summary.get("dropped", 0) + 1
+            log.error(
+                f"[{DAEMON_NAME}] labelled panel retry: {repository}#{key[1]} "
+                f"still unreadable after {misses} passes — no longer retried; "
+                "its next event or restart will look at it again"
+            )
 
     async def _open_labelled_prs(self, repository: str, label: str) -> list[dict]:
         """Open, non-draft PRs in `repository` carrying `label` on the PR itself.
@@ -5457,10 +5617,11 @@ class SwarmDispatcher:
         alone.
         """
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
+            resp = await self._github_get(
+                client,
                 f"https://api.github.com/repos/{repository}/pulls",
+                repository,
                 params={"state": "open", "per_page": 100},
-                headers=self._github_headers(repository),
             )
             resp.raise_for_status()
             prs = resp.json() or []
@@ -8031,6 +8192,29 @@ class SwarmDispatcher:
         return head if head and green == head else ""
 
     async def _handle_pr(self, trigger: SwarmTrigger) -> None:
+        """Run the PR review entrance, recording the head while it runs.
+
+        `_panels_running` is what lets `retry_due_labelled_panels` see a panel
+        already in flight at a head; the body is `_handle_pr_body`.
+        """
+        key = self._panel_run_key(trigger)
+        added = key is not None and key not in self._panels_running
+        if added:
+            self._panels_running.add(key)
+        try:
+            await self._handle_pr_body(trigger)
+        finally:
+            if added:
+                self._panels_running.discard(key)
+
+    @staticmethod
+    def _panel_run_key(trigger: SwarmTrigger) -> tuple[str, int, str] | None:
+        head = _normalise_full_sha(trigger.head_sha or "")
+        if not head or not trigger.number:
+            return None
+        return (trigger.repository.casefold(), int(trigger.number), head)
+
+    async def _handle_pr_body(self, trigger: SwarmTrigger) -> None:
         ref = f"{trigger.repository}#{trigger.number}"
         # A green reading belongs to one panel run: never carry an earlier
         # run's reading into this one.
@@ -11364,10 +11548,8 @@ class SwarmDispatcher:
         url = f"https://api.github.com/repos/{repository}/pulls/{number}/reviews"
         out: list[dict] = []
         for page in range(1, _MAX_COMMENT_PAGES + 1):
-            resp = await client.get(
-                url,
-                params={"per_page": 100, "page": page},
-                headers=self._github_headers(repository),
+            resp = await self._github_get(
+                client, url, repository, params={"per_page": 100, "page": page}
             )
             resp.raise_for_status()
             batch = resp.json()
@@ -11632,10 +11814,8 @@ class SwarmDispatcher:
         complete = True
         page = 1
         while page <= _MAX_COMMENT_PAGES:
-            resp = await client.get(
-                url,
-                params={"per_page": 100, "page": page},
-                headers=self._github_headers(repository),
+            resp = await self._github_get(
+                client, url, repository, params={"per_page": 100, "page": page}
             )
             resp.raise_for_status()
             batch = resp.json()
@@ -11830,9 +12010,7 @@ class SwarmDispatcher:
         url = f"https://api.github.com/repos/{repository}/pulls/{pr_number}"
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    url, headers=self._github_headers(repository)
-                )
+                resp = await self._github_get(client, url, repository)
                 resp.raise_for_status()
                 return resp.json()
         except Exception as exc:
@@ -13990,6 +14168,24 @@ class SwarmDispatcher:
             headers["Authorization"] = f"Bearer {token}"
         return headers
 
+    async def _github_get(
+        self, client: httpx.AsyncClient, url: str, repo: str, **kwargs
+    ):
+        """Send one repo-scoped GitHub read, waiting out a temporary limit.
+
+        The shared read path for the reads the review panel depends on (the
+        open-PR list, the comment and review scans, the changed files, the PR
+        itself). A 403 or 429 that GitHub marks as a temporary limit
+        (``Retry-After``, a secondary-limit message, an exhausted quota) is
+        resent after the wait GitHub names, or a bounded backoff, at most
+        `github_rate_limit.MAX_ATTEMPTS` sends; see `github_rate_limit`. A plain
+        403 is a real refusal and is returned at once. Returns the response, so
+        each caller keeps its own ``raise_for_status`` failure posture.
+        """
+        return await github_rate_limit.send_with_limit_retry(
+            client.get, url, headers=self._github_headers(repo), **kwargs
+        )
+
     async def _github_write(
         self, client: httpx.AsyncClient, method: str, url: str, repo: str, **kwargs
     ):
@@ -14037,7 +14233,7 @@ class SwarmDispatcher:
         )
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(url, headers=self._github_headers(t.repository))
+                resp = await self._github_get(client, url, t.repository)
                 resp.raise_for_status()
                 return [f["filename"] for f in resp.json()]
         except Exception as exc:
