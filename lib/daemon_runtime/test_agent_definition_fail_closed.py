@@ -882,85 +882,67 @@ def test_actual_signed_preparation_is_bounded_and_reaped_for_loader(monkeypatch)
     assert {child.pid for child in multiprocessing.active_children()} <= before
 
 
-# ── a slow list query: read the definition by its known id first ─────────────
+# ── a daemon's own startup waits longer for a slow Neotoma ───────────────────
+#
+# Startup (``load_agent_definition_or_exit``) loads under ``STARTUP_LOAD_BUDGET``:
+# 150 s in total, 30 s per request and growing waits. Every other load keeps the
+# 25 s deadline. The definition is still found only by the list query, which
+# refuses unless exactly one definition carries the name.
 
 
-def _write_doc(tmp_path, name="pavo", entity_id="ent_known"):
-    docs = tmp_path / "agents"
-    docs.mkdir()
-    (docs / f"{name}.md").write_text(
-        "<!-- generated -->\n\n---\n"
-        f"entity_id: {entity_id}\nentity_type: agent_definition\nname: {name}\n"
-        "status: active\n---\n\n# body\n",
-        encoding="utf-8",
-    )
-    return docs
+def test_startup_outlasts_list_query_timeouts_and_loads_the_definition(neotoma):
+    """Today's limits give up after three attempts; startup keeps going."""
+    neotoma["script"] = ["timeout", "timeout", "timeout", "real"]
 
-
-def test_a_daemon_starts_on_its_known_id_when_the_list_query_times_out(
-    neotoma, monkeypatch, tmp_path
-):
-    """Hosted Neotoma overloaded: list queries time out, a single-record read works."""
-    monkeypatch.setattr(al, "AGENT_DOCS_DIR", _write_doc(tmp_path))
-    neotoma["script"] = ["timeout"]  # every list query times out
-    gets = []
-
-    def get(url, **kwargs):
-        gets.append(url)
-        return _Resp({"snapshot": REAL["entities"][0]["snapshot"]})
-
-    monkeypatch.setattr(al.httpx, "get", get)
     d = al.load_agent_definition_or_exit("pavo")
-    assert d.entity_id == "ent_known"
-    assert d.prompt_markdown == "# the real role prompt"
+
+    assert d.entity_id == "ent_real"
     assert d.tools == ["Read", "Bash(gh pr:*)"]
-    assert gets == [f"{al.NEOTOMA_BASE_URL}/entities/ent_known"]
-    assert neotoma["calls"] == 0  # no list query was added to the overloaded server
+    assert neotoma["calls"] == 4
+    assert neotoma["sleeps"] == [1.0, 2.0, 4.0]
 
 
-def test_a_daemon_still_refuses_when_the_known_id_read_and_the_list_query_both_fail(
-    neotoma, monkeypatch, tmp_path
-):
-    monkeypatch.setattr(al, "AGENT_DOCS_DIR", _write_doc(tmp_path))
-    neotoma["script"] = ["timeout"]
+def test_startup_still_refuses_two_definitions_with_the_same_name(neotoma, monkeypatch):
+    twin = {
+        "entity_id": "ent_twin",
+        "snapshot": dict(REAL["entities"][0]["snapshot"], tool_allowlist=["*"]),
+    }
+    calls = {"n": 0}
 
-    def get(url, **kwargs):
-        raise httpx.ReadTimeout("timed out")
+    def post(url, **kwargs):
+        calls["n"] += 1
+        return _Resp({"entities": [REAL["entities"][0], twin]})
 
-    monkeypatch.setattr(al.httpx, "get", get)
+    monkeypatch.setattr(al.httpx, "post", post)
     with pytest.raises(SystemExit) as raised:
         al.load_agent_definition_or_exit("pavo")
     assert raised.value.code == 1
-    assert neotoma["calls"] >= 1  # the list query was tried after the id read failed
+    assert calls["n"] == 1  # an unreadable answer is final, not retried
 
 
-def test_a_stale_known_id_falls_back_to_the_list_query(neotoma, monkeypatch, tmp_path):
-    """An id that now resolves to another agent's definition is not trusted."""
-    monkeypatch.setattr(al, "AGENT_DOCS_DIR", _write_doc(tmp_path))
-    neotoma["script"] = ["real"]
-    other = dict(REAL["entities"][0]["snapshot"], name="corvus")
-    monkeypatch.setattr(al.httpx, "get", lambda url, **kw: _Resp({"snapshot": other}))
-    d = AgentLoader("pavo").load()
-    assert d.entity_id == "ent_real" and neotoma["calls"] == 1
+def test_startup_that_never_gets_an_answer_refuses_after_the_longer_budget(monkeypatch):
+    clock = _VClock()
+    _virtual(monkeypatch, clock, [HANG])
+
+    with pytest.raises(SystemExit) as raised:
+        al.load_agent_definition_or_exit("pavo")
+
+    assert raised.value.code == 1
+    # 30 + 1 + 30 + 2 + 30 + 4 + 30 + 8 = 135 s, then the 15 s that are left.
+    assert [t for t, _ in clock.launched] == [30.0, 30.0, 30.0, 30.0, 15.0]
+    assert clock.elapsed == pytest.approx(150.0)
 
 
-@pytest.mark.parametrize(
-    "frontmatter",
-    [
-        "entity_id: ent_known\nentity_type: agent_definition\nname: corvus\n",
-        "entity_id: ent_known\nentity_type: agent_policy\nname: pavo\n",
-        "entity_id: ../../etc\nentity_type: agent_definition\nname: pavo\n",
-        "entity_type: agent_definition\nname: pavo\n",
-    ],
-)
-def test_a_doc_that_does_not_name_this_definition_gives_no_known_id(tmp_path, frontmatter):
-    (tmp_path / "pavo.md").write_text(f"---\n{frontmatter}---\n", encoding="utf-8")
-    assert al.known_definition_id("pavo", tmp_path) == ""
+def test_a_load_outside_startup_keeps_the_25_second_deadline(monkeypatch):
+    clock = _VClock()
+    _virtual(monkeypatch, clock, [HANG])
+    with pytest.raises(SystemExit):
+        al.load_agent_definition_or_exit("pavo")
 
+    clock.launched.clear()
+    clock.now = clock.start = 10_000.0
+    with pytest.raises(AgentDefinitionUnavailable):
+        AgentLoader("pavo").load()
 
-def test_the_committed_docs_record_each_daemon_definition_id():
-    """The real generated docs carry the id the loader reads (no fixture)."""
-    import pathlib
-
-    docs = pathlib.Path(__file__).resolve().parents[2] / "docs" / "agents"
-    assert al.known_definition_id("apis", docs).startswith("ent_")
+    assert [t for t, _ in clock.launched] == [10.0, 10.0, 3.0]
+    assert clock.elapsed == pytest.approx(25.0)

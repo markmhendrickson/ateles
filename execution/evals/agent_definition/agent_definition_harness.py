@@ -34,6 +34,7 @@ Synthetic and public-safe: no key, no token, no operator data.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import sys
@@ -124,9 +125,6 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
         mp.setenv("APIS_USAGE_PROBE", "off")
         mp.setattr(al.ns, "via_cli_enabled", lambda: False)
         mp.setattr(al, "NEOTOMA_BEARER_TOKEN", "eval-token-not-real")
-        # Scenarios script the list-query route; keep the committed agent docs'
-        # known ids out of them (a nonexistent dir means "no known id").
-        mp.setattr(al, "AGENT_DOCS_DIR", al.Path("/nonexistent/ateles-eval-agent-docs"))
         def _sleep(seconds):
             obs["sleeps"].append(seconds)
             vclock["now"] += seconds
@@ -235,6 +233,7 @@ def run_scenario(scenario: dict, *, mutation: str = "none") -> dict:
             mp.setattr(al.AgentLoader, "_accept_bearer", lenient_bearer)
         if mutation == "no_retry":
             mp.setattr(al, "LOAD_BACKOFFS_S", ())
+            mp.setattr(al, "STARTUP_LOAD_BUDGET", dataclasses.replace(al.STARTUP_LOAD_BUDGET, backoffs_s=()))
         if mutation == "retry_rejected":
             mp.setattr(al, "_RETRYABLE_LOAD_CODES", al._RETRYABLE_LOAD_CODES | {"rejected"})
 
