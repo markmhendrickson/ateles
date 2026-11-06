@@ -264,6 +264,53 @@ def test_task_checks_flag_overdue_and_blocked_soon_only():
     ]
 
 
+def test_session_owned_task_due_today_is_flagged():
+    rows = [
+        task(1, "2026-11-04", assigned_to="Codex session billing"),
+        task(2, "2026-11-04", owner="Codex coordinator chat0a1b2c3d"),
+    ]
+    findings, _ = cdc.check_tasks(pager(rows), NOW)
+    assert [f.key for f in findings] == [
+        f"{cdc.KEY_PREFIX}:task-due:ent_1",
+        f"{cdc.KEY_PREFIX}:task-due:ent_2",
+    ]
+    for f in findings:
+        assert "session" in f.message and "Codex" not in f.message
+        assert "chat0a1b2c3d" not in f.message and f.needs_operator is False
+
+
+def test_session_task_assigned_to_the_dispatcher_is_flagged_when_due_today():
+    # The dispatcher leaves this task as filed, so this finding is its only signal.
+    rows = [
+        task(1, "2026-11-04", assigned_to="apis", owner="Codex session"),
+        task(2, "2026-11-04", assigned_to="Apis@ateles-swarm", owner="ateles session"),
+        task(3, "2026-11-04", assigned_to="apis", owner="Jane Doe"),
+        task(4, "2026-11-04", assigned_to="apis"),
+    ]
+    findings, _ = cdc.check_tasks(pager(rows), NOW)
+    assert [f.key for f in findings] == [
+        f"{cdc.KEY_PREFIX}:task-due:ent_1",
+        f"{cdc.KEY_PREFIX}:task-due:ent_2",
+    ]
+
+
+def test_task_due_today_without_a_session_owner_gets_no_due_finding():
+    rows = [
+        task(1, "2026-11-04", assigned_to="cicada"),
+        task(2, "2026-11-04", assigned_to="Jane Doe", owner="Codex session"),
+        task(3, "2026-11-04", owner="operator"),
+        task(4, "2026-11-04"),
+        task(5, "2026-11-08", owner="Codex session"),  # not today
+    ]
+    assert cdc.check_tasks(pager(rows), NOW)[0] == []
+
+
+def test_blocked_session_task_due_today_is_blocked_only_not_duplicated():
+    rows = [task(1, "2026-11-04", status="blocked", owner="Codex session")]
+    findings, _ = cdc.check_tasks(pager(rows), NOW)
+    assert [f.key.split(":")[-2] for f in findings] == ["task-blocked"]
+
+
 def test_task_reads_are_bounded():
     calls = []
 
