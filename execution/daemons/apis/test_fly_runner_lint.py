@@ -36,6 +36,8 @@ ALLOWLIST: dict[str, str] = {
         'legacy new-delivery schema has no existing head; exact-key validation requires a nonempty valid head with pr_number',
     "execution/daemons/apis/fly_runner.py:FlyLedger.reserve_delivery.write.keys:row.get('associated_keys', [])":
         'legacy receipt owns its primary key without aliases; present malformed associations refuse before writing',
+    "execution/daemons/apis/fly_runner.py:FlyLedger.supersede_delivery.keys:row.get('associated_keys', [])":
+        'legacy receipt owns its primary key without aliases; present malformed associations refuse before superseding',
     "execution/daemons/apis/fly_runner.py:FlyLedger._snapshot:raw.get('deliveries', {})":
         'an older pre-delivery ledger has no bindings; present malformed bindings fail closed',
 
