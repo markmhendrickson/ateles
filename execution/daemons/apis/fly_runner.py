@@ -180,6 +180,19 @@ class FlyApiError(Exception):
         safe = redact_nonces(_OPAQUE_RUN.sub("[redacted]", str(message)))[:200]
         super().__init__(f"Fly API HTTP {status}: {safe}")
         self.status = status
+        self.detail = safe  # Fly's own text, already redacted and capped
+
+
+def fly_refusal_reason(detail: str) -> str:
+    """A label from a closed set for Fly's refusal text, so a log line or
+    refusal message can say why without carrying Fly's own words (which
+    could echo something secret the redaction above missed)."""
+    text = str(detail).lower()
+    if "insufficient memory" in text or "overcommit" in text:
+        return "host_memory"
+    if "version" in text:  # also covers "current_version"
+        return "version_conflict"
+    return "other"
 
 
 class FlyLeaseBusy(FlyApiError):
@@ -3051,20 +3064,22 @@ class FlyExecutor:
         ``SCRUB_RETRY_SECONDS``, every attempt from a fresh read, version and
         ownership check; without it (the reaper, a launch reconciling the
         machine, the periodic step) one attempt is made per call. Each
-        refusal is logged with its status and Fly's text only."""
+        refusal is logged with its status and a reason label
+        (``fly_refusal_reason``) only, never Fly's text."""
         delays = SCRUB_RETRY_SECONDS if pause is not None else ()
         for attempt in range(len(delays) + 1):
             try:
                 return await self._scrub_once(machine_id, run_id, nonce)
             except _ScrubRefused as refused:
                 exc = refused.error
-                # Only the status and Fly's (already redacted) error text: never
+                # Only the status and a closed-set reason label: never Fly's
+                # own text (which could echo something the redaction missed),
                 # the request body or the config, which carry the job's files.
-                text = str(exc)[:SCRUB_REFUSAL_TEXT_LIMIT]
+                reason = fly_refusal_reason(exc.detail)
                 last = attempt == len(delays)
                 log.warning(
                     f"[fly] run={run_id} login machine {machine_id} refused the clean-up "
-                    f"update (attempt {attempt + 1}, status {exc.status}): {text}"
+                    f"update (attempt {attempt + 1}, status {exc.status}, reason {reason})"
                     + ("; giving up" if last else f"; retrying in {delays[attempt]:g}s")
                 )
                 if last:
@@ -3701,8 +3716,6 @@ LOGIN_CLAIM_RETRY_SECONDS = 1.0
 # during each pause. The reaper and the periodic step make one attempt per
 # pass.
 SCRUB_RETRY_SECONDS = (2.0, 5.0, 15.0, 30.0, 60.0)
-# How much of Fly's error text a refused clean-up update logs.
-SCRUB_REFUSAL_TEXT_LIMIT = 300
 # A short lease taken only to clear a stopped login machine whose run's own
 # lease has expired (recovery of an unconfirmed reservation).
 LOGIN_CLEANUP_LEASE_TTL = 120

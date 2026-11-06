@@ -2607,7 +2607,8 @@ def test_scrub_gives_up_after_its_bound(fly_env, monkeypatch, caplog):
     refusals = [r.getMessage() for r in caplog.records
                 if r.levelno == logging.WARNING and "refused the clean-up update" in r.getMessage()]
     assert len(refusals) == seen["scrubs"]
-    assert all("status 412" in m and "insufficient memory available" in m for m in refusals)
+    assert all("status 412" in m and "reason host_memory" in m for m in refusals)
+    assert "insufficient memory available" not in caplog.text  # Fly's own words never logged
     text = caplog.text
     for job_file in files:
         assert job_file["raw_value"] not in text
@@ -2682,6 +2683,73 @@ def test_periodic_step_settles_a_marked_reservation(fly_env, monkeypatch):
     assert fake.machines["m-codex"]["config"]["files"] == []
     assert "m-codex" not in fake.leases  # the cleanup lease went with it
     assert not fake.calls("POST", "/start") and not fake.calls("POST", "/v1/apps/runner-app/machines")
+
+
+class _SweepDispatcher:
+    """Every review step of Apis's sweep pass, doing nothing: only the Fly
+    step at the head of the pass has an effect."""
+
+    class config:  # noqa: N801 — mirrors SwarmDispatcher.config
+        resume_repositories: list[str] = []
+
+    def __getattr__(self, name):
+        async def step(*args, **kwargs):
+            return None
+
+        return step
+
+
+def test_apis_sweep_pass_settles_a_marked_reservation(fly_env, monkeypatch):
+    # Drives the real sweep pass in apis.py, not the fly_runner entry point:
+    # removing the Fly step from the pass leaves the reservation in flight.
+    import apis
+
+    fake = _codex_fake(monkeypatch)
+    clock = Clock()
+    executor, _, _ = make_executor(fake, clock=clock)
+    run_id = _seed_marked_login(executor, clock)
+    fake.machines["m-codex"]["config"] = _job_config(run_id)  # the clean-up Fly refused
+    assert _in_flight_count(executor, clock.now) == 1
+    monkeypatch.setattr(fly_runner, "_EXECUTOR", executor)
+    monkeypatch.setitem(sys.modules, "fly_runner", fly_runner)  # the module apis imports
+    asyncio.run(apis.deferred_review_sweep_pass(_SweepDispatcher()))
+    assert executor.ledger.entry(run_id) is None
+    assert _in_flight_count(executor, clock.now) == 0
+    assert fake.machines["m-codex"]["config"]["files"] == []
+    assert not fake.calls("POST", "/start")
+
+
+_FLY_TEXT_MARKER = "zq7-marker"
+
+
+@pytest.mark.parametrize(("fly_text", "label"), [
+    (f"insufficient memory available {_FLY_TEXT_MARKER}", "host_memory"),
+    (f"would OVERCOMMIT the host {_FLY_TEXT_MARKER}", "host_memory"),
+    (f"current_version mismatch {_FLY_TEXT_MARKER}", "version_conflict"),
+    (f"Version changed {_FLY_TEXT_MARKER}", "version_conflict"),
+    (f"something else {_FLY_TEXT_MARKER}", "other"),
+])
+def test_a_refused_scrub_logs_a_reason_label_and_never_flys_text(
+        fly_env, monkeypatch, caplog, fly_text, label):  # fmt: skip
+    caplog.set_level(logging.DEBUG)
+    fake = _codex_fake(monkeypatch)
+    executor, _, _ = make_executor(fake, record=None)
+    fake.machines["m-codex"]["config"] = _job_config("fly-r")
+    real = fake.handler
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/machines/m-codex"):
+            return httpx.Response(412, json={"error": fly_text})
+        return real(request)
+
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(handler)
+    )
+    assert asyncio.run(executor._scrub_login_machine("m-codex", "fly-r")) is False
+    refusals = [r.getMessage() for r in caplog.records
+                if "refused the clean-up update" in r.getMessage()]  # fmt: skip
+    assert refusals and all(f"status 412, reason {label})" in m for m in refusals)
+    assert _FLY_TEXT_MARKER not in caplog.text
 
 
 @pytest.mark.parametrize("case", ["unreadable", "running", "another_run"])
