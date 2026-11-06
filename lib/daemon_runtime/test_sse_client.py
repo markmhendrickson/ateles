@@ -320,7 +320,9 @@ def test_slow_handler_is_not_mistaken_for_a_silent_stream(short_limits):
     # not trigger a reconnect: the next event is already buffered when it ends.
     async def gap_while_handler_runs(resp):
         await resp.write(_task_event("ent_a").encode())
-        await asyncio.sleep(0.1)
+        # Longer than the read limit with no bytes at all, but spent while the
+        # handler is still busy with ent_a.
+        await asyncio.sleep(0.3)
         await resp.write(_task_event("ent_b").encode())
         while True:
             await asyncio.sleep(0.05)
