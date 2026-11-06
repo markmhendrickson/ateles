@@ -2840,7 +2840,44 @@ class FlyExecutor:
         written. The update carries the machine version read here as a
         precondition, and the stored config is read back afterwards: unless
         it is this run's, the launch fails closed before any start.
+
+        A version conflict (409/412) means the machine changed between the
+        read and the write, typically the previous job releasing it. Nothing
+        was stored, so the claim starts again from a fresh read, settle and
+        free check, up to ``LOGIN_CLAIM_ATTEMPTS`` updates in total and never
+        past *deadline*; then it is the same retry-later refusal as before.
+        Every attempt sends the same lease nonce: it is this run's ownership
+        token for the machine (still held across attempts), not a
+        per-request replay guard, so a retried update is not a replay.
         """
+        for attempt in range(1, LOGIN_CLAIM_ATTEMPTS + 1):
+            if await self._try_write_login_config(machine_id, job, deadline, launch, nonce):
+                break
+            if (attempt == LOGIN_CLAIM_ATTEMPTS
+                    or self._clock() + LOGIN_CLAIM_RETRY_SECONDS >= deadline):  # fmt: skip
+                raise FlyRefusal(
+                    f"{job.provider} login machine changed while being claimed; retry later",
+                    _render_wall(self._clock() + 300),
+                )
+            log.info(f"[fly] run={job.run_id} login machine {machine_id} changed while being "
+                     f"claimed (attempt {attempt}); re-reading")  # fmt: skip
+            await asyncio.sleep(LOGIN_CLAIM_RETRY_SECONDS)
+        # Read back once the update has settled (a transitional state right
+        # after the write is not a refusal); one that never settles fails
+        # closed before any start.
+        after = await self.client.get(machine_id)
+        if after is not None:
+            after = await self._settle_login_machine(after)
+        if after is None or after["state"] in LOGIN_SETTLING_STATES:
+            raise FlyApiError(409, "login machine did not settle to stopped after the write")
+        if after["state"] != "stopped" or _config_run_id(after["config"]) != job.run_id:
+            raise FlyApiError(409, "login machine config is not this run's after the write")
+
+    async def _try_write_login_config(self, machine_id: str, job: FlyJob, deadline: float,
+                                      launch: "_LaunchState", nonce: str) -> bool:  # fmt: skip
+        """One claim attempt for ``_write_login_config``: read, settle, refuse
+        unless free, then the version-checked update. False only on a version
+        conflict (nothing stored); every other outcome raises."""
         machine = await self._read_login_machine(machine_id, job)  # re-read under the lease
         if machine is not None:
             machine = await self._settle_login_machine(machine)
@@ -2864,22 +2901,9 @@ class FlyExecutor:
             await self.client.update(machine_id, body, nonce=nonce)
         except FlyApiError as exc:
             if exc.status in (409, 412):
-                # The machine changed between the check and the write.
-                raise FlyRefusal(
-                    f"{job.provider} login machine changed while being claimed; retry later",
-                    _render_wall(self._clock() + 300),
-                ) from None
+                return False  # the machine changed between the check and the write
             raise
-        # Read back once the update has settled (a transitional state right
-        # after the write is not a refusal); one that never settles fails
-        # closed before any start.
-        after = await self.client.get(machine_id)
-        if after is not None:
-            after = await self._settle_login_machine(after)
-        if after is None or after["state"] in LOGIN_SETTLING_STATES:
-            raise FlyApiError(409, "login machine did not settle to stopped after the write")
-        if after["state"] != "stopped" or _config_run_id(after["config"]) != job.run_id:
-            raise FlyApiError(409, "login machine config is not this run's after the write")
+        return True
 
     async def _scrub_login_machine(self, machine_id: str, run_id: str, nonce: str = "") -> bool:
         """Remove THIS run's files from a stopped login machine's stored
@@ -3445,6 +3469,12 @@ LOGIN_NOT_RUNNING_STATES = frozenset({"stopped", "created"})
 LOGIN_SETTLE_WAIT_SECONDS = 20
 LOGIN_SETTLE_POLLS = 5
 LOGIN_SETTLE_POLL_SECONDS = 1.0
+# A login claim whose version-checked update hits a conflict (409/412, the
+# machine changed between the read and the write, e.g. the previous job just
+# released it) starts again from a fresh read: at most this many updates in
+# total, this many seconds apart.
+LOGIN_CLAIM_ATTEMPTS = 3
+LOGIN_CLAIM_RETRY_SECONDS = 1.0
 # A short lease taken only to clear a stopped login machine whose run's own
 # lease has expired (recovery of an unconfirmed reservation).
 LOGIN_CLEANUP_LEASE_TTL = 120

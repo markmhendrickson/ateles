@@ -4539,3 +4539,98 @@ def test_every_lens_review_class_is_vetted_and_delivery_only_is_unchanged(monkey
     assert fly_runner.runner_classes() == {"lens_review:security"}
     assert fly_runner.wants_fly(None, "lens_review:security") is True
     assert fly_runner.wants_fly(None, "lens_review:qa") is False
+
+
+# ── A login claim retries a version conflict from a fresh read ──────────────
+
+
+def _claim_conflicts(fake: FakeFly, executor, machine_id: str, on_conflict):
+    """Route the executor through *fake*, answering a CLAIM update (one that
+    installs a job's files) with whatever ``on_conflict(n)`` returns for the
+    n-th claim (1-based): an ``httpx.Response`` to send instead, or None to
+    let the fake handle it. Returns the claim requests, in order."""
+    claims: list[httpx.Request] = []
+
+    def handler(request):
+        if (request.method == "POST" and request.url.path.endswith(f"/machines/{machine_id}")
+                and json.loads(request.content)["config"].get("files")):  # fmt: skip
+            claims.append(request)
+            answer = on_conflict(len(claims))
+            if answer is not None:
+                fake.requests.append(request)
+                return answer
+        return fake.handler(request)
+
+    executor.client = fly_runner.FlyMachinesClient(
+        executor.config, transport=httpx.MockTransport(handler)
+    )
+    return claims
+
+
+@pytest.fixture
+def fast_claim_retry(monkeypatch):
+    monkeypatch.setattr(fly_runner, "LOGIN_CLAIM_RETRY_SECONDS", 0.0)
+
+
+def test_a_login_claim_retries_a_412_with_the_new_version(fly_env, claude_login,
+                                                          fast_claim_retry):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "CLAUDE OK"})
+
+    def first_conflicts(n):
+        if n == 1:  # the previous job releasing the machine bumps its version
+            fake.machines["m-claude"]["instance_id"] = "v2"
+            return httpx.Response(412, json={"error": "machine version changed"})
+        return None
+
+    claims = _claim_conflicts(fake, executor, "m-claude", first_conflicts)
+    rc, out, _ = asyncio.run(executor.run(_job()))
+    assert rc == 0 and b"CLAUDE OK" in out
+    assert [json.loads(r.content)["current_version"] for r in claims] == ["v1", "v2"]
+    nonces = {r.headers.get("fly-machine-lease-nonce") for r in claims}
+    assert len(nonces) == 1 and None not in nonces  # the run's own lease, held throughout
+    assert len(fake.calls("POST", "/start")) == 1
+    assert executor.ledger.snapshot()["in_flight"] == {} and "m-claude" not in fake.leases
+
+
+def test_a_login_claim_conflict_then_another_runs_job_is_refused(fly_env, claude_login,
+                                                                 fast_claim_retry):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, revoked = make_executor(fake, record=None)
+    other = {"files": [{"guest_path": "/run/job/job.json", "raw_value": "eA=="}],
+             "env": {"ATELES_RUN_ID": "other-run"},
+             "metadata": {"ateles_run_id": "other-run"}}  # fmt: skip
+
+    def another_run_wins(n):
+        fake.machines["m-claude"]["config"] = dict(other)
+        fake.machines["m-claude"]["instance_id"] = "v2"
+        return httpx.Response(409, json={"error": "machine version changed"})
+
+    claims = _claim_conflicts(fake, executor, "m-claude", another_run_wins)
+    with pytest.raises(fly_runner.FlyRefusal, match="another run") as exc:
+        asyncio.run(executor.run(_job()))
+    assert exc.value.cooled_until
+    assert len(claims) == 1  # the re-read refused: no second update was sent
+    assert not fake.calls("POST", "/start")
+    assert fly_runner._config_run_id(fake.machines["m-claude"]["config"]) == "other-run"
+    assert revoked == [MINTED]
+
+
+def test_a_login_claim_that_always_conflicts_is_refused_after_the_bound(
+        fly_env, claude_login, fast_claim_retry):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, revoked = make_executor(fake, record=None)
+    claims = _claim_conflicts(
+        fake, executor, "m-claude",
+        lambda n: httpx.Response(409, json={"error": "machine version changed"}),
+    )
+    job = _job()
+    with pytest.raises(fly_runner.FlyRefusal,
+                       match="login machine changed while being claimed; retry later") as exc:
+        asyncio.run(executor.run(job))
+    assert exc.value.cooled_until
+    assert len(claims) == fly_runner.LOGIN_CLAIM_ATTEMPTS == 3
+    assert not fake.calls("POST", "/start")  # nothing started
+    assert not fly_runner._has_job_config(fake.machines["m-claude"]["config"])
+    assert executor.ledger.entry(job.run_id) is None and "m-claude" not in fake.leases
+    assert revoked == [MINTED]
