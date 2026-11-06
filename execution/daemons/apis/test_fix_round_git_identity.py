@@ -24,6 +24,7 @@ from test_skill_runner import _loader_with_no_policies, _make_def
 from test_tiering_call_sites import (  # noqa: F401 (world is a fixture)
     _Recorder,
     _dispatcher,
+    _run_revision_sweep,
     _trigger,
     world,
 )
@@ -195,3 +196,8 @@ def test_findings_fix_round_asks_for_the_agent_identity(monkeypatch, world):
     assert rec.only("cicada").get("agent_git_identity") is True
     # The lens that writes fix guidance commits nothing and is left alone.
     assert "agent_git_identity" not in rec.only("accipiter")
+
+
+def test_resumed_fix_round_asks_for_the_agent_identity(monkeypatch, world):
+    rec = _run_revision_sweep(monkeypatch)
+    assert rec.only("cicada").get("agent_git_identity") is True
