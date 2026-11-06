@@ -541,3 +541,44 @@ def test_swarm_mechanics_pattern_does_not_overmatch(text: str) -> None:
     this module's own docstring warns produce silent misroutes.
     """
     assert "agents" not in infer_tags_from_text(text), text
+
+
+# ── session ownership: the four-way contract ─────────────────────────────────
+
+
+def test_session_assignee_is_session_owned_not_unroutable() -> None:
+    from routing import SESSION_OWNED
+
+    assert resolve_skill([], assigned_to="Codex session billing") == SESSION_OWNED
+    assert resolve_role([], assigned_to="Codex session billing") == SESSION_OWNED
+
+
+def test_session_owner_without_assignee_is_session_owned_and_beats_tags() -> None:
+    from routing import SESSION_OWNED
+
+    assert resolve_skill([], owner="ateles session") == SESSION_OWNED
+    assert resolve_skill(["ops"], owner="Codex session") == SESSION_OWNED
+    assert resolve_skill(["ops"], assigned_to="unassigned", owner="Codex session") == SESSION_OWNED
+    assert resolve_role(["ops"], owner="Codex session") == SESSION_OWNED
+
+
+def test_owner_never_overrides_a_real_assignee() -> None:
+    from routing import HUMAN_OWNED
+
+    assert resolve_skill([], assigned_to="cicada", owner="Codex session") == "cicada"
+    assert resolve_skill([], assigned_to="operator", owner="Codex session") == HUMAN_OWNED
+    # Hard stop unchanged: a named non-agent, non-person, non-session assignee.
+    assert resolve_skill(["ops"], assigned_to="Jane Doe", owner="Codex session") is None
+    assert resolve_skill(["ops"], assigned_to="root", owner="Codex session") is None
+
+
+def test_non_session_owner_is_ignored_and_tags_still_route() -> None:
+    assert resolve_skill([], owner="meeting: acme") is None
+    assert resolve_skill(["ops"], owner="meeting: acme") == resolve_skill(["ops"])
+
+
+def test_sentinel_assignees_are_the_shared_set() -> None:
+    import routing
+    from lib.daemon_runtime.task_ownership import SENTINEL_ASSIGNEES
+
+    assert routing.SENTINEL_ASSIGNEES is SENTINEL_ASSIGNEES

@@ -35,6 +35,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.daemon_runtime.task_lifecycle import is_terminal, normalize  # noqa: E402
+from lib.daemon_runtime.task_ownership import names_a_session  # noqa: E402
 
 # ── Classes ──────────────────────────────────────────────────────────────────
 RAISED_BY_PERSON_OR_SESSION = "raised_by_person_or_session"
@@ -112,10 +113,6 @@ EFFECT_ACTION_TYPES = frozenset(
         "release",
         "correspondence",
     }
-)
-_SESSION_OWNER = re.compile(
-    r"\b(codex|claude|session|coordinator|root\s?[0-9a-f]{6,}|chat)\b|root[0-9a-f]{6,}",
-    re.IGNORECASE,
 )
 #: A title that asks somebody to choose. Matched on the task's title only, so it
 #: errs towards keeping a hold: a false match costs one more line in the reading,
@@ -268,7 +265,7 @@ def classify_one(
         return SESSION_WROTE_HOLD
 
     # 6. Still held only because the gate held it.
-    if owner and _SESSION_OWNER.search(owner):
+    if owner and names_a_session(owner):
         return LIVE_SESSION_OWNED
     if action_type in EFFECT_ACTION_TYPES:
         return LIVE_EFFECT

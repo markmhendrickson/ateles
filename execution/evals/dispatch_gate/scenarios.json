@@ -937,6 +937,84 @@
           "action_blast_radius": "high"
         }
       }
+    },
+    {
+      "id": "session_assignee_is_left_as_filed",
+      "why": "a task assigned to an interactive session is not unroutable: no status write, no page, no spawn",
+      "task": {
+        "assigned_to": "Codex session billing",
+        "tags": []
+      },
+      "expect": {
+        "outcome": "left_as_filed",
+        "notifications": 0,
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "session_owner_is_left_as_filed",
+      "why": "an owner naming a session, with no assignee and no tags, is left exactly as filed",
+      "task": {
+        "assigned_to": null,
+        "owner": "Codex street coordinator chat0a1b2c3d",
+        "tags": [],
+        "due_date": "2026-11-10",
+        "action_type": "analysis"
+      },
+      "expect": {
+        "outcome": "left_as_filed",
+        "notifications": 0,
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "session_owner_with_guessable_words_is_not_routed",
+      "why": "words that would infer a route never override a session owner: no gate, no brief, no spawn",
+      "task": {
+        "assigned_to": null,
+        "owner": "ateles session",
+        "title": "Reconcile the payments ledger",
+        "body": "payments wage",
+        "action_type": "code"
+      },
+      "expect": {
+        "outcome": "left_as_filed",
+        "notifications": 0,
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "unknown_named_assignee_still_blocks",
+      "why": "fail closed: a named assignee that is no agent, person or session still blocks and pages",
+      "task": {
+        "assigned_to": "Jane Doe"
+      },
+      "expect": {
+        "outcome": "blocked",
+        "notifications": 1,
+        "any_notification_contains": [
+          "unroutable"
+        ],
+        "scorer_called": false
+      }
+    },
+    {
+      "id": "approved_session_task_is_not_spawned",
+      "why": "an approval is not consent to put a second worker on a session's task: not spawned, one INFO line",
+      "task": {
+        "assigned_to": "Codex session billing"
+      },
+      "expect": {
+        "outcome": "left_as_filed",
+        "notifications": 1,
+        "any_notification_contains": [
+          "session-owned"
+        ],
+        "scorer_called": false
+      },
+      "dispatch": {
+        "gate_override": true
+      }
     }
   ]
 }

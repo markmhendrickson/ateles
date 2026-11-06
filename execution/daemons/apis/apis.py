@@ -570,6 +570,7 @@ GITHUB_WEBHOOK_SECRET_NEXT = os.environ.get("APIS_GITHUB_WEBHOOK_SECRET_NEXT", "
 from routing import (  # noqa: E402
     DOMAIN_ROUTES as _DOMAIN_ROUTES,
     HUMAN_OWNED as _HUMAN_OWNED,
+    SESSION_OWNED as _SESSION_OWNED,
     canonical_assignee as _canonical_assignee,
     infer_tags_from_text as _infer_tags_from_text,
     resolve_role as _resolve_role,
@@ -2254,11 +2255,24 @@ async def dispatch_task(
     # "unassigned" is truthy, so it used to satisfy `has_owner` while naming
     # nobody any dispatcher could resolve.
     assigned_to = _canonical_assignee(snapshot.get("assigned_to"))
-    skill = _resolve_skill(existing_tags, assigned_to=assigned_to)
+    # `owner` is read only to recognise a session (see the session-owned block
+    # below). The `build_released` re-dispatch and `existing_pr_correction`
+    # lifecycles own their own handling, so for them it is not consulted.
+    owner_for_routing = (
+        None
+        if trigger == "build_released"
+        or snapshot.get("task_type") == "existing_pr_correction"
+        else snapshot.get("owner")
+    )
+    skill = _resolve_skill(
+        existing_tags, assigned_to=assigned_to, owner=owner_for_routing
+    )
     # resolve_role returns the same string as resolve_skill in this codebase;
     # computed here for explicitness and to thread through to skill_runner so
     # agent_definition loading asks for "the role" rather than "the skill".
-    role = _resolve_role(existing_tags, assigned_to=assigned_to)
+    role = _resolve_role(
+        existing_tags, assigned_to=assigned_to, owner=owner_for_routing
+    )
 
     # ── Human-owned: a routing ANSWER, not a routing failure ─────────────────
     # Must come before EVERY truthy-skill path (activity, ROUTED, readiness,
@@ -2290,6 +2304,37 @@ async def dispatch_task(
             priority=Priority.OPERATOR_DECISION,
             handler=DAEMON_NAME,
         )
+        return
+
+    # ── Session-owned: an interactive session owns this, so leave it alone ───
+    # Interactive sessions own many tasks and no dispatcher can spawn one. Such
+    # a task used to fall to the `skill is None` escalation below (an
+    # `assigned_to` naming a session) or to be read as no-owner (an `owner` that
+    # nothing read), and was written BLOCKED "no route/owner" with live work
+    # underway; or, when its words matched tag inference, a route was guessed
+    # and the task gated or held for an agent, risking a second worker on
+    # session-owned work. The owning session writes its own state, so nothing is
+    # written here: no status, no blocked_reason, no ROUTED, no gate, no brief,
+    # no ledger entry, no spawn. The task stays exactly as filed.
+    #
+    # `gate_override` does NOT bypass this, the same stance as human-owned: an
+    # approval is not consent to put a second worker on a session's task. It
+    # only earns one INFO line so the approval does not look silently ignored.
+    # A forgotten ledger entry keeps the standing-backlog re-report from
+    # repeating a task that is no longer unroutable.
+    if skill == _SESSION_OWNED:
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} is session-owned "
+            f"(trigger={trigger}) — leaving it as filed, not dispatching"
+        )
+        _unroutable.forget(entity_id)
+        if gate_override:
+            notifier.send(
+                f"Approved task is session-owned and was not dispatched: "
+                f"{title[:70]}\n  task={entity_id}",
+                priority=Priority.INFO,
+                handler=DAEMON_NAME,
+            )
         return
 
     # ── A guessed owner is not an owner: leave the task as filed ─────────────

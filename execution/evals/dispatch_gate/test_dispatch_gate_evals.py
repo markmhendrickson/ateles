@@ -129,3 +129,17 @@ def test_same_raw_policy_through_actual_dispatch_and_mcp(raw_policy, declared):
         key: observed["preview"][key]
         for key in ("action_type", "action_type_source", "action_blast_radius")
     }
+
+
+SESSION_SCENARIOS = [s for s in SCENARIOS if s["id"].startswith(("session_", "approved_session_"))]
+
+
+@pytest.mark.parametrize("scenario", SESSION_SCENARIOS, ids=[s["id"] for s in SESSION_SCENARIOS])
+def test_checks_go_red_without_the_session_branch(scenario):
+    """Remove the session-owned answer and every session scenario must fail."""
+    obs = harness.run_scenario(scenario, BASE, mutation="no_session_branch")
+    assert harness.check(scenario, obs), "this scenario cannot detect the session branch's absence"
+
+
+def test_session_scenarios_are_present():
+    assert len(SESSION_SCENARIOS) == 4

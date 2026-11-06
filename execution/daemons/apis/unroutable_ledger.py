@@ -458,6 +458,26 @@ class UnroutableLedger:
             self._tombstones.setdefault("unreadable", set()).add(entity_id)
             self.save()
 
+    def forget(self, entity_id: str) -> bool:
+        """Drop a task from the unroutable ledger, pending report included.
+
+        For a task a later look found owned after all (a session owner): the
+        ledger re-asserts a standing backlog on a timer, so an entry left behind
+        would keep re-reporting a task that is no longer unroutable. Records a
+        tombstone so `save()`'s merge does not resurrect the entry from disk.
+        Returns True when there was something to forget; a task never noted
+        costs no disk write.
+        """
+        if not self._loaded:
+            self.load()
+        known = self._seen.pop(entity_id, None) is not None
+        staged = self._pending.pop(entity_id, None) is not None
+        if not (known or staged):
+            return False
+        self._tombstones.setdefault("tasks", set()).add(entity_id)
+        self.save()
+        return True
+
     def drain_unreadable(self, now: float | None = None, force: bool = False) -> str | None:
         """Aggregated report for tasks whose snapshot cannot be read.
 

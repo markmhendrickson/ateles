@@ -499,12 +499,13 @@ def infer_tags_from_text(title: str, body: str = "") -> list[str]:
     return tags
 
 
-# Values that encode "nobody owns this" as a STRING rather than as absence.
-# They are worse than an empty field: `bool(assigned_to)` is True for them, so
-# they satisfy an owner check (`readiness.assess_readiness(has_owner=...)`) and
-# an `eq` filter without naming an owner any dispatcher can resolve.
-# `canonical_assignee` maps them to None so absence is spelled exactly one way.
-SENTINEL_ASSIGNEES = frozenset({"unassigned", "none", "nobody", "tbd", "n/a", "-"})
+# `SENTINEL_ASSIGNEES` (values that encode "nobody owns this" as a string) lives
+# in lib.daemon_runtime.task_ownership as the single source; re-exported here so
+# `routing.SENTINEL_ASSIGNEES` keeps resolving.
+from lib.daemon_runtime.task_ownership import (  # noqa: E402
+    SENTINEL_ASSIGNEES,
+    names_a_session,
+)
 
 # AAuth subjects are written `<agent>@ateles-swarm` (lib/daemon_runtime/
 # aauth_signer.py builds them as f"{name}@ateles-swarm"). The local part IS the
@@ -521,6 +522,16 @@ _AAUTH_SUFFIXES = ("@ateles-swarm", "@ateles")
 # work is not a defect to page about, so it must not travel the BLOCKED +
 # BLOCKER unroutable path either.
 HUMAN_OWNED = "HUMAN_OWNED"
+
+# ── Session ownership is a routing ANSWER, not a routing miss ────────────────
+#
+# `resolve_skill` returns this when an interactive session owns the task (an
+# `assigned_to` naming a session, or, with no real assignee, an `owner` naming
+# one). No dispatcher can spawn a session and the session writes its own state,
+# so `dispatch_task` branches on it and leaves the task exactly as filed: no
+# status write, no BLOCKED reason, no spawn. It never names a skill and is not a
+# key in ASSIGNED_TO_ROUTES.
+SESSION_OWNED = "SESSION_OWNED"
 
 
 def _human_assignee_keys() -> frozenset[str]:
@@ -567,29 +578,39 @@ def canonical_assignee(assigned_to: str | None) -> str | None:
     return key or None
 
 
-def resolve_skill(tags: list[str], assigned_to: str | None = None) -> str | None:
+def resolve_skill(
+    tags: list[str],
+    assigned_to: str | None = None,
+    owner: str | None = None,
+) -> str | None:
     """
     Pick the T4 skill for a task.
 
-    Returns one of three things — the contract is three-way, not two-way:
+    Returns one of four things:
 
       * an agent skill name — a resolved owner the dispatcher may spawn;
       * ``HUMAN_OWNED``    — a person owns this; park it, never spawn;
+      * ``SESSION_OWNED``  — an interactive session owns this; leave it as
+                             filed, never spawn, never mark it blocked;
       * ``None``           — nobody owns this; escalate it loudly.
 
     An explicit `assigned_to` (set by Sylvia/Turdus when they create or route a
     task) always wins over tag inference — the creating agent already decided
-    the owner. Tag inference runs ONLY when the field is genuinely absent: unset,
-    a sentinel ("unassigned"), or the dispatcher itself ("apis").
+    the owner. Order: routable agent assignee, person assignee, session
+    assignee, then any other named assignee (None). With no real assignee, a
+    session `owner` is SESSION_OWNED; only after that does tag inference run.
+    `owner` is consulted ONLY when there is no real assignee, so an assignee
+    naming anyone else never lets a session owner override it.
 
-    An `assigned_to` naming someone who is not a routable agent is a HARD STOP,
-    never a fallthrough. This used to fall through to keyword tag inference,
-    which is the silent misroute the old comment here disclaimed while
-    performing it: with 17 domain owners against a ~38-name roster, every other
-    agent name — `pavo`, `apus`, `turdus`, `waxwing`, … — was treated as absent,
-    so a finance-tagged task assigned to ANY of them reached `monedula`, the
-    payment executor, and a product task assigned to `pavo` became a `cicada`
-    code change. A named owner nobody can spawn must block visibly (#702).
+    An `assigned_to` naming someone who is not a routable agent, person or
+    session is a HARD STOP, never a fallthrough. This used to fall through to
+    keyword tag inference, which is the silent misroute the old comment here
+    disclaimed while performing it: with 17 domain owners against a ~38-name
+    roster, every other agent name — `pavo`, `apus`, `turdus`, `waxwing`, … —
+    was treated as absent, so a finance-tagged task assigned to ANY of them
+    reached `monedula`, the payment executor, and a product task assigned to
+    `pavo` became a `cicada` code change. A named owner nobody can spawn must
+    block visibly (#702).
     """
     key = canonical_assignee(assigned_to)
     if key and key != "apis":
@@ -599,11 +620,15 @@ def resolve_skill(tags: list[str], assigned_to: str | None = None) -> str | None
         if key in _human_assignee_keys():
             # Deliberate human ownership — terminal, and not an escalation.
             return HUMAN_OWNED
-        # A named owner that is neither an agent nor the operator. Stop here:
-        # tag inference would reassign work its creator explicitly gave to
-        # someone else, and a confident wrong owner reads as covered while a
-        # missing one is visibly unowned.
+        if names_a_session(assigned_to):
+            return SESSION_OWNED
+        # A named owner that is neither an agent, the operator nor a session.
+        # Stop here: tag inference would reassign work its creator explicitly
+        # gave to someone else, and a confident wrong owner reads as covered
+        # while a missing one is visibly unowned.
         return None
+    if names_a_session(owner):
+        return SESSION_OWNED
     for tag in tags:
         skill = DOMAIN_ROUTES.get(tag)
         if skill:
@@ -611,7 +636,11 @@ def resolve_skill(tags: list[str], assigned_to: str | None = None) -> str | None
     return None
 
 
-def resolve_role(tags: list[str], assigned_to: str | None = None) -> str | None:
+def resolve_role(
+    tags: list[str],
+    assigned_to: str | None = None,
+    owner: str | None = None,
+) -> str | None:
     """
     Return the role name for a task (i.e. the agent_definition name to load).
 
@@ -621,6 +650,7 @@ def resolve_role(tags: list[str], assigned_to: str | None = None) -> str | None:
     interface: if the role/skill mapping ever diverges (e.g. a single agent
     handles multiple skill entry-points), only this function changes.
 
-    Returns None when no route matches (mirrors resolve_skill).
+    Returns None when no route matches, and may return the HUMAN_OWNED or
+    SESSION_OWNED sentinels (mirrors resolve_skill).
     """
-    return resolve_skill(tags, assigned_to=assigned_to)
+    return resolve_skill(tags, assigned_to=assigned_to, owner=owner)

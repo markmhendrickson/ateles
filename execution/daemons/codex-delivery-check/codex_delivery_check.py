@@ -19,7 +19,8 @@ Checks (each a small independent function returning findings):
                          ACTIVE ones whose target thread has gone quiet.
 3. ``check_deploys``     merged to the default branch but not deployed for
                          over a day, per ``deployment_configuration`` entity.
-4. ``check_tasks``       operator tasks due soon and blocked, or past due.
+4. ``check_tasks``       tasks due soon and blocked, past due, or owned by a
+                         session and due today.
 
 Findings file: every non-dry run atomically writes
 ``codex-delivery-findings.json`` (mode 0600) next to ``CODEX_DELIVERY_STATE_PATH``
@@ -574,6 +575,10 @@ def check_tasks(
     fetch_page: Callable[[int], tuple[list[dict[str, Any]], bool]], now: datetime
 ) -> tuple[list[Finding], list[str]]:
     """``fetch_page(offset) -> (rows, more)``; reads are sequential and bounded."""
+    # Function-level, like the other `lib` imports here: `main` puts the repo
+    # root on sys.path before any check runs.
+    from lib.daemon_runtime.task_ownership import session_owned
+
     findings: list[Finding] = []
     notes: list[str] = []
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -628,6 +633,25 @@ def check_tasks(
                             f"A task is due {due.date().isoformat()} and is blocked. "
                             "Find the task's owner: if a session owns it, message "
                             "that session. If the operator owns it, raise it with "
+                            "the operator only if it needs a decision or action "
+                            "from them."
+                        ),
+                    )
+                )
+            elif due == today and session_owned(
+                snap.get("assigned_to"), snap.get("owner")
+            ):
+                # The dispatcher no longer marks a session's task blocked, and
+                # that false block was the only thing flagging such a task
+                # before its due date. The owner's name is never put in the
+                # message: it is task-supplied text.
+                findings.append(
+                    Finding(
+                        key=f"{KEY_PREFIX}:task-due:{ident}",
+                        subject=title,
+                        message=(
+                            "A task owned by a session is due today. Find the "
+                            "task's owner and message that session; raise it with "
                             "the operator only if it needs a decision or action "
                             "from them."
                         ),
