@@ -4890,6 +4890,18 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             handler=DAEMON_NAME,
         )
         if AUTO_EXECUTE:
+            # Same guard as created/updated above: dispatch_task routes the task,
+            # so a due reminder for a task whose Fly run is in flight (or whose
+            # ledger is unreadable) must not re-route it. The reminder still goes.
+            in_flight = _fly_run_in_flight(snapshot, entity_id)
+            if in_flight is None or in_flight:
+                log.warning(
+                    f"[{DAEMON_NAME}] task.due_today for {entity_id}: "
+                    + ("the Fly ledger could not be read" if in_flight is None
+                       else "a Fly run is in flight for this task")
+                    + " — not dispatching"
+                )
+                return
             log.info(
                 f"[{DAEMON_NAME}] AUTO_EXECUTE=1 — dispatching due task {entity_id}"
             )

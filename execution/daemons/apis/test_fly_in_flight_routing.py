@@ -101,3 +101,63 @@ def test_unreadable_ledger_does_not_route(env):
     ledger.write_text("{not json")
     asyncio.run(apis.handle_event(_event("created"), _Notifier()))
     assert routed == [], f"routed with an unreadable ledger: {routed}"
+
+
+def test_launched_receipt_naming_a_run_still_in_flight_does_not_route(env):
+    ledger, routed = env
+    fly = fly_runner.FlyLedger(ledger)
+    key = build_delivery.fly_delivery_key(REPO, None, TASK)
+    assert fly.reserve_delivery(
+        key, {"status": "launched", "branch": "b", "run_id": "run-1", "token": "x"})
+    fly.record_untracked(machine_id="m-1", run_id="run-1", owner="apis",
+                         config=fly_runner.FlyConfig.from_env(),
+                         started_at=fly._clock(), max_run_seconds=600)
+    assert "run-1" in fly.snapshot()["in_flight"]
+    asyncio.run(apis.handle_event(_event("created"), _Notifier()))
+    assert routed == [], f"routed a task whose receipt names an in-flight run: {routed}"
+
+
+def test_due_today_auto_execute_with_run_in_flight_reminds_but_does_not_route(env, monkeypatch):
+    # Settles security question 1: does a due_today event with APIS_AUTO_EXECUTE=1
+    # re-route a task whose Fly run is in flight? Before this change that branch
+    # called dispatch_task unguarded (routed == [TASK]), so the task could be
+    # moved to routed and launched again. It now uses the same guard as created
+    # and updated: the operator reminder is still sent, dispatch is not.
+    ledger, routed = env
+    monkeypatch.setattr(apis, "AUTO_EXECUTE", True)
+    _launching(ledger)
+    notifier = _Notifier()
+    asyncio.run(apis.handle_event(_event("due_today"), notifier))
+    assert routed == [], f"due_today routed a task whose Fly run is in flight: {routed}"
+    assert len(notifier.sent) == 1
+
+
+def test_due_today_auto_execute_with_unreadable_ledger_does_not_route(env, monkeypatch):
+    ledger, routed = env
+    monkeypatch.setattr(apis, "AUTO_EXECUTE", True)
+    ledger.write_text("{not json")
+    asyncio.run(apis.handle_event(_event("due_today"), _Notifier()))
+    assert routed == []
+
+
+def test_due_today_auto_execute_with_no_run_routes_as_today(env, monkeypatch):
+    _, routed = env
+    monkeypatch.setattr(apis, "AUTO_EXECUTE", True)
+    asyncio.run(apis.handle_event(_event("due_today"), _Notifier()))
+    assert routed == [TASK]
+
+
+def test_update_moving_task_to_another_repo_mid_run_does_not_route(env):
+    # Settles security question 2: an update that changes the repository (and so
+    # the receipt key) while the run is in flight does reach the guard, but the
+    # new key misses the earlier receipt, so the guard reports no run in flight.
+    # Nothing is routed anyway, because the updated branch never dispatches: it
+    # only logs. A second run would need a later created replay, due_today or
+    # approval against the changed key; see "Open question for security" in the PR.
+    ledger, routed = env
+    _launching(ledger)
+    moved = _event("updated")
+    moved.snapshot = {**moved.snapshot, "repo": "markmhendrickson/other-repo"}
+    assert apis._fly_run_in_flight(moved.snapshot, TASK) is False  # key no longer matches
+    asyncio.run(apis.handle_event(moved, _Notifier()))
+    assert routed == []
