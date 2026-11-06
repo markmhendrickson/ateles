@@ -2172,6 +2172,29 @@ def signed_off_is_head_pinned(body: str | None, current_head_sha: str | None) ->
     return reviewed == current or current.startswith(reviewed) or reviewed.startswith(current)
 
 
+def checks_green_note(head: str) -> str:
+    """The prompt line stating that the check gate read *head*'s checks green.
+
+    Empty when *head* is empty: with no green reading for the reviewed head
+    (the gate did not run, held, or read a different head) the prompt states
+    nothing and the lenses read check status themselves as before. Evidence
+    only — it relaxes no lens rule.
+    """
+    if not head:
+        return ""
+    return (
+        "CURRENT-HEAD CI EVIDENCE: before seating this panel, Apis's check "
+        f"gate read every gating check on head `{head}` as green (the same "
+        "reading the panel-gated approval tool applies). This fact binds to "
+        "that exact SHA: if the PR head you see is not that SHA, ignore it. "
+        "It is evidence, not a waiver: it relaxes no lens rule — QA still "
+        "judges test coverage — and a check you see failed or pending on "
+        "this head is still reported. Do not withhold a verdict or record a "
+        "process block only because you could not confirm current-head CI "
+        "yourself.\n\n"
+    )
+
+
 def merge_authorization_clause(
     *, auto_merge: bool, pending_gates: set[str] | None = None
 ) -> str:
@@ -4558,6 +4581,11 @@ class SwarmDispatcher:
         # `_hold_panel_until_checks_green`; read by `_handle_ci_status_for_current_head`
         # to re-dispatch a held panel when the head's checks complete.
         self._panel_ci_holds: dict[tuple[str, int], _PanelCIHold] = {}
+        # The head SHA whose checks `_hold_panel_until_checks_green` last read
+        # green, keyed like `_panel_ci_holds`. Cleared at the start of each
+        # `_handle_pr` and on any hold, so it only ever names a reading taken
+        # in the current panel run; see `_checks_green_head`.
+        self._panel_checks_green: dict[tuple[str, int], str] = {}
         # (source, "owner/repo#N") pairs whose label-gate skip has already been
         # logged at WARNING by a periodic sweep — see `_label_gate_log`.
         self._label_gate_warned: set[tuple[str, str]] = set()
@@ -7914,6 +7942,7 @@ class SwarmDispatcher:
         pr = await self._fetch_pr(trigger.repository, trigger.number)
         if isinstance(pr, dict) and pr.get("state") == "closed":
             self._panel_ci_holds.pop(key, None)
+            self._panel_checks_green.pop(key, None)
             return True
         head = _normalise_full_sha(trigger.head_sha) if isinstance(trigger.head_sha, str) else ""
         problem = panel_check_gate.live_pr_problem(
@@ -7926,12 +7955,16 @@ class SwarmDispatcher:
                 trigger.repository, head, pr["base"]["ref"]
             )
         if gate.green:
+            # Remember which head read green, so the panel prompts can state
+            # it (only `gate.green` from this reading ever sets it).
+            self._panel_checks_green[key] = head
             if self._panel_ci_holds.pop(key, None) is not None:
                 log.info(
                     f"[{DAEMON_NAME}] {ref}: head {head[:9]} checks are green — "
                     f"releasing the held review panel ({source})"
                 )
             return False
+        self._panel_checks_green.pop(key, None)
         previous = self._panel_ci_holds.get(key)
         self._panel_ci_holds[key] = _PanelCIHold(head=head, reason=gate.reason)
         changed = previous is None or previous.head != head or previous.reason != gate.reason
@@ -7943,8 +7976,25 @@ class SwarmDispatcher:
         )
         return True
 
+    def _checks_green_head(self, trigger: SwarmTrigger, review_head: str) -> str:
+        """*review_head* when the check gate read it green in this panel run.
+
+        Empty when there was no green reading (the gate held, or this path
+        never went through it) or the reading was for another head: the fact
+        binds to the SHA, so a moved head states nothing.
+        """
+        head = _normalise_full_sha(review_head or "")
+        key = (trigger.repository.casefold(), trigger.number)
+        green = self._panel_checks_green.get(key, "")
+        return head if head and green == head else ""
+
     async def _handle_pr(self, trigger: SwarmTrigger) -> None:
         ref = f"{trigger.repository}#{trigger.number}"
+        # A green reading belongs to one panel run: never carry an earlier
+        # run's reading into this one.
+        self._panel_checks_green.pop(
+            (trigger.repository.casefold(), trigger.number), None
+        )
         # A push/reopen changes which artifact may stand. Retire stale bot
         # verdicts before any gate reads or new panel work begins. Missing SHA
         # skips safely: supersession must never guess which head is current.
@@ -8281,6 +8331,7 @@ class SwarmDispatcher:
                 pending_gates=pending_gates,
                 live_gates=live_gates,
                 signals=panel_signals,
+                checks_green_head=self._checks_green_head(trigger, review_head),
             )
         for lens in panel:
             if lens.lens not in combined_results and await self._hold_panel_until_checks_green(
@@ -8655,6 +8706,11 @@ class SwarmDispatcher:
                 pending_gates=pending_gates,
                 reviewed_head=review_head,
                 **({"carried": carried_lenses} if carried_lenses else {}),
+                **(
+                    {"checks_green_head": green_head}
+                    if (green_head := self._checks_green_head(trigger, aggregation_head))
+                    else {}
+                ),
             ),
             github_token=_token_for_agent_on_repo("vanellus", trigger.repository),
             include_github_contract=True,
@@ -13605,6 +13661,7 @@ class SwarmDispatcher:
         pending_gates: set[str] | None = None,
         reviewed_head: str | None = None,
         carried: "dict[str, review_carry.Carried] | None" = None,
+        checks_green_head: str = "",
     ) -> str:
         # The captured lens reviews are embedded INLINE below so the aggregator
         # never has to re-fetch them via `gh`. Vanellus runs diff-only
@@ -13653,7 +13710,10 @@ class SwarmDispatcher:
             "----- PANEL LENS REVIEWS (inline) -----\n"
             f"{panel_block}\n"
             "----- END PANEL LENS REVIEWS -----\n\n"
-            f"{_agent_prompt_instruction('vanellus', 'PR steward')}\n\n"
+            + checks_green_note(
+                checks_green_head if checks_green_head == marker_head else ""
+            )
+            + f"{_agent_prompt_instruction('vanellus', 'PR steward')}\n\n"
             "POST YOUR AGGREGATED VERDICT AS A PR COMMENT using the gh CLI "
             f"(`gh pr comment {t.number} --repo {t.repository} --body ...`). "
             f"The comment MUST begin with the line `{marker}`. If the SHA is "
@@ -14158,6 +14218,7 @@ class SwarmDispatcher:
         parent: int | None = None,
         changed_files: list[str] | None = None,
         read_only: bool = False,
+        checks_green_head: str = "",
     ) -> str:
         """One prompt that has the pm, qa and ux lenses review together.
 
@@ -14240,6 +14301,7 @@ class SwarmDispatcher:
                 "parent issue, where a lens below asks for it, is the only "
                 "write you make.\n\n"
             )
+            + checks_green_note(checks_green_head if checks_green_head == head else "")
             + "Return ONE reply made of one block per lens, in this order. Each "
             "block starts with its own delimiter line, then that lens's header "
             "line EXACTLY as shown, then its verdict line (replace `**<VERDICT>**` "
@@ -14268,6 +14330,7 @@ class SwarmDispatcher:
         pending_gates: set[str],
         live_gates,
         signals,
+        checks_green_head: str = "",
     ) -> dict[str, SkillResult]:
         """Review the panel's pm/qa/ux lenses in one mid-tier dispatch.
 
@@ -14289,7 +14352,7 @@ class SwarmDispatcher:
                 first.agent,
                 self._combined_prompt(
                     trigger, combinable, expectations, review_head, parent,
-                    changed_files,
+                    changed_files, checks_green_head=checks_green_head,
                 ),
                 github_token=_token_for_agent_on_repo(first.agent, trigger.repository),
                 include_github_contract=True,
