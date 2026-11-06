@@ -70,6 +70,7 @@ from lib.daemon_runtime import (  # noqa: E402
     AgentDefinition, AgentDefinitionUnavailable, AgentPolicyUnavailable,
     AgentLoader, admit_agent_definition,
 )
+from lib.daemon_runtime.agent_loader import TEMPORARY_LOAD_CODES  # noqa: E402
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
 from foundation import (  # noqa: E402
     SWARM_FOUNDATION_CONTRACT,  # noqa: F401 — re-exported beside the sibling contracts
@@ -981,6 +982,24 @@ def canonical_role_fingerprint(role: str, agent_def: AgentDefinition) -> str:
     return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
 
 
+def authority_read_is_temporary(result: "SkillResult") -> bool:
+    """True when a dispatch was refused only because Neotoma could not be read.
+
+    The refusal itself stands: the agent did not run and must not run without
+    its definition and policy. This says only that the SAME dispatch may work
+    later, because the read failed for availability (a timeout, a connection
+    error, a 5xx, a 429, or no free request worker) rather than returning an
+    answer. A definition or policy that was read and refuses the run, a
+    malformed one, or a definite "no such definition" is never temporary.
+    """
+    if not (
+        getattr(result, "definition_unavailable", False)
+        or getattr(result, "policy_unavailable", False)
+    ):
+        return False
+    return getattr(result, "authority_read_code", "") in TEMPORARY_LOAD_CODES
+
+
 def _load_active_policy_prompt(role: str, *, agent_definition_id: str | None = None) -> str:
     """Read live policy on every admission; an unreadable corpus refuses execution."""
     try:
@@ -1852,6 +1871,12 @@ class SkillResult:
     # Same admission failure semantics for unreadable governing policies: no
     # child, no provider cooldown/failover, retry after the read is repaired.
     policy_unavailable: bool = False
+    # The fixed reason code of that refusal (``agent_loader.load_failure_code``:
+    # timeout, transport_error, server_error, rejected, bad_response, ...);
+    # empty for every other result. Lets a caller tell "Neotoma could not be
+    # read" from "Neotoma answered and the answer refuses the run" without
+    # parsing the error text (`authority_read_is_temporary`).
+    authority_read_code: str = ""
     remote_run_id: str = ""
     remote_machine_state: str = ""
     # A configuration the operator must repair before this dispatch can run
@@ -3165,7 +3190,7 @@ async def _run_skill_once(
         log.error(f"[apis] {skill} dispatch refused — {msg}")
         return SkillResult(
             skill, False, None, "", "", error=msg, provider=provider,
-            definition_unavailable=True,
+            definition_unavailable=True, authority_read_code=exc.code,
         )
 
     # Policy is authority too. Read it before provider admission or any runner,
@@ -3181,7 +3206,7 @@ async def _run_skill_once(
         )
         log.error(f"[apis] {skill} dispatch refused — {msg}")
         return SkillResult(skill, False, None, "", "", error=msg, provider=provider,
-                           policy_unavailable=True)
+                           policy_unavailable=True, authority_read_code=exc.code)
 
     binary = _provider_binaries().get(provider)
     if binary is None:

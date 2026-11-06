@@ -462,6 +462,12 @@ MIN_ATTEMPT_TIMEOUT_S = 2.0
 _RETRYABLE_LOAD_CODES = frozenset(
     {"timeout", "transport_error", "server_error", "throttled", "busy"}
 )
+# Public name for the same set: reason codes that say Neotoma could not be read
+# right now (a timeout, a connection error, a 5xx, a 429, or no free request
+# worker). A caller may retry a refused dispatch later on one of these; every
+# other code (rejected, not_found, bad_response, invalid_name, unexpected) is an
+# answer, not an outage, and stays final.
+TEMPORARY_LOAD_CODES = _RETRYABLE_LOAD_CODES
 # The only HTTP status the lookup accepts. 201, 204, a redirect, a 4xx, a 5xx: all
 # are refused before any body is read (see ``AgentLoader._neotoma``).
 SUCCESS_STATUS = 200

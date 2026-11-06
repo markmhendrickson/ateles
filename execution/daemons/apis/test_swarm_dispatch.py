@@ -9697,6 +9697,231 @@ def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
     assert deferred["reason"] == "incomplete review panel"
 
 
+# ── Temporary Neotoma read failure: resume, don't page ─────────────────────
+# A lens refused because its agent_policy/agent_definition could not be READ
+# (timeout, connection error, 5xx) is a temporary failure: the panel resumes
+# through the deferral marker, runs only the missing lens, and pages the
+# operator only past the per-lens retry bound, naming Neotoma availability.
+
+
+# Bound before any test patches it, so the notice path below is the real one.
+_REAL_PANEL_STOP = SwarmDispatcher._handle_panel_session_limit
+
+
+def _policy_refusal(skill, code):
+    return SkillResult(
+        skill, False, None, "", "",
+        error=(
+            f"agent_policy unavailable: agent_policy for {skill!r} is unavailable "
+            f"(query, {code}); the agent was not run"
+        ),
+        policy_unavailable=True,
+        authority_read_code=code,
+    )
+
+
+def _two_lens_panel(monkeypatch):
+    monkeypatch.setattr(
+        swarm_dispatch,
+        "select_panel",
+        lambda **kwargs: [
+            Lens(agent="pavo", lens="pm", gate="pm", checks="scope"),
+            Lens(agent="falco", lens="security", gate=None, checks="security"),
+        ],
+    )
+
+
+def _capture_panel_stop(monkeypatch):
+    stops: list[dict] = []
+
+    async def fake_stop(self, *args, **kwargs):
+        stops.append(kwargs)
+
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_session_limit", fake_stop)
+    return stops
+
+
+def _post_panel_notice(monkeypatch, reason, failed_lenses):
+    """Run the real notice path; return (notifier priorities, posted bodies)."""
+    bodies: list[str] = []
+
+    class _CapturingClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs):
+            return _FakeListResp([])
+        async def post(self, url, **kwargs):
+            bodies.append(kwargs.get("json", {}).get("body", ""))
+            return _FakeResp(201)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+    notifier = _StubNotifier()
+    d = SwarmDispatcher(notifier, DispatchConfig(neotoma_token="", github_token="x"))
+    asyncio.run(
+        _REAL_PANEL_STOP(
+            d, _trigger(number=264, repository="owner/repo"), None,
+            ", ".join(lens for lens, _ in failed_lenses), "", "",
+            reason=reason, completed_lenses=(), failed_lenses=failed_lenses,
+        )
+    )
+    return d, notifier, bodies
+
+
+@pytest.mark.parametrize("code", ["timeout", "transport_error", "server_error"])
+def test_policy_read_timeout_schedules_resume_without_operator_notice(monkeypatch, code):
+    calls: list = []
+    d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**", calls=calls)
+    _two_lens_panel(monkeypatch)
+    ran: list[str] = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        ran.append(skill)
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "pavo":
+            return _policy_refusal(skill, code)
+        if skill == "falco":
+            return SkillResult(skill, True, 0, "**APPROVE**", "")
+        raise AssertionError(f"unexpected skill: {skill}")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    stops = _capture_panel_stop(monkeypatch)
+
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    assert "vanellus" not in ran  # the panel stopped before aggregation
+    assert len(stops) == 1
+    assert stops[0]["failed_lenses"] == (("pm", swarm_dispatch.AUTHORITY_READ_FAILURE),)
+    assert stops[0]["reason"] == swarm_dispatch.AUTHORITY_READ_FAILURE
+
+    # The notice that reason produces: a deferral marker, INFO, no paging.
+    dd, notifier, bodies = _post_panel_notice(
+        monkeypatch, stops[0]["reason"], stops[0]["failed_lenses"]
+    )
+    assert notifier.priorities == [swarm_dispatch.Priority.INFO]
+    assert len(bodies) == 1
+    assert dd._REVIEW_DEFERRED_RE.search(bodies[0]) is not None
+    assert "operator attention" not in bodies[0].lower()
+    assert "no operator action is required" in bodies[0].lower()
+    assert "temporary" in bodies[0].lower()
+
+
+def test_resumed_panel_runs_only_the_missing_lens(monkeypatch):
+    calls: list = []
+    d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**", calls=calls)
+    _two_lens_panel(monkeypatch)
+    head = "a" * 40
+    pm_body = f"<!-- review:pm commit={head} -->\n**APPROVE**\nscope fine"
+    ran: list[str] = []
+    vanellus_prompts: list[str] = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        ran.append(skill)
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "falco":
+            return SkillResult(skill, True, 0, "**APPROVE**", "")
+        if skill == "vanellus":
+            vanellus_prompts.append(prompt)
+            return SkillResult(skill, True, 0, "**APPROVE**", "")
+        raise AssertionError(f"{skill} ran again at a head where it already finished")
+
+    async def fake_comments(self, repository, number, client):
+        return [{"body": pm_body, "created_at": "2026-11-06T07:50:00Z", "html_url": ""}]
+
+    persisted: list = []
+
+    async def fake_persist(self, trigger, reviews, agents, **kwargs):
+        persisted.extend(reviews)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_lens_scoped_comments", fake_comments)
+    monkeypatch.setattr(SwarmDispatcher, "_persist_panel_reviews", fake_persist)
+    stops = _capture_panel_stop(monkeypatch)
+
+    # No parent issue, so no pre-impl gate is pending: a pending gate's owner
+    # is always re-seated, finished or not (covered by the forced rule).
+    resume = _trigger(
+        kind="pr_synchronize", action="synchronize", body="",
+        delivery_id=f"{swarm_dispatch.DEFERRED_RESUME_DELIVERY_PREFIX}87",
+    )
+    asyncio.run(d._handle_pr(resume))
+
+    assert "pavo" not in ran
+    assert ran.count("falco") == 1
+    assert stops == []
+    # Only the fresh verdict is written again; the reused one is aggregated.
+    assert persisted == [("security", "**APPROVE**")]
+    assert len(vanellus_prompts) == 1 and "scope fine" in vanellus_prompts[0]
+
+
+@pytest.mark.parametrize("code", ["bad_response", "rejected", "not_found"])
+def test_policy_read_that_refuses_still_stops_for_operator(monkeypatch, code):
+    calls: list = []
+    d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**", calls=calls)
+    _two_lens_panel(monkeypatch)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "pavo":
+            return _policy_refusal(skill, code)
+        if skill == "falco":
+            return SkillResult(skill, True, 0, "**APPROVE**", "")
+        raise AssertionError(f"unexpected skill: {skill}")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    stops = _capture_panel_stop(monkeypatch)
+
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    assert stops[0]["failed_lenses"] == (("pm", "execution failure"),)
+    assert stops[0]["reason"] == "incomplete review panel"
+    _, notifier, bodies = _post_panel_notice(
+        monkeypatch, stops[0]["reason"], stops[0]["failed_lenses"]
+    )
+    assert notifier.priorities == [swarm_dispatch.Priority.BLOCKER]
+    assert "operator attention is required" in bodies[0].lower()
+    assert SwarmDispatcher._REVIEW_DEFERRED_RE.search(bodies[0]) is None
+
+
+def test_repeated_policy_read_failure_past_limit_names_neotoma(monkeypatch):
+    monkeypatch.setenv("APIS_MISSING_LENS_MAX_RETRIES", "2")
+    calls: list = []
+    d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**", calls=calls)
+    _two_lens_panel(monkeypatch)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "pavo":
+            return _policy_refusal(skill, "timeout")
+        if skill == "falco":
+            return SkillResult(skill, True, 0, "**APPROVE**", "")
+        raise AssertionError(f"unexpected skill: {skill}")
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    stops = _capture_panel_stop(monkeypatch)
+
+    for _ in range(3):
+        asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+
+    reasons = [stop["reason"] for stop in stops]
+    assert reasons[:2] == [swarm_dispatch.AUTHORITY_READ_FAILURE] * 2
+    assert reasons[2].startswith("Neotoma availability")
+    assert "pm" in reasons[2]
+
+    _, notifier, bodies = _post_panel_notice(
+        monkeypatch, reasons[2], stops[2]["failed_lenses"]
+    )
+    assert notifier.priorities == [swarm_dispatch.Priority.BLOCKER]
+    assert "neotoma availability" in bodies[0].lower()
+    assert "operator attention is required" in bodies[0].lower()
+    assert SwarmDispatcher._REVIEW_DEFERRED_RE.search(bodies[0]) is None
+
+
 def test_parse_limit_reset_delay_reads_the_clock():
     from datetime import datetime
     now = datetime(2026, 7, 23, 16, 45, 0)  # 4:45pm

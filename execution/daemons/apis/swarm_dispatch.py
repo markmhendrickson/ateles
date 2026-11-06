@@ -117,6 +117,7 @@ from skill_runner import (
     NEOTOMA_IDENTITY_UNAVAILABLE,
     REVIEW_VERDICT_TOKENS,
     SkillResult,
+    authority_read_is_temporary,
     run_skill,
     usable_providers_async,
     write_dispatch_failure_log,
@@ -3473,8 +3474,40 @@ def detect_auth_failure(*texts: str) -> bool:
     return any(sig in blob for sig in _AUTH_FAILURE_SIGNATURES)
 
 
+# A lens (or the aggregation) refused before it ran because its
+# agent_definition or agent_policy could not be READ from Neotoma right now — a
+# timeout, a connection error, a 5xx. The refusal is correct and stays: nothing
+# runs without its policy. But the cause clears on its own, so the panel resumes
+# through the deferral marker like a usage limit, bounded per lens and head.
+AUTHORITY_READ_FAILURE = "temporary Neotoma read failure"
+# Failure classes that resume a panel automatically through the deferral marker.
+AUTO_RESUME_FAILURE_CLASSES = frozenset(
+    {"usage limit", "provider exhaustion", AUTHORITY_READ_FAILURE}
+)
+# `trigger.delivery_id` prefix of a re-run started by `resume_deferred_reviews`.
+DEFERRED_RESUME_DELIVERY_PREFIX = "deferred-resume-"
+
+
+def _authority_read_retry_limit() -> int:
+    """Automatic resumes allowed per lens and head after a temporary Neotoma
+    read failure: the existing per-lens retry bound of the missing-lens sweep."""
+    return int(os.environ.get("APIS_MISSING_LENS_MAX_RETRIES", "3"))
+
+
+def _authority_read_retry_delay() -> int:
+    """Seconds before a panel stopped by a temporary Neotoma read failure is
+    due again. Short: the deferred-review sweep (600s) picks it up next pass."""
+    return max(60, int(os.environ.get("APIS_AUTHORITY_READ_RETRY_SECONDS", "300")))
+
+
 def review_failure_class(result: SkillResult) -> str:
     """Return a public-safe reason for one incomplete review invocation."""
+    # Structural and checked first: an unreadable definition/policy refused the
+    # run before any provider was touched, so no text probe below applies. A
+    # policy that was read and refuses, or a malformed one, is NOT this class
+    # and falls through to "execution failure" (fail-closed, operator attention).
+    if authority_read_is_temporary(result):
+        return AUTHORITY_READ_FAILURE
     if getattr(result, "cooled_until", "") or detect_session_limit(
         result.stdout, result.stderr, result.error
     ):
@@ -4647,6 +4680,14 @@ class SwarmDispatcher:
         # carry the first lens's exhaustion onto the second and silently skip it.
         self._missing_lens_retries: dict[str, dict[str, int]] = {}
         self._missing_lens_escalated: dict[str, set[str]] = {}
+        # Temporary Neotoma read failures, per (repo, PR, head, lens): how many
+        # panel runs in a row this lens was refused because its definition or
+        # policy could not be read. In memory like the counters above: a restart
+        # resets it, which costs at most a few extra short retries.
+        self._authority_read_failures: dict[tuple[str, int, str, str], int] = {}
+        # PRs whose deferred-review resume is running right now, so a sweep
+        # pass never starts a second panel over one still in flight.
+        self._deferred_resumes_running: set[tuple[str, int]] = set()
         # ateles#511. Keyed by "owner/repo#N@<head sha>", not by ref: a new push
         # is a new attempt and must reset the budget, or three failures on one
         # revision would permanently suppress every later revision of that PR.
@@ -5366,7 +5407,7 @@ class SwarmDispatcher:
                         body=pr.get("body") or "",
                         author=(pr.get("user") or {}).get("login", ""),
                         html_url=pr.get("html_url", ""),
-                        delivery_id=f"deferred-resume-{pr.get('number')}",
+                        delivery_id=f"{DEFERRED_RESUME_DELIVERY_PREFIX}{pr.get('number')}",
                         action="synchronize",
                         head_ref=(pr.get("head") or {}).get("ref", ""),
                         base_ref=(pr.get("base") or {}).get("ref", ""),
@@ -5381,11 +5422,24 @@ class SwarmDispatcher:
                     ):
                         summary["label_gated"] = summary.get("label_gated", 0) + 1
                         continue
+                    running = self.__dict__.setdefault("_deferred_resumes_running", set())
+                    run_key = (repository.casefold(), int(pr.get("number")))
+                    if run_key in running:
+                        log.info(
+                            f"[{DAEMON_NAME}] deferred-review sweep: {ref} resume "
+                            "already running — not starting a second panel"
+                        )
+                        summary["in_flight"] = summary.get("in_flight", 0) + 1
+                        continue
                     log.info(
                         f"[{DAEMON_NAME}] deferred-review sweep: {ref} deferral "
                         "has matured — re-running the panel"
                     )
-                    await self._handle_pr(trigger)
+                    running.add(run_key)
+                    try:
+                        await self._handle_pr(trigger)
+                    finally:
+                        running.discard(run_key)
                     summary["resumed"] += 1
                 except Exception as exc:
                     summary["failed"] += 1
@@ -8400,6 +8454,18 @@ class SwarmDispatcher:
                     )
                     return
 
+        # A deferred-review resume re-enters here after a panel stopped part
+        # way (a usage limit, provider exhaustion, a temporary Neotoma read
+        # failure). Lenses that already finished at THIS head keep their
+        # verdict and are not run again; only the missing ones run. `panel`
+        # itself stays whole, for the aggregation and merge readiness.
+        to_run = panel
+        reused_reviews: list[tuple[str, str]] = []
+        if (trigger.delivery_id or "").startswith(DEFERRED_RESUME_DELIVERY_PREFIX):
+            to_run, reused_reviews = await self._reuse_finished_lenses(
+                trigger, panel, review_head, forced=pending_gates
+            )
+
         reviews: list[tuple[str, str]] = []
         failed_lenses: list[tuple[str, str]] = []
         # Forward-looking (advisory) lenses that failed without a verdict.
@@ -8445,14 +8511,14 @@ class SwarmDispatcher:
         # and the expectation updates they returned.
         remote_lenses: set[str] = set()
         expectation_updates: dict[str, str] = {}
-        if self.config.combined_review_pass:
+        if self.config.combined_review_pass and to_run:
             if await self._hold_panel_until_checks_green(
                 trigger, source="combined_review_pass"
             ):
                 return
             combined_results = await self._run_combined_pass(
                 trigger,
-                panel,
+                to_run,
                 expectations,
                 parent,
                 review_head,
@@ -8462,7 +8528,7 @@ class SwarmDispatcher:
                 signals=panel_signals,
                 checks_green_head=self._checks_green_head(trigger, review_head),
             )
-        for lens in panel:
+        for lens in to_run:
             if lens.lens not in combined_results and await self._hold_panel_until_checks_green(
                 trigger, source=f"panel_lens:{lens.lens}"
             ):
@@ -8537,6 +8603,10 @@ class SwarmDispatcher:
                     remote_lenses.add(lens.lens)
                     if returned_update:
                         expectation_updates[lens.lens] = returned_update
+            self._count_authority_read_failure(
+                trigger, review_head, lens.lens,
+                failed=not result.ok and review_failure_class(result) == AUTHORITY_READ_FAILURE,
+            )
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
                 # ateles#795 amended ADR: the dispatcher — not the lens's own
@@ -8703,21 +8773,21 @@ class SwarmDispatcher:
                 trigger, parent, expectation_updates, agents_by_lens
             )
 
+        # Verdicts reused from this head (deferred resume) join the fresh ones
+        # only now: they are already persisted and posted, so they are not
+        # written a second time, but the roll-up and aggregation read them.
+        if reused_reviews:
+            reviews = reused_reviews + reviews
+
         if failed_lenses:
-            auto_resume = all(
-                failure in {"usage limit", "provider exhaustion"}
-                for _, failure in failed_lenses
-            )
             await self._handle_panel_session_limit(
                 trigger,
                 parent,
                 ", ".join(lens for lens, _ in failed_lenses),
                 "",
                 "",
-                reason=(
-                    "provider capacity exhausted"
-                    if auto_resume
-                    else "incomplete review panel"
+                reason=self._incomplete_panel_reason(
+                    trigger, review_head, failed_lenses
                 ),
                 completed_lenses=tuple(lens for lens, _ in reviews),
                 failed_lenses=tuple(failed_lenses),
@@ -8868,15 +8938,24 @@ class SwarmDispatcher:
         if detect_auth_failure(vanellus_result.stdout, vanellus_result.stderr):
             await self._handle_panel_auth_failure(trigger, "vanellus")
             return
+        vanellus_failure = (
+            "" if vanellus_result.ok else review_failure_class(vanellus_result)
+        )
+        self._count_authority_read_failure(
+            trigger, review_head, "vanellus",
+            failed=vanellus_failure == AUTHORITY_READ_FAILURE,
+        )
         if not vanellus_result.ok:
             # No current invocation verdict exists. Historical issue comments
             # cannot turn provider exhaustion or process failure into a review.
-            reason = (
-                "provider capacity exhausted"
-                if review_failure_class(vanellus_result)
-                in {"usage limit", "provider exhaustion"}
-                else "review execution failure"
-            )
+            if vanellus_failure == AUTHORITY_READ_FAILURE:
+                reason = self._incomplete_panel_reason(
+                    trigger, review_head, (("vanellus", vanellus_failure),)
+                )
+            elif vanellus_failure in {"usage limit", "provider exhaustion"}:
+                reason = "provider capacity exhausted"
+            else:
+                reason = "review execution failure"
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus", "", vanellus_result.error,
                 reason=reason,
@@ -16425,6 +16504,109 @@ class SwarmDispatcher:
     _REVIEW_DEFERRED_MARKER = "<!-- review-deferred-until:{iso} -->"
     _REVIEW_DEFERRED_RE = re.compile(r"<!-- review-deferred-until:([^ ]+) -->")
 
+    def _count_authority_read_failure(
+        self, t: SwarmTrigger, head: str, lens: str, *, failed: bool
+    ) -> None:
+        """Count consecutive temporary Neotoma read failures for one lens at one
+        head; any other outcome (it ran, or failed some other way) resets it."""
+        counts = self.__dict__.setdefault("_authority_read_failures", {})
+        key = (t.repository.casefold(), int(t.number), head, lens)
+        if failed:
+            counts[key] = counts.get(key, 0) + 1
+        else:
+            counts.pop(key, None)
+
+    def _incomplete_panel_reason(
+        self,
+        t: SwarmTrigger,
+        head: str,
+        failed_lenses: "tuple[tuple[str, str], ...] | list[tuple[str, str]]",
+    ) -> str:
+        """The `_handle_panel_session_limit` reason for a panel with missing lenses.
+
+        Auto-resumes only when every missing lens failed for a self-clearing
+        cause. A temporary Neotoma read failure resumes at most
+        ``APIS_MISSING_LENS_MAX_RETRIES`` times per lens and head (the existing
+        per-lens retry bound); past it the panel stops for operator attention
+        and says the cause is Neotoma availability.
+        """
+        classes = {failure for _, failure in failed_lenses}
+        if not classes <= AUTO_RESUME_FAILURE_CLASSES:
+            return "incomplete review panel"
+        if AUTHORITY_READ_FAILURE not in classes:
+            return "provider capacity exhausted"
+        limit = _authority_read_retry_limit()
+        counts = self.__dict__.get("_authority_read_failures", {})
+        exhausted = sorted(
+            lens
+            for lens, failure in failed_lenses
+            if failure == AUTHORITY_READ_FAILURE
+            and counts.get((t.repository.casefold(), int(t.number), head, lens), 0) > limit
+        )
+        if exhausted:
+            return (
+                "Neotoma availability — the agent definition or policy for "
+                f"{', '.join(exhausted)} could not be read after {limit} automatic "
+                "retries at this head"
+            )
+        return AUTHORITY_READ_FAILURE
+
+    async def _reuse_finished_lenses(
+        self,
+        t: SwarmTrigger,
+        panel: list[Lens],
+        head: str,
+        *,
+        forced: set[str],
+    ) -> tuple[list[Lens], list[tuple[str, str]]]:
+        """Split a resumed panel into lenses to run and verdicts to reuse.
+
+        A lens whose latest swarm-authored verdict comment is pinned to *head*
+        already finished there, so its verdict is reused instead of running it
+        again. A lens in *forced* (owner of a still-pending gate) always runs,
+        as in `review_carry.select_rerun`. Any read failure reuses nothing and
+        runs the whole panel: re-running costs work, skipping without proof
+        could drop a review.
+        """
+        if not head or not panel:
+            return panel, []
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._lens_scoped_comments(
+                    t.repository, t.number, client
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: could not read "
+                f"finished lens verdicts ({exc}) — resuming the full panel"
+            )
+            return panel, []
+        latest: dict[str, tuple[str, str]] = {}
+        for comment in sorted(comments, key=lambda c: c.get("created_at") or ""):
+            raw = comment.get("body") or ""
+            if _LENS_SUPERSEDED_RE.search(raw):
+                continue
+            marker = _LENS_MARKER_RE.search(raw)
+            if not marker:
+                continue
+            latest[marker.group("lens").lower()] = (marker.group("sha").lower(), raw)
+        forced_set = {str(f).lower() for f in forced}
+        to_run: list[Lens] = []
+        reused: list[tuple[str, str]] = []
+        for item in panel:
+            found = latest.get(item.lens)
+            if item.lens not in forced_set and found and found[0] == head.lower():
+                reused.append((item.lens, found[1]))
+            else:
+                to_run.append(item)
+        if reused:
+            log.info(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: resumed panel reuses "
+                f"{[lens for lens, _ in reused]} finished at {head[:7]}; running "
+                f"{[item.lens for item in to_run]}"
+            )
+        return to_run, reused
+
     async def _handle_panel_session_limit(
         self,
         t: SwarmTrigger,
@@ -16445,10 +16627,16 @@ class SwarmDispatcher:
         Successful and failed lens names remain visible on partial panels.
         Best-effort; never raises.
         """
-        auto_resume = reason in {"usage limit", "provider capacity exhausted"}
+        auto_resume = reason in {
+            "usage limit", "provider capacity exhausted", AUTHORITY_READ_FAILURE,
+        }
         iso = ""
         if auto_resume:
-            delay = parse_limit_reset_delay(stdout, stderr)
+            delay = (
+                _authority_read_retry_delay()
+                if reason == AUTHORITY_READ_FAILURE
+                else parse_limit_reset_delay(stdout, stderr)
+            )
             resume_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
             iso = resume_at.strftime("%Y-%m-%dT%H:%M:%SZ")
             log.warning(
@@ -16497,7 +16685,15 @@ class SwarmDispatcher:
         if not await self._require_github_write_credential(t.repository, "handle panel session limit"):
             return
         detail = completed_note + failed_note
-        if auto_resume:
+        if auto_resume and reason == AUTHORITY_READ_FAILURE:
+            status_copy = (
+                "The lens was not run, because it never runs without its policy. "
+                "This is temporary: the review will resume automatically and run "
+                f"only the missing lens(es) (scheduled ~`{iso}`); no operator "
+                "action is required."
+            )
+            marker = self._REVIEW_DEFERRED_MARKER.format(iso=iso) + "\n"
+        elif auto_resume:
             status_copy = (
                 "The review will resume automatically when capacity is expected "
                 f"to return (scheduled ~`{iso}`); no operator action is required."
