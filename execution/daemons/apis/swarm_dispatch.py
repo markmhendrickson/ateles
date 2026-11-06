@@ -91,6 +91,7 @@ from review_learning import (
     parse_findings,
     propose_skill_updates,
 )
+import review_panel
 from review_panel import (
     LENSES,
     Lens,
@@ -107,6 +108,7 @@ import model_tiering
 import panel_check_gate
 import review_carry
 import review_delta
+import review_scope
 import skill_runner
 from skill_runner import (
     ATELES_REPO,
@@ -2812,14 +2814,38 @@ def gate_verdict_instruction(agent: str, role: str) -> str:
 def compose_fallback_comment(
     lens: str, agent: str, text: str, commit_sha: str = ""
 ) -> str:
-    """Body for a dispatcher-posted review comment (panelist could not post)."""
+    """Body for a dispatcher-posted review comment (panelist could not post).
+
+    The approval tool reads a lens's posted comment with `lens_own_verdict`
+    alone: at most one head marker, then the lens's header, then its verdict.
+    So when the lens's own reply already reads that way (it opens with its
+    header, optionally after its own marker for this head), the comment is the
+    head marker followed by that reply, with nothing between them, and it must
+    read the same as the reply did. The earlier shape put a plain
+    `review:<lens>` line and a second, dispatcher-written header ahead of the
+    lens's own, so the tool found no verdict at the fixed position and every
+    fallback verdict, arch's included, read as missing. A reply with no
+    readable verdict of its own keeps the dispatcher header, which reads as
+    before (no verdict, never a pass).
+    """
     marker = compose_lens_review_marker(lens, commit_sha)
-    return (
-        f"{marker}\nreview:{lens}\n"
-        f"{attribution_header(agent, f'{lens} lens panelist')}\n\n"
-        f"{text}\n\n"
+    footer = (
         f"_Posted by the Apis dispatcher on behalf of {agent} — the "
         "panelist could not post its comment directly._"
+    )
+    reply = (text or "").lstrip("\r\n")
+    own_marker = f"{marker}\n"
+    if _normalise_full_sha(commit_sha) and reply.startswith(own_marker):
+        reply = reply[len(own_marker):]
+    if _normalise_full_sha(commit_sha) and lens_own_verdict(reply, lens_agent=agent):
+        body = f"{marker}\n{reply.rstrip()}\n\n{footer}"
+        if _reader_view(body, agent) == _reader_view(text, agent):
+            return body
+    return (
+        f"{marker}\n"
+        f"{attribution_header(agent, f'{lens} lens panelist')}\n\n"
+        f"{text}\n\n"
+        f"{footer}"
     )
 
 
@@ -3281,6 +3307,32 @@ def panel_finished_at_head(
             continue
         reported.add(match.group("lens").lower())
     return {lens.lower() for lens in required_lenses} <= reported
+
+
+def unseated_required_lenses(
+    comments: list[dict], head_sha: str, required_lenses: set[str] | frozenset[str]
+) -> list[str]:
+    """Required lenses the panel on this PR never seated, sorted.
+
+    A lens counts as seated when a swarm comment carries its `review:<lens>`
+    head marker at ANY head (a lens carried from an earlier head was seated
+    there), or when the newest aggregation at *head_sha* names it as not
+    received (the missing-lens sweep re-runs that one). Anything else was left
+    out of the panel altogether, which is what an Apis panel chosen without the
+    repository's scope file did: the approval tool requires the lens and no
+    verdict for it will ever arrive on its own. ``comments`` must already be
+    scoped to swarm identities (`_lens_scoped_comments`).
+    """
+    seen = {
+        match.group("lens").lower()
+        for comment in comments
+        for match in [_LENS_MARKER_RE.search(comment.get("body") or "")]
+        if match
+    }
+    aggregation = latest_aggregation_comment(comments, head_sha=_normalise_full_sha(head_sha))
+    if aggregation is not None:
+        seen |= set(parse_not_received_lenses(aggregation.get("body") or ""))
+    return sorted({lens.lower() for lens in required_lenses} - seen)
 
 
 def vanellus_comment_missing(comment_bodies: list[str], head_sha: str = "") -> bool:
@@ -5476,10 +5528,11 @@ class SwarmDispatcher:
         """Whether `trigger`'s head already has a finished panel; None if unreadable.
 
         The required lenses are the ones `select_panel` seats for the PR's
-        changed files. `_changed_files` reports a failed read as an empty list;
-        the required set is then left empty, so only an aggregation marker can
-        count as finished (when it carries a verdict) and the PR is re-driven
-        rather than skipped.
+        changed files, which include every lens the approval tool requires
+        (`_path_required_lenses`); a panel missing one of those is not
+        finished. `_changed_files` reports a failed read as an empty list; the
+        required set is then the approval tool's alone (the full panel when the
+        read failed there too).
         """
         head = _normalise_full_sha(trigger.head_sha or "")
         if not head:
@@ -5496,7 +5549,15 @@ class SwarmDispatcher:
                 "alone"
             )
             return None
-        # An aggregation at the head settles it without reading the diff.
+        # The lenses the approval tool requires at this head. An aggregation at
+        # the head settles the panel only when every one of them was seated on
+        # this PR at some point (it has a lens comment, or the aggregation names
+        # it as not received, which the missing-lens sweep recovers). An
+        # aggregation over a panel that never seated a required lens is not a
+        # finished panel: the approval tool can never pass it.
+        path_required = await self._path_required_lenses(trigger)
+        if unseated_required_lenses(comments, head, path_required):
+            return False
         if panel_finished_at_head(comments, head, set()):
             return True
         try:
@@ -5515,11 +5576,12 @@ class SwarmDispatcher:
                     gate_contributors=set(),
                     changed_files=changed_files,
                     max_panel=self.config.panel_max,
+                    required_lenses=path_required,
                 )
             }
             if changed_files
             else set()
-        )
+        ) | set(path_required)
         return panel_finished_at_head(comments, head, required)
 
     async def resume_stalled_reviews(self, repositories: list[str]) -> dict:
@@ -6300,7 +6362,9 @@ class SwarmDispatcher:
     async def _prs_with_missing_lens(
         self, repository: str
     ) -> list[tuple[dict, list[str]]]:
-        """Open PRs whose LATEST aggregation is clear but names an absent lens.
+        """Open PRs whose LATEST aggregation is clear but names an absent lens,
+        or is clear at the current head while a lens the approval tool requires
+        (`_path_required_lenses`) was never seated on the PR.
 
         Reads the newest aggregation via ``latest_aggregation_comment`` over the
         fully-paged comment list (#430) — reading the oldest would resurrect a
@@ -6333,9 +6397,27 @@ class SwarmDispatcher:
                 if not latest:
                     continue
                 body = latest.get("body") or ""
-                if not is_missing_lens_candidate(body):
-                    continue
-                lenses = parse_not_received_lenses(body)
+                lenses = (
+                    parse_not_received_lenses(body)
+                    if is_missing_lens_candidate(body)
+                    else []
+                )
+                # A clear aggregation at the current head over a panel that
+                # never seated a lens the approval tool requires (one chosen
+                # without the scope file) is the same hold with no NOT RECEIVED
+                # line to say so: re-run each such lens too.
+                head = _normalise_full_sha(str((pr.get("head") or {}).get("sha") or ""))
+                if (
+                    head
+                    and parse_blocking_count(body) == 0
+                    and parse_aggregation_marker(body).get("commit") == head
+                ):
+                    required = await self._path_required_lenses(
+                        self._pr_trigger_from_api(repository, pr)
+                    )
+                    for lens in unseated_required_lenses(comments, head, required):
+                        if lens not in lenses:
+                            lenses.append(lens)
                 if lenses:
                     out.append((pr, lenses))
         return out
@@ -8279,11 +8361,16 @@ class SwarmDispatcher:
             if parent
             else {}
         )
+        # Every lens the approval tool will require at this head is seated
+        # (union with the picks above, never capped away), so the panel can
+        # produce an approvable review without anyone running a lens by hand.
+        path_required = await self._path_required_lenses(trigger)
         panel = select_panel(
             gate_contributors=set(expectations),
             changed_files=changed_files,
             max_panel=self.config.panel_max,
             pending_gates=pending_gates,
+            required_lenses=path_required,
         )
         # Narrow a re-round (ruling `rereview_only_blockers_and_touched_areas`).
         # Extends the carry-forward above: a pending gate's owner is forced to
@@ -14029,6 +14116,89 @@ class SwarmDispatcher:
             "credential"
         )
         return await send(url, headers=headers, **kwargs)
+
+    async def _path_required_lenses(self, t: SwarmTrigger) -> frozenset[str]:
+        """Every lens the panel-gated approval tool will require for this PR at
+        this head (`approve_pr_as_app.py --panel path`): the path decision's
+        lenses AND, on a full-panel decision, the tool's diff-derived floor
+        (`legal` for a `LICENSE` or `package.json` change, a pre-registered
+        contributor's lens).
+
+        Read and decided by the tool's own code: `review_scope.fetch_scope` and
+        `review_scope.path_panel_for_pr` for the path decision (the scope file
+        from the PR's BASE branch, every changed path with renames counting both
+        sides), `review_scope.fetch_pr_files` and
+        `review_panel.fetch_gate_contributors` for the floor's inputs, and
+        `review_panel.approval_required_lenses` for the set, at this daemon's
+        `panel_max` (the tool's `APIS_PANEL_MAX`). A missing, unreadable or
+        malformed scope file is the full panel; an unreadable PR, file list or
+        parent issue, or any error here, is every lens the tool could require
+        (`review_panel.every_requirable_lens`), never a smaller set; one log
+        line names the reason. Seated by `select_panel` alongside its own
+        picks, never capped away, and read by finished detection and the
+        missing-lens sweep, so Apis never finishes a panel whose approval the
+        tool must refuse for a lens that was never seated.
+        """
+        ref = f"{t.repository}#{t.number}"
+        try:
+            pr_data = await self._fetch_pr(t.repository, t.number)
+            if not isinstance(pr_data, dict):
+                raise RuntimeError("the PR could not be read")
+            headers = self._github_headers(t.repository)
+            api_base = "https://api.github.com"
+            base_ref = str((pr_data.get("base") or {}).get("ref") or "")
+            async with httpx.AsyncClient(timeout=30) as client:
+                load = await review_scope.fetch_scope(
+                    client, api_base=api_base,
+                    repo=t.repository, base_ref=base_ref, headers=headers,
+                )
+                decision = await review_scope.path_panel_for_pr(
+                    client, api_base=api_base,
+                    repo=t.repository, pr=t.number, pr_data=pr_data,
+                    headers=headers, load=load,
+                )
+                changed_files: list[str] = []
+                contributors: set[str] = set()
+                if decision.full:
+                    # The tool's floor inputs, read the way the tool reads
+                    # them; a failed read raises into the fail-closed branch.
+                    changed_files, _rows = await review_scope.fetch_pr_files(
+                        client, api_base=api_base, repo=t.repository,
+                        pr=t.number, headers=headers,
+                    )
+                    parent = self._parent_issue_number(
+                        str(pr_data.get("body") or ""), t.repository
+                    )
+                    if parent is not None:
+                        contributors = await review_panel.fetch_gate_contributors(
+                            client, api_base=api_base, repo=t.repository,
+                            issue_number=parent, headers=headers,
+                        )
+            lenses = review_panel.approval_required_lenses(
+                decision,
+                gate_contributors=contributors,
+                changed_files=changed_files,
+                max_panel=self.config.panel_max,
+            )
+        except Exception as exc:  # noqa: BLE001 — unknown: every requirable lens
+            lenses = review_panel.every_requirable_lens()
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: required panel unreadable "
+                f"({type(exc).__name__}: {exc}) — seating every lens the "
+                f"approval tool could require {sorted(lenses)}"
+            )
+            return lenses
+        if load.scope is None:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: scope file unusable ({load.error}) — "
+                f"seating the full panel {sorted(lenses)}"
+            )
+        else:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: approval tool requires {sorted(lenses)}. "
+                f"{decision.reason}"
+            )
+        return lenses
 
     async def _changed_files(self, t: SwarmTrigger) -> list[str]:
         url = (
