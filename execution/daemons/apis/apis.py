@@ -959,6 +959,30 @@ def _fly_receipt_key(snapshot: dict, entity_id: str) -> str:
     return build_delivery.fly_delivery_key(repository, issue[1] if issue else None, entity_id)
 
 
+def _fly_run_in_flight(snapshot: dict, entity_id: str) -> bool | None:
+    """Whether the Fly ledger shows a delivery run in flight for this task.
+
+    True: the task's delivery receipt is still ``launching`` (held for the
+    whole run) or names a run whose reservation is still in flight. False: no
+    such run, or the task has no delivery key. None: the ledger could not be
+    read, so whether a run is in flight is unknown. Reads the ledger once,
+    through ``FlyLedger.snapshot``; never settles or writes anything."""
+    import fly_runner
+
+    key = _fly_receipt_key(snapshot, entity_id)
+    if not key:
+        return False
+    try:
+        doc = build_delivery._delivery_ledger().snapshot()
+    except (OSError, fly_runner.FlyLedgerError):
+        return None
+    entry = build_delivery._receipt_for(build_delivery.canonical_key(key), doc.get("deliveries", {}))
+    if entry is None:
+        return False
+    run_id = entry.get("run_id")
+    return entry.get("status") == "launching" or bool(run_id and run_id in doc["in_flight"])
+
+
 def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *, lifecycle_version=None,
                               lifecycle_provenance=None):
     """Bind the explicit owner policy read to this current exclusive invocation.
@@ -4784,6 +4808,25 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
 
     title = snapshot.get("title", "(untitled)")
     status = snapshot.get("status", "")
+
+    # A replayed task event must not re-route a task whose Fly run is still in
+    # flight (seen 2026-11-06: after an Apis restart a replay moved such a task
+    # from executing to routed, and releasing it could build the change twice).
+    # An unreadable ledger leaves the same doubt, so it does nothing either.
+    if action in ("created", "updated"):
+        in_flight = _fly_run_in_flight(snapshot, entity_id)
+        if in_flight is None:
+            log.warning(
+                f"[{DAEMON_NAME}] task.{action} for {entity_id}: the Fly ledger could "
+                "not be read, so whether a run is in flight is unknown — not routing"
+            )
+            return
+        if in_flight:
+            log.info(
+                f"[{DAEMON_NAME}] task.{action} for {entity_id}: a Fly run is in "
+                "flight for this task — not routing"
+            )
+            return
 
     if action == "created":
         # Neotoma redelivers `task.created` for the same entity — measured
