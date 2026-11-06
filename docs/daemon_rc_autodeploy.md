@@ -59,11 +59,18 @@ before it lets go: it sends SIGTERM to the script (its own parent, and only whil
 is still its parent), waits up to 30 seconds for it to exit (then SIGKILL), waits a
 further 5 seconds (a fixed allowance for a `launchctl kickstart` already started,
 not proof that it has finished), and only then releases the lock. Its signalling
-always re-checks that the pid is still its parent, so a reused pid is never signalled. A deploy that has been ended cannot restart anything, so no
-restart follows the release, and a hung deploy still cannot block Fly admission for
-ever. Before each `launchctl kickstart`, in both the `gui` and the `user` domain attempt, the script also checks the holder is still
-alive; if it is gone the script logs `Fly admission holder is gone`, restarts nothing
-more and exits non-zero. If the lock cannot be
+re-checks that the pid is still its parent immediately before each signal; the
+check and the signal are separate operations, so this narrows, but does not
+eliminate, the window in which a reused pid could be signalled. A deploy that has
+been ended cannot restart anything, so no restart follows the release when the
+holder reaches its own limit, and a hung deploy still cannot block Fly admission
+for ever. That ordering guarantee covers the holder's own limit only. Before each
+`launchctl kickstart`, in both the `gui` and the `user` domain attempt, the script
+also checks the holder is still alive; if it is gone the script logs
+`Fly admission holder is gone`, restarts nothing more and exits non-zero. This is
+best effort, for a holder killed from outside (at its own limit the holder ends the
+deploy first): the check and the kickstart are two operations, so a restart can
+still race a holder that dies between them. If the lock cannot be
 taken within 60 seconds (admission or the reaper is at work), the run logs
 `DEFERRED: Fly admission lock busy` and exits 0. The check fails open: if the
 holder cannot start or answer, the script logs one fixed warning and deploys, and a
@@ -74,10 +81,11 @@ hiding a live one.
 Accepted limits of a deploy that is ended early:
 
 - A deploy ended after the fast-forward (the holder's 15-minute limit during a long
-  dependency refresh, or a failed `pip install`) leaves the daemons on the old build:
-  the next run sees the checkout at origin and does nothing. The script logs
-  `DEPLOY DID NOT FINISH` saying so; the next merge to main, or a manual restart,
-  picks up the new build. This is how a failed `pip install` already behaved.
+  dependency refresh, a failed `pip install`, or a holder that is gone partway through
+  the restarts) leaves the checkout updated but the restarts incomplete, so daemons
+  may be on mixed builds: the next run sees the checkout at origin and does nothing.
+  The script logs `DEPLOY DID NOT FINISH` saying so; the next merge to main, or a
+  manual restart, picks up the new build. This is how a failed `pip install` already behaved.
 - If the holder ends a deploy while `pip` is running, that `pip` child may outlive
   the script and finish its install. It restarts nothing.
 

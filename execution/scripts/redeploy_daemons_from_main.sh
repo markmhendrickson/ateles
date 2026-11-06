@@ -79,12 +79,13 @@ release_admission() {
 # EXIT also runs when the holder ends this script with SIGTERM (no TERM trap on
 # purpose: bash would defer it until a foreground pip returned). If the run
 # fast-forwarded the checkout and never finished the restarts, say so plainly:
-# the next run sees the checkout at origin and does nothing, so the daemons stay
-# on the old build until the next merge to main or a manual restart.
+# the next run sees the checkout at origin and does nothing, so any daemon not
+# yet restarted stays on its old build (builds may be mixed) until the next
+# merge to main or a manual restart.
 on_exit() {
   local status=$?
   if [ "$FF_DONE" -eq 1 ] && [ "$RESTARTS_DONE" -eq 0 ]; then
-    log "DEPLOY DID NOT FINISH: the checkout was updated but the restarts did not complete; the daemons are still on the old build until the next merge to main or a manual restart."
+    log "DEPLOY DID NOT FINISH: the checkout was updated but the restarts did not all complete, so daemons may be on mixed builds until the next merge to main or a manual restart."
   fi
   # bash 3.2 reports $? as 0 in an EXIT trap after a fatal signal, so the
   # holder says it is ending us by creating this file before it sends SIGTERM.
@@ -127,11 +128,13 @@ fi
 # in-progress dispatch). The lock dies with the holder, which
 # also exits if this script dies. After 15 minutes at most the holder ENDS THIS
 # SCRIPT (SIGTERM, SIGKILL after 30s), waits 5s for a kickstart already begun,
-# and only then releases the lock, so a deploy never restarts anything after
-# the lock is gone. (The 5s is a fixed allowance for a kickstart already
-# started, not proof that it has finished.) Before each kickstart below, in
-# both launchd domains, this script also checks the holder is still alive, and
-# stops restarting if it is not.
+# and only then releases the lock, so a deploy that reaches the holder's own
+# limit is ended before the lock goes. (The 5s is a fixed allowance for a
+# kickstart already started, not proof that it has finished.) Separately, before
+# each kickstart below, in both launchd domains, this script checks the holder
+# is still alive and stops restarting if it is not. That check is best effort,
+# for a holder killed from outside: the check and the kickstart are two
+# operations, so a restart can still race a holder that dies between them.
 #   busy  -> the lock is held (admission or the reaper at work): defer.
 #   ok N  -> N live reservations: defer if N > 0, else deploy holding the lock.
 #   anything else (the holder could not start or answer): fail OPEN and deploy,
@@ -210,6 +213,7 @@ fi
 # so the holder check guards both the gui and the user-domain attempt. The holder
 # is what keeps Fly admission blocked; if it is gone (killed, or its lifetime
 # ended), a restart could orphan a job admitted since, so restart nothing more.
+# Best effort: the check and the kickstart are not atomic.
 # (Skipped in fail-open mode, where no holder ever started.)
 kickstart_in_domain() {
   if [ "$HOLDER_FAIL_OPEN" -eq 0 ] && ! kill -0 "$HOLDER_PID" 2>/dev/null; then

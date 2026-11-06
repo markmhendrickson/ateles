@@ -239,6 +239,8 @@ case "$1" in
     exit "${MERGE_RC:-0}" ;;
   diff)
     exit "${DIFF_RC:-0}" ;;
+  merge-base)
+    exit "${MERGE_BASE_RC:-0}" ;;
 esac
 exit 0
 """ % _PROBE
@@ -418,7 +420,8 @@ def test_redeploy_does_not_restart_after_admission_holder_expires(tmp_path):
     calls = calls_file.read_text()
     assert "kickstart" not in calls
     assert "DEPLOY DID NOT FINISH" in stdout
-    assert "still on the old build" in stdout
+    assert "may be on mixed builds" in stdout
+    assert "still on the old build" not in stdout
     assert "DEPLOYED" not in stdout
     time.sleep(1)
     assert "kickstart" not in calls_file.read_text()
@@ -461,7 +464,8 @@ def test_holder_death_stops_further_restarts(tmp_path):
     assert "HOLDER NOT KILLED" not in calls  # the injector really killed it
     assert "Fly admission holder is gone" in result.stdout
     assert "DEPLOY DID NOT FINISH" in result.stdout
-    assert "still on the old build" in result.stdout
+    assert "may be on mixed builds" in result.stdout
+    assert "still on the old build" not in result.stdout  # Apis was restarted
     assert _wait_lock_free(helper.admission_lock_path(ledger))
 
 
@@ -478,7 +482,7 @@ def test_holder_death_during_failed_gui_attempt_blocks_user_domain_kickstart(tmp
     assert _wait_lock_free(helper.admission_lock_path(ledger))
 
 
-def test_end_parent_never_signals_a_pid_that_is_no_longer_its_parent(monkeypatch):
+def test_end_parent_stops_signalling_once_pid_is_no_longer_its_parent(monkeypatch):
     sent = []
     states = iter([True])  # still our parent only at entry; gone after SIGTERM
     monkeypatch.setattr(helper, "_is_my_parent", lambda _p: next(states, False))
@@ -518,4 +522,16 @@ def test_killed_redeploy_releases_admission_lock(tmp_path):
     assert result.returncode != 0
     assert calls.count("launchctl kickstart -k") == 1
     assert "DEPLOY DID NOT FINISH" in result.stdout
+    assert _wait_lock_free(helper.admission_lock_path(ledger))
+
+
+def test_diverged_checkout_refuses_deploy_and_releases_admission_lock(tmp_path):
+    ledger = _ledger(tmp_path / "l.json")
+    env, calls_file = _setup_redeploy(tmp_path, ledger)
+    env["MERGE_BASE_RC"] = "1"  # HEAD is not an ancestor of origin: diverged
+    result, calls = _invoke(env, calls_file)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "diverged" in result.stdout
+    assert "merge --ff-only" not in calls
+    assert "kickstart" not in calls
     assert _wait_lock_free(helper.admission_lock_path(ledger))

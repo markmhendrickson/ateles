@@ -18,7 +18,10 @@ holds the lock no launch can reserve, so the count stays true from the check
 to the restart. The lock dies with the holder process.
 
 When the limit is reached the holder does not simply let go: a deploy that
-outlived the lock could restart Apis over a job admitted after the release. It
+outlived the lock could restart Apis over a job admitted after the release.
+This ordering covers the holder's own limit. (A holder killed from outside is
+only caught, best effort, by the script's liveness check before each kickstart,
+which can race.) It
 first ends its parent (SIGTERM, then SIGKILL after ``PARENT_TERM_WAIT_SECONDS``),
 waits ``KICKSTART_SETTLE_SECONDS`` (a fixed allowance for a ``launchctl
 kickstart`` the parent had already started, not proof that it has finished),
@@ -167,7 +170,9 @@ def _end_parent(parent: int, ending_file: str | None = None) -> None:
     except OSError:
         return
     # Every check below is "still MY parent", not "pid alive": once our parent
-    # dies we are reparented, so a reused pid can never be signalled.
+    # dies we are reparented. The check is immediately before each signal; the
+    # check and the signal are separate operations, so this narrows, not
+    # eliminates, the window in which a reused pid could be signalled.
     deadline = time.monotonic() + PARENT_TERM_WAIT_SECONDS
     while _is_my_parent(parent) and time.monotonic() < deadline:
         time.sleep(0.1)
