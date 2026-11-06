@@ -2091,14 +2091,14 @@ def _proxy_value_has_credentials(value: str) -> bool:
     return "@" in authority
 
 
-def _make_dispatch_scratch_dir(tmp_parent: str | None = None) -> str:
+def _make_dispatch_scratch_dir(tmp_parent: str | None = None, *, prefix: str = "apis_work_") -> str:
     """A fresh, empty, owner-only directory for a dispatch that names no
     working directory, as a resolved absolute path. The caller removes it."""
     try:
         parent = Path(tmp_parent) if tmp_parent and tmp_parent.strip() else None
         if parent is not None:
             parent.mkdir(parents=True, exist_ok=True)
-        made = tempfile.mkdtemp(prefix="apis_work_", dir=str(parent) if parent else None)
+        made = tempfile.mkdtemp(prefix=prefix, dir=str(parent) if parent else None)
         os.chmod(made, 0o700)
     except OSError as exc:
         # The class only: an OSError's text can carry local paths.
@@ -3570,6 +3570,11 @@ async def _run_skill_once(
     _isolated_home: IsolatedHarnessHome | None = None
     # A per-dispatch working directory, made only when the caller named none.
     _scratch_dir: str | None = None
+    # A host-run read-only review (a lens or a carry-forward check) gets an
+    # empty GH_CONFIG_DIR of its own, created at the local spawn, so `gh` in the
+    # child has no keyring account to fall back on when GH_TOKEN is absent or
+    # unset. Its only GitHub identity is the token it is handed.
+    _gh_config_dir: str | None = None
     _codex_gate_token = ""
     if provider == "claude" and local_review:
         # Claude otherwise merges project/user MCP configuration. A local
@@ -3925,6 +3930,8 @@ async def _run_skill_once(
             shutil.rmtree(_isolated_home.home, ignore_errors=True)
         if _scratch_dir is not None:
             shutil.rmtree(_scratch_dir, ignore_errors=True)
+        if _gh_config_dir is not None:
+            shutil.rmtree(_gh_config_dir, ignore_errors=True)
 
     # ── Executor choice (ateles#1456) ──────────────────────────────────────────
     # Local is today's code, unchanged. The fly executor takes the SAME argv,
@@ -4031,7 +4038,7 @@ async def _run_skill_once(
     proc = None
 
     async def _run_local() -> tuple[int | None, bytes, bytes]:
-        nonlocal proc, _isolated_home, _scratch_dir
+        nonlocal proc, _isolated_home, _scratch_dir, _gh_config_dir
         spawn_cwd = cwd
         if _home_override_refusal is not None:
             exc = _home_override_refusal
@@ -4092,6 +4099,17 @@ async def _run_skill_once(
             subprocess_env.update(_isolated_home.env)
             log.info(f"[apis] {provider} child for {_role!r} runs in an isolated harness "
                      f"home; MCP servers: {list(_isolated_home.servers) or 'none'}")  # fmt: skip
+        if github_read_only and not local_review:
+            # `gh` reads its accounts from GH_CONFIG_DIR, else
+            # XDG_CONFIG_HOME/gh, else HOME/.config/gh, and treats an empty or
+            # unset GH_TOKEN as "use the keyring account". A lens keeps the
+            # host HOME (the Claude and Codex logins live there), so without
+            # this a child that drops its token reaches the host owner's own
+            # GitHub session. local_review already sets its own isolated one.
+            if _gh_config_dir is None:
+                _gh_config_dir = _make_dispatch_scratch_dir(
+                    (env_extra or {}).get("TMPDIR"), prefix="apis_gh_config_")
+            subprocess_env["GH_CONFIG_DIR"] = _gh_config_dir
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -4588,6 +4606,8 @@ async def _run_skill_once(
             shutil.rmtree(_isolated_home.home, ignore_errors=True)
         if _scratch_dir is not None:
             shutil.rmtree(_scratch_dir, ignore_errors=True)
+        if _gh_config_dir is not None:
+            shutil.rmtree(_gh_config_dir, ignore_errors=True)
 
 
 def usable_providers() -> set[str]:
