@@ -62,6 +62,20 @@ from swarm_dispatch import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _readable_fly_ledger(_fly_runner_off_and_isolated):
+    """Give this file's tests a readable Fly ledger with no receipts.
+
+    A fix round reads the ledger to tell whether the PR came from Fly, and a
+    missing ledger holds the round (origin unknown). These tests exercise
+    the local round, so the PR must be one a readable ledger does not name."""
+    import build_delivery
+
+    ledger = build_delivery._delivery_ledger()
+    with ledger._locked():
+        ledger._save(ledger._load())
+
+
 def _trigger(**overrides):
     base = dict(
         kind="pr_opened",

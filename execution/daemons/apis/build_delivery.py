@@ -1097,6 +1097,84 @@ def verified_parent_task(
     return found.pop() if len(found) == 1 else None
 
 
+@dataclass(frozen=True)
+class FlyDeliveredPR:
+    """Whether Apis's own ledger shows a pull request came from Fly.
+
+    ``delivered`` is True when a receipt names the PR, False when a readable
+    ledger names it in none, and None when the ledger is missing or could not
+    be read (unknown, never "not Fly").
+    ``branch``/``base_branch`` are what the receipts recorded, when they did;
+    ``source_task`` is the task a first delivery was keyed by, when exactly one
+    such receipt names the PR."""
+
+    delivered: bool | None
+    branch: str = ""
+    base_branch: str = ""
+    source_task: str = ""
+
+
+def fly_delivered_pr(repository: object, pr_number: object) -> FlyDeliveredPR:
+    """Whether *pr_number* in *repository* is a pull request Fly delivered.
+
+    Read only from the delivery ledger, never from the PR's author or body. A
+    PR counts when a non-lens receipt for the same repository either settled a
+    first delivery as ``opened``/``updated`` with that PR number, or records an
+    existing-PR correction of it. Used to route a fix round: a Fly PR's fix
+    round runs as a Fly correction, never as a commit on this host."""
+    import fly_runner
+
+    number = _as_issue_number(pr_number)
+    repo = canonical_repository(repository)
+    if not number or not repo:
+        return FlyDeliveredPR(False)
+    try:
+        ledger = _delivery_ledger()
+        # A missing file is no evidence either way: `delivery_receipts` reads
+        # it as an empty map, which must not pass for "no Fly receipt".
+        if not ledger.path.exists():
+            return FlyDeliveredPR(None)
+        receipts = ledger.delivery_receipts()
+    except (OSError, fly_runner.FlyLedgerError, ValueError):
+        return FlyDeliveredPR(None)
+    if not isinstance(receipts, dict):
+        return FlyDeliveredPR(None)
+    branches: set[str] = set()
+    bases: set[str] = set()
+    tasks: set[str] = set()
+    delivered = False
+    for stored, entry in receipts.items():
+        if not isinstance(stored, str) or not isinstance(entry, dict) or entry.get("kind") == "lens":
+            continue
+        key_repo, _, rest = canonical_key(stored).partition("#")
+        if key_repo != repo:
+            continue
+        admitted = entry.get("existing_pr")
+        if isinstance(admitted, dict):
+            if _as_issue_number(admitted.get("pr_number")) != number:
+                continue
+            delivered = True
+            branches.add(str(admitted.get("branch") or ""))
+            bases.add(str(admitted.get("base_branch") or ""))
+            continue
+        if (entry.get("status") not in _PARENT_TASK_STATUSES
+                or _as_issue_number(entry.get("pr_number")) != number):
+            continue
+        delivered = True
+        branches.add(str(entry.get("branch") or ""))
+        task_mark = _TASK_KEY_MARK.lstrip("#")
+        if rest.startswith(task_mark) and rest[len(task_mark):].strip():
+            tasks.add(rest[len(task_mark):].strip())
+    branches.discard("")
+    bases.discard("")
+    return FlyDeliveredPR(
+        delivered,
+        branch=branches.pop() if len(branches) == 1 else "",
+        base_branch=bases.pop() if len(bases) == 1 else "",
+        source_task=tasks.pop() if len(tasks) == 1 else "",
+    )
+
+
 def fly_delivery_facts(key: str, status, branch, run_id, commit=None) -> str:
     """The status, run and branch of a recorded delivery, one scannable line."""
     return (f"Status: {status or 'not reported'}. Run: {run_id or 'not reported'}. "
