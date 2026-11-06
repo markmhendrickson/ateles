@@ -4637,9 +4637,12 @@ class SwarmDispatcher:
         # cadence, tries them again without waiting for a restart.
         self._labelled_panels_due: dict[tuple[str, int], str] = {}
         self._labelled_repos_due: dict[str, str] = {}
-        # Consecutive retry passes each due PR stayed unreadable; bounded by
+        # Consecutive retry passes each due PR was examined and stayed
+        # unreadable (a pass whose cap never reached it does not count), and
+        # likewise each due repository's PR list; bounded by
         # `_LABELLED_RETRY_MAX_MISSES`.
         self._labelled_retry_misses: dict[tuple[str, int], int] = {}
+        self._labelled_repo_retry_misses: dict[str, int] = {}
         # (casefolded repository, PR number, head SHA) of every `_handle_pr`
         # run in flight in this process, so a retry never seats a second panel
         # on a head whose panel is already running.
@@ -5517,8 +5520,13 @@ class SwarmDispatcher:
         failed is listed again; a single due PR is fetched again and must still
         be open, non-draft and labelled. Each goes through
         `_resume_one_labelled_panel`, so a head whose panel is running or
-        finished is left alone, and a PR still unreadable stays due. Never
-        raises.
+        finished is left alone, and a PR still unreadable stays due.
+
+        Under the `_STARTUP_PANEL_SWEEP_MAX` cap, a PR the pass never reached
+        spends none of its retry budget: only a PR actually examined and still
+        unreadable counts a miss. An examined PR that stays due moves behind
+        the ones not yet reached, so when the first PRs stay unreadable the
+        later ones still get their turn on the following passes. Never raises.
         """
         summary = {
             "scanned": 0, "resumed": 0, "finished": 0, "unreadable": 0,
@@ -5532,21 +5540,21 @@ class SwarmDispatcher:
             try:
                 prs = await self._open_labelled_prs(repository, label)
             except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    f"[{DAEMON_NAME}] labelled panel retry: still cannot list "
-                    f"open PRs in {repository} ({exc}) — still due"
-                )
+                self._count_labelled_repo_retry_miss(key, repository, exc, summary)
                 continue
             self._labelled_repos_due.pop(key, None)
+            self._labelled_repo_retry_misses.pop(key, None)
             candidates.extend((repository, pr) for pr in prs)
         listed = {(repo.casefold(), pr.get("number")) for repo, pr in candidates}
-        attempted = set(self._labelled_panels_due)
+        # Due PRs actually read this pass; only these can count a miss.
+        examined: set[tuple[str, int]] = set()
         for (repo_key, number), repository in list(self._labelled_panels_due.items()):
             if (repo_key, number) in listed:
                 continue
             pr = await self._fetch_pr(repository, number)
             if not isinstance(pr, dict):
                 summary["unreadable"] += 1
+                examined.add((repo_key, number))
                 continue  # still due
             if (
                 pr.get("state") != "open"
@@ -5571,39 +5579,69 @@ class SwarmDispatcher:
             await self._resume_one_labelled_panel(
                 repository, pr, summary, source="labelled panel retry"
             )
-        self._count_labelled_retry_misses(attempted, summary)
+            examined.add((repository.casefold(), pr.get("number")))
+        self._count_labelled_retry_misses(examined, summary)
         log.info(f"[{DAEMON_NAME}] labelled panel retry: {summary}")
         return summary
 
     def _count_labelled_retry_misses(
-        self, attempted: set[tuple[str, int]], summary: dict
+        self, examined: set[tuple[str, int]], summary: dict
     ) -> None:
-        """Bound the retry: a PR still unreadable after
-        `_LABELLED_RETRY_MAX_MISSES` passes is dropped, logged at ERROR.
+        """Bound the retry: a PR examined and still unreadable in
+        `_LABELLED_RETRY_MAX_MISSES` passes is dropped, logged at WARNING.
 
         A temporary limit clears in minutes; a PR deleted or no longer readable
         by the swarm never does, and without a bound it would be requested every
-        pass for the life of the process. A dropped PR is still recovered by its
-        next event or the next restart's sweep.
+        pass for the life of the process. Only `examined` PRs count: a due PR
+        the cap kept this pass from reaching keeps its whole budget. An examined
+        PR that stays due moves to the back of `_labelled_panels_due`, so the
+        next pass reaches the ones waiting behind it first. A dropped PR is
+        still recovered by its next event or the next restart's sweep.
         """
         for key in list(self._labelled_retry_misses):
             if key not in self._labelled_panels_due:
                 self._labelled_retry_misses.pop(key, None)
-        for key in attempted:
+        for key in examined:
             if key not in self._labelled_panels_due:
                 continue
             misses = self._labelled_retry_misses.get(key, 0) + 1
             if misses < self._LABELLED_RETRY_MAX_MISSES:
                 self._labelled_retry_misses[key] = misses
+                self._labelled_panels_due[key] = self._labelled_panels_due.pop(key)
                 continue
             repository = self._labelled_panels_due.pop(key)
             self._labelled_retry_misses.pop(key, None)
             summary["dropped"] = summary.get("dropped", 0) + 1
-            log.error(
+            log.warning(
                 f"[{DAEMON_NAME}] labelled panel retry: {repository}#{key[1]} "
                 f"still unreadable after {misses} passes — no longer retried; "
                 "its next event or restart will look at it again"
             )
+
+    def _count_labelled_repo_retry_miss(
+        self, key: str, repository: str, exc: Exception, summary: dict
+    ) -> None:
+        """Bound a due repository's PR-list read the same way: a list read
+        that fails in `_LABELLED_RETRY_MAX_MISSES` passes is dropped, logged at
+        WARNING. Every due repository is read each pass (the cap counts PRs,
+        not repositories), so each failure here is an examined miss.
+        """
+        misses = self._labelled_repo_retry_misses.get(key, 0) + 1
+        if misses < self._LABELLED_RETRY_MAX_MISSES:
+            self._labelled_repo_retry_misses[key] = misses
+            log.warning(
+                f"[{DAEMON_NAME}] labelled panel retry: still cannot list "
+                f"open PRs in {repository} ({exc}) — still due"
+            )
+            return
+        self._labelled_repos_due.pop(key, None)
+        self._labelled_repo_retry_misses.pop(key, None)
+        summary["dropped"] = summary.get("dropped", 0) + 1
+        log.warning(
+            f"[{DAEMON_NAME}] labelled panel retry: still cannot list open PRs "
+            f"in {repository} after {misses} passes ({exc}) — no longer "
+            "retried; its PRs' next events or restart will look again"
+        )
 
     async def _open_labelled_prs(self, repository: str, label: str) -> list[dict]:
         """Open, non-draft PRs in `repository` carrying `label` on the PR itself.

@@ -831,7 +831,7 @@ def test_a_pr_that_never_becomes_readable_is_retried_a_bounded_number_of_times(
     for _ in range(d._LABELLED_RETRY_MAX_MISSES - 1):
         _run(d.retry_due_labelled_panels())
         assert (REPO, PR) in d._labelled_panels_due
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         summary = _run(d.retry_due_labelled_panels())
     assert summary["dropped"] == 1 and d._labelled_panels_due == {}
     assert "no longer retried" in caplog.text
@@ -856,6 +856,104 @@ def test_the_periodic_retry_keeps_due_the_prs_its_cap_did_not_reach(
     summary = _run(d.retry_due_labelled_panels())
     assert summary["capped"] is True and len(driven) == 20
     assert sorted(n for _, n in d._labelled_panels_due) == [21, 22, 23, 24, 25]
+
+
+def _many_due_world(d, state, monkeypatch, total, unreadable):
+    """`total` labelled PRs left due by a failed list read; the comment reads of
+    the PR numbers in `unreadable` keep failing. Returns the per-pass record of
+    which PRs had their panel state read."""
+    state["list_error"] = RuntimeError("limited")
+    _run(d.resume_labelled_panels([REPO]))
+    state["list_error"] = None
+    state["listed"] = [_labelled_pr(number=n) for n in range(1, total + 1)]
+    reads = []
+
+    async def comments(self, repository, number, client):
+        reads[-1].append(number)
+        if number in unreadable:
+            raise RuntimeError("limited")
+        return [_aggregation_comment()]
+
+    async def fetch(self, repository, number):
+        return _labelled_pr(number=number)
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_lens_scoped_comments", comments)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_fetch_pr", fetch)
+
+    def run_pass():
+        reads.append([])
+        return _run(d.retry_due_labelled_panels())
+
+    return reads, run_pass
+
+
+def test_capped_pass_spends_no_budget_on_unexamined_prs(sweep_world, monkeypatch):
+    # Red on 3d25015: PRs 21-25 were counted a miss on every capped pass they
+    # were never examined in, and were dropped unread after six passes.
+    d, state = sweep_world
+    cap = d._STARTUP_PANEL_SWEEP_MAX
+    reads, run_pass = _many_due_world(
+        d, state, monkeypatch, cap + 5, unreadable=set(range(1, cap + 1))
+    )
+    examined_late = set()
+    for _ in range(d._LABELLED_RETRY_MAX_MISSES + 2):
+        run_pass()
+        examined_late |= {n for n in reads[-1] if n > cap}
+        for n in range(cap + 1, cap + 6):
+            assert (REPO, n) in d._labelled_panels_due or n in examined_late, (
+                f"PR {n} was dropped before it was ever examined"
+            )
+    assert examined_late == set(range(cap + 1, cap + 6))
+
+
+def test_later_due_prs_get_a_turn_under_the_cap(sweep_world, monkeypatch):
+    # Red on 3d25015: every pass examined PRs 1-20 first, so PR 25 was never
+    # read within the bound.
+    d, state = sweep_world
+    cap = d._STARTUP_PANEL_SWEEP_MAX
+    reads, run_pass = _many_due_world(
+        d, state, monkeypatch, cap + 5, unreadable=set(range(1, cap + 1))
+    )
+    for _ in range(3):
+        run_pass()
+        assert len(reads[-1]) <= cap, "the cap still holds"
+    assert cap + 5 in {n for passed in reads for n in passed}, (
+        "a later due PR was examined within three passes"
+    )
+    # PRs readable once examined are resolved and leave the queue.
+    assert all((REPO, n) not in d._labelled_panels_due for n in range(cap + 1, cap + 6))
+
+
+def test_examined_unreadable_pr_still_expires(sweep_world, caplog):
+    # Red on 3d25015: the drop was logged at ERROR, not WARNING.
+    d, state = sweep_world
+    state["comment_error"] = RuntimeError("403 Resource not accessible")
+    _run(d.resume_labelled_panels([REPO]))
+    for _ in range(d._LABELLED_RETRY_MAX_MISSES - 1):
+        _run(d.retry_due_labelled_panels())
+        assert (REPO, PR) in d._labelled_panels_due
+    with caplog.at_level(logging.WARNING):
+        summary = _run(d.retry_due_labelled_panels())
+    assert summary["dropped"] == 1 and d._labelled_panels_due == {}
+    dropped = [r for r in caplog.records if "no longer retried" in r.getMessage()]
+    assert len(dropped) == 1 and dropped[0].levelno == logging.WARNING
+    assert f"#{PR}" in dropped[0].getMessage()
+    assert state["seated"] == []
+
+
+def test_a_repository_whose_pr_list_never_reads_is_retried_a_bounded_number_of_times(
+    sweep_world, caplog
+):
+    d, state = sweep_world
+    state["list_error"] = RuntimeError("limited")
+    _run(d.resume_labelled_panels([REPO]))
+    for _ in range(d._LABELLED_RETRY_MAX_MISSES - 1):
+        _run(d.retry_due_labelled_panels())
+        assert REPO.casefold() in d._labelled_repos_due
+    with caplog.at_level(logging.WARNING):
+        summary = _run(d.retry_due_labelled_panels())
+    assert summary["dropped"] == 1 and d._labelled_repos_due == {}
+    assert "no longer retried" in caplog.text
 
 
 def test_the_periodic_retry_runs_on_the_existing_review_sweep_loop():
