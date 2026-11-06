@@ -594,6 +594,16 @@ def parse_pending_gates(stdout: str) -> set[str]:
     return {g.strip().lower() for g in m.group(1).split(",") if g.strip()}
 
 
+_MISSING_PARENT_ISSUE_REASON = re.compile(
+    r"^GATE_BLOCK_REASON: missing_parent_issue\s*$", re.I | re.M
+)
+
+
+def missing_parent_issue_block(stdout: str) -> bool:
+    """Recognize only Lanius's explicit missing-parent-issue block reason."""
+    return bool(_MISSING_PARENT_ISSUE_REASON.search(stdout or ""))
+
+
 # Vanellus / panelist verdict token (SWARM_GITHUB_CONTRACT, skill_runner.py):
 # a review comment carries exactly one of these bold verdict tokens.
 #
@@ -2214,6 +2224,17 @@ def signed_off_is_head_pinned(body: str | None, current_head_sha: str | None) ->
         return False
     current = current_head_sha.lower()
     return reviewed == current or current.startswith(reviewed) or reviewed.startswith(current)
+
+
+def verified_parent_task_note(task_id: str) -> str:
+    """The fact a lens is told about a PR delivered from a tracked task.
+
+    Only ever built from ``build_delivery.verified_parent_task`` (Apis's own
+    delivery ledger), never from PR body text."""
+    return (
+        f"VERIFIED PARENT TASK: Apis's own delivery record shows this exact "
+        f"head was delivered from tracked task {task_id}. It has no parent issue."
+    )
 
 
 def checks_green_note(head: str) -> str:
@@ -8135,6 +8156,17 @@ class SwarmDispatcher:
         ):
             return
         parent = self._parent_issue_number(trigger.body, trigger.repository)
+        # A PR the Apis task path delivered has a tracked task as its parent,
+        # not an issue. Taken only from Apis's own delivery ledger (never the
+        # PR body); None keeps the no-parent path unchanged.
+        parent_task = (
+            self._verified_parent_task(trigger) if parent is None else None
+        )
+        if parent_task:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: no parent issue, but Apis's delivery "
+                f"ledger verifies parent task {parent_task} — no bypass notice"
+            )
 
         # 0. Pipeline-bypass guard (ateles): a product-code PR with NO parent
         #    issue skipped the gated issue → pm/arch → Cicada path. Lanius still
@@ -8142,7 +8174,7 @@ class SwarmDispatcher:
         #    bypass must be surfaced LOUDLY — a visible PR comment + an operator
         #    notification — instead of being silently retro-initialized as a
         #    "legacy independent fix". Best-effort; never blocks the pipeline.
-        if parent is None:
+        if parent is None and parent_task is None:
             bypass_files = await self._changed_files(trigger)
             if touches_product_code(bypass_files):
                 log.info(
@@ -8175,7 +8207,7 @@ class SwarmDispatcher:
         )
         lanius = await run_skill(
             "lanius",
-            self._lanius_pr_prompt(trigger, parent),
+            self._lanius_pr_prompt(trigger, parent, parent_task),
             github_token=_lanius_token,
             include_github_contract=True,
             # Read-only on Fly: the check reads gates and never delivers.
@@ -8205,7 +8237,7 @@ class SwarmDispatcher:
             )
             lanius = await run_skill(
                 "lanius",
-                self._lanius_pr_prompt(trigger, parent)
+                self._lanius_pr_prompt(trigger, parent, parent_task)
                 + (
                     "\n\nREMINDER: your previous attempt omitted the mandatory "
                     "final line. End with exactly `GATE_INHERITANCE: clear` or "
@@ -8254,16 +8286,31 @@ class SwarmDispatcher:
             )
             log.error(
                 f"[{DAEMON_NAME}] {ref}: gate inheritance unresolved ({reason}) — "
-                "failing OPEN to `clear` so the review panel still runs. Merge "
-                "remains gated on a formal approval."
+                + ("proceeding to review with an unknown verdict; task receipt "
+                   "does not clear it. " if parent_task else "failing OPEN to "
+                   "`clear` so the review panel still runs. ")
+                + "Merge remains gated on a formal approval."
             )
-            verdict = "clear"
+            if not parent_task:
+                verdict = "clear"
 
         # Gates Lanius reports as still-pending (from its GATE_PENDING: line on a
         # blocked verdict). Fed to select_panel so the owning lens is guaranteed
         # a seat under the cap — otherwise a carried-over gate can never clear
         # because its owning lens is never re-invoked (ateles#230 panel gap).
         pending_gates = parse_pending_gates(lanius.stdout)
+        if (parent is None and parent_task and verdict == "blocked"
+                and not pending_gates
+                and missing_parent_issue_block(lanius.stdout)):
+            # Only a block explicitly about the absent issue is resolved by
+            # the task receipt. All other blocks retain their pending gates.
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: Lanius blocked on a PR with verified "
+                f"parent task {parent_task} and missing-parent-issue reason — "
+                "proceeding to review"
+            )
+            verdict = "clear"
+            pending_gates = set()
         if verdict == "blocked":
             await self._post_gate_block(
                 trigger, parent, parse_pending_gates(lanius.stdout)
@@ -8835,6 +8882,7 @@ class SwarmDispatcher:
                 pending_gates=pending_gates,
                 reviewed_head=review_head,
                 **({"carried": carried_lenses} if carried_lenses else {}),
+                **({"parent_task": parent_task} if parent_task else {}),
                 **(
                     {"checks_green_head": green_head}
                     if (green_head := self._checks_green_head(trigger, aggregation_head))
@@ -13451,13 +13499,73 @@ class SwarmDispatcher:
         )
 
     @staticmethod
-    def _lanius_pr_prompt(t: SwarmTrigger, parent: int | None) -> str:
-        parent_line = (
-            f"The PR body references parent issue #{parent}."
-            if parent
-            else "No parent issue reference found in the PR body — find it "
-            "yourself or treat gate inheritance as blocked."
-        )
+    def _lanius_pr_prompt(
+        t: SwarmTrigger, parent: int | None, parent_task: str | None = None
+    ) -> str:
+        # The verified-task wording applies only when no parent issue is
+        # identified; every other path keeps the issue-gate prompt unchanged.
+        task_only = bool(parent_task) and not parent
+        if parent:
+            parent_line = f"The PR body references parent issue #{parent}."
+        elif parent_task:
+            parent_line = verified_parent_task_note(parent_task) + (
+                " No issue is identified for this PR, so do not retrieve or "
+                "initialize issue gates. Emit `GATE_INHERITANCE: clear` if "
+                "that is the only gate concern. If you block solely because "
+                "the parent issue is missing, emit `GATE_BLOCK_REASON: "
+                "missing_parent_issue` on a separate line. For every other "
+                "block, report its pending gates and omit that reason."
+            )
+        else:
+            parent_line = (
+                "No parent issue reference found in the PR body — find it "
+                "yourself or treat gate inheritance as blocked."
+            )
+        if task_only:
+            report_lines = (
+                "Report through the final GATE_INHERITANCE, GATE_PENDING and, "
+                "only for a missing parent issue, GATE_BLOCK_REASON lines"
+            )
+            retrieve_clause = (
+                "GATE-STATUS SOURCE OF TRUTH: when a parent issue is "
+                "identified, the parent issue's `gate_status` "
+                "lives on its NEOTOMA issue entity, NOT in the GitHub issue body "
+                "(the GitHub body never carries gate metadata). For an "
+                "identified parent issue, retrieve it "
+            )
+            blocked_clause = "For an identified issue, only emit `blocked` when "
+            override_clause = (
+                "publication steps in your role prompt. When a verified parent "
+                "task is supplied and no parent issue is identified, it also "
+                "overrides any role-prompt instruction to retrieve issue gates: "
+                "there is no issue entity to retrieve. Do NOT post a blocking "
+            )
+            routed_lines = "GATE_INHERITANCE, GATE_PENDING and GATE_BLOCK_REASON "
+            final_line = (
+                "End your reply with one verdict line: `GATE_INHERITANCE: clear` "
+            )
+            omit_clause = (
+                "Omit the line when clear or when no gate is pending. "
+                "Only a block solely for an absent parent issue may add "
+                "`GATE_BLOCK_REASON: missing_parent_issue`; omit it for all "
+                "other blocks."
+            )
+        else:
+            report_lines = "Report only through the final GATE_INHERITANCE and GATE_PENDING lines"
+            retrieve_clause = (
+                "GATE-STATUS SOURCE OF TRUTH: the parent issue's `gate_status` "
+                "lives on its NEOTOMA issue entity, NOT in the GitHub issue body "
+                "(the GitHub body never carries gate metadata). ALWAYS retrieve it "
+            )
+            blocked_clause = "Only emit `blocked` when "
+            override_clause = (
+                "publication steps in your role prompt. Do NOT post a blocking "
+            )
+            routed_lines = "GATE_INHERITANCE and GATE_PENDING "
+            final_line = (
+                "End your reply with exactly one line: `GATE_INHERITANCE: clear` "
+            )
+            omit_clause = "Omit the line when clear."
         return (
             "Invoke the lanius agent per your appended system prompt.\n\n"
             f"A pull request event ({t.action}) fired for "
@@ -13466,12 +13574,9 @@ class SwarmDispatcher:
             f"{parent_line}\n\n"
             "Run your PR-opened protocol: enforce PR gate inheritance from "
             "the parent issue. Do NOT post GitHub comments or assign reviewers "
-            "or make any other GitHub write. Report only through the final "
-            "GATE_INHERITANCE and GATE_PENDING lines; the dispatcher posts the "
+            f"or make any other GitHub write. {report_lines}; the dispatcher posts the "
             "blocking comment and routes Vanellus into review when clear.\n\n"
-            "GATE-STATUS SOURCE OF TRUTH: the parent issue's `gate_status` "
-            "lives on its NEOTOMA issue entity, NOT in the GitHub issue body "
-            "(the GitHub body never carries gate metadata). ALWAYS retrieve it "
+            f"{retrieve_clause}"
             "first: `retrieve_entity_by_identifier(entity_type='issue', "
             "identifier=<number>, identifier_field='github_number')` (scoped to "
             "this repo), and read `gate_status` from that entity's snapshot. "
@@ -13487,7 +13592,7 @@ class SwarmDispatcher:
             "emit `GATE_INHERITANCE: clear`. Legacy init MUST MERGE, never "
             "overwrite: if the entity already has a `gate_status` with any gate "
             "at `signed_off`/`waived`, PRESERVE those exactly — never downgrade "
-            "a `signed_off` gate to `pending`. Only emit `blocked` when "
+            f"a `signed_off` gate to `pending`. {blocked_clause}"
             "`gate_status` exists AND a pre-impl gate is genuinely `pending` "
             "(unsigned). Merge stays operator-gated regardless, per the "
             "fail-open-for-review guardrail. To run the full issue pipeline on "
@@ -13495,19 +13600,19 @@ class SwarmDispatcher:
             "backfill via `trigger_swarm_pr.py issue <n>`.\n\n"
             f"{_agent_prompt_instruction('lanius', 'PR gate inheritance')}\n\n"
             "AUTHORITATIVE FOR THIS RUN: this instruction overrides the "
-            "publication steps in your role prompt. Do NOT post a blocking "
+            f"{override_clause}"
             "comment, do NOT assign or request a reviewer, and make no other "
             "GitHub write. The dispatcher posts the gate-block comment and "
-            "routes Vanellus from your GATE_INHERITANCE and GATE_PENDING "
+            f"routes Vanellus from your {routed_lines}"
             "lines.\n\n"
-            "End your reply with exactly one line: `GATE_INHERITANCE: clear` "
+            f"{final_line}"
             "or `GATE_INHERITANCE: blocked` so the dispatcher can route. When "
             "you emit `blocked`, add a SECOND line naming the unsigned pre-impl "
             "gates as a comma-separated list, e.g. `GATE_PENDING: arch,ux` — "
             "the dispatcher uses this to guarantee the lens agent that owns "
             "each pending gate a seat on the (capped) review panel, so a gate "
             "can never stay blocked because its owning lens was never "
-            "re-invoked. Omit the line when clear."
+            f"re-invoked. {omit_clause}"
         )
 
     @staticmethod
@@ -13809,6 +13914,7 @@ class SwarmDispatcher:
         reviewed_head: str | None = None,
         carried: "dict[str, review_carry.Carried] | None" = None,
         checks_green_head: str = "",
+        parent_task: str | None = None,
     ) -> str:
         # The captured lens reviews are embedded INLINE below so the aggregator
         # never has to re-fetch them via `gh`. Vanellus runs diff-only
@@ -13844,8 +13950,16 @@ class SwarmDispatcher:
             "Invoke the vanellus agent per your appended system prompt.\n\n"
             f"Aggregate the review panel for PR {t.repository}#{t.number}: "
             f"{t.title}\n{t.html_url}\n"
-            f"Parent issue: #{parent if parent else 'unknown'}. "
-            f"Panel lenses that reviewed: {', '.join(lenses) or '(none — GHA baseline only)'}.\n\n"
+            + (
+                f"Parent issue: #{parent}. "
+                if parent or not parent_task
+                else f"Parent issue: none. {verified_parent_task_note(parent_task)} "
+                "The missing issue is NOT a blocker: do not record "
+                "`block_kind=process` or BLOCKED for it, and do not sign gates "
+                "on any issue entity or create one. Every content finding "
+                "still blocks exactly as it would otherwise. "
+            )
+            + f"Panel lenses that reviewed: {', '.join(lenses) or '(none — GHA baseline only)'}.\n\n"
             "The panel lens reviews are provided INLINE below — aggregate them "
             "directly. Do NOT fetch them via gh; you run without a repo checkout "
             "and that read fails. (Optionally read the Claude GHA baseline with "
@@ -13884,6 +13998,22 @@ class SwarmDispatcher:
         )
 
     # ── GitHub helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _verified_parent_task(t: SwarmTrigger) -> str | None:
+        """The tracked task this PR was delivered from, read from Apis's own
+        delivery ledger (``build_delivery.verified_parent_task``), or None.
+        The PR body is never consulted, so editing it cannot make the claim."""
+        try:
+            return build_delivery.verified_parent_task(
+                t.repository, t.number, t.head_ref, t.head_sha
+            )
+        except Exception as exc:  # noqa: BLE001 — fail closed to no-parent
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: parent-task lookup "
+                f"failed ({type(exc).__name__}) — treating as no parent"
+            )
+            return None
 
     @staticmethod
     def _parent_issue_number(pr_body: str, repository: str = "") -> int | None:
