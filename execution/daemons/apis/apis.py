@@ -113,6 +113,7 @@ import hashlib
 import logging
 import math
 import os
+import uuid
 import stat
 import sys
 import time
@@ -262,6 +263,8 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     _snapshot_with_tenant,
     ExecutionPolicy,
     checkpoint_already_dispatched,
+    checkpoint_recovery_claim,
+    claim_checkpoint_recovery,
     checkpoints_for_task,
     close_checkpoint_without_release,
     entity_record_digest,
@@ -4306,8 +4309,15 @@ _checkpoint_locks: dict[str, asyncio.Lock] = {}
 # Checkpoints this process has already handed to dispatch_task (through the
 # stamp or through stranded-release recovery). Dispatch runs outside the lock,
 # so a replay arriving while the first dispatch is still writing must not read
-# the not-yet-moved task as stranded and launch it a second time.
+# the not-yet-moved task as stranded and launch it a second time. This is only
+# a fast path inside one process: the durable guard across processes is the
+# version-checked recovery claim on the checkpoint record.
 _checkpoints_released_here: set[str] = set()
+
+
+def _recovery_claim_token(entity_id: str) -> str:
+    """A token no other consumer, process or attempt can produce."""
+    return f"{DAEMON_NAME}:{os.getpid()}:{uuid.uuid4().hex}"
 
 
 def _stranded_release(entity_id: str, checkpoint_record: dict) -> bool:
@@ -4331,6 +4341,23 @@ def _stranded_release(entity_id: str, checkpoint_record: dict) -> bool:
         checkpoint = _record_snapshot(checkpoint_record) or {}
         task_id = str(checkpoint.get("task_entity_id") or "")
         if not task_id:
+            return False
+        # Recovery is taken at most once per checkpoint. A claim already on the
+        # record means some consumer took it; if the task still reads held, that
+        # consumer stopped between its claim and dispatch. Left held on purpose:
+        # a held task is safe and visible, a second run is not.
+        if checkpoint_recovery_claim(checkpoint) is not None:
+            task = _record_snapshot(fetch_task_record(task_id))
+            if (
+                task is None
+                or normalize_status(task.get("status"))
+                == TaskStatus.AWAITING_APPROVAL.value
+            ):
+                log.error(
+                    f"[{DAEMON_NAME}] checkpoint {entity_id}: recovery was already "
+                    f"claimed but task {task_id} still reads held — leaving it held; "
+                    "recovery is not retried"
+                )
             return False
         task_record = fetch_task_record(task_id)
         task = _record_snapshot(task_record)
@@ -4727,8 +4754,30 @@ async def handle_checkpoint_brief(
         )
         # The stamp is the existing replay claim. If it does not land, this attempt
         # owns nothing and must not dispatch; a later consumer delivery may retry.
-        # A recovered release already holds the stamp from the interrupted run.
-        if not recovering:
+        # A recovered release already holds the stamp from the interrupted run;
+        # instead it takes the one durable recovery claim, version-checked on
+        # the same read every check above judged. Only the consumer whose claim
+        # reads back as its own dispatches; a lost race, a refused precondition,
+        # a failed write or an unreadable result leaves the checkpoint as it is.
+        if recovering:
+            if not isinstance(version, str) or not version:
+                log.error(
+                    f"[{DAEMON_NAME}] checkpoint {entity_id} has no entity_version "
+                    "— cannot claim recovery with a version-checked write"
+                )
+                return False
+            if not claim_checkpoint_recovery(
+                entity_id,
+                claim_token=_recovery_claim_token(entity_id),
+                expected_version=version,
+            ):
+                log.warning(
+                    f"[{DAEMON_NAME}] checkpoint {entity_id} recovery claim not "
+                    "acquired — another consumer owns it or the write failed; "
+                    "not releasing task"
+                )
+                return False
+        else:
             if not isinstance(version, str) or not version:
                 log.error(
                     f"[{DAEMON_NAME}] checkpoint {entity_id} has no entity_version "

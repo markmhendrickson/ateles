@@ -205,6 +205,18 @@ def release_store(monkeypatch, tmp_path):
         _bump_version(record)
         return True
 
+    def claim_recovery(checkpoint_entity_id, *, claim_token, expected_version):
+        # Models the version-checked /correct the real recovery claim sends: a
+        # stale expected_version is refused and writes nothing; a committed
+        # write bumps the version; the claim counts only when it reads back as
+        # the caller's own token.
+        record = records[checkpoint_entity_id]
+        if not expected_version or expected_version != record.get("entity_version"):
+            return False
+        record["snapshot"]["release_recovery_claim"] = claim_token
+        _bump_version(record)
+        return record["snapshot"].get("release_recovery_claim") == claim_token
+
     def close_without_release(checkpoint_entity_id, *, handler, reason):
         records[checkpoint_entity_id]["snapshot"]["status"] = "approved_no_release"
         return True
@@ -323,6 +335,7 @@ def release_store(monkeypatch, tmp_path):
         lambda entity_id, **kwargs: set_status(entity_id, "declined"),
     )
     monkeypatch.setattr(apis, "stamp_checkpoint_dispatched", stamp)
+    monkeypatch.setattr(apis, "claim_checkpoint_recovery", claim_recovery)
     monkeypatch.setattr(
         apis,
         "close_checkpoint_without_release",
@@ -2681,6 +2694,8 @@ async def test_replayed_stranded_approval_dispatches_once(monkeypatch, release_s
     assert released is True
     assert dispatches == [task_id]
     assert records[task_id]["snapshot"]["status"] == "routed"
+    # The recovery took the durable claim on the checkpoint record.
+    assert brief["release_recovery_claim"]
 
     # A second replay right after it does not dispatch again.
     again = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
@@ -2790,3 +2805,164 @@ async def test_stranded_replay_after_a_task_write_does_not_dispatch(
     # Silent no-op: the consumed approval is not retired for a fresh one.
     assert notifier.sent == []
     assert brief["status"] == "approved"
+
+
+# ── Recovery takes one durable, version-checked claim ────────────────────────
+
+
+def _frozen_copy(record):
+    import copy
+
+    return copy.deepcopy(record)
+
+
+@pytest.mark.asyncio
+async def test_two_processes_replaying_one_stranded_approval_dispatch_once(
+    monkeypatch, release_store
+):
+    """Red before the claim: the second process, with its own empty
+    ``_checkpoints_released_here`` and its own locks, read the same stranded
+    state and dispatched too (``dispatches == [task_id, task_id]``).
+
+    Both processes read the checkpoint and the task before either writes (the
+    race window), and the first one's dispatch is still in flight, so the task
+    still reads held. Only the shared store's version precondition can stop the
+    second: it must lose the claim because the first claim moved the version.
+    """
+    records, brief_id, task_id = release_store
+    brief = records[brief_id]["snapshot"]
+    brief.update({"status": "approved", "resolved_dispatched": True})
+    monkeypatch.setattr(
+        apis.build_delivery, "_delivery_ledger", lambda: _FakeDeliveryLedger()
+    )
+    # What each process read before either wrote: the same version, no claim.
+    checkpoint_as_read = _frozen_copy(records[brief_id])
+    task_as_read = _frozen_copy(records[task_id])
+    monkeypatch.setattr(
+        apis, "fetch_checkpoint_record", lambda entity_id: _frozen_copy(checkpoint_as_read)
+    )
+    monkeypatch.setattr(
+        apis, "fetch_task_record", lambda entity_id: _frozen_copy(task_as_read)
+    )
+    dispatches: list[str] = []
+
+    async def in_flight_dispatch(entity_id, *args, **kwargs):
+        dispatches.append(entity_id)  # the task has not moved yet
+
+    monkeypatch.setattr(apis, "dispatch_task", in_flight_dispatch)
+
+    async def replay_in_its_own_process():
+        monkeypatch.setattr(apis, "_checkpoints_released_here", set())
+        monkeypatch.setattr(apis, "_checkpoint_locks", {})
+        await apis.handle_checkpoint_brief(brief_id, dict(brief), _Notifier())
+
+    await replay_in_its_own_process()  # the Apis daemon's event stream
+    await replay_in_its_own_process()  # the MCP server's inline consumer
+
+    assert dispatches == [task_id]
+    assert records[brief_id]["snapshot"]["release_recovery_claim"]
+    assert records[brief_id]["entity_version"] == "v2"
+
+
+def _claim_http(monkeypatch, records, brief_id, outcome):
+    """Drive the real gating claim against a fake /correct and read-back."""
+    from types import SimpleNamespace
+
+    def post(url, headers=None, json=None, timeout=None):
+        assert json["field"] == "release_recovery_claim"
+        if outcome == "write_fails":
+            raise gating_module.httpx.ConnectError("connection refused")
+        if outcome == "precondition":
+            return SimpleNamespace(
+                status_code=409,
+                json=lambda: {"error_code": "ERR_FIELD_VERSION_CONFLICT"},
+                raise_for_status=lambda: (_ for _ in ()).throw(
+                    RuntimeError("409")
+                ),
+            )
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {"snapshot": {"accepted": True}},
+            raise_for_status=lambda: None,
+        )
+
+    def fetch(entity_id):
+        if outcome == "unreadable":
+            return None
+        if outcome == "not_ours":
+            record = _frozen_copy(records[entity_id])
+            record["snapshot"]["release_recovery_claim"] = "someone-else"
+            return record
+        return records[entity_id]
+
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(gating_module.httpx, "post", post)
+    monkeypatch.setattr(gating_module, "_fetch_entity", fetch)
+    monkeypatch.setattr(
+        apis, "claim_checkpoint_recovery", gating_module.claim_checkpoint_recovery
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome", ["write_fails", "precondition", "unreadable", "not_ours", "stale_read"]
+)
+async def test_failed_or_refused_recovery_claim_does_not_dispatch(
+    monkeypatch, release_store, outcome
+):
+    """Red before the claim: recovery dispatched on the read alone, so every
+    case here dispatched once (``dispatches == [task_id]``)."""
+    records, brief_id, task_id = release_store
+    brief, dispatches = _strand_release(
+        monkeypatch, records, brief_id, _FakeDeliveryLedger()
+    )
+    if outcome == "stale_read":
+        # The record moved after this consumer read it: the fixture store's
+        # precondition refuses the claim.
+        stale = _frozen_copy(records[brief_id])
+        records[brief_id]["entity_version"] = "v9"
+        monkeypatch.setattr(
+            apis, "fetch_checkpoint_record", lambda entity_id: _frozen_copy(stale)
+        )
+    else:
+        _claim_http(monkeypatch, records, brief_id, outcome)
+    before = _frozen_copy(records[brief_id])
+
+    released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+    # The checkpoint stays exactly as it was: no field written or cleared.
+    assert records[brief_id] == before
+    assert "release_recovery_claim" not in records[brief_id]["snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_existing_recovery_claim_with_task_still_held_does_not_dispatch(
+    monkeypatch, release_store, caplog
+):
+    """A consumer died between its claim and its dispatch. Red before the
+    claim check: the replay judged the task stranded again and dispatched
+    (``dispatches == [task_id]``) with no error line."""
+    import logging
+
+    records, brief_id, task_id = release_store
+    brief, dispatches = _strand_release(
+        monkeypatch, records, brief_id, _FakeDeliveryLedger()
+    )
+    brief["release_recovery_claim"] = "apis:1234:deadbeef"
+    before = _frozen_copy(records[brief_id])
+
+    with caplog.at_level(logging.INFO):
+        released = await apis.handle_checkpoint_brief(brief_id, brief, _Notifier())
+
+    assert released is False
+    assert dispatches == []
+    assert records[task_id]["snapshot"]["status"] == "awaiting_approval"
+    assert records[brief_id] == before
+    errors = [
+        r for r in caplog.records
+        if r.levelno >= logging.ERROR and "recovery was already claimed" in r.getMessage()
+    ]
+    assert len(errors) == 1
