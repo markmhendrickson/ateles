@@ -871,10 +871,16 @@ async def _spawn_harness_skill(
                 "names no repository — running without worktree or network"
             )
         else:
-            blocker = build_delivery.fly_delivery_blocker(
+            # A further correction whose settled receipt qualifies proceeds to
+            # run_fly_delivery, which supersedes it; every other receipt refuses
+            # here, with no local fallback (the same supersedable_correction).
+            blocker = build_delivery.fly_delivery_entrance_blocker(
                 build_delivery.fly_delivery_key(
                     repository, key[1] if key else None, entity_id
-                )
+                ),
+                receipt_key=(build_delivery.fly_delivery_key(repository, target.number)
+                             if target else ""),
+                target=target,
             )
             if blocker:
                 return SkillResult(skill, False, None, "", "", error=blocker,
