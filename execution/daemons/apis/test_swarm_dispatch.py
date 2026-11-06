@@ -9702,7 +9702,7 @@ def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
 # with no verdict, or a failed run, is still deferred or paged as before.
 
 
-def _aggregation_outcomes(monkeypatch, *, vanellus_ok, vanellus_stdout):
+def _aggregation_outcomes(monkeypatch, *, vanellus_ok, vanellus_stdout, vanellus_stderr=""):
     calls = []
     d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout=vanellus_stdout, calls=calls)
 
@@ -9711,8 +9711,8 @@ def _aggregation_outcomes(monkeypatch, *, vanellus_ok, vanellus_stdout):
             return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
         if skill == "vanellus":
             return SkillResult(
-                skill, vanellus_ok, 0 if vanellus_ok else 1, vanellus_stdout, "",
-                error="" if vanellus_ok else "process failed",
+                skill, vanellus_ok, 0 if vanellus_ok else 1, vanellus_stdout,
+                vanellus_stderr, error="" if vanellus_ok else "process failed",
             )
         return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
 
@@ -9781,6 +9781,65 @@ def test_failed_aggregation_with_limit_notice_and_verdict_still_defers(monkeypat
     )
     assert len(deferrals) == 1, deferrals
     assert deferrals[0][1][0] == stdout
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+# The review path skips the detectors for stdout only: stderr is still read,
+# so a zero-exit roll-up with a real limit or auth diagnostic there is not
+# acted on as a clean review.
+
+
+def test_successful_aggregation_with_limit_in_stderr_defers(monkeypatch):
+    stdout = "**APPROVE**\nlgtm"
+    stderr = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout, vanellus_stderr=stderr
+    )
+    assert len(deferrals) == 1, deferrals
+    agent, args, _kwargs = deferrals[0]
+    assert agent == "vanellus"
+    assert args == (stdout, stderr)  # reset parsing still sees both streams
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_successful_aggregation_with_auth_failure_in_stderr_pages(monkeypatch):
+    stdout = "**APPROVE**\nlgtm"
+    stderr = "API Error: 401 invalid authentication credentials"
+    assert swarm_dispatch.detect_auth_failure(stderr)  # instrument check
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout, vanellus_stderr=stderr
+    )
+    assert auth_pages == ["vanellus"], auth_pages
+    assert deferrals == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_successful_aggregation_mentioning_limits_with_empty_stderr_is_a_review(
+    monkeypatch,
+):
+    stdout = (
+        "**APPROVE**\n"
+        "The retry loop honours the usage limit and waits until the window "
+        "resets at the time the provider reports."
+    )
+    assert swarm_dispatch.detect_session_limit(stdout)  # would match if read
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout, vanellus_stderr=""
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
+
+
+def test_verdict_only_in_stderr_is_not_a_review(monkeypatch):
+    # The verdict is read from stdout alone; a token in stderr does not make a
+    # limit notice in stdout a review.
+    notice = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=notice,
+        vanellus_stderr="**APPROVE**",
+    )
+    assert len(deferrals) == 1, deferrals
     assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
 
 
