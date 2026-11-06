@@ -2063,16 +2063,18 @@ def body_has_blocking_findings(body: str | None) -> bool:
 # that normalizes to ASCII is judged like the ASCII one, and one that does not
 # stays on the line for the wildcard backstop to catch.
 _CLEAN_NO_BLOCKING_LINE_RE = re.compile(
-    r"[ \t]*(?:(?:[-*+]|\d{1,3}[.)])[ \t]+)?(?:\[[xX]\][ \t]+)?"
-    r"No[ \t]+\[BLOCKING\][ \t]+findings?\.?[ \t\r]*",
+    r"(?:(?:[-*+]|\d{1,3}[.)])[ \t]+)?(?:\[[xX]\][ \t]+)?"
+    r"No[ \t]+\[BLOCKING\][ \t]+findings?\.?",
     re.IGNORECASE,
 )
 
 
 def is_clean_no_blocking_line(line: str) -> bool:
     """True when *line*, a normalized scan-form line, only states that there are
-    no blocking findings (`_CLEAN_NO_BLOCKING_LINE_RE`)."""
-    return _CLEAN_NO_BLOCKING_LINE_RE.fullmatch(line) is not None
+    no blocking findings (`_CLEAN_NO_BLOCKING_LINE_RE`). Surrounding spaces,
+    tabs and a carriage return are stripped here rather than matched, so the
+    pattern has no leading run to backtrack over."""
+    return _CLEAN_NO_BLOCKING_LINE_RE.fullmatch(line.strip(" \t\r")) is not None
 
 
 def _without_clean_no_blocking_lines(text: str) -> str:
