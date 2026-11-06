@@ -7929,6 +7929,10 @@ class SwarmDispatcher:
 
         reviews: list[tuple[str, str]] = []
         failed_lenses: list[tuple[str, str]] = []
+        # Forward-looking (advisory) lenses that failed without a verdict.
+        # Kept out of `failed_lenses`: they block nothing, so they never stop
+        # the panel; they are only left out of the lens list Vanellus reads.
+        failed_advisory_lenses: set[str] = set()
         # (lens, agent) for each gate owner that reported its writeback refused.
         denied_gate_writebacks: list[tuple[str, str]] = []
         # (lens, agent, error_class, observed_state) for each dispatcher-side
@@ -8149,6 +8153,21 @@ class SwarmDispatcher:
                     gate_launch_refusals.append(
                         (lens.lens, lens.agent, failure_class)
                     )
+                elif lens.forward_looking and not (
+                    lens.lens in pending_gates or signs_gate
+                ):
+                    # An advisory (forward-looking) lens blocks nothing and
+                    # routes its output to its own queue, so its failure must
+                    # not stop a review whose blocking lenses all completed
+                    # (6 November 2026: three PRs stopped on the `content`
+                    # lens). Logged, left out of the roll-up, never a pass for
+                    # any blocking lens.
+                    failed_advisory_lenses.add(lens.lens)
+                    log.warning(
+                        f"[{DAEMON_NAME}] {ref}: advisory lens {lens.lens} "
+                        f"({lens.agent}) failed ({failure_class}) — not "
+                        "blocking; the panel continues without it"
+                    )
                 else:
                     failed_lenses.append((lens.lens, failure_class))
             # ateles#795: a lens that owns a gate and reports its own writeback
@@ -8337,7 +8356,7 @@ class SwarmDispatcher:
             self._vanellus_prompt(
                 trigger,
                 parent,
-                [p.lens for p in panel],
+                [p.lens for p in panel if p.lens not in failed_advisory_lenses],
                 reviews,
                 pending_gates=pending_gates,
                 reviewed_head=review_head,
