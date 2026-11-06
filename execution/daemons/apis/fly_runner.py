@@ -3138,7 +3138,7 @@ class FlyExecutor:
             if last:
                 raise FlyRefusal(
                     f"Fly refused the {job.provider} login machine update "
-                    f"({refused.status}, reason {label}); retry later",
+                    f"({refused.status}, reason {label}); {self._refile_action(job, machine_id)}",
                     _render_wall(self._clock() + 300),
                 )
             if out_of_time:
@@ -3161,14 +3161,26 @@ class FlyExecutor:
 
     def _refuse_past_deadline(self, job: FlyJob, deadline: float, what: str, *,
                               now: float | None = None) -> None:  # fmt: skip
-        """Refuse (retry later) once the run's *deadline* has come, before
-        *what* is sent; the caller's cleanup clears anything already written."""
+        """Refuse once the run's *deadline* has come, before *what* is sent;
+        the caller's cleanup clears anything already written. The refusal
+        names the recovery (``_refile_action``)."""
         if (self._clock() if now is None else now) >= deadline:
+            machine_id = self.config.login_machines.get(job.provider, "")
             raise FlyRefusal(
                 f"{job.provider} login machine claim reached the run's deadline before "
-                f"{what}; nothing further was written or started; retry later",
+                f"{what}; nothing further was written or started; "
+                f"{self._refile_action(job, machine_id)}",
                 _render_wall(self._clock() + 300),
             )
+
+    @staticmethod
+    def _refile_action(job: FlyJob, machine_id: str) -> str:
+        """The recovery a refused claim needs, in the refusal's own text (so
+        it survives filtered warnings): the task never launched and is not
+        retried automatically, so it must be refiled. The job carries no task
+        id, so the run and machine name it."""
+        return (f"the task never launched and is not retried automatically: refile it "
+                f"(run {job.run_id}, machine {machine_id or 'unknown'})")
 
     async def _within_deadline(self, coro, job: FlyJob, deadline: float, what: str) -> Any:
         """Await *coro* (reads only) for no longer than the time left before

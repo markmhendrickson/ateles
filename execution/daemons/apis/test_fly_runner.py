@@ -5226,9 +5226,10 @@ def test_a_login_claim_that_always_conflicts_is_refused_after_the_bound(
     job = _job()
     with pytest.raises(fly_runner.FlyRefusal,
                        match=r"Fly refused the claude login machine update \(409, reason "
-                             r"version_conflict\); retry later") as exc:  # fmt: skip
+                             r"version_conflict\); the task never launched") as exc:  # fmt: skip
         asyncio.run(executor.run(job))
     assert exc.value.cooled_until
+    _assert_names_refile(str(exc.value), job)
     assert "changed while being claimed" not in str(exc.value)
     assert len(claims) == len(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS) + 1 == 7
     assert not fake.calls("POST", "/start")  # nothing started
@@ -5239,6 +5240,15 @@ def test_a_login_claim_that_always_conflicts_is_refused_after_the_bound(
 
 # ── A login claim never writes or starts past the run's deadline ────────────
 
+def _assert_names_refile(text: str, job) -> None:
+    """A terminal claim refusal tells the reader what to do: the task never
+    launched, is not retried automatically, and must be refiled; it names
+    the run and the login machine."""
+    assert "retry later" not in text
+    assert "never launched and is not retried automatically: refile it" in text
+    assert f"run {job.run_id}, machine m-claude" in text
+
+
 def _past_deadline_refusal(executor, job, fake, claims, *, sent: int):
     """Run *job* to its deadline refusal, then assert what every such refusal
     leaves: *sent* claim updates, no start, the job config cleared, and the
@@ -5246,6 +5256,7 @@ def _past_deadline_refusal(executor, job, fake, claims, *, sent: int):
     with pytest.raises(fly_runner.FlyRefusal, match="reached the run's deadline") as exc:
         asyncio.run(executor.run(job))
     assert exc.value.cooled_until
+    _assert_names_refile(str(exc.value), job)
     assert len(claims) == sent
     assert not fake.calls("POST", "/start")
     assert not fly_runner._has_job_config(fake.machines["m-claude"]["config"])
@@ -5456,10 +5467,13 @@ def test_unknown_revert_reason_is_labelled_without_its_text(fly_env, claude_logi
 
     claims = _claim_conflicts(fake, executor, "m-claude", always_refused)
     # A long enough run that the waits are spent before its deadline.
+    job = _job(timeout=600)
     with pytest.raises(fly_runner.FlyRefusal) as exc:
-        asyncio.run(executor.run(_job(timeout=600)))
+        asyncio.run(executor.run(job))
     assert str(exc.value).startswith(
-        "Fly refused the claude login machine update (412, reason update_reverted); retry later")
+        "Fly refused the claude login machine update (412, reason update_reverted); "
+        "the task never launched")
+    _assert_names_refile(str(exc.value), job)
     assert len(claims) == len(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS) + 1
     refusals = _claim_refusals(caplog)
     assert len(refusals) == len(claims)
@@ -5503,6 +5517,53 @@ def test_refusal_label_falls_back_to_api_text(fly_env, claude_login, caplog, rea
     assert all("reason host_memory, from api" in m for m in refusals)
     assert failed_reads == ([1, 2] if read == "read_fails" else [])
     assert "insufficient memory available" not in caplog.text
+
+
+def test_refusal_reason_read_timeout_falls_back_to_api_text(fly_env, claude_login, caplog):
+    caplog.set_level(logging.DEBUG)
+    fake = _claude_fake()
+    executor, clock, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+    job = _job()
+    deadline = clock.now + job.timeout + fly_runner.APIS_DEADLINE_GRACE_SECONDS
+    refused: list[int] = []
+
+    def refused_once(n):
+        if n == 1:
+            refused.append(n)
+            return httpx.Response(412, json={"error": FLY_REFUSAL})
+        return None
+
+    claims = _claim_conflicts(fake, executor, "m-claude", refused_once)
+    routed = executor.client
+    stalled: list[float] = []
+
+    class StalledReasonRead(fly_runner.FlyMachinesClient):
+        async def get(self, machine_id):
+            if refused and not stalled:  # the read for the refusal's reason
+                started = asyncio.get_running_loop().time()
+                try:
+                    await asyncio.Event().wait()  # never answers
+                finally:
+                    stalled.append(asyncio.get_running_loop().time() - started)
+            return await routed.get(machine_id)
+
+    executor.client = StalledReasonRead(executor.config, transport=routed._transport)
+    # A short real bound keeps the test fast; the fake clock leaves the
+    # deadline far off, so the read bound is the one that applies.
+    bound = 0.2
+    original = fly_runner.REFUSAL_EVENT_READ_SECONDS
+    fly_runner.REFUSAL_EVENT_READ_SECONDS = bound
+    try:
+        rc, _, _ = asyncio.run(asyncio.wait_for(executor.run(job), 30))
+    finally:
+        fly_runner.REFUSAL_EVENT_READ_SECONDS = original
+    assert rc == 0  # a later accepted update still launched the job
+    assert len(claims) == 2 and len(fake.calls("POST", "/start")) == 1
+    assert len(stalled) == 1
+    assert stalled[0] <= min(bound, deadline - clock.now) + 1.0
+    refusals = _claim_refusals(caplog)
+    assert len(refusals) == 1 and "reason host_memory, from api" in refusals[0]
+    assert "refusal reason failed: TimeoutError" in caplog.text
 
 
 @pytest.mark.parametrize("when", ["waiting", "retaking_locks"])
