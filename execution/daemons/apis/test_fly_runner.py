@@ -658,6 +658,25 @@ def test_admission_cache_ttls_and_unreachable_is_not_cached(fly_env):
     assert len(session.requests) == 4
 
 
+def test_a_neotoma_outage_answer_is_not_cached(fly_env):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(503, text="deploying")
+        return httpx.Response(200, json={"aauth": {"admitted": True}})
+
+    def ask():
+        return fly_runner.role_admission(
+            "lanius", _valid_role_jwk(), "https://n.example.test",
+            client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    assert ask() == (False, "Neotoma /session answered 503")
+    assert ask() == (True, "")
+    assert len(calls) == 2
+
+
 def test_admission_reason_is_only_a_safe_label(fly_env):
     session = _session(fly_env)
     session.answer = {"aauth": {"admitted": False, "admission_reason": "bad\nheader: x"}}

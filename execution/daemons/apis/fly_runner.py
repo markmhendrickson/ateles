@@ -2036,7 +2036,9 @@ def role_admission(role: str, jwk: dict, base_url: str, *, client: httpx.Client 
 
     Returns ``(admitted, reason)``. Cached per role and key: an admission for
     ``ADMISSION_ADMITTED_TTL_SECONDS``, a refusal for
-    ``ADMISSION_REFUSED_TTL_SECONDS``. A network failure is never cached. The
+    ``ADMISSION_REFUSED_TTL_SECONDS``. A network failure, a 5xx or a 429 is
+    never cached. It blocks for up to ``ADMISSION_TIMEOUT_SECONDS``, so an
+    async caller runs ``build_job`` in a thread. The
     reason is Neotoma's ``admission_reason`` when it is a short safe label,
     never header or key material."""
     httpsig = _httpsig()
@@ -2085,6 +2087,8 @@ def role_admission(role: str, jwk: dict, base_url: str, *, client: httpx.Client 
         else:
             reason = raw if isinstance(raw, str) and _SAFE_ADMISSION_REASON.fullmatch(raw) \
                 else "unrecognized"
+    if resp.status_code >= 500 or resp.status_code == 429:
+        return False, reason  # a passing outage, like a network error: not cached
     ttl = ADMISSION_ADMITTED_TTL_SECONDS if admitted else ADMISSION_REFUSED_TTL_SECONDS
     with _ADMISSION_LOCK:
         _ADMISSION_CACHE[cache_key] = (now + ttl, admitted, reason)
