@@ -143,3 +143,16 @@ def test_checks_go_red_without_the_session_branch(scenario):
 
 def test_session_scenarios_are_present():
     assert len(SESSION_SCENARIOS) == 4
+
+
+DISPATCHER_SCENARIOS = [s for s in SCENARIOS if s["id"].startswith("dispatcher_assignee_")]
+
+
+@pytest.mark.parametrize("scenario", DISPATCHER_SCENARIOS, ids=[s["id"] for s in DISPATCHER_SCENARIOS])
+def test_checks_go_red_if_the_dispatcher_counts_as_an_owner(scenario):
+    obs = harness.run_scenario(scenario, BASE, mutation="dispatcher_counts_as_owner")
+    assert harness.check(scenario, obs), "this scenario cannot detect the dispatcher reading as an owner"
+
+
+def test_dispatcher_scenarios_are_present():
+    assert len(DISPATCHER_SCENARIOS) == 2
