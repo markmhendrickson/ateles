@@ -1277,7 +1277,8 @@ def _deliver(job: Job, delivery: DeliveryRun, rc: int, timed_out: bool,
             if spec.pr_number:
                 pr = rd.require_existing_pr(repository=job.repository, number=spec.pr_number,
                                            branch=spec.branch, base_branch=spec.base_branch,
-                                           head=imported.head, token=token)
+                                           head=imported.head, token=token,
+                                           wait_for_head=True)
             else:
                 title, body = _pr_text(rd, work, job.secrets)
                 pr = rd.open_or_update_pr(repository=job.repository, branch=spec.branch,

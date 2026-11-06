@@ -1417,6 +1417,91 @@ def test_a_failed_pull_request_call_is_a_fixed_reason(monkeypatch, responses, re
     assert exc.value.category == rd.PR_FAILED and str(exc.value).endswith(reason)
 
 
+OLD_HEAD, NEW_HEAD = "a" * 40, "b" * 40
+
+
+def _existing_pr(sha=OLD_HEAD, **over):
+    payload = _pr_payload(12, state="open", merged=False,
+                          head={"ref": BRANCH, "repo": {"full_name": REPO}, "sha": sha},
+                          base={"ref": "main", "repo": {"full_name": REPO}})  # fmt: skip
+    payload.update(over)
+    return payload
+
+
+def _with_existing_pr_reads(monkeypatch, reads):
+    """The repository read, then each PR read in turn (the last repeats); a
+    fake clock that moves only when the wait sleeps, so tests take no time."""
+    pr_reads, sleeps, now = [], [], [time.time()]
+
+    def fake(method, path, token, body=None):
+        assert method == "GET"
+        if path == f"/repos/{REPO}":
+            return 200, {"full_name": REPO, "default_branch": "main"}
+        pr_reads.append(path)
+        return 200, reads[min(len(pr_reads), len(reads)) - 1]
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(rd, "_api", fake)
+    monkeypatch.setattr(rd, "_clock", lambda: now[0])
+    monkeypatch.setattr(rd, "_sleep", sleep)
+    return pr_reads, sleeps
+
+
+def _require(head=NEW_HEAD, **kw):
+    return rd.require_existing_pr(repository=REPO, number=12, branch=BRANCH,
+                                  base_branch="main", head=head, token=TOKEN, **kw)
+
+
+def test_existing_pr_head_catches_up_after_push(monkeypatch):
+    reads, sleeps = _with_existing_pr_reads(monkeypatch, [_existing_pr(OLD_HEAD), _existing_pr(NEW_HEAD)])
+    pr = _require(wait_for_head=True)
+    assert pr == rd.PullRequest(12, f"https://github.com/{REPO}/pull/12", "updated")
+    assert len(reads) == 2 and sleeps == [rd.HEAD_CATCH_UP_INTERVAL_SECONDS]
+
+
+def test_existing_pr_head_never_catches_up_refuses(monkeypatch):
+    reads, sleeps = _with_existing_pr_reads(monkeypatch, [_existing_pr(OLD_HEAD)])
+    with pytest.raises(rd.RepoWorkError) as exc:
+        _require(wait_for_head=True)
+    assert exc.value.category == rd.PR_FAILED and "no longer matches" in str(exc.value)
+    assert len(reads) > 1 and sum(sleeps) <= rd.HEAD_CATCH_UP_SECONDS
+
+
+@pytest.mark.parametrize("over", [
+    {"state": "closed"},
+    {"merged": True},
+    {"base": {"ref": "main", "repo": {"full_name": "fork/repo"}}},
+    {"base": {"ref": "develop", "repo": {"full_name": REPO}}},
+    {"head": {"ref": BRANCH, "repo": {"full_name": "fork/repo"}, "sha": OLD_HEAD}},
+])
+def test_closed_existing_pr_refuses_without_waiting(monkeypatch, over):
+    reads, sleeps = _with_existing_pr_reads(monkeypatch, [_existing_pr(OLD_HEAD, **over),
+                                                          _existing_pr(NEW_HEAD)])  # fmt: skip
+    with pytest.raises(rd.RepoWorkError) as exc:
+        _require(wait_for_head=True)
+    assert exc.value.category == rd.PR_FAILED and len(reads) == 1 and sleeps == []
+
+
+def test_pre_push_read_does_not_wait(monkeypatch):
+    reads, sleeps = _with_existing_pr_reads(monkeypatch, [_existing_pr(OLD_HEAD), _existing_pr(NEW_HEAD)])
+    with pytest.raises(rd.RepoWorkError) as exc:
+        _require()
+    assert exc.value.category == rd.PR_FAILED and len(reads) == 1 and sleeps == []
+    _with_existing_pr_reads(monkeypatch, [_existing_pr(OLD_HEAD)])
+    assert _require(head=OLD_HEAD).number == 12  # an exact head still passes
+
+
+def test_existing_pr_wait_stays_within_the_delivery_deadline(monkeypatch):
+    reads, sleeps = _with_existing_pr_reads(monkeypatch, [_existing_pr(OLD_HEAD), _existing_pr(NEW_HEAD)])
+    with rd.bounded_by(time.time() + rd.HEAD_CATCH_UP_INTERVAL_SECONDS):
+        with pytest.raises(rd.RepoWorkError) as exc:
+            _require(wait_for_head=True)
+    assert exc.value.category == rd.PR_FAILED and len(reads) == 1 and sleeps == []
+
+
 @pytest.mark.parametrize("content,expected", [
     (b"# Fix it\n\nWhy.\n", ("Fix it", "Why.")),
     (b"Plain title\nline two\n", ("Plain title", "line two")),
