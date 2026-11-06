@@ -590,3 +590,107 @@ def test_concurrent_dispatches_launch_once():
 
     asyncio.run(go())
     assert launched == [True] and len(refused) == 1
+
+
+# ── The real apis.py entrance agrees with run_fly_delivery ─────────────────
+# ``correct()`` declares a correction of PR #12 against head "a"*40 (issue #34).
+
+_ENTRANCE_HEAD, _ENTRANCE_PRIOR = "a" * 40, "d" * 40
+
+
+def _seed_entrance(status="updated", commit=_ENTRANCE_HEAD):
+    from test_existing_pr_delivery import BRANCH
+    entry = {"status": status, "token": "earlier-run", "branch": BRANCH, "run_id": "earlier-run-id",
+             "recorded_at": 1.0, "commit": commit, "associated_keys": [REPO + "#34"],
+             "existing_pr": {"branch": BRANCH, "base_branch": "main", "pr_number": "12",
+                             "head_sha": _ENTRANCE_PRIOR}}
+    assert delivery._delivery_ledger().reserve_delivery(_KEY, entry)
+    return entry
+
+
+def _entrance(monkeypatch, preflight=None):
+    launched, local = [], []
+
+    async def verify(*a, **kw):
+        if preflight is not None:
+            preflight.append(True)
+        return None
+
+    async def run(skill, prompt, **kw):
+        launched.append(kw.get("fly_delivery"))
+        return SkillResult(skill, False, 0, "", "", fly_delivery_status="no_changes",
+                           remote_run_id="next-run-id")
+
+    async def worktree(*a, **kw):
+        local.append(a)
+        raise AssertionError("a correction must never fall back to a local worktree")
+
+    monkeypatch.setattr(delivery, "verify_existing_pr_target", verify)
+    monkeypatch.setattr(apis, "run_skill", run)
+    monkeypatch.setattr(delivery, "prepare_build_worktree", worktree)
+    return asyncio.run(correct()), launched, local
+
+
+@pytest.mark.parametrize("status", ["updated", "pr_failed"])
+def test_qualifying_further_correction_passes_the_real_entrance_and_launches(monkeypatch, status):
+    _seed_entrance(status=status)
+    got, launched, local = _entrance(monkeypatch)
+    assert len(launched) == 1 and launched[0]["pr_number"] == "12"
+    assert launched[0]["head_sha"] == _ENTRANCE_HEAD and local == []
+    assert "already recorded" not in (got.error or "")
+    receipt = delivery._delivery_ledger().delivery_receipts()[_KEY]
+    assert receipt["run_id"] == "next-run-id" and receipt["existing_pr"]["head_sha"] == _ENTRANCE_HEAD
+    (event,) = _audit()
+    assert event["action"] == "supersede_delivery_receipt" and event["status"] == status
+
+
+@pytest.mark.parametrize("status,commit", [
+    ("unknown", _ENTRANCE_HEAD), ("launching", _ENTRANCE_HEAD), ("unreported", _ENTRANCE_HEAD),
+    ("exhausted", _ENTRANCE_HEAD), ("no_changes", _ENTRANCE_HEAD), ("updated", "c" * 40)])
+def test_uncertain_or_unqualified_receipt_is_refused_at_the_real_entrance(monkeypatch, status, commit):
+    held = _seed_entrance(status=status, commit=commit)
+    preflight = []
+    got, launched, local = _entrance(monkeypatch, preflight)
+    # Refused AT the entrance: the correction path (its PR preflight) never ran.
+    assert preflight == [] and launched == [] and local == [] and not got.ok
+    assert "already recorded" in got.error and got.fly_delivery_status == "unknown"
+    assert delivery._delivery_ledger().delivery_receipts() == {_KEY: held}
+    assert _audit() == []
+
+
+def test_a_second_receipt_for_the_source_issue_is_refused_at_the_real_entrance(monkeypatch):
+    _seed_entrance()
+    other = {"status": "opened", "token": "t", "branch": "b", "run_id": "r"}
+    ledger = delivery._delivery_ledger()
+    data = ledger._load()
+    data["deliveries"][REPO + "#34"] = other  # a legacy receipt the reserve rule would refuse
+    ledger._save(data)
+    preflight = []
+    got, launched, local = _entrance(monkeypatch, preflight)
+    assert preflight == [] and launched == [] and local == [] and "already recorded" in got.error
+
+
+@pytest.mark.parametrize("stage", ["save", "snapshot"])
+def test_supersede_write_or_readback_failure_launches_nothing(monkeypatch, stage):
+    import fly_runner
+    _seed()
+    real_save, real_snapshot = fly_runner.FlyLedger._save, fly_runner.FlyLedger._snapshot
+    saved = []
+
+    def save(self, data):
+        if stage == "save":
+            raise OSError("inert save failure")
+        saved.append(True)
+        return real_save(self, data)
+
+    def snapshot_(self, *a, **kw):
+        if saved:
+            raise fly_runner.FlyLedgerError("inert snapshot failure")
+        return real_snapshot(self, *a, **kw)
+
+    monkeypatch.setattr(fly_runner.FlyLedger, "_save", save)
+    monkeypatch.setattr(fly_runner.FlyLedger, "_snapshot", snapshot_)
+    launched, refused = _dispatch()
+    assert launched == [] and len(refused) == 1
+    assert "could not be replaced with certainty" in refused[0]
+    assert len(_audit()) == 1  # the audit entry came first; nothing claims success

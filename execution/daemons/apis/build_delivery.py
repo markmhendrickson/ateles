@@ -1093,6 +1093,40 @@ def fly_delivery_blocker(key: str) -> str:
             + fly_delivery_recovery(key, existing_pr=isinstance(entry.get("existing_pr"), dict)))
 
 
+def fly_delivery_entrance_blocker(key: str, *, receipt_key: str = "", target=None) -> str:
+    """``fly_delivery_blocker`` for a dispatch entrance, with the one exception
+    ``run_fly_delivery`` admits: a further correction of an existing PR whose
+    settled receipt passes ``supersedable_correction`` proceeds (an empty
+    string), so the same eligibility decides at the entrance and at launch.
+
+    *key* is the entrance's receipt key, *receipt_key* the correction's own
+    (``OWNER/REPO#PR``). Every receipt naming either key, by its stored key or
+    an association, must be that one qualifying receipt; any other receipt, an
+    unknown outcome, or a ledger that cannot be read keeps the refusal."""
+    reason = fly_delivery_blocker(key)
+    if not reason or target is None or not receipt_key:
+        return reason
+    import fly_runner
+
+    wanted = {canonical_key(key), canonical_key(receipt_key)}
+    try:
+        receipts = _delivery_ledger().delivery_receipts()
+        matches = []
+        for stored, entry in receipts.items():
+            aliases = entry.get("associated_keys", [])
+            if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
+                return reason
+            if wanted & {canonical_key(stored), *(canonical_key(a) for a in aliases)}:
+                matches.append((stored, entry))
+    except (OSError, fly_runner.FlyLedgerError, AttributeError, TypeError):
+        return reason
+    probe = FlyDeliveryPlan(repository="", branch=target.branch, base_branch=target.base_branch,
+                            key=receipt_key, issue_number=None, target=target)
+    if len(matches) == 1 and supersedable_correction(probe, *matches[0]):
+        return ""
+    return reason
+
+
 def _new_token() -> str:
     """A unique identity for one reservation."""
     return secrets.token_hex(16)
