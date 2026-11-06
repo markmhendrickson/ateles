@@ -70,8 +70,7 @@
     },
     {
       "id": "shared_role_token_uses_aauth_key_without_shipping_bearer",
-      "description": "The role token matches the shared daemon bearer, so the Fly job ships only its AAuth key: the child launches without a Neotoma MCP server while the runner still signs its result record with that key. The discarded token name remains in the forbidden-environment probe.",
-      "neotoma_proxy_providers": [],
+      "description": "The role token matches the shared daemon bearer, so the Fly job ships only its AAuth key: Neotoma admits the key, the child's Neotoma MCP server is the runner's signing proxy (never a bearer), and the runner signs its result record with that key. The discarded token name remains in the forbidden-environment probe.",
       "settings": {
         "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
         "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
@@ -108,16 +107,16 @@
         "machine_gone": true,
         "key_only_no_agent_mcp": true,
         "dispatch_events": [
-          "key_only_notice",
           "launch"
         ],
         "result_record_aauth_key": true,
-        "probe_env_contains": "LANIUS_NEOTOMA_TOKEN"
+        "probe_env_contains": "LANIUS_NEOTOMA_TOKEN",
+        "job_neotoma_mcp": "proxy"
       }
     },
     {
-      "id": "shared_role_token_fly_launch_falls_back_with_correction",
-      "description": "A key-only Fly launch is refused; the opted-in dispatch corrects its capability notice and completes locally with normal tools, without claiming a Fly result.",
+      "id": "key_only_job_without_the_signing_proxy_runs_locally_before_any_request",
+      "description": "A key-only job granted Neotoma tools, on a provider the runner's signing proxy does not serve, is not eligible for Fly: nothing is sent to Fly or minted, and the opted-in dispatch runs locally with its normal tools instead of on Fly without them.",
       "neotoma_proxy_providers": [],
       "settings": {
         "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
@@ -127,50 +126,7 @@
       "github_app": "configured",
       "fly": {
         "wait": "ok",
-        "record": null,
-        "create": "refused"
-      },
-      "args": [
-        "--action-class",
-        "carry_forward_check",
-        "--model",
-        "eval-model",
-        "--github-read",
-        "--github-token-env",
-        "EVAL_LOCAL_SCOPED_GH",
-        "--repository",
-        "owner/repo"
-      ],
-      "expect": {
-        "exit": 0,
-        "ok": true,
-        "stdout_contains": "LOCAL GATE_INHERITANCE: clear",
-        "local_cli_ran": true,
-        "machines_created": 0,
-        "in_flight_after": 0,
-        "revoked_all_minted": true,
-        "dispatch_events": [
-          "key_only_notice",
-          "launch",
-          "local_correction"
-        ],
-        "local_key_only_correction": "The Fly launch failed; this run fell back to a local run with its normal tools."
-      }
-    },
-    {
-      "id": "shared_role_token_fly_ineligible_falls_back_with_correction",
-      "description": "A key-only Fly run becomes ineligible before any launch request; the opted-in dispatch reports that reason and completes locally with normal tools.",
-      "neotoma_proxy_providers": [],
-      "settings": {
-        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
-        "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
-      },
-      "identity": "key",
-      "github_app": "configured",
-      "fly": {
-        "wait": "ok",
-        "record": null,
-        "raise_before_launch": "ineligible"
+        "record": null
       },
       "args": [
         "--action-class",
@@ -192,12 +148,51 @@
         "machines_created": 0,
         "minted": 0,
         "in_flight_after": 0,
-        "dispatch_events": [
-          "key_only_notice",
-          "run_attempt",
-          "local_correction"
-        ],
-        "local_key_only_correction": "This run was not eligible for Fly, so it ran locally with its normal tools."
+        "dispatch_events": [],
+        "fly_ineligible_reason": "the Fly runner cannot yet give a claude job its Neotoma tools"
+      }
+    },
+    {
+      "id": "key_not_admitted_by_neotoma_runs_locally_before_any_request",
+      "description": "A key-only job granted Neotoma tools whose key no active agent_grant admits is not eligible for Fly: the Mac's signed /session check refuses it before any Fly request or mint, and the opted-in dispatch runs locally with its normal tools.",
+      "settings": {
+        "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
+        "LANIUS_NEOTOMA_TOKEN": "eval-shared-daemon-bearer-0001"
+      },
+      "identity": "key",
+      "github_app": "configured",
+      "fly": {
+        "wait": "ok",
+        "record": null
+      },
+      "args": [
+        "--action-class",
+        "carry_forward_check",
+        "--model",
+        "eval-model",
+        "--github-read",
+        "--github-token-env",
+        "EVAL_LOCAL_SCOPED_GH",
+        "--repository",
+        "owner/repo"
+      ],
+      "expect": {
+        "exit": 0,
+        "ok": true,
+        "stdout_contains": "LOCAL GATE_INHERITANCE: clear",
+        "local_cli_ran": true,
+        "fly_requests": 0,
+        "machines_created": 0,
+        "minted": 0,
+        "in_flight_after": 0,
+        "dispatch_events": [],
+        "fly_ineligible_reason": "role 'lanius''s AAuth key is not admitted by Neotoma (no_match)"
+      },
+      "neotoma_admission": {
+        "aauth": {
+          "admitted": false,
+          "admission_reason": "no_match"
+        }
       }
     },
     {

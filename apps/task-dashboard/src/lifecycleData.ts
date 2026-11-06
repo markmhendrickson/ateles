@@ -443,21 +443,21 @@ export const VALIDATION_NOTE = {
  * OWNER vs ASSIGNEE — distinct fields, and the distinction is load-bearing.
  *
  * The `task` schema declares BOTH `owner` and `assigned_to`. They are not
- * synonyms and the lifecycle only reads one of them: `assigned_to` carries the
+ * synonyms and the lifecycle routes on only one of them: `assigned_to` carries the
  * ROLE NAME the dispatcher routes on ("cicada"), and it is what Apis resolves
- * a skill from before writing ROUTED. `owner` is a free-text field no
- * dispatcher reads.
+ * a skill from before writing ROUTED. `owner` is a free-text field. The
+ * dispatcher reads it only to recognise an interactive session: a task owned by
+ * a session is left exactly as filed (its session writes its own state).
  *
- * This matters because an unroutable task looks identical to a routed one from
- * the outside: a task with `owner` set but `assigned_to` empty has a person's
- * name on it and still goes BLOCKED with "no route/owner", because nothing can
- * spawn from `owner`.
+ * Any other task with `owner` set but `assigned_to` empty has a name on it and
+ * still goes BLOCKED with "no route/owner", because nothing can spawn from
+ * `owner`.
  */
 export const OWNERSHIP_NOTE = {
   assignedTo:
     "The role the dispatcher routes on. Apis resolves it (with the task's tags) to a skill, and cannot write ROUTED without one.",
   owner:
-    "A declared owner, free text. No dispatcher reads it — a task carrying only an owner still blocks with “no route/owner”.",
+    "A declared owner, free text. The dispatcher reads it only to recognise a session: a task owned by a session is left as filed. Any other task carrying only an owner still blocks with “no route/owner”.",
   perStage:
     "There is no per-stage assignee field on a task. Who acts at each stage is fixed by the state machine — Apis, its watchdog, or the operator — not stored per task.",
 } as const;
