@@ -478,8 +478,12 @@ def _lens_comment(lens, head=HEAD, cid=1, verdict="**SIGNED_OFF**"):
             "body": f"<!-- review:{lens} commit={head} -->\n{text}"}
 
 
+_VANELLUS_HEADER = "**🤖 Vanellus — Ateles swarm, PR steward**"
+
+
 def _aggregation_comment(head=HEAD, cid=9, verdict="**APPROVE**"):
-    text = "" if verdict is None else f"\n{verdict}\n\nBlocking: 0"
+    """An aggregation at `head` in the contract shape: marker, header, verdict."""
+    text = "" if verdict is None else f"\n{_VANELLUS_HEADER}\n{verdict}\n\nBlocking: 0"
     return {"id": cid, "created_at": f"2026-11-06T00:00:{cid:02d}Z",
             "body": f"<!-- vanellus-aggregation commit={head} -->{text}"}
 
@@ -778,3 +782,76 @@ def test_an_admitted_label_add_on_a_green_pr_with_no_parent_issue_runs_the_panel
         _run(d._handle_pr(trigger))
     assert state["seated"], "the admitted label add seated the review panel"
     assert "lanius" not in state["seated"]
+
+
+# ── PR #1616 review: a verdict counts only at the fixed position ──
+
+
+@pytest.mark.parametrize("shape", ["prose_after_marker", "prose_after_header"])
+def test_an_aggregation_that_only_quotes_a_bold_verdict_is_recovered(sweep_world, shape):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    prose = "An earlier round said **APPROVE**, but this run stopped before aggregating."
+    lead = "" if shape == "prose_after_marker" else f"{_VANELLUS_HEADER}\n"
+    state["comments"] = [
+        {"id": 9, "created_at": "2026-11-06T00:00:09Z",
+         "body": f"<!-- vanellus-aggregation commit={HEAD} -->\n{lead}{prose}"},
+    ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == ["lanius"], "a quoted verdict is not a finished panel"
+    assert summary["finished"] == 0
+
+
+def test_a_lens_that_only_quotes_a_bold_verdict_is_not_counted_finished(sweep_world):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    required = sorted(
+        lens.lens for lens in sd.select_panel(set(), state["files"], d.config.panel_max)
+    )
+    first = required[0]
+    agent = sd.lens_by_name(first).agent
+    quoting = {
+        "id": 1, "created_at": "2026-11-06T00:00:01Z",
+        "body": (
+            f"<!-- review:{first} commit={HEAD} -->\n"
+            f"**🤖 {agent.capitalize()} — Ateles swarm, {first} lens**\n"
+            "Still reading; the last round's verdict was **SIGNED_OFF**."
+        ),
+    }
+    state["comments"] = [quoting] + [
+        _lens_comment(lens, cid=i) for i, lens in enumerate(required[1:], 2)
+    ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == ["lanius"], "the quoting lens did not finish"
+    assert summary["finished"] == 0
+
+
+@pytest.mark.parametrize("shape", ["aggregation_single", "aggregation_fallback", "lens_fallback"])
+def test_real_apis_comment_shapes_still_count_as_finished(sweep_world, shape):
+    d, state = sweep_world
+    state["gate"] = GREEN
+    required = sorted(
+        lens.lens for lens in sd.select_panel(set(), state["files"], d.config.panel_max)
+    )
+    if shape == "aggregation_single":
+        state["comments"] = [_aggregation_comment()]
+    elif shape == "aggregation_fallback":
+        # The dispatcher wraps Vanellus's own reply, which repeats the marker
+        # and header, so both appear twice before the verdict.
+        reply = _aggregation_comment()["body"]
+        state["comments"] = [{
+            "id": 9, "created_at": "2026-11-06T00:00:09Z",
+            "body": sd.compose_vanellus_fallback_comment(reply, commit_sha=HEAD),
+        }]
+    else:
+        # A lens fallback adds a `review:<lens>` line and the dispatcher's
+        # header ahead of the lens's own marker, header and verdict.
+        state["comments"] = [
+            {**_lens_comment(lens, cid=i),
+             "body": sd.compose_fallback_comment(
+                 lens, sd.lens_by_name(lens).agent, _lens_comment(lens)["body"], HEAD)}
+            for i, lens in enumerate(required, 1)
+        ]
+    summary = _run(d.resume_labelled_panels([REPO]))
+    assert state["seated"] == []
+    assert summary["finished"] == 1

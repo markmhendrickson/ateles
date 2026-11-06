@@ -3113,16 +3113,77 @@ def latest_aggregation_comment(
     )
 
 
+_WRAPPER_MARKER_RE = re.compile(
+    r"^(?:<!--\s*review:[a-z0-9_-]+\s+commit=[0-9a-f]{7,40}\s*-->"
+    r"|<!--\s*vanellus-aggregation(?:\s[^>]*)?-->"
+    r"|review:[a-z0-9_-]+)$",
+    re.IGNORECASE,
+)
+
+
+def posted_comment_own_verdict(body: str | None, *, lens_agent: str) -> str | None:
+    """The fixed-position verdict of a POSTED swarm comment, or None.
+
+    A posted comment can carry a wrapper `lens_own_verdict` alone refuses: a
+    dispatcher fallback post (`compose_fallback_comment`,
+    `compose_vanellus_fallback_comment`) prefixes a marker, for a lens a plain
+    `review:<lens>` line, and its own attribution header to the agent's reply,
+    which may itself begin with the same marker and header. So this peels the
+    leading run of marker lines (lens, aggregation, or plain `review:<lens>`)
+    and attribution headers naming *lens_agent*, keeps the LAST header of that
+    run, and hands the rest to `lens_own_verdict` unchanged; every one of its
+    rules (verdict line right after the header, one header emoji, no second
+    verdict-like line) still applies to what follows. A wrapper line that is
+    code-indented, ends in a non-newline break, or is a header naming another
+    agent stops the peel, which then reads as not finished. A comment with no
+    header at all (an aggregation posted from a provisioned account with the
+    header omitted) also reads as None, deliberately: a false "not finished"
+    re-runs a panel, the safe direction.
+    """
+    lines = _split_lines_keeping_breaks(body or "")
+    count = len(lines)
+    want = (lens_agent or "").strip().lower()
+    i = 0
+    last_header: int | None = None
+    while i < count:
+        raw, brk = lines[i]
+        stripped = raw.strip()
+        if not stripped:
+            i += 1
+            continue
+        if brk and brk not in _PLAIN_LINE_BREAKS:
+            break
+        if not _starts_a_markdown_line(raw):
+            break
+        if _WRAPPER_MARKER_RE.match(stripped):
+            i += 1
+            continue
+        header = _OWN_HEADER_RE.match(_normalize_for_blocking_scan(raw).strip())
+        if header and header.group("name").strip().lower() == want:
+            last_header = i
+            i += 1
+            continue
+        break
+    if last_header is None:
+        return None
+    rest = "".join(line + brk for line, brk in lines[last_header:])
+    return lens_own_verdict(rest, lens_agent=lens_agent)
+
+
 def panel_finished_at_head(
     comments: list[dict], head_sha: str, required_lenses: set[str] | frozenset[str]
 ) -> bool:
     """True when the review panel has already finished on exactly ``head_sha``.
 
     Finished means a non-superseded Vanellus aggregation pinned to the head
-    that carries a verdict token (`parse_review_verdict`, the reader the
-    approval path applies to the aggregation), or, for every lens in
+    whose verdict reads at the fixed position, or, for every lens in
     ``required_lenses``, a non-superseded ``review:<lens> commit=<head>``
-    comment whose verdict reads at the fixed position (`lens_own_verdict`).
+    comment whose verdict reads at the fixed position. Both go through
+    `posted_comment_own_verdict`, which is `lens_own_verdict` (the reader the
+    panel-gated approval tool uses) after peeling the dispatcher's wrapper. A
+    bold verdict token quoted anywhere else in the body does not count: an
+    unanchored search let a marker followed by prose quoting `**APPROVE**`
+    skip recovery (PR #1616 review).
     A marker alone is not a finished panel: a marker-only or malformed comment
     is exactly what a review that died mid-post leaves, and it must be
     recovered, not skipped. Any readable verdict is terminal, a blocking one
@@ -3138,7 +3199,9 @@ def panel_finished_at_head(
     # The NEWEST aggregation at the head decides: a newer marker-only one is a
     # later run that died, and an older verdict must not stand in for it.
     aggregation = latest_aggregation_comment(comments, head_sha=head)
-    if aggregation is not None and parse_review_verdict(aggregation.get("body") or ""):
+    if aggregation is not None and posted_comment_own_verdict(
+        aggregation.get("body") or "", lens_agent="vanellus"
+    ):
         return True
     if not required_lenses:
         return False
@@ -3149,7 +3212,7 @@ def panel_finished_at_head(
         if not match or not comment_verdict_matches_current_head(body, head):
             continue
         known = lens_by_name(match.group("lens"))
-        if known is None or lens_own_verdict(body, lens_agent=known.agent) is None:
+        if known is None or posted_comment_own_verdict(body, lens_agent=known.agent) is None:
             continue
         reported.add(match.group("lens").lower())
     return {lens.lower() for lens in required_lenses} <= reported
