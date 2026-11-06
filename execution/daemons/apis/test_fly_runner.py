@@ -2068,6 +2068,73 @@ def test_two_processes_sharing_a_ledger_never_reap_each_others_live_run(fly_env,
     assert "m-their-live" not in fake.machines
 
 
+@pytest.mark.parametrize("blocked_on", ["in_process_lock", "flock"])
+def test_cancel_while_retaking_admission_leaves_both_locks_free(fly_env, blocked_on):
+    """``released()`` drops both locks, then is cancelled inside its re-take:
+    once waiting on the in-process lock, once after taking it while polling
+    the flock. The cancellation reaches the caller, and neither lock is left
+    held: a later admission takes both at once."""
+    import fcntl
+
+    executor, _, _ = make_executor(FakeFly())
+    lock_path = executor.ledger.path.with_name(executor.ledger.path.name + ".admission.lock")
+
+    async def scenario():
+        dropped, go = asyncio.Event(), asyncio.Event()
+        lock = executor._admission_lock()
+
+        async def caller():
+            async with executor._admission() as hold:
+                async with hold.released():
+                    dropped.set()
+                    await go.wait()
+
+        task = asyncio.create_task(caller())
+        await dropped.wait()
+        # While the caller has let go, someone else takes the lock it needs back.
+        other_fh = open(lock_path, "a+")
+        if blocked_on == "in_process_lock":
+            await lock.acquire()
+        else:
+            fcntl.flock(other_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        go.set()
+        # Wait until the re-take is actually blocked where this case says.
+        for _ in range(400):
+            await asyncio.sleep(0.005)
+            if blocked_on == "in_process_lock" and lock._waiters:
+                break
+            if blocked_on == "flock" and lock.locked():
+                break  # re-take holds the in-process lock and polls the flock
+        else:
+            raise AssertionError(f"re-take never blocked on {blocked_on}")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Let go of what this test itself held.
+        if blocked_on == "in_process_lock":
+            lock.release()
+        else:
+            fcntl.flock(other_fh.fileno(), fcntl.LOCK_UN)
+        other_fh.close()
+        assert not lock.locked()
+        # A later admission takes both locks without waiting.
+        async with executor._admission():
+            assert lock.locked()
+            probe = open(lock_path, "a+")
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                probe.close()
+        probe = open(lock_path, "a+")
+        try:
+            fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # free again
+        finally:
+            probe.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), 10))
+
+
 def test_admission_is_exclusive_across_processes(fly_env, tmp_path):
     executor, _, _ = make_executor(FakeFly())
     other = _holder(tmp_path, "admission", executor.ledger.path)
@@ -4661,7 +4728,8 @@ def test_a_login_claim_that_always_conflicts_is_refused_after_the_bound(
     )
     job = _job()
     with pytest.raises(fly_runner.FlyRefusal,
-                       match=r"Fly refused the claude login machine update \(409\); "
+                       match=r"Fly refused the claude login machine update "
+                             r"\(409, reason version_conflict\); "
                              "retry later") as exc:
         asyncio.run(executor.run(job))
     assert exc.value.cooled_until
@@ -4715,27 +4783,62 @@ def test_claim_outlasts_repeated_refused_updates(fly_env, claude_login, monkeypa
     assert executor.ledger.snapshot()["in_flight"] == {} and "m-claude" not in fake.leases
 
 
-def test_refused_update_logs_status_and_fly_text(fly_env, claude_login, monkeypatch, caplog):
+# A short synthetic marker in Fly's text: shorter than any run the redaction
+# removes, so only the reason label keeps it out of the log.
+_FLY_TEXT_MARKER = "zq7MARKERzq"
+
+
+def test_refused_update_logs_status_and_reason_label(fly_env, claude_login, monkeypatch,
+                                                     caplog):  # fmt: skip
     clock = Clock()
     fake = _claude_fake()
     executor, _, _ = make_executor(fake, record={"exit_code": 0}, clock=clock)
     _backoff_on_clock(monkeypatch, executor, clock)
-    claims = _claim_conflicts(fake, executor, "m-claude",
-                              _refuse_claims(2, "update replacing user; revert stopped flyd"))
+    text = f"update replacing user {_FLY_TEXT_MARKER}; revert stopped flyd"
+    claims = _claim_conflicts(fake, executor, "m-claude", _refuse_claims(2, text))
     with caplog.at_level(logging.WARNING, logger="apis.fly_runner"):
         asyncio.run(executor.run(_job()))
     refused = [r for r in caplog.records
                if r.levelno == logging.WARNING and "refused the update" in r.getMessage()]
     assert len(refused) == 2  # once per refused attempt
     for record in refused:
-        text = record.getMessage()
-        assert "412" in text and "update replacing user; revert stopped flyd" in text
+        assert "HTTP 412, reason other" in record.getMessage()
     logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert _FLY_TEXT_MARKER not in logged and "revert stopped flyd" not in logged
     files = json.loads(claims[0].content)["config"]["files"]
     assert files and "raw_value" not in logged and "guest_path" not in logged
     for f in files:
         assert f["raw_value"] not in logged
     assert "the task" not in logged and "current_version" not in logged
+
+
+def test_refusal_message_carries_the_label_not_fly_text(fly_env, claude_login,
+                                                        fast_claim_retry, caplog):  # fmt: skip
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record=None)
+    text = f"insufficient memory on host {_FLY_TEXT_MARKER}"
+    _claim_conflicts(fake, executor, "m-claude",
+                     lambda n: httpx.Response(412, json={"error": text}))
+    with caplog.at_level(logging.WARNING, logger="apis.fly_runner"):
+        with pytest.raises(fly_runner.FlyRefusal) as exc:
+            asyncio.run(executor.run(_job()))
+    assert "(412, reason host_memory)" in str(exc.value)
+    assert _FLY_TEXT_MARKER not in str(exc.value) and "insufficient" not in str(exc.value)
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reason host_memory" in logged and _FLY_TEXT_MARKER not in logged
+
+
+@pytest.mark.parametrize("text, label", [
+    ("Insufficient Memory available on host", "host_memory"),
+    ("would OVERCOMMIT the host", "host_memory"),
+    ("machine version changed", "version_conflict"),
+    ("current_version does not match", "version_conflict"),
+    ("update replacing user; revert stopped flyd", "other"),
+    ("", "other"),
+])
+def test_fly_refusal_reason_labels(text, label):
+    assert fly_runner.fly_refusal_reason(text) == label
+    assert fly_runner.fly_refusal_reason(fly_runner.FlyApiError(412, text).detail) == label
 
 
 def test_claim_stops_at_deadline_during_backoff(fly_env, claude_login, monkeypatch):

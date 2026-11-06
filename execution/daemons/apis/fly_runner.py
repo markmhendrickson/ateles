@@ -183,6 +183,18 @@ class FlyApiError(Exception):
         self.detail = safe  # Fly's own text, already redacted and capped
 
 
+def fly_refusal_reason(detail: str) -> str:
+    """A label from a closed set for Fly's refusal text, so a log line or
+    refusal message can say why without carrying Fly's own words (which
+    could echo something secret the redaction above missed)."""
+    text = str(detail).lower()
+    if "insufficient memory" in text or "overcommit" in text:
+        return "host_memory"
+    if "version" in text:  # also covers "current_version"
+        return "version_conflict"
+    return "other"
+
+
 class FlyLeaseBusy(FlyApiError):
     """Another holder has the machine's lease."""
 
@@ -2943,12 +2955,12 @@ class FlyExecutor:
             if refused is None:
                 break
             log.warning(f"[fly] run={job.run_id} Fly refused the update of login machine "
-                        f"{machine_id} (attempt {attempt}): HTTP {refused.status}: "
-                        f"{refused.detail[:300]}")  # fmt: skip
+                        f"{machine_id} (attempt {attempt}): HTTP {refused.status}, "
+                        f"reason {fly_refusal_reason(refused.detail)}")  # fmt: skip
             if not waits:
                 raise FlyRefusal(
                     f"Fly refused the {job.provider} login machine update "
-                    f"({refused.status}); retry later",
+                    f"({refused.status}, reason {fly_refusal_reason(refused.detail)}); retry later",
                     _render_wall(self._clock() + 300),
                 )
             wait = waits.pop(0)
