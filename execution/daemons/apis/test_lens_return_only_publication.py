@@ -262,6 +262,12 @@ async def test_a_mac_fallback_of_a_return_only_run_is_still_published(monkeypatc
 
 @pytest.mark.asyncio
 async def test_a_local_prompt_run_is_not_treated_as_return_only(monkeypatch):
+    # The lens has a token of its own, so it is a local prompt run on both
+    # grounds (not on Fly, and not handed a read-only token).
+    monkeypatch.setenv("PAVO_AGENT_PAT", "own-pat-0000")
+    import review_panel
+    for _l in review_panel.LENSES:
+        monkeypatch.setenv(f"{_l.agent.upper()}_AGENT_PAT", "own-pat-0000")
     d = _dispatcher()
     seen: dict = {}
 

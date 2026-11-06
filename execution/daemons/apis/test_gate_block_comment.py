@@ -101,3 +101,17 @@ def test_gate_block_post_uses_dispatcher_credential_and_issue_comments(monkeypat
     assert request.method == "POST"
     assert str(request.url).endswith("/repos/owner/repo/issues/87/comments")
     assert "`arch`" in json.loads(request.content)["body"]
+
+
+import pytest as _pytest_identity
+
+
+@_pytest_identity.fixture(autouse=True)
+def _lenses_have_their_own_identity(monkeypatch):
+    """A lens with a token of its own is not handed a read-only token, so these
+    tests keep exercising the local prompt and publication they were written
+    for (the read-token path has its own tests)."""
+    import review_panel
+
+    for lens in review_panel.LENSES:
+        monkeypatch.setenv(f"{lens.agent.upper()}_AGENT_PAT", f"own-pat-{lens.agent}-0000")

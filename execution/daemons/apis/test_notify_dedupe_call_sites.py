@@ -823,3 +823,17 @@ def test_process_blocked_claim_false_still_sends_once(monkeypatch, tmp_path):
         )
     )
     assert len(sent) == 1
+
+
+import pytest as _pytest_identity
+
+
+@_pytest_identity.fixture(autouse=True)
+def _lenses_have_their_own_identity(monkeypatch):
+    """A lens with a token of its own is not handed a read-only token, so these
+    tests keep exercising the local prompt and publication they were written
+    for (the read-token path has its own tests)."""
+    import review_panel
+
+    for lens in review_panel.LENSES:
+        monkeypatch.setenv(f"{lens.agent.upper()}_AGENT_PAT", f"own-pat-{lens.agent}-0000")

@@ -279,6 +279,7 @@ class TestAFailedReadIsNotAnAbsentEntity:
         result = _run(d._refresh_pending_gates("o/r", 795, {"arch"}))
         assert result == set(swarm_dispatch.PRE_IMPL_GATES)
 
+    @pytest.mark.usefixtures("_lenses_have_their_own_identity")
     def test_a_failed_first_read_seats_the_owner_and_holds_the_gate_for_merge(
         self, monkeypatch
     ):
@@ -537,6 +538,7 @@ class TestQaAndLegalAreSigned:
         assert awaits("qa", None) is False  # unknown record: sign nothing
         assert awaits("", live) is False
 
+    @pytest.mark.usefixtures("_lenses_have_their_own_identity")
     @pytest.mark.parametrize(
         "lens_name,agent", [("qa", "phoenicurus"), ("legal", "buteo")]
     )
@@ -719,3 +721,14 @@ class TestLoadReadsEnvelopeProvenance:
         monkeypatch.setattr(store, "_post", prod_shape)
         state = _run(store.load("o/r", 795))
         assert state.field_provenance.get(GATE_STATUS_FIELD) == "obs-head"
+
+
+@pytest.fixture
+def _lenses_have_their_own_identity(monkeypatch):
+    """A lens with a token of its own is not handed a read-only token, so these
+    tests keep exercising the local prompt and publication they were written
+    for (the read-token path has its own tests)."""
+    import review_panel
+
+    for lens in review_panel.LENSES:
+        monkeypatch.setenv(f"{lens.agent.upper()}_AGENT_PAT", f"own-pat-{lens.agent}-0000")

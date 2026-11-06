@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 import httpx
 import pytest
+import pytest as _pytest_identity
 import swarm_dispatch
 from github_gateway import SwarmTrigger
 from lib.daemon_runtime.gating import CheckpointPosture, ExecutionPolicy
@@ -1378,6 +1379,7 @@ def test_panel_rechecks_ci_after_inheritance_before_seating_lenses(monkeypatch, 
     assert not any(item[0] in {"gate", "persist_head", "review"} for item in calls)
 
 
+@_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
 def test_handle_pr_blocking_verdict_routes_findings(monkeypatch):
     calls = []
     d = _pr_dispatcher_with_stubs(
@@ -1388,6 +1390,7 @@ def test_handle_pr_blocking_verdict_routes_findings(monkeypatch):
     assert ("gate", None) not in calls
 
 
+@_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
 def test_handle_pr_threads_one_live_head_through_persistence_and_recovery(
     monkeypatch,
 ):
@@ -1408,6 +1411,7 @@ def test_handle_pr_threads_one_live_head_through_persistence_and_recovery(
     assert ("route_head", live_head) in calls
 
 
+@_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
 def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
     calls = []
     d = _pr_dispatcher_with_stubs(
@@ -1418,6 +1422,7 @@ def test_handle_pr_clear_verdict_gates_readiness(monkeypatch):
     assert not any(c[0] == "route" for c in calls)
 
 
+@_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
 def test_handle_pr_panel_loop_clean_verdict_calls_sign_off(monkeypatch):
     """Phoenicurus's QA review, PR #1181 (NON-BLOCKING coverage gap): the
     panel-loop `sign_off` branch in `_handle_pr` — CLEAN verdict for a gate a
@@ -1522,6 +1527,7 @@ def test_handle_pr_panel_loop_blocking_verdict_does_not_call_sign_off(monkeypatc
     assert not sign_off_calls, "sign_off must not be called when the lens blocked"
 
 
+@_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
 def test_handle_pr_clear_verdict_without_verified_approval_holds_readiness(monkeypatch):
     """A clear model verdict is prose until GitHub readback proves an exact-head
     APPROVED review by the distinct Vanellus principal."""
@@ -1582,6 +1588,7 @@ def test_handle_pr_holds_before_aggregation_when_durable_readback_fails(monkeypa
     assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
 
 
+@_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
 def test_handle_pr_emits_formal_review_on_blocking_path(monkeypatch):
     """ateles#241: a REQUEST_CHANGES verdict must reach GitHub's review state,
     not just route findings internally."""
@@ -1593,6 +1600,7 @@ def test_handle_pr_emits_formal_review_on_blocking_path(monkeypatch):
     assert ("review", "REQUEST_CHANGES") in calls, calls
 
 
+@_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
 def test_handle_pr_emits_formal_review_on_clear_path(monkeypatch):
     """An APPROVE must also land as a native review — that is what lets branch
     protection see the swarm's verdict."""
@@ -1604,6 +1612,7 @@ def test_handle_pr_emits_formal_review_on_clear_path(monkeypatch):
     assert ("review", "APPROVE") in calls, calls
 
 
+@_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
 def test_formal_review_emitted_before_routing_decision(monkeypatch):
     """Emission happens on BOTH paths, so it must precede the branch — and must
     fire exactly once per handled PR (not duplicated across retry paths)."""
@@ -1725,6 +1734,7 @@ def test_gate_blocked_reopen_auto_rereviews_when_flag_on(monkeypatch):
     assert any(c[0] == "lens" for c in calls), "lens agents must re-review the new head"
 
 
+@_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
 def test_auto_rereview_never_gates_merge_readiness(monkeypatch):
     """Self-certification boundary (ateles#230 arch §4): an auto-re-review of a
     gate-blocked PR must never reach merge-readiness — a push is not a sign-off.
@@ -7143,6 +7153,7 @@ def test_vanellus_fallback_non_fatal_when_post_raises(monkeypatch):
     asyncio.run(dispatcher._post_missing_vanellus_comment(t, result))
 
 
+@_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
 def test_handle_pr_calls_vanellus_fallback_after_run(monkeypatch):
     """_handle_pr must call _post_missing_vanellus_comment after the Vanellus run."""
     stale_head = "a" * 40
@@ -9652,6 +9663,7 @@ def test_provider_capacity_failure_auto_resumes_with_partial_panel_detail(monkey
     assert "missing lens results: security (provider exhaustion)" in body.lower()
 
 
+@_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
 def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
     """One failed lens leaves the successful results visible and names the gap."""
     calls = []
@@ -10189,6 +10201,7 @@ def test_resolve_verdict_reads_comments_newest_first(monkeypatch):
     assert calls and "direction" not in calls[0][1], calls
 
 
+@_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
 def test_handle_pr_recovers_blocking_verdict_from_comment(monkeypatch):
     """T6 (effect-level) — the bug itself: stdout omits REQUEST_CHANGES, but the
     PR must still be routed as blocking AND get a native REQUEST_CHANGES review,
@@ -10208,6 +10221,7 @@ def test_handle_pr_recovers_blocking_verdict_from_comment(monkeypatch):
     assert ("review", "REQUEST_CHANGES") in calls, calls
 
 
+@_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
 def test_handle_pr_recovered_approve_gates_readiness(monkeypatch):
     """T7 — the fallback must not over-trigger blocking: a recovered APPROVE
     proceeds to the readiness gate."""
@@ -12275,6 +12289,7 @@ import gate_waive as _gw  # noqa: E402
 
 
 class TestCallersTreatAFailedSignOffAsNotCleared:
+    @_pytest_identity.mark.usefixtures("_lenses_have_their_own_identity")
     def test_panel_keeps_a_failed_gate_pending_even_when_the_reread_shows_it_cleared(
         self, monkeypatch
     ):
@@ -12812,3 +12827,14 @@ class TestLabelGate:
         # confirms an operator who never sets ATELES_SWARM_REQUIRE_LABEL gets
         # exactly today's behaviour, not a hidden non-empty default.
         assert DispatchConfig(neotoma_token="", github_token="").require_label == ""
+
+
+@_pytest_identity.fixture
+def _lenses_have_their_own_identity(monkeypatch):
+    """A lens with a token of its own is not handed a read-only token, so these
+    tests keep exercising the local prompt and publication they were written
+    for (the read-token path has its own tests)."""
+    import review_panel
+
+    for lens in review_panel.LENSES:
+        monkeypatch.setenv(f"{lens.agent.upper()}_AGENT_PAT", f"own-pat-{lens.agent}-0000")

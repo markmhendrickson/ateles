@@ -647,3 +647,17 @@ def test_ci_green_merge_gate_still_clears_a_genuinely_clean_aggregation(monkeypa
     d, _ = _dispatcher(monkeypatch, [[aggregation]])
 
     assert asyncio.run(d._pr_review_is_clear("o/r", 1)) is True
+
+
+import pytest as _pytest_identity
+
+
+@_pytest_identity.fixture(autouse=True)
+def _lenses_have_their_own_identity(monkeypatch):
+    """A lens with a token of its own is not handed a read-only token, so these
+    tests keep exercising the local prompt and publication they were written
+    for (the read-token path has its own tests)."""
+    import review_panel
+
+    for lens in review_panel.LENSES:
+        monkeypatch.setenv(f"{lens.agent.upper()}_AGENT_PAT", f"own-pat-{lens.agent}-0000")

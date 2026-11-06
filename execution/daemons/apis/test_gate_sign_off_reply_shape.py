@@ -324,6 +324,14 @@ class TestAFormatOnlyRejectionIsVisible:
         return surfaced, signed
 
     def test_panel_call_site_surfaces_a_format_only_rejection(self, monkeypatch):
+        # This pins the shared-account verdict format (header and marker the
+        # lens writes itself), which a lens with an identity of its own does
+        # not use, and a lens handed a read-only token returns in sections
+        # instead. So here, and only here, the lens has neither.
+        monkeypatch.delenv("WAXWING_AGENT_PAT", raising=False)
+        monkeypatch.setattr(
+            swarm_dispatch, "_lens_gets_local_read_token", lambda *a, **k: False
+        )
         stdout = _fill("{m}\nreview:arch\n{h}\n**SIGNED_OFF**\n\nno concerns", "arch")
         surfaced, signed = self._panel_run(monkeypatch, stdout)
         assert surfaced == [(80, ["arch"], "a" * 40)]
@@ -959,3 +967,17 @@ class TestTheStandardHarnessFooterIsToleratedOnlyInItsOneRealShape:
         # explicitly as the OTHER thing that already covers it.
         assert "ateles#109" in section
         assert "avatar" in section.lower()
+
+
+import pytest as _pytest_identity
+
+
+@_pytest_identity.fixture(autouse=True)
+def _lenses_have_their_own_identity(monkeypatch):
+    """A lens with a token of its own is not handed a read-only token, so these
+    tests keep exercising the local prompt and publication they were written
+    for (the read-token path has its own tests)."""
+    import review_panel
+
+    for lens in review_panel.LENSES:
+        monkeypatch.setenv(f"{lens.agent.upper()}_AGENT_PAT", f"own-pat-{lens.agent}-0000")

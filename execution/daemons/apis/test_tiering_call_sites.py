@@ -40,6 +40,17 @@ from test_swarm_dispatch import (
     _trigger,
 )
 
+
+@pytest.fixture(autouse=True)
+def _lenses_have_their_own_identity(monkeypatch):
+    """A lens with a token of its own is not handed a read-only token, so these
+    tests keep exercising the local prompt and publication they were written
+    for (the read-token path has its own tests)."""
+    import review_panel
+
+    for lens in review_panel.LENSES:
+        monkeypatch.setenv(f"{lens.agent.upper()}_AGENT_PAT", f"own-pat-{lens.agent}-0000")
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE_DIR = _REPO_ROOT / "docs" / "examples" / "model-tiering"
 EXAMPLE_POLICY = EXAMPLE_DIR / "action-policy.json"
