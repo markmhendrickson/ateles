@@ -835,15 +835,17 @@ def check_undated_session_tasks(
             Finding(
                 key=f"{KEY_PREFIX}:task-undated-session",
                 subject=(
-                    f"{lead}{info['quiet']} session-owned tasks with no due date "
-                    f"quiet for {UNDATED_QUIET_DAYS}+ days"
+                    f"{lead}{info['quiet']} session-owned "
+                    f"{'task' if info['quiet'] == 1 else 'tasks'} with no due "
+                    f"date quiet for {UNDATED_QUIET_DAYS}+ days"
                 ),
                 message=(
                     "Some tasks owned by a session have no due date and have not "
                     "changed for two weeks, so nothing else surfaces them. List "
                     "them, find each task's owner and message that session; "
                     "raise one with the operator only if it needs a decision or "
-                    f"action from them. To list them, run: {UNDATED_LIST_COMMAND}"
+                    "action from them. To list them, run this from the Ateles "
+                    f"repo root: {UNDATED_LIST_COMMAND}"
                 ),
             )
         )
@@ -853,7 +855,12 @@ def check_undated_session_tasks(
 def render_undated_listing(
     rows: list[dict[str, Any]], truncated: bool, now: datetime
 ) -> list[str]:
-    """One line per task, quietest first. Task-supplied text is sanitized."""
+    """A summary line, then one line per task, quietest first.
+
+    Every undated session-owned task is listed, quiet or not; the summary says
+    how many of them are quiet so the count matches the published finding.
+    Task-supplied text is sanitized.
+    """
     from lib.daemon_runtime.task_ownership import deciding_assignee
 
     items = []
@@ -870,7 +877,19 @@ def render_undated_listing(
             )
         )
     items.sort(key=lambda t: (-t[0], t[1]))
-    lines = []
+    total = len(items)
+    quiet = sum(
+        1 for _, _, days, _, _ in items if days is None or days >= UNDATED_QUIET_DAYS
+    )
+    more = "at least " if truncated else ""
+    noun = "task" if total == 1 else "tasks"
+    if total == 0:
+        lines = [f"{more}0 session-owned tasks with no due date."]
+    else:
+        lines = [
+            f"{more}{total} session-owned {noun} with no due date; "
+            f"{quiet} quiet for {UNDATED_QUIET_DAYS}+ days. Quietest first."
+        ]
     for _, ident, days, ent, snap in items:
         who = deciding_assignee(snap.get("assigned_to")) or snap.get("owner") or ""
         title = snap.get("title") or ent.get("canonical_name") or "an untitled task"

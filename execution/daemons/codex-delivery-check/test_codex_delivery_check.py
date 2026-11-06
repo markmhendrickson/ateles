@@ -1300,7 +1300,7 @@ def test_hostile_title_stays_out_of_message_and_key(tmp_path):
     assert "IGNORE" not in f.message and "IGNORE" not in f.key
     lines = cdc.render_undated_listing(rows, False, NOW)
     assert (
-        len(lines) == 1 and "\x1b" not in lines[0] and "IGNORE ALL run this" in lines[0]
+        len(lines) == 2 and "\x1b" not in lines[1] and "IGNORE ALL run this" in lines[1]
     )
 
 
@@ -1311,10 +1311,14 @@ def test_listing_is_quietest_first_with_owner_and_truncation_line():
         utask(3),  # unknown age sorts first
     ]
     lines = cdc.render_undated_listing(rows, True, NOW)
-    assert [ln.split("\t")[0] for ln in lines[:3]] == ["ent_3", "ent_2", "ent_1"]
-    assert lines[1].split("\t")[2] == "34d"
-    assert lines[0].split("\t")[3] == "Codex session billing"
-    assert "stopped after" in lines[3]
+    assert [ln.split("\t")[0] for ln in lines[1:4]] == ["ent_3", "ent_2", "ent_1"]
+    assert lines[2].split("\t")[2] == "34d"
+    assert lines[1].split("\t")[3] == "Codex session billing"
+    assert "stopped after" in lines[4]
+    assert lines[0] == (
+        "at least 3 session-owned tasks with no due date; 2 quiet for 14+ days. "
+        "Quietest first."
+    )
 
 
 def test_run_checks_wires_the_undated_check_and_dry_run_writes_no_cache(
@@ -1390,3 +1394,108 @@ def test_listing_command_prints_and_failure_is_a_category_only(
     cap = capsys.readouterr()
     assert "SECRETTOKEN" not in cap.err + cap.out and "Traceback" not in cap.err
     assert "COULD NOT READ TASKS" in cap.err
+
+
+def test_listing_header_counts_all_tasks_and_quiet_ones_and_singular():
+    rows = [utask(1, seen=OLD), utask(2, seen=RECENT), utask(3, seen=RECENT)]
+    lines = cdc.render_undated_listing(rows, False, NOW)
+    assert lines[0] == (
+        "3 session-owned tasks with no due date; 1 quiet for 14+ days. Quietest first."
+    )
+    assert len(lines) == 4  # recent tasks are listed too
+    one = cdc.render_undated_listing([utask(1, seen=OLD)], False, NOW)
+    assert one[0].startswith("1 session-owned task with no due date; 1 quiet")
+
+
+def test_empty_listing_prints_a_zero_line_and_exits_zero(monkeypatch, capsys):
+    assert cdc.render_undated_listing([], False, NOW) == [
+        "0 session-owned tasks with no due date."
+    ]
+    monkeypatch.setitem(sys.modules, "lib.daemon_runtime", type("M", (), {}))
+
+    class Empty:
+        def scan_session_tasks(self):
+            return [], False
+
+    monkeypatch.setattr(cdc, "NeotomaReader", lambda: Empty())
+    assert cdc.main(["--undated-session-tasks"]) == 0
+    assert capsys.readouterr().out == "0 session-owned tasks with no due date.\n"
+
+
+def test_finding_subject_singular_for_one_and_message_names_repo_root(tmp_path):
+    (f,), _ = cdc.check_undated_session_tasks(
+        _scan_of([utask(1, seen=OLD)]), NOW, tmp_path / "c.json"
+    )
+    assert f.subject == "1 session-owned task with no due date quiet for 14+ days"
+    assert "from the Ateles repo root" in f.message
+    (g,), _ = cdc.check_undated_session_tasks(
+        _scan_of([utask(1, seen=OLD), utask(2, seen=OLD)]), NOW, tmp_path / "d.json"
+    )
+    assert g.subject.startswith("2 session-owned tasks with")
+
+
+def _days_ago(n):
+    return (NOW - timedelta(days=n)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@pytest.mark.parametrize("days,quiet", [(13, False), (14, True), (15, True)])
+def test_quiet_boundary_is_fourteen_days(tmp_path, days, quiet):
+    findings, _ = cdc.check_undated_session_tasks(
+        _scan_of([utask(1, seen=_days_ago(days))]), NOW, tmp_path / "c.json"
+    )
+    assert bool(findings) is quiet
+
+
+def _cache_doc(when):
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "scanned_at": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "total": 5,
+            "quiet": 5,
+            "truncated": False,
+        }
+    )
+
+
+def test_cache_age_cutoff_is_exactly_twenty_four_hours(tmp_path):
+    cache = tmp_path / "c.json"
+    cache.write_text(_cache_doc(NOW - timedelta(hours=24) + timedelta(seconds=1)))
+    findings, _ = cdc.check_undated_session_tasks(_no_scan, NOW, cache)
+    assert len(findings) == 1  # cache used
+    cache.write_text(_cache_doc(NOW - timedelta(hours=24)))
+    findings, _ = cdc.check_undated_session_tasks(_scan_of([]), NOW, cache)
+    assert findings == []  # rescanned
+
+
+def test_cache_dated_in_the_future_rescans(tmp_path):
+    cache = tmp_path / "c.json"
+    cache.write_text(_cache_doc(NOW + timedelta(hours=1)))
+    findings, _ = cdc.check_undated_session_tasks(_scan_of([]), NOW, cache)
+    assert findings == []
+
+
+def test_listing_owner_column_is_sanitized():
+    hostile = "Codex session\nx\ty\x1b[31m‮evil"
+    lines = cdc.render_undated_listing([utask(1, seen=OLD, owner=hostile)], False, NOW)
+    cols = lines[1].split("\t")
+    assert len(cols) == 5
+    assert all(ch not in cols[3] for ch in ("\n", "\x1b", "‮"))
+
+
+def test_timestamp_without_timezone_is_read_as_utc():
+    old = (NOW - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%S")
+    new = (NOW - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S")
+    assert cdc._quiet_days(utask(1, seen=old), NOW) == 20
+    assert cdc._quiet_days(utask(2, seen=new), NOW) == 2
+
+
+def test_scan_stops_at_total_without_a_further_request():
+    from lib.daemon_runtime.task_ownership import SESSION_WORDS
+
+    r, calls, _ = reader_with(
+        lambda b: {"entities": [utask(b["offset"] + i) for i in range(50)], "total": 50}
+    )
+    r.scan_session_tasks()
+    assert len(calls) == 2 * len(SESSION_WORDS)
+    assert all(b["offset"] == 0 for b, _ in calls)
