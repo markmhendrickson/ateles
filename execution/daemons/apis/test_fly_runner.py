@@ -5377,14 +5377,6 @@ def _claim_backoff_executor(fake, *, record=None):
     return executor, clock, slept, free, revoked
 
 
-def _revert_events(reason: str, now: float) -> list[dict]:
-    # Newest first, as Fly lists them; an older revert carries another reason.
-    return [{"type": "update", "status": "failed", "timestamp": now},
-            {"type": "revert", "timestamp": now, "request": {"reason": reason}},
-            {"type": "revert", "timestamp": now - 600,
-             "request": {"reason": "machine version changed"}}]
-
-
 def _claim_refusals(caplog) -> list[str]:
     return [r.getMessage() for r in caplog.records
             if r.levelno == logging.WARNING and "refused the claim update" in r.getMessage()]
@@ -5431,16 +5423,14 @@ def test_claim_stops_at_deadline_during_backoff(fly_env, claude_login):
 
 
 @pytest.mark.parametrize("reason", _REVERT_MEMORY)
-def test_refused_update_labels_from_revert_event(fly_env, claude_login, caplog, reason):
+def test_refused_update_labels_from_api_text(fly_env, claude_login, caplog, reason):
     caplog.set_level(logging.DEBUG)
     fake = _claude_fake()
-    executor, clock, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+    executor, _, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
 
     def refused_once(n):
         if n == 1:
-            fake.machines["m-claude"]["events"] = _revert_events(reason, clock.now)
-            # The API text alone would say "version_conflict".
-            return httpx.Response(412, json={"error": "machine version check failed"})
+            return httpx.Response(412, json={"error": reason})
         return None
 
     _claim_conflicts(fake, executor, "m-claude", refused_once)
@@ -5448,32 +5438,16 @@ def test_refused_update_labels_from_revert_event(fly_env, claude_login, caplog, 
     assert rc == 0
     refusals = _claim_refusals(caplog)
     assert len(refusals) == 1
-    assert "status 412" in refusals[0] and "reason host_memory, from event" in refusals[0]
+    assert "status 412" in refusals[0] and "reason host_memory)" in refusals[0]
     assert reason not in caplog.text
 
 
-def test_fly_revert_reason_picks_the_newest_revert():
-    newest_first = {"events": [
-        {"type": "revert", "request": {"reason": "insufficient memory"}},
-        {"type": "revert", "request": {"reason": "machine version changed"}}]}
-    assert fly_runner.fly_revert_reason(newest_first) == "host_memory"
-    stamped = {"events": [
-        {"type": "revert", "timestamp": 1, "request": {"reason": "insufficient memory"}},
-        {"type": "revert", "timestamp": 2, "request": {"reason": "something new"}}]}
-    assert fly_runner.fly_revert_reason(stamped) == "update_reverted"
-    for absent in ({}, {"events": None}, {"events": [{"type": "update"}]},
-                   {"events": [{"type": "revert", "request": {}}]}, None):
-        assert fly_runner.fly_revert_reason(absent) is None
-
-
-def test_unknown_revert_reason_is_labelled_without_its_text(fly_env, claude_login, caplog):
+def test_unknown_refusal_text_is_labelled_without_its_text(fly_env, claude_login, caplog):
     caplog.set_level(logging.DEBUG)
     fake = _claude_fake()
-    executor, clock, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
+    executor, _, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
 
     def always_refused(n):
-        fake.machines["m-claude"]["events"] = _revert_events(
-            f"flyd said {_UNKNOWN_MARKER} and stopped", clock.now)
         return httpx.Response(412, json={"error": f"update failed: {_UNKNOWN_MARKER}"})
 
     claims = _claim_conflicts(fake, executor, "m-claude", always_refused)
@@ -5482,99 +5456,16 @@ def test_unknown_revert_reason_is_labelled_without_its_text(fly_env, claude_logi
     with pytest.raises(fly_runner.FlyRefusal) as exc:
         asyncio.run(executor.run(job))
     assert str(exc.value).startswith(
-        "Fly refused the claude login machine update (412, reason update_reverted); "
+        "Fly refused the claude login machine update (412, reason other); "
         "the task never launched")
     _assert_names_refile(str(exc.value), job)
     assert len(claims) == len(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS) + 1
     refusals = _claim_refusals(caplog)
     assert len(refusals) == len(claims)
-    assert all("reason update_reverted, from event" in m for m in refusals)
+    assert all("reason other)" in m for m in refusals)
     assert _UNKNOWN_MARKER not in caplog.text
     assert _UNKNOWN_MARKER not in str(exc.value)
     assert not fake.calls("POST", "/start")
-
-
-@pytest.mark.parametrize("read", ["no_event", "read_fails"])
-def test_refusal_label_falls_back_to_api_text(fly_env, claude_login, caplog, read):
-    caplog.set_level(logging.DEBUG)
-    fake = _claude_fake()
-    executor, _, slept, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
-    refused = []
-
-    def refused_twice(n):
-        if n <= 2:
-            refused.append(n)
-            return httpx.Response(412, json={"error": FLY_REFUSAL})
-        return None
-
-    claims = _claim_conflicts(fake, executor, "m-claude", refused_twice)
-    routed = executor.client
-    failed_reads: list[int] = []
-
-    class FailingReasonRead(fly_runner.FlyMachinesClient):
-        async def get(self, machine_id):
-            # The first read after each refusal is the one for its reason.
-            if read == "read_fails" and len(failed_reads) < len(refused):
-                failed_reads.append(len(refused))
-                raise fly_runner.FlyApiError(500, "machines API unavailable")
-            return await routed.get(machine_id)
-
-    executor.client = FailingReasonRead(executor.config, transport=routed._transport)
-    rc, _, _ = asyncio.run(executor.run(_job()))
-    assert rc == 0  # the retry carried on
-    assert len(claims) == 3 and slept == [2.0, 5.0]
-    refusals = _claim_refusals(caplog)
-    assert len(refusals) == 2
-    assert all("reason host_memory, from api" in m for m in refusals)
-    assert failed_reads == ([1, 2] if read == "read_fails" else [])
-    assert "insufficient memory available" not in caplog.text
-
-
-def test_refusal_reason_read_timeout_falls_back_to_api_text(fly_env, claude_login, caplog):
-    caplog.set_level(logging.DEBUG)
-    fake = _claude_fake()
-    executor, clock, _, _, _ = _claim_backoff_executor(fake, record={"exit_code": 0})
-    job = _job()
-    deadline = clock.now + job.timeout + fly_runner.APIS_DEADLINE_GRACE_SECONDS
-    refused: list[int] = []
-
-    def refused_once(n):
-        if n == 1:
-            refused.append(n)
-            return httpx.Response(412, json={"error": FLY_REFUSAL})
-        return None
-
-    claims = _claim_conflicts(fake, executor, "m-claude", refused_once)
-    routed = executor.client
-    stalled: list[float] = []
-
-    class StalledReasonRead(fly_runner.FlyMachinesClient):
-        async def get(self, machine_id):
-            if refused and not stalled:  # the read for the refusal's reason
-                started = asyncio.get_running_loop().time()
-                try:
-                    await asyncio.Event().wait()  # never answers
-                finally:
-                    stalled.append(asyncio.get_running_loop().time() - started)
-            return await routed.get(machine_id)
-
-    executor.client = StalledReasonRead(executor.config, transport=routed._transport)
-    # A short real bound keeps the test fast; the fake clock leaves the
-    # deadline far off, so the read bound is the one that applies.
-    bound = 0.2
-    original = fly_runner.REFUSAL_EVENT_READ_SECONDS
-    fly_runner.REFUSAL_EVENT_READ_SECONDS = bound
-    try:
-        rc, _, _ = asyncio.run(asyncio.wait_for(executor.run(job), 30))
-    finally:
-        fly_runner.REFUSAL_EVENT_READ_SECONDS = original
-    assert rc == 0  # a later accepted update still launched the job
-    assert len(claims) == 2 and len(fake.calls("POST", "/start")) == 1
-    assert len(stalled) == 1
-    assert stalled[0] <= min(bound, deadline - clock.now) + 1.0
-    refusals = _claim_refusals(caplog)
-    assert len(refusals) == 1 and "reason host_memory, from api" in refusals[0]
-    assert "refusal reason failed: TimeoutError" in caplog.text
 
 
 @pytest.mark.parametrize("when", ["waiting", "retaking_locks"])
