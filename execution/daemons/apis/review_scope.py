@@ -533,8 +533,9 @@ async def path_panel_for_pr(
             client, api_base=api_base, repo=repo, pr=pr, headers=headers
         )
         list_problem = file_list_problem(rows_seen, pr_data.get("changed_files"))
-    except Exception:  # noqa: BLE001 — unreadable list: full panel
+    except Exception as exc:  # noqa: BLE001 — unreadable list: full panel
         changed = []
+        list_problem = f"the file list could not be read ({exc.__class__.__name__})"
     default_branch = await fetch_default_branch(
         client, api_base=api_base, repo=repo, headers=headers
     )
