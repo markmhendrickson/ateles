@@ -121,6 +121,8 @@ ALLOWLIST: dict[str, str] = {
         'log text only',
     'execution/daemons/apis/fly_runner.py:FlyExecutor.maybe_reap:return []':
         'a failed reaper settles nothing: every reservation stays held',
+    'execution/daemons/apis/fly_runner.py:settle_marked_reservations:return []':
+        'a failed periodic pass settles nothing: every reservation stays held',
     'execution/daemons/apis/fly_runner.py:FlyLedger.heartbeat:return':
         'no heartbeat on an unreadable ledger: liveness only gets staler, never fresher',
     "execution/daemons/apis/fly_runner.py:FlyMachinesClient._call:resp.json().get('error') or resp.text":

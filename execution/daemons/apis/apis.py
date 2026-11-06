@@ -4860,6 +4860,118 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
+async def deferred_review_sweep_pass(dispatcher: SwarmDispatcher) -> None:
+    """One pass of Apis's periodic review sweep (``main``'s
+    ``deferred_review_sweep`` runs it every APIS_DEFERRED_REVIEW_SWEEP_SECONDS).
+    Each step is fail-open: a broken one is logged and the next still runs."""
+    # 0. Fly reservations marked for the reaper. A run whose login
+    #    machine clean-up Fly refused keeps its reservation, marked,
+    #    and only a later launch's reaper would settle it, so
+    #    fly_jobs_in_flight.py kept holding daemon deploys behind a job
+    #    that had ended. Each pass retries the reaper's own recovery;
+    #    a machine that is unreadable, running or not provably this
+    #    run's keeps its reservation. Nothing to do without Fly.
+    try:
+        import fly_runner
+
+        await fly_runner.settle_marked_reservations()
+    except Exception as exc:  # noqa: BLE001 — never stop the loop
+        log.error(
+            f"[{DAEMON_NAME}] Fly marked-reservation step failed: {exc}",
+            exc_info=True,
+        )
+    # Head-scoped review supersession (#507). Webhook synchronize and
+    # reopen events retire stale verdicts synchronously; this pass is
+    # the bounded backup for missed deliveries. It shares the review
+    # sweep cadence, so secondary invalidation lag is at most
+    # APIS_DEFERRED_REVIEW_SWEEP_SECONDS (600s by default).
+    try:
+        await dispatcher.supersede_stale_review_verdicts(
+            list(dispatcher.config.resume_repositories)
+        )
+    except Exception as exc:
+        log.error(
+            f"[{DAEMON_NAME}] review-supersession sweep failed: {exc}",
+            exc_info=True,
+        )
+    try:
+        await dispatcher.resume_deferred_reviews(
+            list(dispatcher.config.resume_repositories)
+        )
+    except Exception as exc:
+        log.error(
+            f"[{DAEMON_NAME}] deferred-review sweep failed: {exc}",
+            exc_info=True,
+        )
+    # 3. Stalled reviews. The deferred sweep only rescues PRs that got
+    #    far enough to post a deferral marker. A review that dies
+    #    earlier leaves NOTHING — no marker, no formal review, no error
+    #    anyone reads — and with auto-merge keyed on a formal approval
+    #    the PR just sits (ateles#408: two days, every check green,
+    #    zero reviews, found by a human). Same cadence and the same
+    #    fail-open discipline; runs after the deferred pass so a PR
+    #    with a live deferral is never double-handled.
+    try:
+        await dispatcher.resume_stalled_reviews(
+            list(dispatcher.config.resume_repositories)
+        )
+    except Exception as exc:
+        log.error(
+            f"[{DAEMON_NAME}] stalled-review sweep failed: {exc}",
+            exc_info=True,
+        )
+    # 4. Missing lens verdicts. The two sweeps above cover a review that
+    #    never ran and one that died mid-flight. This covers a THIRD
+    #    state neither can see: the panel ran, aggregated `Blocking: 0`,
+    #    and merge is withheld only because one declared lens produced
+    #    no verdict (neotoma#2153, security). The hold is correct — CI
+    #    green is not a lens judgement — but nothing re-ran the absent
+    #    lens, so a content-clear PR sat with no mechanism watching it.
+    #    Re-dispatches ONLY that lens; same cadence, same fail-open
+    #    discipline, runs last so a PR the earlier passes already
+    #    re-dispatched is not handled twice in one tick.
+    try:
+        await dispatcher.resume_missing_lens_reviews(
+            list(dispatcher.config.resume_repositories)
+        )
+    except Exception as exc:
+        log.error(
+            f"[{DAEMON_NAME}] missing-lens sweep failed: {exc}",
+            exc_info=True,
+        )
+    # 5. Unactioned revisions (ateles#511). The three sweeps above all
+    #    carry a PR TOWARD a verdict. This is the first that carries one
+    #    PAST a verdict: a PR at CHANGES_REQUESTED whose author pushed
+    #    the fix and whose review never looked again. Measured
+    #    2026-08-31: 23 of 47 open ateles PRs in that state, median 33d.
+    #    `resume_stalled_reviews` excludes them by design (it requires
+    #    ZERO reviews), so until now nothing watched this state at all.
+    #    Same cadence, same fail-open discipline.
+    try:
+        await dispatcher.resume_unactioned_revisions(
+            list(dispatcher.config.resume_repositories)
+        )
+    except Exception as exc:
+        log.error(
+            f"[{DAEMON_NAME}] revision sweep failed: {exc}",
+            exc_info=True,
+        )
+    # 6. Approved-unmerged visibility (ateles#565). Reports only — it
+    #    never merges. An APPROVED PR presents as done, so nothing was
+    #    watching while three of them rotted CLEAN → DIRTY over 33-53
+    #    days. Runs last: it reports on the state the sweeps above have
+    #    already had their chance to change this tick.
+    try:
+        await dispatcher.report_pr_review_queue(
+            list(dispatcher.config.resume_repositories)
+        )
+    except Exception as exc:
+        log.error(
+            f"[{DAEMON_NAME}] approved-unmerged report failed: {exc}",
+            exc_info=True,
+        )
+
+
 async def main() -> None:
     denial_store = _require_checkpoint_denial_store()
     log.info(f"[{DAEMON_NAME}] Starting up...")
@@ -5093,96 +5205,7 @@ async def main() -> None:
 
     async def deferred_review_sweep() -> None:
         while True:
-            # Head-scoped review supersession (#507). Webhook synchronize and
-            # reopen events retire stale verdicts synchronously; this pass is
-            # the bounded backup for missed deliveries. It shares the review
-            # sweep cadence, so secondary invalidation lag is at most
-            # APIS_DEFERRED_REVIEW_SWEEP_SECONDS (600s by default).
-            try:
-                await dispatcher.supersede_stale_review_verdicts(
-                    list(dispatcher.config.resume_repositories)
-                )
-            except Exception as exc:
-                log.error(
-                    f"[{DAEMON_NAME}] review-supersession sweep failed: {exc}",
-                    exc_info=True,
-                )
-            try:
-                await dispatcher.resume_deferred_reviews(
-                    list(dispatcher.config.resume_repositories)
-                )
-            except Exception as exc:
-                log.error(
-                    f"[{DAEMON_NAME}] deferred-review sweep failed: {exc}",
-                    exc_info=True,
-                )
-            # 3. Stalled reviews. The deferred sweep only rescues PRs that got
-            #    far enough to post a deferral marker. A review that dies
-            #    earlier leaves NOTHING — no marker, no formal review, no error
-            #    anyone reads — and with auto-merge keyed on a formal approval
-            #    the PR just sits (ateles#408: two days, every check green,
-            #    zero reviews, found by a human). Same cadence and the same
-            #    fail-open discipline; runs after the deferred pass so a PR
-            #    with a live deferral is never double-handled.
-            try:
-                await dispatcher.resume_stalled_reviews(
-                    list(dispatcher.config.resume_repositories)
-                )
-            except Exception as exc:
-                log.error(
-                    f"[{DAEMON_NAME}] stalled-review sweep failed: {exc}",
-                    exc_info=True,
-                )
-            # 4. Missing lens verdicts. The two sweeps above cover a review that
-            #    never ran and one that died mid-flight. This covers a THIRD
-            #    state neither can see: the panel ran, aggregated `Blocking: 0`,
-            #    and merge is withheld only because one declared lens produced
-            #    no verdict (neotoma#2153, security). The hold is correct — CI
-            #    green is not a lens judgement — but nothing re-ran the absent
-            #    lens, so a content-clear PR sat with no mechanism watching it.
-            #    Re-dispatches ONLY that lens; same cadence, same fail-open
-            #    discipline, runs last so a PR the earlier passes already
-            #    re-dispatched is not handled twice in one tick.
-            try:
-                await dispatcher.resume_missing_lens_reviews(
-                    list(dispatcher.config.resume_repositories)
-                )
-            except Exception as exc:
-                log.error(
-                    f"[{DAEMON_NAME}] missing-lens sweep failed: {exc}",
-                    exc_info=True,
-                )
-            # 5. Unactioned revisions (ateles#511). The three sweeps above all
-            #    carry a PR TOWARD a verdict. This is the first that carries one
-            #    PAST a verdict: a PR at CHANGES_REQUESTED whose author pushed
-            #    the fix and whose review never looked again. Measured
-            #    2026-08-31: 23 of 47 open ateles PRs in that state, median 33d.
-            #    `resume_stalled_reviews` excludes them by design (it requires
-            #    ZERO reviews), so until now nothing watched this state at all.
-            #    Same cadence, same fail-open discipline.
-            try:
-                await dispatcher.resume_unactioned_revisions(
-                    list(dispatcher.config.resume_repositories)
-                )
-            except Exception as exc:
-                log.error(
-                    f"[{DAEMON_NAME}] revision sweep failed: {exc}",
-                    exc_info=True,
-                )
-            # 6. Approved-unmerged visibility (ateles#565). Reports only — it
-            #    never merges. An APPROVED PR presents as done, so nothing was
-            #    watching while three of them rotted CLEAN → DIRTY over 33-53
-            #    days. Runs last: it reports on the state the sweeps above have
-            #    already had their chance to change this tick.
-            try:
-                await dispatcher.report_pr_review_queue(
-                    list(dispatcher.config.resume_repositories)
-                )
-            except Exception as exc:
-                log.error(
-                    f"[{DAEMON_NAME}] approved-unmerged report failed: {exc}",
-                    exc_info=True,
-                )
+            await deferred_review_sweep_pass(dispatcher)
             await asyncio.sleep(deferred_interval)
 
     # Keep the App installation token minted so GitHub writes never fall back to
