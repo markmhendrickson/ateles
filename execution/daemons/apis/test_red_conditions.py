@@ -139,20 +139,26 @@ def test_lens_and_release_subjects():
         "release-failed",
         "1.2.3",
     )
-    assert rc.classify(
-        "🔴 acme/widgets#6: the author pushed a revision answering"
-    ) == ("revision-stuck", "acme/widgets#6")
+    assert rc.classify("🔴 acme/widgets#6: the author pushed a revision answering") == (
+        "revision-stuck",
+        "acme/widgets#6",
+    )
 
 
 # ── the send is never disturbed ──────────────────────────────────────────────
 
 
 def test_super_send_called_with_same_arguments_and_result_returned(state, base_sends):
-    result = make().send(
-        ESCALATION, Priority.BLOCKER, "apis", True, "dk", False
-    )
+    result = make().send(ESCALATION, Priority.BLOCKER, "apis", True, "dk", False)
     assert result == "base-result"
-    assert base_sends[-1][0] == (ESCALATION, Priority.BLOCKER, "apis", True, "dk", False)
+    assert base_sends[-1][0] == (
+        ESCALATION,
+        Priority.BLOCKER,
+        "apis",
+        True,
+        "dk",
+        False,
+    )
 
 
 def test_recording_failure_never_changes_the_send(state, base_sends, monkeypatch):
@@ -187,8 +193,12 @@ def test_file_created_at_construction_with_created_at(state, base_sends):
 
 
 @pytest.mark.parametrize(
-    "content", ["not json {", json.dumps({"schema_version": 2, "conditions": {}}),
-    json.dumps([1, 2])],
+    "content",
+    [
+        "not json {",
+        json.dumps({"schema_version": 2, "conditions": {}}),
+        json.dumps([1, 2]),
+    ],
 )
 def test_unreadable_file_is_not_overwritten(state, base_sends, content):
     state.write_text(content)
@@ -246,8 +256,10 @@ def test_no_free_text_reaches_the_file(state, base_sends):
         "🔴 Release 1.2.3 email-approved but publish FAILED (rc=1): "
         "Traceback SECRETSTDERRTAIL boom. See phoenicurus-release.log."
     )
-    n.send("🔴 Release 1.2.4 email-approved but publish.py is missing at "
-           "/Users/someone/private/path/publish.py — publish did NOT run.")
+    n.send(
+        "🔴 Release 1.2.4 email-approved but publish.py is missing at "
+        "/Users/someone/private/path/publish.py — publish did NOT run."
+    )
     n.send(RED_APPROVED_DIRTY.format(age=9) + " PR TITLE SHOULD NOT APPEAR")
     text = state.read_text()
     for leak in ("SECRETSTDERRTAIL", "/Users/someone", "Traceback", "TITLE", "http"):
@@ -293,7 +305,9 @@ def _red_literals(source: str) -> list[str]:
 
 def test_every_red_alert_in_swarm_dispatch_is_classified_or_excluded():
     literals = _red_literals((HERE / "swarm_dispatch.py").read_text())
-    assert len(literals) >= 11, "drift guard found too few red alerts: instrument broken"
+    assert len(literals) >= 11, (
+        "drift guard found too few red alerts: instrument broken"
+    )
     excluded = [t for t in literals if not rc.is_surfaced_red(t)]
     assert excluded, "expected the NO FORMAL REVIEW alert to be found and excluded"
     for text in literals:

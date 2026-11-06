@@ -165,7 +165,9 @@ def _read_state(path: Path) -> dict[str, Any]:
     return doc
 
 
-def _write_atomic(path: Path, doc: dict[str, Any], *, create_only: bool = False) -> None:
+def _write_atomic(
+    path: Path, doc: dict[str, Any], *, create_only: bool = False
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
     try:
@@ -193,13 +195,19 @@ class ApisNotifier(Notifier):
         try:
             self._ensure_state_file()
         except Exception as exc:  # noqa: BLE001 — never stop Apis over this
-            log.error("red-conditions: could not create state file: %s", type(exc).__name__)
+            log.error(
+                "red-conditions: could not create state file: %s", type(exc).__name__
+            )
 
     def _ensure_state_file(self) -> None:
         path = default_state_path()
         if path.exists():
             return
-        doc = {"schema_version": SCHEMA_VERSION, "created_at": _now_iso(), "conditions": {}}
+        doc = {
+            "schema_version": SCHEMA_VERSION,
+            "created_at": _now_iso(),
+            "conditions": {},
+        }
         try:
             _write_atomic(path, doc, create_only=True)
         except FileExistsError:
