@@ -7,6 +7,7 @@ Offline: the real job entrypoint, a local bare remote, a stand-in GitHub API.
 from __future__ import annotations
 
 import dataclasses
+import subprocess
 import sys
 from pathlib import Path
 
@@ -75,6 +76,17 @@ def test_the_judge_goes_red_when_a_failed_pr_records_a_number(tmp_path, monkeypa
 def test_the_judge_goes_red_when_the_cli_runs_without_its_clone(tmp_path, monkeypatch):
     scenario, trace = _trace("clone_failure_never_runs_the_cli", tmp_path, monkeypatch)
     assert runner.judge(scenario, dataclasses.replace(trace, cli_ran=True))
+
+
+def test_the_stand_in_agent_git_starts_no_background_maintenance(tmp_path):
+    # A detached auto-maintenance from the stand-in's commits could still be
+    # writing into the work directory when the job removes it.
+    env = dict(runner._genv(tmp_path), GIT_TRACE=str(tmp_path / "trace"))
+    for args in (["init", "-q", "repo"], ["-C", "repo", "commit", "-q", "--allow-empty", "-m", "x"]):
+        assert subprocess.run(["git", *args], cwd=tmp_path, env=env,
+                              capture_output=True).returncode == 0
+    traced = (tmp_path / "trace").read_text()
+    assert "built-in: git commit" in traced and "maintenance" not in traced
 
 
 def test_the_scenario_set_covers_the_required_cases():

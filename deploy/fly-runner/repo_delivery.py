@@ -330,6 +330,11 @@ def git_env(home: Path, *, allow: str, config: list[tuple[str, str]] = ()) -> di
         ("core.fsmonitor", "false"),
         ("transfer.fsckObjects", "true"),
         ("fetch.fsckObjects", "true"),
+        # No automatic maintenance: git 2.47+ runs it detached after fetch and
+        # commit, and a background git still writing (its lock file, a repack)
+        # makes ``remove_work`` fail with the work directory left behind.
+        ("maintenance.auto", "false"),
+        ("gc.auto", "0"),
         ("protocol.allow", "never"),
         *[(f"protocol.{name}.allow", "always") for name in allow.split(":")],
         *config,
