@@ -23,7 +23,9 @@ This mirrors Neotoma's `~/neotoma-rc-src` + `com.neotoma.rc-autodeploy` pattern.
 ```
 merge to main ──> (≤120s) com.ateles.rc-autodeploy fires
   ──> redeploy_daemons_from_main.sh
-        ├─ git fetch origin main; abort if deploy HEAD diverged (non-ff)
+        ├─ git fetch origin main; exit if already current
+        ├─ defer (exit 0, no change) while a Fly job is in flight
+        ├─ abort if deploy HEAD diverged (non-ff)
         ├─ git merge --ff-only origin/main
         ├─ refresh .venv iff daemon-requirements.txt changed
         └─ launchctl kickstart -k each daemon  (fresh module import)
@@ -32,6 +34,65 @@ merge to main ──> (≤120s) com.ateles.rc-autodeploy fires
 The redeploy script is idempotent (no-ops when already at `origin/main`),
 single-flighted via an atomic lockdir, and fail-soft (daemons stay on the prior
 build on any error).
+
+**Deferral while a Fly job runs.** Apis awaits every Fly job it starts, so a hard
+restart would orphan the job and leave its task `executing`. Before fast-forwarding,
+the script starts `execution/scripts/fly_jobs_in_flight.py --hold`, which takes the
+Fly runner's own admission lock (`<ledger>.admission.lock`, the cross-process
+`flock` every reservation is made under), then counts Fly runner ledger
+reservations (`APIS_FLY_LEDGER_FILE`, default
+`~/.config/ateles/fly-runner-ledger.json`) that are still live. A reservation is
+live until 300 seconds after its `deadline`, because a run past its deadline may
+still be collecting its last answer and settling its result; `unconfirmed`
+reservations count on the same rule. If any are live, the script logs
+`DEFERRED: <n> Fly job(s) in flight` and exits 0 with nothing changed; the checkout
+stays behind, so the next 120s run retries. If none are, the script keeps holding
+the lock through the fast-forward, any venv refresh and the restarts, so no new job
+can be reserved between the check and the restart. A launch that tries meanwhile
+waits for the lock. One waiting in another process resumes once the lock is
+released; one waiting inside an Apis that is being restarted dies with it before it
+reserves or starts a Fly machine, so no machine is orphaned, but its task and any
+GitHub token it already minted (the launch mints before it waits for admission) are
+left as any restart leaves an in-progress dispatch. The lock dies with the holder, which
+also exits if the script dies. After 15 minutes at most the holder ends the deploy
+before it lets go: it sends SIGTERM to the script (its own parent, and only while it
+is still its parent), waits up to 30 seconds for it to exit (then SIGKILL), waits a
+further 5 seconds (a fixed allowance for a `launchctl kickstart` already started,
+not proof that it has finished), and only then releases the lock. Its signalling
+re-checks that the pid is still its parent immediately before each signal; the
+check and the signal are separate operations, so this narrows, but does not
+eliminate, the window in which a reused pid could be signalled. A deploy that has
+been ended cannot restart anything, so no restart follows the release when the
+holder reaches its own limit, and a hung deploy still cannot block Fly admission
+for ever. That ordering guarantee covers the holder's own limit only. Before each
+`launchctl kickstart`, in both the `gui` and the `user` domain attempt, the script
+also checks the holder is still alive; if it is gone the script logs
+`Fly admission holder is gone`, restarts nothing more and exits non-zero. This is
+best effort, for a holder killed from outside (at its own limit the holder ends the
+deploy first): the check and the kickstart are two operations, so a restart can
+still race a holder that dies between them. If the lock cannot be
+taken within 60 seconds (admission or the reaper is at work), the run logs
+`DEFERRED: Fly admission lock busy` and exits 0. The check fails open: if the
+holder cannot start or answer, the script logs one fixed warning and deploys, and a
+missing or unreadable ledger, or an entry with no readable deadline (including one
+too large to convert), never holds a deploy; a corrupt entry is skipped without
+hiding a live one.
+
+Accepted limits of a deploy that is ended early:
+
+- A deploy ended after the fast-forward (the holder's 15-minute limit during a long
+  dependency refresh, a failed `pip install`, or a holder that is gone partway through
+  the restarts) leaves the checkout updated but the restarts incomplete, so daemons
+  may be on mixed builds: the next run sees the checkout at origin and does nothing.
+  The script logs `DEPLOY DID NOT FINISH` saying so; the next merge to main, or a
+  manual restart, picks up the new build. This is how a failed `pip install` already behaved.
+- If the holder ends a deploy while `pip` is running, that `pip` child may outlive
+  the script and finish its install. It restarts nothing.
+
+What remains: consecutive Fly jobs can still defer a deploy for as long as they
+keep overlapping. This change stops admission only from the check to the restart;
+it does not pause admission ahead of a pending deploy so that running jobs can
+drain. That limit is known and left for a later change.
 
 ## Per-daemon plist requirements
 

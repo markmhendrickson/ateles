@@ -38,6 +38,12 @@ DAEMON_LABELS=(
 BRANCH="${BRANCH:-main}"
 LOCK_DIR="${LOCK_DIR:-/tmp/ateles-rc-autodeploy.lock.d}"
 REQ_FILE="execution/scripts/daemon-requirements.txt"
+# Set once the checkout has been fast-forwarded; RESTARTS_DONE once the restart
+# loop has run. Used only to report a deploy that was ended in between.
+FF_DONE=0
+RESTARTS_DONE=0
+# Resolved before the cd below, so a relative $0 still finds the helper.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "[$(ts)] $*"; }
@@ -55,7 +61,48 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   log "another redeploy is in progress; skipping."
   exit 0
 fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+# The Fly admission holder (see below), if one is running. Released on every
+# exit path, so a deferred or failed run never leaves admission blocked.
+HOLDER_PID=""
+HOLDER_DIR=""
+release_admission() {
+  if [ -n "$HOLDER_PID" ]; then
+    kill "$HOLDER_PID" 2>/dev/null || true
+    wait "$HOLDER_PID" 2>/dev/null || true
+    HOLDER_PID=""
+  fi
+  if [ -n "$HOLDER_DIR" ]; then
+    rm -rf "$HOLDER_DIR" 2>/dev/null || true
+    HOLDER_DIR=""
+  fi
+}
+# EXIT also runs when the holder ends this script with SIGTERM (no TERM trap on
+# purpose: bash would defer it until a foreground pip returned). If the run
+# fast-forwarded the checkout and never finished the restarts, say so plainly:
+# the next run sees the checkout at origin and does nothing, so any daemon not
+# yet restarted stays on its old build (builds may be mixed) until the next
+# merge to main or a manual restart.
+on_exit() {
+  local status=$?
+  if [ "$FF_DONE" -eq 1 ] && [ "$RESTARTS_DONE" -eq 0 ]; then
+    log "DEPLOY DID NOT FINISH: the checkout was updated but the restarts did not all complete, so daemons may be on mixed builds until the next merge to main or a manual restart."
+  fi
+  # bash 3.2 reports $? as 0 in an EXIT trap after a fatal signal, so the
+  # holder says it is ending us by creating this file before it sends SIGTERM.
+  if [ -n "$HOLDER_DIR" ] && [ -e "$HOLDER_DIR/ending" ]; then
+    # Ended by the holder's lifetime limit. Do not signal or
+    # wait for the holder: it is mid-way through its own sequence (wait for this
+    # script to be gone, then a settle for a kickstart already begun) and
+    # releases the lock when that is done. Any other exit (including a TERM
+    # from elsewhere) takes release_admission below.
+    rm -rf "$HOLDER_DIR" 2>/dev/null
+  else
+    release_admission
+  fi
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+  exit "$status"
+}
+trap on_exit EXIT
 
 cd "$RC_DIR" || { log "ERROR: RC_DIR $RC_DIR missing"; exit 1; }
 
@@ -68,6 +115,57 @@ if [ "$LOCAL" = "$REMOTE" ]; then
   log "deploy checkout already at origin/$BRANCH ($(git rev-parse --short HEAD)); nothing to do."
   exit 0
 fi
+
+# Defer while a Fly job is in flight. Apis awaits each Fly job it starts, so a
+# restart below would orphan the job (nothing left to read its result; the task
+# stays `executing`). The helper takes the Fly runner's own admission lock
+# (the cross-process flock every reservation is made under), counts live
+# reservations while holding it, and keeps holding it until the restarts below
+# finish, so no new job can be reserved between this check and the restart.
+# A launch that tries meanwhile waits; one waiting inside an Apis this script
+# restarts dies with that process before it reserves or starts a machine (its
+# task and any token it already minted are left as any restart leaves an
+# in-progress dispatch). The lock dies with the holder, which
+# also exits if this script dies. After 15 minutes at most the holder ENDS THIS
+# SCRIPT (SIGTERM, SIGKILL after 30s), waits 5s for a kickstart already begun,
+# and only then releases the lock, so a deploy that reaches the holder's own
+# limit is ended before the lock goes. (The 5s is a fixed allowance for a
+# kickstart already started, not proof that it has finished.) Separately, before
+# each kickstart below, in both launchd domains, this script checks the holder
+# is still alive and stops restarting if it is not. That check is best effort,
+# for a holder killed from outside: the check and the kickstart are two
+# operations, so a restart can still race a holder that dies between them.
+#   busy  -> the lock is held (admission or the reaper at work): defer.
+#   ok N  -> N live reservations: defer if N > 0, else deploy holding the lock.
+#   anything else (the holder could not start or answer): fail OPEN and deploy,
+#   so a broken check still cannot stop fixes from deploying.
+# Checked before the checkout is fast-forwarded, so a deferred run leaves the
+# checkout behind and the next scheduled run (StartInterval) retries.
+HOLDER_REPLY=""
+HOLDER_FAIL_OPEN=0
+if HOLDER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ateles-fly-hold.XXXXXX" 2>/dev/null)" \
+   && mkfifo "$HOLDER_DIR/reply" 2>/dev/null; then
+  python3 "$SCRIPT_DIR/fly_jobs_in_flight.py" --hold "$$" --ending-file "$HOLDER_DIR/ending" \
+    >"$HOLDER_DIR/reply" 2>/dev/null </dev/null &
+  HOLDER_PID=$!
+  # The background child opens the fifo for writing before it execs python, so
+  # this open always pairs; read -t bounds the wait for the answer.
+  read -r -t 90 HOLDER_REPLY <"$HOLDER_DIR/reply" || HOLDER_REPLY=""
+fi
+case "$HOLDER_REPLY" in
+  busy)
+    log "DEFERRED: Fly admission lock busy; leaving deploy checkout and daemons unchanged until the next run."
+    exit 0 ;;
+  "ok 0")
+    : ;;  # nothing in flight; keep the lock through the restarts
+  ok\ [1-9]*)
+    log "DEFERRED: ${HOLDER_REPLY#ok } Fly job(s) in flight; leaving deploy checkout and daemons unchanged until the next run."
+    exit 0 ;;
+  *)
+    log "WARNING: Fly in-flight check unavailable; deploying without it."
+    HOLDER_FAIL_OPEN=1
+    release_admission ;;
+esac
 
 # Refuse to deploy if HEAD has diverged from origin/main (not a fast-forward).
 # The deploy checkout must only ever fast-forward; a divergence means someone
@@ -92,6 +190,7 @@ if ! git merge --ff-only "origin/$BRANCH" --quiet; then
   log "ERROR: fast-forward merge failed"
   exit 1
 fi
+FF_DONE=1
 
 log "deploy now at $(git rev-parse --short HEAD)"
 
@@ -110,18 +209,36 @@ if [ "$REQ_CHANGED" -eq 1 ] && [ -f "$REQ_FILE" ]; then
   fi
 fi
 
+# One kickstart attempt in one launchd domain. EVERY kickstart goes through here,
+# so the holder check guards both the gui and the user-domain attempt. The holder
+# is what keeps Fly admission blocked; if it is gone (killed, or its lifetime
+# ended), a restart could orphan a job admitted since, so restart nothing more.
+# Best effort: the check and the kickstart are not atomic.
+# (Skipped in fail-open mode, where no holder ever started.)
+kickstart_in_domain() {
+  if [ "$HOLDER_FAIL_OPEN" -eq 0 ] && ! kill -0 "$HOLDER_PID" 2>/dev/null; then
+    log "ERROR: Fly admission holder is gone; not restarting $2 or the rest."
+    exit 1
+  fi
+  launchctl kickstart -k "$1/$(id -u)/$2" 2>/dev/null
+}
+
 # HARD restart each daemon: kickstart -k kills the running instance and
 # relaunches it, forcing a fresh module import from the updated source.
 rc=0
 for label in "${DAEMON_LABELS[@]}"; do
-  log "hard-restarting $label…"
-  if ! launchctl kickstart -k "gui/$(id -u)/$label" 2>/dev/null; then
-    if ! launchctl kickstart -k "user/$(id -u)/$label" 2>/dev/null; then
+  log "hard-restarting ${label}…"
+  if ! kickstart_in_domain gui "$label"; then
+    if ! kickstart_in_domain user "$label"; then
       log "WARNING: failed to kickstart $label (not loaded?); continuing"
       rc=1
     fi
   fi
 done
+
+# Restarts done: let Fly admission resume.
+RESTARTS_DONE=1
+release_admission
 
 if [ "$rc" -eq 0 ]; then
   log "DEPLOYED: all daemons restarted at $(git rev-parse --short HEAD)."
