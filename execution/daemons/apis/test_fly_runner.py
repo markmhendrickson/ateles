@@ -512,6 +512,35 @@ def test_per_job_machine_config_and_credential_set(fly_env, caplog):
     assert executor.ledger.snapshot()["spend_usd"] >= 0
 
 
+def test_key_only_claude_role_with_neotoma_tools_uses_the_signing_proxy(fly_env):
+    job = _job(neotoma_tools_granted=True)
+    spec = json.loads(base64.b64decode(next(
+        f["raw_value"] for f in fly_runner.job_files(job, fly_runner.FlyConfig.from_env())
+        if f["guest_path"].endswith("/job.json"))))
+    assert spec["neotoma_mcp"] == "proxy"
+    assert job.neotoma_tools_unavailable is False
+    assert spec["neotoma_jwk_name"] == fly_runner.AAUTH_JWK_JOB_NAME
+    assert "LANIUS_NEOTOMA_TOKEN" not in job.secrets  # nothing minted
+
+
+def test_key_wins_over_a_legacy_token_for_the_proxy(fly_env, monkeypatch):
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    assert _job(neotoma_tools_granted=True).neotoma_mcp == "proxy"
+
+
+@pytest.mark.parametrize("kw", [
+    {},  # no Neotoma tools granted
+    {"neotoma_tools_granted": True, "owns_pending_gate": True, "github_read_only": True},
+], ids=["not-granted", "seated"])
+def test_no_proxy_without_granted_tools_or_an_mcp_slot(fly_env, kw):
+    job = _job(**kw)
+    assert job.neotoma_mcp == ""
+    spec = json.loads(base64.b64decode(next(
+        f["raw_value"] for f in fly_runner.job_files(job, fly_runner.FlyConfig.from_env())
+        if f["guest_path"].endswith("/job.json"))))
+    assert "neotoma_mcp" not in spec
+
+
 def test_mcp_and_shared_token_never_ship_when_role_has_only_a_key(fly_env):
     job = _job()
     assert "LANIUS_NEOTOMA_TOKEN" in job.probe_env_names
@@ -1134,14 +1163,15 @@ def test_seam_forced_fly_returns_the_machine_result(fly_env, seam, monkeypatch):
         result = _once(runner="fly", repository="owner/repo",
                        github_token="")  # fmt: skip
     assert result.ok, result.error
-    assert result.stdout == (
-        "GATE_INHERITANCE: clear\n" + fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE + "\n"
-    )
+    # A key-only Claude role reaches Neotoma through the runner's signing
+    # proxy, so no tool-loss note is appended.
+    assert result.stdout == "GATE_INHERITANCE: clear\n"
     assert spawned == []
     assert minted == ["owner/repo"] and revoked == [MINTED]
     files = _files(json.loads(fake.calls("POST", "/machines")[0].content))
     argv = json.loads(files["/run/job/argv.json"])
     assert argv[0] == "claude" and fly_runner.MCP_CONFIG_PLACEHOLDER in argv
+    assert json.loads(files["/run/job/job.json"])["neotoma_mcp"] == "proxy"
     assert SHARED_BEARER not in _all_request_text(fake)
 
 
@@ -1153,6 +1183,8 @@ def test_seam_forced_fly_returns_the_machine_result(fly_env, seam, monkeypatch):
 def test_key_only_neotoma_tool_loss_is_disclosed_in_result_and_log(
         fly_env, seam, monkeypatch, caplog, capsys, own_token, tools_granted, disclosed):
     _, fake_exec = seam
+    # The disclosure is for a provider without the signing proxy.
+    monkeypatch.setattr(fly_runner, "FLY_NEOTOMA_PROXY_PROVIDERS", frozenset())
     if own_token:
         monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
     if not tools_granted:
@@ -1229,6 +1261,8 @@ def test_seam_definite_launch_failure_falls_back_or_fails(fly_env, seam, monkeyp
 def test_key_only_local_fallback_reports_the_actual_fly_failure(
         fly_env, seam, monkeypatch, caplog, capsys, error, correction):
     spawned, fake_exec = seam
+    # The correction is for a provider without the signing proxy.
+    monkeypatch.setattr(fly_runner, "FLY_NEOTOMA_PROXY_PROVIDERS", frozenset())
     monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
     executor, _, _ = make_executor(FakeFly())

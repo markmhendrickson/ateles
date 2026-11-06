@@ -419,6 +419,11 @@ def run_scenario(scenario: dict, tmp_path: Path, monkeypatch) -> Trace:
         settings["APIS_HARNESS_HEADROOM"] = '{"claude": 1.0, "codex": 1.0}'
     for name, value in settings.items():
         monkeypatch.setenv(name, value)
+    if "neotoma_proxy_providers" in scenario:
+        # A scenario for a provider without the runner's signing proxy (its
+        # key-only child has no Neotoma tools, and that loss is disclosed).
+        monkeypatch.setattr(fly_runner, "FLY_NEOTOMA_PROXY_PROVIDERS",
+                            frozenset(scenario["neotoma_proxy_providers"]))
     if scenario["identity"] == "key":
         keys = tmp_path / "keys"
         keys.mkdir()

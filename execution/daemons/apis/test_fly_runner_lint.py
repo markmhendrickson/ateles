@@ -51,13 +51,13 @@ ALLOWLIST: dict[str, str] = {
         'unset means the fixed job directory',
     'deploy/fly-runner/run_job.py:_readable:return True':
         'a path it cannot check counts as reachable, so the probe fails closed',
-    "deploy/fly-runner/run_job.py:auth_headers_for:jwk.get('iss') or httpsig.DEFAULT_AAUTH_ISSUER":
+    "deploy/fly-runner/run_job.py:_role_signer:jwk.get('iss') or httpsig.DEFAULT_AAUTH_ISSUER":
         "the signer's documented default issuer",
-    "deploy/fly-runner/run_job.py:auth_headers_for:jwk.get('kid') or ''":
+    "deploy/fly-runner/run_job.py:_role_signer:jwk.get('kid') or ''":
         'a key id is optional in the signature',
-    "deploy/fly-runner/run_job.py:auth_headers_for:jwk.get('sub') or ''":
+    "deploy/fly-runner/run_job.py:_role_signer:jwk.get('sub') or ''":
         "a missing subject cannot equal the role's and is refused",
-    "deploy/fly-runner/run_job.py:auth_headers_for:str(jwk.get('kid') or '').strip() or None":
+    "deploy/fly-runner/run_job.py:_role_signer:str(jwk.get('kid') or '').strip() or None":
         'a key id is optional in the signature',
     'deploy/fly-runner/run_job.py:cap_stdout:secrets or {}':
         'a caller with no secrets has nothing to redact',

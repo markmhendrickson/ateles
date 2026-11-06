@@ -1887,6 +1887,9 @@ class FlyJob:
     neotoma_jwk_name: str = ""
     neotoma_base_url: str = ""
     neotoma_tools_unavailable: bool = False
+    # "proxy" when the CLI's Neotoma MCP server is the runner's loopback
+    # signing proxy (run_job.py signs each request with the role's key).
+    neotoma_mcp: str = ""
     probe_env_names: list[str] = field(default_factory=list)
     # Claude's system prompt, shipped as a job file instead of an argument.
     system_prompt: str = field(repr=False, default="")
@@ -1928,6 +1931,11 @@ def runner_argv(provider: str, cmd: list[str], mcp_config_path: str | None) -> l
         argv = [MCP_CONFIG_PLACEHOLDER if a == mcp_config_path else a for a in argv]
     return argv
 
+
+# Providers whose CLI reaches Neotoma on Fly through the runner's loopback
+# signing proxy when the role ships its AAuth key (no static bearer is ever
+# minted for it). Codex and Cursor have no per-run MCP config path.
+FLY_NEOTOMA_PROXY_PROVIDERS = frozenset({"claude"})
 
 # Providers whose seated, read-only run may go to Fly with no Neotoma tools.
 # Cursor stays on the Mac (it cannot deny a single MCP tool).
@@ -2170,6 +2178,13 @@ def build_job(
     if largest > MAX_ARGV_ELEMENT_BYTES:
         # Refused before any token, reservation or machine.
         raise _command_too_large(provider, largest)
+    # The role's key wins over a legacy token: the CLI's MCP server is the
+    # runner's signing proxy. Only when the argv still has an MCP config slot
+    # (a seated run's was removed above, and it gets no Neotoma tools).
+    neotoma_mcp = ""
+    if (jwk_text and neotoma_tools_granted and provider in FLY_NEOTOMA_PROXY_PROVIDERS
+            and MCP_CONFIG_PLACEHOLDER in argv):
+        neotoma_mcp = "proxy"
     return FlyJob(
         run_id=f"fly-{uuid.uuid4().hex[:16]}",
         role=role,
@@ -2185,7 +2200,9 @@ def build_job(
         neotoma_token_name=token_name if own_token else "",
         neotoma_jwk_name=AAUTH_JWK_JOB_NAME if jwk_text else "",
         neotoma_base_url=base_url,
-        neotoma_tools_unavailable=bool(neotoma_tools_granted and not own_token),
+        neotoma_tools_unavailable=bool(neotoma_tools_granted and not own_token
+                                       and not neotoma_mcp),
+        neotoma_mcp=neotoma_mcp,
         probe_env_names=probe,
         system_prompt=system_prompt,
         delivery=delivery,
@@ -2254,6 +2271,7 @@ def job_files(job: FlyJob, config: FlyConfig) -> list[dict]:
         "neotoma_jwk_name": job.neotoma_jwk_name,
         "neotoma_base_url": job.neotoma_base_url,
         "probe_env_names": job.probe_env_names,
+        **({"neotoma_mcp": job.neotoma_mcp} if job.neotoma_mcp else {}),
         **({"delivery": job.delivery} if job.delivery is not None else {}),
     }
     if job.provider == "claude" and job.login:
