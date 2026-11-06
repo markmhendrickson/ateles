@@ -4603,7 +4603,8 @@ def _claim_conflicts(fake: FakeFly, executor, machine_id: str, on_conflict):
 
 @pytest.fixture
 def fast_claim_retry(monkeypatch):
-    monkeypatch.setattr(fly_runner, "LOGIN_CLAIM_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(fly_runner, "LOGIN_CLAIM_BACKOFF_SECONDS",
+                        (0.0,) * len(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS))
 
 
 def test_a_login_claim_retries_a_412_with_the_new_version(fly_env, claude_login,
@@ -4660,14 +4661,101 @@ def test_a_login_claim_that_always_conflicts_is_refused_after_the_bound(
     )
     job = _job()
     with pytest.raises(fly_runner.FlyRefusal,
-                       match="login machine changed while being claimed; retry later") as exc:
+                       match=r"Fly refused the claude login machine update \(409\); "
+                             "retry later") as exc:
         asyncio.run(executor.run(job))
     assert exc.value.cooled_until
-    assert len(claims) == fly_runner.LOGIN_CLAIM_ATTEMPTS == 3
+    assert len(claims) == len(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS) + 1 == 7
     assert not fake.calls("POST", "/start")  # nothing started
     assert not fly_runner._has_job_config(fake.machines["m-claude"]["config"])
     assert executor.ledger.entry(job.run_id) is None and "m-claude" not in fake.leases
     assert revoked == [MINTED]
+
+
+def _backoff_on_clock(monkeypatch, executor, clock) -> list[dict]:
+    """The claim's backoff waits advance *clock* instead of sleeping. Returns
+    one record per wait: when it began, how long, and whether the admission
+    lock was held during it. Every other sleep is real and untouched."""
+    waits: list[dict] = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay, *args, **kwargs):
+        if sys._getframe(1).f_code.co_name == "_write_login_config":
+            waits.append({"at": clock.now, "delay": delay,
+                          "admission_held": executor._admission_lock().locked()})
+            clock.now += delay
+            delay = 0
+        return await real_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(fly_runner.asyncio, "sleep", sleep)
+    return waits
+
+
+def _refuse_claims(count: int, text: str = "update replacing user; revert stopped flyd"):
+    """``on_conflict`` for ``_claim_conflicts``: the first *count* claim
+    updates are refused with 412 and *text*, nothing stored; later ones land."""
+    return lambda n: httpx.Response(412, json={"error": text}) if n <= count else None
+
+
+def test_claim_outlasts_repeated_refused_updates(fly_env, claude_login, monkeypatch):
+    clock = Clock()
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0, "stdout": "CLAUDE OK"},
+                                   clock=clock)  # fmt: skip
+    waits = _backoff_on_clock(monkeypatch, executor, clock)
+    claims = _claim_conflicts(fake, executor, "m-claude", _refuse_claims(5))
+    rc, out, _ = asyncio.run(executor.run(_job()))
+    assert rc == 0 and b"CLAUDE OK" in out
+    assert len(claims) == 6 and len(fake.calls("POST", "/start")) == 1
+    assert [w["delay"] for w in waits] == list(fly_runner.LOGIN_CLAIM_BACKOFF_SECONDS[:5])
+    # Unrelated dispatches are not stalled behind the wait: admission is let go.
+    assert not any(w["admission_held"] for w in waits)
+    assert {r.headers.get("fly-machine-lease-nonce") for r in claims} != {None}
+    assert len({r.headers.get("fly-machine-lease-nonce") for r in claims}) == 1
+    assert executor.ledger.snapshot()["in_flight"] == {} and "m-claude" not in fake.leases
+
+
+def test_refused_update_logs_status_and_fly_text(fly_env, claude_login, monkeypatch, caplog):
+    clock = Clock()
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0}, clock=clock)
+    _backoff_on_clock(monkeypatch, executor, clock)
+    claims = _claim_conflicts(fake, executor, "m-claude",
+                              _refuse_claims(2, "update replacing user; revert stopped flyd"))
+    with caplog.at_level(logging.WARNING, logger="apis.fly_runner"):
+        asyncio.run(executor.run(_job()))
+    refused = [r for r in caplog.records
+               if r.levelno == logging.WARNING and "refused the update" in r.getMessage()]
+    assert len(refused) == 2  # once per refused attempt
+    for record in refused:
+        text = record.getMessage()
+        assert "412" in text and "update replacing user; revert stopped flyd" in text
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    files = json.loads(claims[0].content)["config"]["files"]
+    assert files and "raw_value" not in logged and "guest_path" not in logged
+    for f in files:
+        assert f["raw_value"] not in logged
+    assert "the task" not in logged and "current_version" not in logged
+
+
+def test_claim_stops_at_deadline_during_backoff(fly_env, claude_login, monkeypatch):
+    clock = Clock()
+    fake = _claude_fake()
+    executor, _, _ = make_executor(fake, record={"exit_code": 0}, clock=clock)
+    job = _job()  # deadline: 60s timeout plus the grace, from the launch
+    deadline = clock.now + job.timeout + fly_runner.APIS_DEADLINE_GRACE_SECONDS
+    waits = _backoff_on_clock(monkeypatch, executor, clock)
+    sent_at: list[float] = []
+
+    def always_refused(n):
+        sent_at.append(clock.now)
+        return httpx.Response(412, json={"error": "update replacing user"})
+
+    claims = _claim_conflicts(fake, executor, "m-claude", always_refused)
+    # 2+5+15+30+60 = 112s of waits fit; the next 120s would end past the deadline.
+    _past_deadline_refusal(executor, job, fake, claims, sent=6)
+    assert waits and all(w["at"] + w["delay"] < deadline for w in waits)
+    assert all(t < deadline for t in sent_at)
 
 
 # ── A login claim never writes or starts past the run's deadline ────────────
@@ -4694,7 +4782,7 @@ def test_a_deadline_passing_in_the_retry_sleep_stops_the_claim(fly_env, claude_l
     clock = Clock()
     fake = _claude_fake()
     executor, _, _ = make_executor(fake, record={"exit_code": 0}, clock=clock)
-    monkeypatch.setattr(fly_runner, "LOGIN_CLAIM_RETRY_SECONDS", _CLAIM_RETRY_MARK)
+    monkeypatch.setattr(fly_runner, "LOGIN_CLAIM_BACKOFF_SECONDS", (_CLAIM_RETRY_MARK,) * 6)
     real_sleep = asyncio.sleep
 
     async def sleep(delay, *args, **kwargs):
