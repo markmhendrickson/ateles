@@ -187,7 +187,6 @@ the config-sourcing linter (`check_hardcoded_config.py`) and the public/PII disc
 The original profile inferred a technically self-sufficient operator who would adapt the code and manage
 the infrastructure. Its deployment inventory is historical evidence, not a current installation guide.
 
-
 ## Implications for documentation and positioning
 
 Explain the accountable operator's work first, then distinguish the governance substrate from the
