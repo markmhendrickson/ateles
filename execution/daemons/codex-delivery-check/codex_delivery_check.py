@@ -21,7 +21,12 @@ Checks (each a small independent function returning findings):
                          over a day, per ``deployment_configuration`` entity.
 4. ``check_tasks``       tasks due soon and blocked, past due, or owned by a
                          session and due today.
-5. ``check_apis_red``    red alerts Apis has recorded in its own state file
+5. ``check_undated_session_tasks`` one daily rolled-up finding for tasks a
+                         session owns that have no due date and have not
+                         changed in 14 days (nothing else surfaces them). Read
+                         narrowly and sequentially, at most once a day, via a
+                         cache file next to the findings file.
+6. ``check_apis_red``    red alerts Apis has recorded in its own state file
                          (``apis-red-conditions.json``, a sibling of the
                          findings file). Read-only: this job only parses that
                          file and publishes entries as needs_operator findings,
@@ -45,9 +50,14 @@ Privacy: goal objectives and thread titles are never read into a finding (a
 session with no name is shown by its id), and rollout files are never opened.
 
 Usage:
-    codex_delivery_check.py --once --dry-run   # print findings, write nothing;
-                                               # exit 1 if any check failed
+    codex_delivery_check.py --once --dry-run   # print findings, write nothing
+                                               # (no cache either); exit 1 if
+                                               # any check failed
     codex_delivery_check.py --once             # publish the findings file
+    codex_delivery_check.py --undated-session-tasks
+                                               # list those tasks, quietest
+                                               # first; scans live, writes
+                                               # nothing
 """
 
 from __future__ import annotations
@@ -92,6 +102,19 @@ TERMINAL_TASK_STATUSES = frozenset(
     {"done", "completed", "complete", "cancelled", "canceled", "closed", "dropped"}
 )
 SUBPROCESS_TIMEOUT = 60
+# Session-owned tasks with no due date. A full scan of open tasks is far too
+# large for the single hosted instance, so the read is narrowed server-side on
+# the ownership fields, one request at a time, and done at most once a day.
+UNDATED_SCHEMA_VERSION = 1
+UNDATED_CACHE_HOURS = 24
+UNDATED_QUIET_DAYS = 14
+SCAN_PAGE = 50
+SCAN_TIMEOUT = 180
+# Rows read across all scan queries, duplicates included.
+SCAN_MAX_ROWS = 3000
+SCAN_FIELDS = ("assigned_to", "owner")
+# Spellings agents write that the lifecycle enum lacks.
+EXTRA_OPEN_STATUSES = ("open", "todo", "in_progress")
 RED_PUBLISH_DAYS = 7
 RED_SCHEMA_VERSION = 1
 
@@ -681,7 +704,212 @@ def check_tasks(
     return findings, notes
 
 
-# ── check 5: Apis red alerts ─────────────────────────────────────────────────
+# ── check 5: undated session-owned tasks ────────────────────────────────────
+
+
+def open_task_statuses() -> list[str]:
+    """Every status that is not finished, derived from the lifecycle enum.
+
+    Plus the spellings agents write that the enum lacks. Terminal synonyms
+    (``completed``) are rejected by ``is_terminal``, so they cannot appear.
+    """
+    from lib.daemon_runtime.task_lifecycle import TaskStatus, is_terminal
+
+    names = {s.value for s in TaskStatus} | set(EXTRA_OPEN_STATUSES)
+    return sorted(n for n in names if not is_terminal(n))
+
+
+def undated_session_task_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows a session owns, that are not finished, with no due date.
+
+    Ownership is decided by the shared rule, never re-implemented here.
+    """
+    from lib.daemon_runtime.task_lifecycle import is_terminal
+    from lib.daemon_runtime.task_ownership import session_owned
+
+    kept = []
+    for ent in rows:
+        snap = _snapshot(ent)
+        if is_terminal(str(snap.get("status") or "")):
+            continue
+        if str(snap.get("due_date") or "").strip():
+            continue
+        if not session_owned(snap.get("assigned_to"), snap.get("owner")):
+            continue
+        kept.append(ent)
+    return kept
+
+
+def _quiet_days(ent: dict[str, Any], now: datetime) -> int | None:
+    """Whole days since the last change; ``None`` when unknown."""
+    raw = ent.get("last_observation_at") or _snapshot(ent).get("last_observation_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        ts = _parse_ts(raw.strip())
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return max(0, (now - ts).days)
+
+
+def _is_quiet(ent: dict[str, Any], now: datetime) -> bool:
+    days = _quiet_days(ent, now)
+    return days is None or days >= UNDATED_QUIET_DAYS
+
+
+def undated_cache_path(state_path: Path) -> Path:
+    return state_path.with_name("codex-delivery-undated-session-tasks.json")
+
+
+def _read_undated_cache(path: Path, now: datetime) -> dict[str, Any] | None:
+    """A valid cache younger than a day, else ``None`` (which means: scan)."""
+    try:
+        doc = json.loads(path.read_text())
+        if doc.get("schema_version") != UNDATED_SCHEMA_VERSION:
+            return None
+        scanned = _parse_ts(str(doc["scanned_at"]))
+        total, quiet, truncated = doc["total"], doc["quiet"], doc["truncated"]
+    except (OSError, ValueError, KeyError, AttributeError, TypeError):
+        return None
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        return None
+    if isinstance(quiet, bool) or not isinstance(quiet, int) or quiet < 0:
+        return None
+    if not isinstance(truncated, bool):
+        return None
+    age = now - scanned
+    if age < timedelta(0) or age >= timedelta(hours=UNDATED_CACHE_HOURS):
+        return None
+    return {"total": total, "quiet": quiet, "truncated": truncated}
+
+
+UNDATED_LIST_COMMAND = (
+    "python3 execution/daemons/codex-delivery-check/codex_delivery_check.py "
+    "--undated-session-tasks"
+)
+
+
+def check_undated_session_tasks(
+    scan: Callable[[], tuple[list[dict[str, Any]], bool]],
+    now: datetime,
+    cache_path: Path,
+    write_cache: bool = True,
+) -> tuple[list[Finding], list[str]]:
+    """One rolled-up finding for session-owned tasks nothing else surfaces.
+
+    A cache younger than a day is used instead of scanning. A scan that fails
+    raises, even when a stale cache exists: a failed read is never an all-clear.
+    """
+    info = _read_undated_cache(cache_path, now)
+    if info is None:
+        rows, truncated = scan()
+        undated = undated_session_task_rows(rows)
+        info = {
+            "total": len(undated),
+            "quiet": sum(1 for e in undated if _is_quiet(e, now)),
+            "truncated": bool(truncated),
+        }
+        if write_cache:
+            write_findings(
+                cache_path,
+                {
+                    "schema_version": UNDATED_SCHEMA_VERSION,
+                    "scanned_at": now.astimezone(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                    **info,
+                },
+            )
+    findings: list[Finding] = []
+    notes = [f"undated session tasks: {info['total']} in total"]
+    if info["truncated"]:
+        notes.append(
+            f"undated session tasks: stopped after {SCAN_MAX_ROWS} rows; "
+            "some tasks not examined"
+        )
+    if info["quiet"] > 0:
+        lead = "at least " if info["truncated"] else ""
+        findings.append(
+            Finding(
+                key=f"{KEY_PREFIX}:task-undated-session",
+                subject=(
+                    f"{lead}{info['quiet']} session-owned "
+                    f"{'task' if info['quiet'] == 1 else 'tasks'} with no due "
+                    f"date quiet for {UNDATED_QUIET_DAYS}+ days"
+                ),
+                message=(
+                    "Some tasks owned by a session have no due date and have not "
+                    "changed for two weeks, so nothing else surfaces them. List "
+                    "them, find each task's owner and message that session; "
+                    "raise one with the operator only if it needs a decision or "
+                    "action from them. To list them, run this from the Ateles "
+                    f"repo root: {UNDATED_LIST_COMMAND}"
+                ),
+            )
+        )
+    return findings, notes
+
+
+def render_undated_listing(
+    rows: list[dict[str, Any]], truncated: bool, now: datetime
+) -> list[str]:
+    """A summary line, then one line per task, quietest first.
+
+    Every undated session-owned task is listed, quiet or not; the summary says
+    how many of them are quiet so the count matches the published finding.
+    Task-supplied text is sanitized.
+    """
+    from lib.daemon_runtime.task_ownership import deciding_assignee
+
+    items = []
+    for ent in undated_session_task_rows(rows):
+        snap = _snapshot(ent)
+        days = _quiet_days(ent, now)
+        items.append(
+            (
+                float("inf") if days is None else days,
+                clean_text(ent.get("entity_id") or snap.get("entity_id") or "?", 60),
+                days,
+                ent,
+                snap,
+            )
+        )
+    items.sort(key=lambda t: (-t[0], t[1]))
+    total = len(items)
+    quiet = sum(
+        1 for _, _, days, _, _ in items if days is None or days >= UNDATED_QUIET_DAYS
+    )
+    more = "at least " if truncated else ""
+    noun = "task" if total == 1 else "tasks"
+    if total == 0:
+        lines = [f"{more}0 session-owned tasks with no due date."]
+    else:
+        lines = [
+            f"{more}{total} session-owned {noun} with no due date; "
+            f"{quiet} quiet for {UNDATED_QUIET_DAYS}+ days. Quietest first."
+        ]
+    for _, ident, days, ent, snap in items:
+        who = deciding_assignee(snap.get("assigned_to")) or snap.get("owner") or ""
+        title = snap.get("title") or ent.get("canonical_name") or "an untitled task"
+        lines.append(
+            "\t".join(
+                [
+                    ident,
+                    clean_text(snap.get("status") or "?", 30),
+                    "?" if days is None else f"{days}d",
+                    clean_text(who or "?"),
+                    clean_text(title),
+                ]
+            )
+        )
+    if truncated:
+        lines.append(f"(stopped after {SCAN_MAX_ROWS} rows; some tasks not examined)")
+    return lines
+
+
+# ── check 6: Apis red alerts ─────────────────────────────────────────────────
 
 # Fixed sentences, one per kind: no name, ref or number, so a finding's
 # key + message is stable across runs. The ref or version is in ``subject``.
@@ -808,7 +1036,7 @@ class NeotomaReader:
         self._base = assert_prod_target(base)
         self._token = token
 
-    def query(self, body: dict[str, Any]) -> dict[str, Any]:
+    def query(self, body: dict[str, Any], *, timeout: float = 30) -> dict[str, Any]:
         req = urllib.request.Request(
             f"{self._base}/entities/query",
             data=json.dumps(body).encode(),
@@ -820,7 +1048,7 @@ class NeotomaReader:
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
             raise RuntimeError(f"Neotoma read failed: HTTP {exc.code}") from None
@@ -836,6 +1064,63 @@ class NeotomaReader:
             }
         )
         return list(res.get("entities") or [])
+
+    def scan_session_tasks(
+        self, *, max_rows: int = SCAN_MAX_ROWS
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Open tasks whose ownership fields mention a session word.
+
+        Returns ``(rows, truncated)``. Rows are not yet filtered by the
+        ownership rule: ``contains`` only narrows. One request at a time, in a
+        stable order, with a long timeout; the hosted instance is a single
+        machine, so nothing here is concurrent or retried. Rows are deduplicated
+        by ``entity_id``. ``max_rows`` bounds rows read (duplicates included);
+        when another request would be needed past it, the scan stops and
+        ``truncated`` is True.
+
+        Limit: a task with no ``status`` at all is not matched by ``in``, so it
+        is never seen here.
+        """
+        from lib.daemon_runtime.task_ownership import SESSION_WORDS
+
+        statuses = open_task_statuses()
+        seen: dict[str, dict[str, Any]] = {}
+        read = 0
+        for field_name in sorted(SCAN_FIELDS):
+            for word in sorted(SESSION_WORDS):
+                offset = 0
+                while True:
+                    if read >= max_rows:
+                        return list(seen.values()), True
+                    res = self.query(
+                        {
+                            "entity_type": "task",
+                            "include_snapshots": True,
+                            "limit": SCAN_PAGE,
+                            "offset": offset,
+                            # Offset paging needs a fixed order, or a row can
+                            # be skipped between pages and the count reads low.
+                            "sort_by": "entity_id",
+                            "snapshot_filters": {
+                                "status": {"op": "in", "value": statuses},
+                                field_name: {"op": "contains", "value": word},
+                            },
+                        },
+                        timeout=SCAN_TIMEOUT,
+                    )
+                    rows = list(res.get("entities") or [])
+                    read += len(rows)
+                    offset += len(rows)
+                    for ent in rows:
+                        ident = ent.get("entity_id") or _snapshot(ent).get("entity_id")
+                        key = str(ident) if ident else f"anon:{len(seen)}"
+                        seen.setdefault(key, ent)
+                    total = res.get("total")
+                    if not rows or len(rows) < SCAN_PAGE:
+                        break
+                    if total is not None and offset >= total:
+                        break
+        return list(seen.values()), False
 
     def task_page_fetcher(
         self, now: datetime
@@ -918,6 +1203,7 @@ def run_checks(
     home: Path,
     reader_factory: Callable[[], NeotomaReader] = NeotomaReader,
     run: Callable[[list[str]], str] = run_command,
+    write_cache: bool = True,
 ) -> list[CheckResult]:
     now_ms = int(now.timestamp() * 1000)
     goals_db = home / "goals_1.sqlite"
@@ -948,6 +1234,17 @@ def run_checks(
         _guard(
             "due and blocked tasks",
             lambda: check_tasks(reader().task_page_fetcher(now), now),
+        )
+    )
+    results.append(
+        _guard(
+            "undated session tasks",
+            lambda: check_undated_session_tasks(
+                lambda: reader().scan_session_tasks(),
+                now,
+                undated_cache_path(default_state_path()),
+                write_cache,
+            ),
         )
     )
     results.append(
@@ -1064,11 +1361,34 @@ def render_report(results: list[CheckResult]) -> str:
     return "\n".join(lines)
 
 
+def list_undated_session_tasks(
+    now: datetime, reader_factory: Callable[[], NeotomaReader] | None = None
+) -> int:
+    """Print the tasks live. Failure prints a category only, never a traceback."""
+    try:
+        rows, truncated = (reader_factory or NeotomaReader)().scan_session_tasks()
+        lines = render_undated_listing(rows, truncated, now)
+    except Exception as exc:  # noqa: BLE001
+        print(f"COULD NOT READ TASKS: {failure_reason(exc)}", file=sys.stderr)
+        return 1
+    print("\n".join(lines))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--once", action="store_true", required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--once", action="store_true")
+    mode.add_argument(
+        "--undated-session-tasks",
+        action="store_true",
+        help="list undated session-owned tasks, quietest first (live scan, "
+        "writes nothing)",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if args.undated_session_tasks and args.dry_run:
+        parser.error("--dry-run does not apply to --undated-session-tasks")
 
     # Importing lib.daemon_runtime loads the materialized dotenv into the
     # environment (the repo's existing credential path). Nothing is printed.
@@ -1077,7 +1397,9 @@ def main(argv: list[str] | None = None) -> int:
     import lib.daemon_runtime  # noqa: F401,E402
 
     now = datetime.now(timezone.utc)
-    results = run_checks(now=now, home=codex_home())
+    if args.undated_session_tasks:
+        return list_undated_session_tasks(now)
+    results = run_checks(now=now, home=codex_home(), write_cache=not args.dry_run)
     print(render_report(results))
     failed = any(not r.ok for r in results)
     if args.dry_run:

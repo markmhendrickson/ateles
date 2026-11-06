@@ -434,8 +434,11 @@ def test_run_checks_end_to_end_on_fixtures(tmp_path, monkeypatch):
         def task_page_fetcher(self, now):
             return pager([task(1, "2026-11-01")])
 
+        def scan_session_tasks(self):
+            return [], False
+
     results = cdc.run_checks(now=NOW, home=tmp_path, reader_factory=Reader)
-    assert [len(r.findings) for r in results] == [1, 0, 0, 1, 0]
+    assert [len(r.findings) for r in results] == [1, 0, 0, 1, 0, 0]
     assert all(r.ok for r in results)
     assert results[-1].name == "apis red alerts"
 
@@ -1017,6 +1020,9 @@ def test_red_check_is_wired_through_run_checks_with_the_state_directory(
         def task_page_fetcher(self, now):
             return pager([])
 
+        def scan_session_tasks(self):
+            return [], False
+
     results = cdc.run_checks(now=NOW, home=tmp_path, reader_factory=Reader)
     red = next(r for r in results if r.name == "apis red alerts")
     assert red.ok and [f.key for f in red.findings] == ["apis-red:approved-mergeable:x"]
@@ -1024,3 +1030,472 @@ def test_red_check_is_wired_through_run_checks_with_the_state_directory(
         cdc.apis_red_path(cdc.default_state_path())
         == tmp_path / "apis-red-conditions.json"
     )
+
+
+# ── undated session-owned tasks ──────────────────────────────────────────────
+
+
+def reader_with(responder):
+    """A real NeotomaReader whose network call is replaced; records each call."""
+    r = cdc.NeotomaReader(
+        {"NEOTOMA_BASE_URL": "https://neotoma.example.org", "NEOTOMA_BEARER_TOKEN": "t"}
+    )
+    calls = []
+    state = {"active": 0, "max_active": 0}
+
+    def query(body, *, timeout=30):
+        state["active"] += 1
+        state["max_active"] = max(state["max_active"], state["active"])
+        calls.append((body, timeout))
+        try:
+            return responder(body)
+        finally:
+            state["active"] -= 1
+
+    r.query = query
+    return r, calls, state
+
+
+def utask(
+    i,
+    *,
+    assigned_to="",
+    owner="Codex session billing",
+    status="pending",
+    due="",
+    seen=None,
+    title=None,
+):
+    ent = {
+        "entity_id": f"ent_{i}",
+        "snapshot": {
+            "title": title or f"Task {i}",
+            "status": status,
+            "assigned_to": assigned_to,
+            "owner": owner,
+            "due_date": due,
+        },
+    }
+    if seen is not None:
+        ent["last_observation_at"] = seen
+    return ent
+
+
+OLD = "2026-10-01T00:00:00Z"  # 34 days before NOW
+RECENT = "2026-11-03T00:00:00Z"
+
+
+def test_scan_query_shape_and_strictly_sequential():
+    from lib.daemon_runtime.task_ownership import SESSION_WORDS
+
+    r, calls, state = reader_with(lambda body: {"entities": [], "total": 0})
+    rows, truncated = r.scan_session_tasks()
+    assert (rows, truncated) == ([], False)
+    assert state["max_active"] == 1
+    assert len(calls) == 2 * len(SESSION_WORDS)
+    pairs = [next(k for k in b["snapshot_filters"] if k != "status") for b, _ in calls]
+    words = [b["snapshot_filters"][f]["value"] for (b, _), f in zip(calls, pairs)]
+    assert [(f, w) for f, w in zip(pairs, words)] == sorted(
+        (f, w) for f in ("assigned_to", "owner") for w in SESSION_WORDS
+    )
+    for body, timeout in calls:
+        assert timeout == 180
+        assert body["entity_type"] == "task" and body["limit"] == 50
+        assert body["include_snapshots"] is True
+        assert body["sort_by"] == "entity_id"
+        status = body["snapshot_filters"]["status"]
+        assert status["op"] == "in"
+        assert "pending" in status["value"] and "in_progress" in status["value"]
+        assert "done" not in status["value"] and "completed" not in status["value"]
+        f = next(k for k in body["snapshot_filters"] if k != "status")
+        assert body["snapshot_filters"][f]["op"] == "contains"
+
+
+def test_scan_pages_and_dedupes_across_queries():
+    def responder(body):
+        off = body["offset"]
+        if body["snapshot_filters"].get("owner", {}).get("value") == "codex":
+            page = [utask(1)] + [utask(100 + off + i) for i in range(49)]
+            return {"entities": page if off == 0 else [utask(1)], "total": 51}
+        return {"entities": [utask(1)], "total": 1}
+
+    r, calls, _ = reader_with(responder)
+    rows, truncated = r.scan_session_tasks()
+    ids = [e["entity_id"] for e in rows]
+    assert ids.count("ent_1") == 1 and truncated is False
+    assert len(ids) == 50
+    codex_calls = [
+        b
+        for b, _ in calls
+        if b["snapshot_filters"].get("owner", {}).get("value") == "codex"
+    ]
+    assert [b["offset"] for b in codex_calls] == [0, 50]
+
+
+def test_scan_read_bound_sets_truncated():
+    r, calls, _ = reader_with(
+        lambda body: {
+            "entities": [utask(body["offset"] + i) for i in range(50)],
+            "total": 500,
+        }
+    )
+    rows, truncated = r.scan_session_tasks(max_rows=120)
+    assert truncated is True
+    assert len(calls) == 3  # 50 + 50 + 50 read, then stop before a fourth
+    assert len(rows) <= 150
+
+
+def test_open_statuses_exclude_terminal_synonyms():
+    statuses = cdc.open_task_statuses()
+    assert {"pending", "blocked", "open", "todo", "in_progress"} <= set(statuses)
+    for gone in ("done", "completed", "declined", "cancelled", "superseded"):
+        assert gone not in statuses
+
+
+def test_assignee_decides_ownership():
+    rows = [
+        utask(1, assigned_to="jane", owner="Codex session billing"),
+        utask(2, assigned_to="apis", owner="Codex session billing"),
+        utask(3, assigned_to="", owner="Codex session billing"),
+    ]
+    kept = [e["entity_id"] for e in cdc.undated_session_task_rows(rows)]
+    assert kept == ["ent_2", "ent_3"]
+
+
+def test_terminal_and_dated_rows_are_excluded():
+    rows = [
+        utask(1),
+        utask(2, status="completed"),
+        utask(3, status="done"),
+        utask(4, due="2026-12-01"),
+    ]
+    assert [e["entity_id"] for e in cdc.undated_session_task_rows(rows)] == ["ent_1"]
+
+
+def _no_scan():
+    raise AssertionError("must not scan")
+
+
+def _scan_of(rows, truncated=False):
+    return lambda: (rows, truncated)
+
+
+def test_scan_writes_cache_and_publishes_one_finding(tmp_path):
+    cache = tmp_path / "c.json"
+    rows = [utask(1, seen=OLD), utask(2, seen=RECENT), utask(3, seen=OLD)]
+    findings, notes = cdc.check_undated_session_tasks(_scan_of(rows), NOW, cache)
+    (f,) = findings
+    assert f.key == f"{cdc.KEY_PREFIX}:task-undated-session"
+    assert f.needs_operator is False
+    assert "2 " in f.subject and "at least" not in f.subject
+    assert any("3 in total" in n for n in notes)
+    assert f.message.endswith("--undated-session-tasks")
+    doc = json.loads(cache.read_text())
+    assert (doc["total"], doc["quiet"], doc["truncated"]) == (3, 2, False)
+    assert doc["schema_version"] == 1 and (cache.stat().st_mode & 0o777) == 0o600
+
+
+def test_truncated_scan_says_at_least_and_notes_it(tmp_path):
+    findings, notes = cdc.check_undated_session_tasks(
+        _scan_of([utask(1, seen=OLD)], True), NOW, tmp_path / "c.json"
+    )
+    assert findings[0].subject.startswith("at least 1")
+    assert any("stopped after" in n for n in notes)
+
+
+def test_fresh_cache_does_not_scan(tmp_path):
+    cache = tmp_path / "c.json"
+    cdc.check_undated_session_tasks(_scan_of([utask(1, seen=OLD)]), NOW, cache)
+    later = NOW + timedelta(hours=23)
+    findings, notes = cdc.check_undated_session_tasks(_no_scan, later, cache)
+    assert len(findings) == 1 and any("1 in total" in n for n in notes)
+
+
+def test_stale_cache_rescans(tmp_path):
+    cache = tmp_path / "c.json"
+    cdc.check_undated_session_tasks(_scan_of([utask(1, seen=OLD)]), NOW, cache)
+    later = NOW + timedelta(hours=25)
+    findings, _ = cdc.check_undated_session_tasks(_scan_of([]), later, cache)
+    assert findings == []
+    assert json.loads(cache.read_text())["total"] == 0
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "not json",
+        "[]",
+        json.dumps(
+            {
+                "schema_version": 2,
+                "scanned_at": "2026-11-04T11:00:00Z",
+                "total": 9,
+                "quiet": 9,
+                "truncated": False,
+            }
+        ),
+        json.dumps(
+            {
+                "schema_version": 1,
+                "scanned_at": "2026-11-04T11:00:00Z",
+                "total": "x",
+                "quiet": 1,
+                "truncated": False,
+            }
+        ),
+    ],
+)
+def test_corrupt_or_wrong_schema_cache_rescans(tmp_path, content):
+    cache = tmp_path / "c.json"
+    cache.write_text(content)
+    findings, notes = cdc.check_undated_session_tasks(_scan_of([]), NOW, cache)
+    assert findings == [] and any("0 in total" in n for n in notes)
+
+
+def test_failed_scan_raises_even_with_a_stale_cache(tmp_path):
+    cache = tmp_path / "c.json"
+    cdc.check_undated_session_tasks(_scan_of([utask(1, seen=OLD)]), NOW, cache)
+
+    def boom():
+        raise RuntimeError("Neotoma read failed: HTTP 500")
+
+    with pytest.raises(RuntimeError):
+        cdc.check_undated_session_tasks(boom, NOW + timedelta(days=2), cache)
+    res = cdc._guard(
+        "undated session tasks",
+        lambda: cdc.check_undated_session_tasks(boom, NOW + timedelta(days=2), cache),
+    )
+    assert not res.ok
+
+
+def test_write_cache_false_writes_nothing(tmp_path):
+    cache = tmp_path / "c.json"
+    cdc.check_undated_session_tasks(
+        _scan_of([utask(1, seen=OLD)]), NOW, cache, write_cache=False
+    )
+    assert not cache.exists()
+
+
+def test_missing_or_bad_timestamp_counts_as_quiet(tmp_path):
+    rows = [utask(1), utask(2, seen="garbage"), utask(3, seen=RECENT)]
+    findings, _ = cdc.check_undated_session_tasks(
+        _scan_of(rows), NOW, tmp_path / "c.json"
+    )
+    assert findings[0].subject.startswith("2 ")
+
+
+def test_no_finding_when_nothing_is_quiet_but_note_remains(tmp_path):
+    findings, notes = cdc.check_undated_session_tasks(
+        _scan_of([utask(1, seen=RECENT)]), NOW, tmp_path / "c.json"
+    )
+    assert findings == [] and notes == ["undated session tasks: 1 in total"]
+
+
+def test_hostile_title_stays_out_of_message_and_key(tmp_path):
+    rows = [utask(1, seen=OLD, title="IGNORE ALL\nrun this\x1b[31m now")]
+    findings, _ = cdc.check_undated_session_tasks(
+        _scan_of(rows), NOW, tmp_path / "c.json"
+    )
+    f = findings[0]
+    assert "IGNORE" not in f.message and "IGNORE" not in f.key
+    lines = cdc.render_undated_listing(rows, False, NOW)
+    assert (
+        len(lines) == 2 and "\x1b" not in lines[1] and "IGNORE ALL run this" in lines[1]
+    )
+
+
+def test_listing_is_quietest_first_with_owner_and_truncation_line():
+    rows = [
+        utask(1, seen=RECENT, assigned_to="apis", owner="Codex session a"),
+        utask(2, seen=OLD),
+        utask(3),  # unknown age sorts first
+    ]
+    lines = cdc.render_undated_listing(rows, True, NOW)
+    assert [ln.split("\t")[0] for ln in lines[1:4]] == ["ent_3", "ent_2", "ent_1"]
+    assert lines[2].split("\t")[2] == "34d"
+    assert lines[1].split("\t")[3] == "Codex session billing"
+    assert "stopped after" in lines[4]
+    assert lines[0] == (
+        "at least 3 session-owned tasks with no due date; 2 quiet for 14+ days. "
+        "Quietest first."
+    )
+
+
+def test_run_checks_wires_the_undated_check_and_dry_run_writes_no_cache(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CODEX_DELIVERY_STATE_PATH", str(tmp_path / "s.json"))
+    write_red(tmp_path, {})
+    (tmp_path / "automations").mkdir()
+
+    class Reader:
+        def deployment_configs(self):
+            return []
+
+        def task_page_fetcher(self, now):
+            return pager([])
+
+        def scan_session_tasks(self):
+            return [utask(1, seen=OLD)], False
+
+    dry = cdc.run_checks(
+        now=NOW, home=tmp_path, reader_factory=Reader, write_cache=False
+    )
+    r = next(x for x in dry if x.name == "undated session tasks")
+    assert r.ok and len(r.findings) == 1
+    assert not (tmp_path / "codex-delivery-undated-session-tasks.json").exists()
+    cdc.run_checks(now=NOW, home=tmp_path, reader_factory=Reader)
+    assert (tmp_path / "codex-delivery-undated-session-tasks.json").exists()
+
+
+def test_main_dry_run_passes_write_cache_false(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setitem(sys.modules, "lib.daemon_runtime", type("M", (), {}))
+    monkeypatch.setattr(cdc, "run_checks", lambda **kw: seen.update(kw) or [])
+    monkeypatch.setenv("CODEX_DELIVERY_STATE_PATH", str(tmp_path / "s.json"))
+    assert cdc.main(["--once", "--dry-run"]) == 0
+    assert seen["write_cache"] is False
+    assert not (tmp_path / "codex-delivery-findings.json").exists()
+    cdc.main(["--once"])
+    assert seen["write_cache"] is True
+
+
+def test_cli_requires_exactly_one_mode_and_rejects_dry_run_listing(capsys):
+    for argv in (
+        [],
+        ["--once", "--undated-session-tasks"],
+        ["--undated-session-tasks", "--dry-run"],
+        ["--dry-run"],
+    ):
+        with pytest.raises(SystemExit) as e:
+            cdc.main(argv)
+        assert e.value.code == 2
+
+
+def test_listing_command_prints_and_failure_is_a_category_only(
+    monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setitem(sys.modules, "lib.daemon_runtime", type("M", (), {}))
+
+    class Good:
+        def scan_session_tasks(self):
+            return [utask(1, seen=OLD)], False
+
+    monkeypatch.setattr(cdc, "NeotomaReader", lambda: Good())
+    assert cdc.main(["--undated-session-tasks"]) == 0
+    assert "ent_1" in capsys.readouterr().out
+
+    class Bad:
+        def scan_session_tasks(self):
+            raise RuntimeError("Neotoma read failed: Bearer SECRETTOKEN")
+
+    monkeypatch.setattr(cdc, "NeotomaReader", lambda: Bad())
+    assert cdc.main(["--undated-session-tasks"]) == 1
+    cap = capsys.readouterr()
+    assert "SECRETTOKEN" not in cap.err + cap.out and "Traceback" not in cap.err
+    assert "COULD NOT READ TASKS" in cap.err
+
+
+def test_listing_header_counts_all_tasks_and_quiet_ones_and_singular():
+    rows = [utask(1, seen=OLD), utask(2, seen=RECENT), utask(3, seen=RECENT)]
+    lines = cdc.render_undated_listing(rows, False, NOW)
+    assert lines[0] == (
+        "3 session-owned tasks with no due date; 1 quiet for 14+ days. Quietest first."
+    )
+    assert len(lines) == 4  # recent tasks are listed too
+    one = cdc.render_undated_listing([utask(1, seen=OLD)], False, NOW)
+    assert one[0].startswith("1 session-owned task with no due date; 1 quiet")
+
+
+def test_empty_listing_prints_a_zero_line_and_exits_zero(monkeypatch, capsys):
+    assert cdc.render_undated_listing([], False, NOW) == [
+        "0 session-owned tasks with no due date."
+    ]
+    monkeypatch.setitem(sys.modules, "lib.daemon_runtime", type("M", (), {}))
+
+    class Empty:
+        def scan_session_tasks(self):
+            return [], False
+
+    monkeypatch.setattr(cdc, "NeotomaReader", lambda: Empty())
+    assert cdc.main(["--undated-session-tasks"]) == 0
+    assert capsys.readouterr().out == "0 session-owned tasks with no due date.\n"
+
+
+def test_finding_subject_singular_for_one_and_message_names_repo_root(tmp_path):
+    (f,), _ = cdc.check_undated_session_tasks(
+        _scan_of([utask(1, seen=OLD)]), NOW, tmp_path / "c.json"
+    )
+    assert f.subject == "1 session-owned task with no due date quiet for 14+ days"
+    assert "from the Ateles repo root" in f.message
+    (g,), _ = cdc.check_undated_session_tasks(
+        _scan_of([utask(1, seen=OLD), utask(2, seen=OLD)]), NOW, tmp_path / "d.json"
+    )
+    assert g.subject.startswith("2 session-owned tasks with")
+
+
+def _days_ago(n):
+    return (NOW - timedelta(days=n)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@pytest.mark.parametrize("days,quiet", [(13, False), (14, True), (15, True)])
+def test_quiet_boundary_is_fourteen_days(tmp_path, days, quiet):
+    findings, _ = cdc.check_undated_session_tasks(
+        _scan_of([utask(1, seen=_days_ago(days))]), NOW, tmp_path / "c.json"
+    )
+    assert bool(findings) is quiet
+
+
+def _cache_doc(when):
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "scanned_at": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "total": 5,
+            "quiet": 5,
+            "truncated": False,
+        }
+    )
+
+
+def test_cache_age_cutoff_is_exactly_twenty_four_hours(tmp_path):
+    cache = tmp_path / "c.json"
+    cache.write_text(_cache_doc(NOW - timedelta(hours=24) + timedelta(seconds=1)))
+    findings, _ = cdc.check_undated_session_tasks(_no_scan, NOW, cache)
+    assert len(findings) == 1  # cache used
+    cache.write_text(_cache_doc(NOW - timedelta(hours=24)))
+    findings, _ = cdc.check_undated_session_tasks(_scan_of([]), NOW, cache)
+    assert findings == []  # rescanned
+
+
+def test_cache_dated_in_the_future_rescans(tmp_path):
+    cache = tmp_path / "c.json"
+    cache.write_text(_cache_doc(NOW + timedelta(hours=1)))
+    findings, _ = cdc.check_undated_session_tasks(_scan_of([]), NOW, cache)
+    assert findings == []
+
+
+def test_listing_owner_column_is_sanitized():
+    hostile = "Codex session\nx\ty\x1b[31m‮evil"
+    lines = cdc.render_undated_listing([utask(1, seen=OLD, owner=hostile)], False, NOW)
+    cols = lines[1].split("\t")
+    assert len(cols) == 5
+    assert all(ch not in cols[3] for ch in ("\n", "\x1b", "‮"))
+
+
+def test_timestamp_without_timezone_is_read_as_utc():
+    old = (NOW - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%S")
+    new = (NOW - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S")
+    assert cdc._quiet_days(utask(1, seen=old), NOW) == 20
+    assert cdc._quiet_days(utask(2, seen=new), NOW) == 2
+
+
+def test_scan_stops_at_total_without_a_further_request():
+    from lib.daemon_runtime.task_ownership import SESSION_WORDS
+
+    r, calls, _ = reader_with(
+        lambda b: {"entities": [utask(b["offset"] + i) for i in range(50)], "total": 50}
+    )
+    r.scan_session_tasks()
+    assert len(calls) == 2 * len(SESSION_WORDS)
+    assert all(b["offset"] == 0 for b, _ in calls)
