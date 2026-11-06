@@ -195,7 +195,17 @@ _GATE_VERDICT = re.compile(r"GATE_INHERITANCE:\s*(clear|blocked)", re.I)
 # "pr_reopened", distinct from "pr_synchronize") re-enters the pipeline the
 # same way a re-push does, so it must be eligible for the same auto-re-review
 # treatment as a synchronize push against a gate-blocked PR.
-_AUTO_REREVIEW_TRIGGER_KINDS = ("pr_synchronize", "pr_reopened")
+#
+# `pr_labeled` joins them: an admitted label add is meant to re-run the review
+# (CLAUDE.md, "A plain comment does NOT re-dispatch a swarm review"). Without
+# it a labelled PR with no parent issue and already-green checks was skipped as
+# "pre-impl gates open", while the same PR labelled while checks were pending
+# got its panel because the hold is released as a `pr_synchronize`. Only an
+# admitted label add can arrive with this kind: `github_gateway.
+# _labeled_event_admitted` drops every `labeled` delivery unless the gate is
+# set and the label just added is exactly the configured one, before any
+# trigger is built, and nothing in this module constructs a `pr_labeled`.
+_AUTO_REREVIEW_TRIGGER_KINDS = ("pr_synchronize", "pr_reopened", "pr_labeled")
 
 # Product-code path classifier (ateles: harden pipeline-bypass detection).
 # A PR that touches these paths is a product change that SHOULD originate from a
@@ -3103,6 +3113,111 @@ def latest_aggregation_comment(
     )
 
 
+_WRAPPER_MARKER_RE = re.compile(
+    r"^(?:<!--\s*review:[a-z0-9_-]+\s+commit=[0-9a-f]{7,40}\s*-->"
+    r"|<!--\s*vanellus-aggregation(?:\s[^>]*)?-->"
+    r"|review:[a-z0-9_-]+)$",
+    re.IGNORECASE,
+)
+
+
+def posted_comment_own_verdict(body: str | None, *, lens_agent: str) -> str | None:
+    """The fixed-position verdict of a POSTED swarm comment, or None.
+
+    A posted comment can carry a wrapper `lens_own_verdict` alone refuses: a
+    dispatcher fallback post (`compose_fallback_comment`,
+    `compose_vanellus_fallback_comment`) prefixes a marker, for a lens a plain
+    `review:<lens>` line, and its own attribution header to the agent's reply,
+    which may itself begin with the same marker and header. So this peels the
+    leading run of marker lines (lens, aggregation, or plain `review:<lens>`)
+    and attribution headers naming *lens_agent*, keeps the LAST header of that
+    run, and hands the rest to `lens_own_verdict` unchanged; every one of its
+    rules (verdict line right after the header, one header emoji, no second
+    verdict-like line) still applies to what follows. A wrapper line that is
+    code-indented, ends in a non-newline break, or is a header naming another
+    agent stops the peel, which then reads as not finished. A comment with no
+    header at all (an aggregation posted from a provisioned account with the
+    header omitted) also reads as None, deliberately: a false "not finished"
+    re-runs a panel, the safe direction.
+    """
+    lines = _split_lines_keeping_breaks(body or "")
+    count = len(lines)
+    want = (lens_agent or "").strip().lower()
+    i = 0
+    last_header: int | None = None
+    while i < count:
+        raw, brk = lines[i]
+        stripped = raw.strip()
+        if not stripped:
+            i += 1
+            continue
+        if brk and brk not in _PLAIN_LINE_BREAKS:
+            break
+        if not _starts_a_markdown_line(raw):
+            break
+        if _WRAPPER_MARKER_RE.match(stripped):
+            i += 1
+            continue
+        header = _OWN_HEADER_RE.match(_normalize_for_blocking_scan(raw).strip())
+        if header and header.group("name").strip().lower() == want:
+            last_header = i
+            i += 1
+            continue
+        break
+    if last_header is None:
+        return None
+    rest = "".join(line + brk for line, brk in lines[last_header:])
+    return lens_own_verdict(rest, lens_agent=lens_agent)
+
+
+def panel_finished_at_head(
+    comments: list[dict], head_sha: str, required_lenses: set[str] | frozenset[str]
+) -> bool:
+    """True when the review panel has already finished on exactly ``head_sha``.
+
+    Finished means a non-superseded Vanellus aggregation pinned to the head
+    whose verdict reads at the fixed position, or, for every lens in
+    ``required_lenses``, a non-superseded ``review:<lens> commit=<head>``
+    comment whose verdict reads at the fixed position. Both go through
+    `posted_comment_own_verdict`, which is `lens_own_verdict` (the reader the
+    panel-gated approval tool uses) after peeling the dispatcher's wrapper. A
+    bold verdict token quoted anywhere else in the body does not count: an
+    unanchored search let a marker followed by prose quoting `**APPROVE**`
+    skip recovery (PR #1616 review).
+    A marker alone is not a finished panel: a marker-only or malformed comment
+    is exactly what a review that died mid-post leaves, and it must be
+    recovered, not skipped. Any readable verdict is terminal, a blocking one
+    included: a panel that finished with REQUEST_CHANGES is finished.
+    ``comments`` must already be scoped to swarm identities
+    (`_lens_scoped_comments`). An empty required set never counts as finished
+    through the lens path: "no lens known to be required" is not "every
+    required lens reported".
+    """
+    head = _normalise_full_sha(head_sha)
+    if not head:
+        return False
+    # The NEWEST aggregation at the head decides: a newer marker-only one is a
+    # later run that died, and an older verdict must not stand in for it.
+    aggregation = latest_aggregation_comment(comments, head_sha=head)
+    if aggregation is not None and posted_comment_own_verdict(
+        aggregation.get("body") or "", lens_agent="vanellus"
+    ):
+        return True
+    if not required_lenses:
+        return False
+    reported: set[str] = set()
+    for comment in comments:
+        body = comment.get("body") or ""
+        match = _LENS_MARKER_RE.search(body)
+        if not match or not comment_verdict_matches_current_head(body, head):
+            continue
+        known = lens_by_name(match.group("lens"))
+        if known is None or posted_comment_own_verdict(body, lens_agent=known.agent) is None:
+            continue
+        reported.add(match.group("lens").lower())
+    return {lens.lower() for lens in required_lenses} <= reported
+
+
 def vanellus_comment_missing(comment_bodies: list[str], head_sha: str = "") -> bool:
     """Return True when no Vanellus aggregation comment has landed on the PR.
 
@@ -4358,6 +4473,7 @@ class DispatchConfig:
     #   - handle_trigger: issue_opened and PR (opened/reopened/synchronize/
     #     labeled) webhook deliveries;
     #   - resume_interrupted_pipelines (boot) -> _handle_issue_opened;
+    #   - resume_labelled_panels (boot) -> _handle_pr;
     #   - resume_deferred_reviews, resume_stalled_reviews (600s sweep loop)
     #     -> _handle_pr;
     #   - resume_missing_lens_reviews (600s loop) -> one lens re-dispatch;
@@ -5159,6 +5275,182 @@ class SwarmDispatcher:
         if summary["scanned"]:
             log.info(f"[{DAEMON_NAME}] deferred-review sweep: {summary}")
         return summary
+
+    # At most this many labelled PRs are examined by one startup panel sweep.
+    _STARTUP_PANEL_SWEEP_MAX = 20
+
+    async def resume_labelled_panels(self, repositories: list[str]) -> dict:
+        """Restore review panels a restart dropped, once, at startup.
+
+        Apis restarts after every merge to main. Three kinds of pending review
+        work die with it: a panel held until checks go green (the hold lives in
+        the in-memory `_panel_ci_holds`, so the check completion finds nothing
+        to release), a panel running at the moment of the restart, and a
+        webhook delivered while the process was down. Each leaves a labelled PR
+        whose current head has no finished panel and nothing to start one.
+
+        This sweep rebuilds that state from GitHub, the system of record,
+        rather than persisting holds. It runs only when the label gate is set
+        and looks only at open, non-draft PRs that already carry the configured
+        label on the PR itself. For each one whose current head has no finished
+        panel (`panel_finished_at_head`), it drives the ordinary review
+        entrance, `_handle_pr`, with a `pr_synchronize` trigger from
+        `_pr_trigger_from_api`. The existing readiness logic decides the rest:
+        a head with pending checks becomes held (rebuilding the hold), a head
+        with green checks runs its panel.
+
+        PRs are handled one at a time, at most `_STARTUP_PANEL_SWEEP_MAX` per
+        sweep. It never adds a label and never admits a PR the gate would not:
+        each candidate still passes `_label_gate_allows`. A GitHub read that
+        fails leaves that repository or PR alone. Never raises: a failed sweep
+        must not stop Apis from starting.
+        """
+        summary = {
+            "scanned": 0, "resumed": 0, "finished": 0, "unreadable": 0,
+            "failed": 0, "capped": False,
+        }
+        label = self.config.require_label
+        if not label:
+            return summary
+        try:
+            await self._await_github_app_ready(repositories)
+        except Exception as exc:  # noqa: BLE001 — never block startup
+            log.warning(
+                f"[{DAEMON_NAME}] startup panel sweep: GitHub App readiness "
+                f"failed ({exc}) — continuing with whatever token is available"
+            )
+        for repository in repositories:
+            if summary["scanned"] >= self._STARTUP_PANEL_SWEEP_MAX:
+                summary["capped"] = True
+                break
+            try:
+                prs = await self._open_labelled_prs(repository, label)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    f"[{DAEMON_NAME}] startup panel sweep: could not list open "
+                    f"PRs in {repository} ({exc}) — leaving them alone"
+                )
+                continue
+            for pr in prs:
+                if summary["scanned"] >= self._STARTUP_PANEL_SWEEP_MAX:
+                    summary["capped"] = True
+                    log.warning(
+                        f"[{DAEMON_NAME}] startup panel sweep: cap of "
+                        f"{self._STARTUP_PANEL_SWEEP_MAX} PRs reached — the "
+                        "rest wait for their next event or the review sweeps"
+                    )
+                    break
+                summary["scanned"] += 1
+                ref = f"{repository}#{pr.get('number')}"
+                try:
+                    trigger = dataclasses.replace(
+                        self._pr_trigger_from_api(repository, pr),
+                        delivery_id=f"startup-panel-resume-{pr.get('number')}",
+                    )
+                    if not await self._label_gate_allows(
+                        trigger, source="resume_labelled_panels"
+                    ):
+                        continue
+                    finished = await self._panel_finished_for_pr(trigger)
+                    if finished is None:
+                        summary["unreadable"] += 1
+                        continue
+                    if finished:
+                        summary["finished"] += 1
+                        continue
+                    log.info(
+                        f"[{DAEMON_NAME}] startup panel sweep: {ref} head "
+                        f"{trigger.head_sha[:9]} has no finished panel — "
+                        "re-entering review"
+                    )
+                    await self._handle_pr(trigger)
+                    summary["resumed"] += 1
+                except Exception as exc:  # noqa: BLE001
+                    summary["failed"] += 1
+                    log.error(
+                        f"[{DAEMON_NAME}] startup panel sweep: {ref} failed "
+                        f"({exc})",
+                        exc_info=True,
+                    )
+        log.info(f"[{DAEMON_NAME}] startup panel sweep: {summary}")
+        return summary
+
+    async def _open_labelled_prs(self, repository: str, label: str) -> list[dict]:
+        """Open, non-draft PRs in `repository` carrying `label` on the PR itself.
+
+        Bound: this reads only the FIRST page of open pull requests (100, no
+        pagination), and `resume_labelled_panels` examines at most
+        `_STARTUP_PANEL_SWEEP_MAX` (20) labelled PRs in one sweep. A labelled
+        PR beyond either limit is not recovered by this sweep; it waits for its
+        next event (a push, a reopen, an admitted label add) or the review
+        sweeps. Raises on an HTTP error so the caller leaves the repository
+        alone.
+        """
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"https://api.github.com/repos/{repository}/pulls",
+                params={"state": "open", "per_page": 100},
+                headers=self._github_headers(repository),
+            )
+            resp.raise_for_status()
+            prs = resp.json() or []
+        return [
+            pr
+            for pr in prs
+            if isinstance(pr, dict)
+            and not pr.get("draft")
+            and _label_gate.carries_label(label, _label_names(pr))
+        ]
+
+    async def _panel_finished_for_pr(self, trigger: SwarmTrigger) -> bool | None:
+        """Whether `trigger`'s head already has a finished panel; None if unreadable.
+
+        The required lenses are the ones `select_panel` seats for the PR's
+        changed files. `_changed_files` reports a failed read as an empty list;
+        the required set is then left empty, so only an aggregation marker can
+        count as finished (when it carries a verdict) and the PR is re-driven
+        rather than skipped.
+        """
+        head = _normalise_full_sha(trigger.head_sha or "")
+        if not head:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._lens_scoped_comments(
+                    trigger.repository, trigger.number, client
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                f"[{DAEMON_NAME}] startup panel sweep: could not read comments "
+                f"on {trigger.repository}#{trigger.number} ({exc}) — leaving it "
+                "alone"
+            )
+            return None
+        # An aggregation at the head settles it without reading the diff.
+        if panel_finished_at_head(comments, head, set()):
+            return True
+        try:
+            changed_files = await self._changed_files(trigger)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                f"[{DAEMON_NAME}] startup panel sweep: could not read changed "
+                f"files on {trigger.repository}#{trigger.number} ({exc}) — "
+                "leaving it alone"
+            )
+            return None
+        required = (
+            {
+                lens.lens
+                for lens in select_panel(
+                    gate_contributors=set(),
+                    changed_files=changed_files,
+                    max_panel=self.config.panel_max,
+                )
+            }
+            if changed_files
+            else set()
+        )
+        return panel_finished_at_head(comments, head, required)
 
     async def resume_stalled_reviews(self, repositories: list[str]) -> dict:
         """Re-dispatch open PRs whose review died without leaving any marker.
