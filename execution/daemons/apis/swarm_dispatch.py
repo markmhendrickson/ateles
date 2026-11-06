@@ -91,6 +91,7 @@ from review_learning import (
     parse_findings,
     propose_skill_updates,
 )
+import review_panel
 from review_panel import (
     LENSES,
     Lens,
@@ -108,6 +109,7 @@ import model_tiering
 import panel_check_gate
 import review_carry
 import review_delta
+import review_scope
 import skill_runner
 from skill_runner import (
     ATELES_REPO,
@@ -591,6 +593,16 @@ def parse_pending_gates(stdout: str) -> set[str]:
     if not m:
         return set()
     return {g.strip().lower() for g in m.group(1).split(",") if g.strip()}
+
+
+_MISSING_PARENT_ISSUE_REASON = re.compile(
+    r"^GATE_BLOCK_REASON: missing_parent_issue\s*$", re.I | re.M
+)
+
+
+def missing_parent_issue_block(stdout: str) -> bool:
+    """Recognize only Lanius's explicit missing-parent-issue block reason."""
+    return bool(_MISSING_PARENT_ISSUE_REASON.search(stdout or ""))
 
 
 # Vanellus / panelist verdict token (SWARM_GITHUB_CONTRACT, skill_runner.py):
@@ -2215,6 +2227,17 @@ def signed_off_is_head_pinned(body: str | None, current_head_sha: str | None) ->
     return reviewed == current or current.startswith(reviewed) or reviewed.startswith(current)
 
 
+def verified_parent_task_note(task_id: str) -> str:
+    """The fact a lens is told about a PR delivered from a tracked task.
+
+    Only ever built from ``build_delivery.verified_parent_task`` (Apis's own
+    delivery ledger), never from PR body text."""
+    return (
+        f"VERIFIED PARENT TASK: Apis's own delivery record shows this exact "
+        f"head was delivered from tracked task {task_id}. It has no parent issue."
+    )
+
+
 def checks_green_note(head: str) -> str:
     """The prompt line stating that the check gate read *head*'s checks green.
 
@@ -2813,14 +2836,38 @@ def gate_verdict_instruction(agent: str, role: str) -> str:
 def compose_fallback_comment(
     lens: str, agent: str, text: str, commit_sha: str = ""
 ) -> str:
-    """Body for a dispatcher-posted review comment (panelist could not post)."""
+    """Body for a dispatcher-posted review comment (panelist could not post).
+
+    The approval tool reads a lens's posted comment with `lens_own_verdict`
+    alone: at most one head marker, then the lens's header, then its verdict.
+    So when the lens's own reply already reads that way (it opens with its
+    header, optionally after its own marker for this head), the comment is the
+    head marker followed by that reply, with nothing between them, and it must
+    read the same as the reply did. The earlier shape put a plain
+    `review:<lens>` line and a second, dispatcher-written header ahead of the
+    lens's own, so the tool found no verdict at the fixed position and every
+    fallback verdict, arch's included, read as missing. A reply with no
+    readable verdict of its own keeps the dispatcher header, which reads as
+    before (no verdict, never a pass).
+    """
     marker = compose_lens_review_marker(lens, commit_sha)
-    return (
-        f"{marker}\nreview:{lens}\n"
-        f"{attribution_header(agent, f'{lens} lens panelist')}\n\n"
-        f"{text}\n\n"
+    footer = (
         f"_Posted by the Apis dispatcher on behalf of {agent} — the "
         "panelist could not post its comment directly._"
+    )
+    reply = (text or "").lstrip("\r\n")
+    own_marker = f"{marker}\n"
+    if _normalise_full_sha(commit_sha) and reply.startswith(own_marker):
+        reply = reply[len(own_marker):]
+    if _normalise_full_sha(commit_sha) and lens_own_verdict(reply, lens_agent=agent):
+        body = f"{marker}\n{reply.rstrip()}\n\n{footer}"
+        if _reader_view(body, agent) == _reader_view(text, agent):
+            return body
+    return (
+        f"{marker}\n"
+        f"{attribution_header(agent, f'{lens} lens panelist')}\n\n"
+        f"{text}\n\n"
+        f"{footer}"
     )
 
 
@@ -3282,6 +3329,32 @@ def panel_finished_at_head(
             continue
         reported.add(match.group("lens").lower())
     return {lens.lower() for lens in required_lenses} <= reported
+
+
+def unseated_required_lenses(
+    comments: list[dict], head_sha: str, required_lenses: set[str] | frozenset[str]
+) -> list[str]:
+    """Required lenses the panel on this PR never seated, sorted.
+
+    A lens counts as seated when a swarm comment carries its `review:<lens>`
+    head marker at ANY head (a lens carried from an earlier head was seated
+    there), or when the newest aggregation at *head_sha* names it as not
+    received (the missing-lens sweep re-runs that one). Anything else was left
+    out of the panel altogether, which is what an Apis panel chosen without the
+    repository's scope file did: the approval tool requires the lens and no
+    verdict for it will ever arrive on its own. ``comments`` must already be
+    scoped to swarm identities (`_lens_scoped_comments`).
+    """
+    seen = {
+        match.group("lens").lower()
+        for comment in comments
+        for match in [_LENS_MARKER_RE.search(comment.get("body") or "")]
+        if match
+    }
+    aggregation = latest_aggregation_comment(comments, head_sha=_normalise_full_sha(head_sha))
+    if aggregation is not None:
+        seen |= set(parse_not_received_lenses(aggregation.get("body") or ""))
+    return sorted({lens.lower() for lens in required_lenses} - seen)
 
 
 def vanellus_comment_missing(comment_bodies: list[str], head_sha: str = "") -> bool:
@@ -5675,10 +5748,11 @@ class SwarmDispatcher:
         """Whether `trigger`'s head already has a finished panel; None if unreadable.
 
         The required lenses are the ones `select_panel` seats for the PR's
-        changed files. `_changed_files` reports a failed read as an empty list;
-        the required set is then left empty, so only an aggregation marker can
-        count as finished (when it carries a verdict) and the PR is re-driven
-        rather than skipped.
+        changed files, which include every lens the approval tool requires
+        (`_path_required_lenses`); a panel missing one of those is not
+        finished. `_changed_files` reports a failed read as an empty list; the
+        required set is then the approval tool's alone (the full panel when the
+        read failed there too).
         """
         head = _normalise_full_sha(trigger.head_sha or "")
         if not head:
@@ -5695,7 +5769,15 @@ class SwarmDispatcher:
                 "alone"
             )
             return None
-        # An aggregation at the head settles it without reading the diff.
+        # The lenses the approval tool requires at this head. An aggregation at
+        # the head settles the panel only when every one of them was seated on
+        # this PR at some point (it has a lens comment, or the aggregation names
+        # it as not received, which the missing-lens sweep recovers). An
+        # aggregation over a panel that never seated a required lens is not a
+        # finished panel: the approval tool can never pass it.
+        path_required = await self._path_required_lenses(trigger)
+        if unseated_required_lenses(comments, head, path_required):
+            return False
         if panel_finished_at_head(comments, head, set()):
             return True
         try:
@@ -5714,11 +5796,12 @@ class SwarmDispatcher:
                     gate_contributors=set(),
                     changed_files=changed_files,
                     max_panel=self.config.panel_max,
+                    required_lenses=path_required,
                 )
             }
             if changed_files
             else set()
-        )
+        ) | set(path_required)
         return panel_finished_at_head(comments, head, required)
 
     async def resume_stalled_reviews(self, repositories: list[str]) -> dict:
@@ -6499,7 +6582,9 @@ class SwarmDispatcher:
     async def _prs_with_missing_lens(
         self, repository: str
     ) -> list[tuple[dict, list[str]]]:
-        """Open PRs whose LATEST aggregation is clear but names an absent lens.
+        """Open PRs whose LATEST aggregation is clear but names an absent lens,
+        or is clear at the current head while a lens the approval tool requires
+        (`_path_required_lenses`) was never seated on the PR.
 
         Reads the newest aggregation via ``latest_aggregation_comment`` over the
         fully-paged comment list (#430) — reading the oldest would resurrect a
@@ -6532,9 +6617,27 @@ class SwarmDispatcher:
                 if not latest:
                     continue
                 body = latest.get("body") or ""
-                if not is_missing_lens_candidate(body):
-                    continue
-                lenses = parse_not_received_lenses(body)
+                lenses = (
+                    parse_not_received_lenses(body)
+                    if is_missing_lens_candidate(body)
+                    else []
+                )
+                # A clear aggregation at the current head over a panel that
+                # never seated a lens the approval tool requires (one chosen
+                # without the scope file) is the same hold with no NOT RECEIVED
+                # line to say so: re-run each such lens too.
+                head = _normalise_full_sha(str((pr.get("head") or {}).get("sha") or ""))
+                if (
+                    head
+                    and parse_blocking_count(body) == 0
+                    and parse_aggregation_marker(body).get("commit") == head
+                ):
+                    required = await self._path_required_lenses(
+                        self._pr_trigger_from_api(repository, pr)
+                    )
+                    for lens in unseated_required_lenses(comments, head, required):
+                        if lens not in lenses:
+                            lenses.append(lens)
                 if lenses:
                     out.append((pr, lenses))
         return out
@@ -8275,6 +8378,17 @@ class SwarmDispatcher:
         ):
             return
         parent = self._parent_issue_number(trigger.body, trigger.repository)
+        # A PR the Apis task path delivered has a tracked task as its parent,
+        # not an issue. Taken only from Apis's own delivery ledger (never the
+        # PR body); None keeps the no-parent path unchanged.
+        parent_task = (
+            self._verified_parent_task(trigger) if parent is None else None
+        )
+        if parent_task:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: no parent issue, but Apis's delivery "
+                f"ledger verifies parent task {parent_task} — no bypass notice"
+            )
 
         # 0. Pipeline-bypass guard (ateles): a product-code PR with NO parent
         #    issue skipped the gated issue → pm/arch → Cicada path. Lanius still
@@ -8282,7 +8396,7 @@ class SwarmDispatcher:
         #    bypass must be surfaced LOUDLY — a visible PR comment + an operator
         #    notification — instead of being silently retro-initialized as a
         #    "legacy independent fix". Best-effort; never blocks the pipeline.
-        if parent is None:
+        if parent is None and parent_task is None:
             bypass_files = await self._changed_files(trigger)
             if touches_product_code(bypass_files):
                 log.info(
@@ -8315,7 +8429,7 @@ class SwarmDispatcher:
         )
         lanius = await run_skill(
             "lanius",
-            self._lanius_pr_prompt(trigger, parent),
+            self._lanius_pr_prompt(trigger, parent, parent_task),
             github_token=_lanius_token,
             include_github_contract=True,
             # Read-only on Fly: the check reads gates and never delivers.
@@ -8345,7 +8459,7 @@ class SwarmDispatcher:
             )
             lanius = await run_skill(
                 "lanius",
-                self._lanius_pr_prompt(trigger, parent)
+                self._lanius_pr_prompt(trigger, parent, parent_task)
                 + (
                     "\n\nREMINDER: your previous attempt omitted the mandatory "
                     "final line. End with exactly `GATE_INHERITANCE: clear` or "
@@ -8394,16 +8508,31 @@ class SwarmDispatcher:
             )
             log.error(
                 f"[{DAEMON_NAME}] {ref}: gate inheritance unresolved ({reason}) — "
-                "failing OPEN to `clear` so the review panel still runs. Merge "
-                "remains gated on a formal approval."
+                + ("proceeding to review with an unknown verdict; task receipt "
+                   "does not clear it. " if parent_task else "failing OPEN to "
+                   "`clear` so the review panel still runs. ")
+                + "Merge remains gated on a formal approval."
             )
-            verdict = "clear"
+            if not parent_task:
+                verdict = "clear"
 
         # Gates Lanius reports as still-pending (from its GATE_PENDING: line on a
         # blocked verdict). Fed to select_panel so the owning lens is guaranteed
         # a seat under the cap — otherwise a carried-over gate can never clear
         # because its owning lens is never re-invoked (ateles#230 panel gap).
         pending_gates = parse_pending_gates(lanius.stdout)
+        if (parent is None and parent_task and verdict == "blocked"
+                and not pending_gates
+                and missing_parent_issue_block(lanius.stdout)):
+            # Only a block explicitly about the absent issue is resolved by
+            # the task receipt. All other blocks retain their pending gates.
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: Lanius blocked on a PR with verified "
+                f"parent task {parent_task} and missing-parent-issue reason — "
+                "proceeding to review"
+            )
+            verdict = "clear"
+            pending_gates = set()
         if verdict == "blocked":
             await self._post_gate_block(
                 trigger, parent, parse_pending_gates(lanius.stdout)
@@ -8501,11 +8630,16 @@ class SwarmDispatcher:
             if parent
             else {}
         )
+        # Every lens the approval tool will require at this head is seated
+        # (union with the picks above, never capped away), so the panel can
+        # produce an approvable review without anyone running a lens by hand.
+        path_required = await self._path_required_lenses(trigger)
         panel = select_panel(
             gate_contributors=set(expectations),
             changed_files=changed_files,
             max_panel=self.config.panel_max,
             pending_gates=pending_gates,
+            required_lenses=path_required,
         )
         # Narrow a re-round (ruling `rereview_only_blockers_and_touched_areas`).
         # Extends the carry-forward above: a pending gate's owner is forced to
@@ -8970,6 +9104,7 @@ class SwarmDispatcher:
                 pending_gates=pending_gates,
                 reviewed_head=review_head,
                 **({"carried": carried_lenses} if carried_lenses else {}),
+                **({"parent_task": parent_task} if parent_task else {}),
                 **(
                     {"checks_green_head": green_head}
                     if (green_head := self._checks_green_head(trigger, aggregation_head))
@@ -8990,7 +9125,25 @@ class SwarmDispatcher:
         #     limit notice. Post a truthful REVIEW-INCOMPLETE marker (never a stub
         #     that reads like a verdict) and schedule a resume after the reset,
         #     rather than paging the operator to fix nothing.
-        if detect_session_limit(vanellus_result.stdout, vanellus_result.stderr):
+        #
+        #     A successful run whose STDOUT carries Vanellus's verdict at the
+        #     fixed position (`lens_own_verdict`: the steward's header, the
+        #     verdict line directly under it) is a review, so neither detector
+        #     reads its stdout: a roll-up that discusses rate limits or a 401
+        #     would otherwise match the broad signatures, defer, and match
+        #     again on every resume. A verdict token anywhere else does not
+        #     count, so a provider diagnostic carrying an incidental token is
+        #     still detected. Both detectors still read STDERR on the review
+        #     path, since a zero-exit run can carry a real limit or auth
+        #     diagnostic there; a verdict token found only in stderr is not a
+        #     verdict. Output with no fixed-position verdict, and any failed
+        #     run, is checked on both streams as before.
+        aggregation_is_review = vanellus_result.ok and (
+            lens_own_verdict(vanellus_result.stdout, lens_agent="vanellus")
+            is not None
+        )
+        detector_stdout = "" if aggregation_is_review else vanellus_result.stdout
+        if detect_session_limit(detector_stdout, vanellus_result.stderr):
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus",
                 vanellus_result.stdout, vanellus_result.stderr,
@@ -9000,7 +9153,7 @@ class SwarmDispatcher:
         #     auth (expired OAuth / missing ANTHROPIC_API_KEY), its "verdict" is
         #     just the 401. Reframe it as an infra failure and page the operator
         #     to re-auth, rather than posting the raw error as a review.
-        if detect_auth_failure(vanellus_result.stdout, vanellus_result.stderr):
+        if detect_auth_failure(detector_stdout, vanellus_result.stderr):
             await self._handle_panel_auth_failure(trigger, "vanellus")
             return
         if not vanellus_result.ok:
@@ -13562,13 +13715,73 @@ class SwarmDispatcher:
         )
 
     @staticmethod
-    def _lanius_pr_prompt(t: SwarmTrigger, parent: int | None) -> str:
-        parent_line = (
-            f"The PR body references parent issue #{parent}."
-            if parent
-            else "No parent issue reference found in the PR body — find it "
-            "yourself or treat gate inheritance as blocked."
-        )
+    def _lanius_pr_prompt(
+        t: SwarmTrigger, parent: int | None, parent_task: str | None = None
+    ) -> str:
+        # The verified-task wording applies only when no parent issue is
+        # identified; every other path keeps the issue-gate prompt unchanged.
+        task_only = bool(parent_task) and not parent
+        if parent:
+            parent_line = f"The PR body references parent issue #{parent}."
+        elif parent_task:
+            parent_line = verified_parent_task_note(parent_task) + (
+                " No issue is identified for this PR, so do not retrieve or "
+                "initialize issue gates. Emit `GATE_INHERITANCE: clear` if "
+                "that is the only gate concern. If you block solely because "
+                "the parent issue is missing, emit `GATE_BLOCK_REASON: "
+                "missing_parent_issue` on a separate line. For every other "
+                "block, report its pending gates and omit that reason."
+            )
+        else:
+            parent_line = (
+                "No parent issue reference found in the PR body — find it "
+                "yourself or treat gate inheritance as blocked."
+            )
+        if task_only:
+            report_lines = (
+                "Report through the final GATE_INHERITANCE, GATE_PENDING and, "
+                "only for a missing parent issue, GATE_BLOCK_REASON lines"
+            )
+            retrieve_clause = (
+                "GATE-STATUS SOURCE OF TRUTH: when a parent issue is "
+                "identified, the parent issue's `gate_status` "
+                "lives on its NEOTOMA issue entity, NOT in the GitHub issue body "
+                "(the GitHub body never carries gate metadata). For an "
+                "identified parent issue, retrieve it "
+            )
+            blocked_clause = "For an identified issue, only emit `blocked` when "
+            override_clause = (
+                "publication steps in your role prompt. When a verified parent "
+                "task is supplied and no parent issue is identified, it also "
+                "overrides any role-prompt instruction to retrieve issue gates: "
+                "there is no issue entity to retrieve. Do NOT post a blocking "
+            )
+            routed_lines = "GATE_INHERITANCE, GATE_PENDING and GATE_BLOCK_REASON "
+            final_line = (
+                "End your reply with one verdict line: `GATE_INHERITANCE: clear` "
+            )
+            omit_clause = (
+                "Omit the line when clear or when no gate is pending. "
+                "Only a block solely for an absent parent issue may add "
+                "`GATE_BLOCK_REASON: missing_parent_issue`; omit it for all "
+                "other blocks."
+            )
+        else:
+            report_lines = "Report only through the final GATE_INHERITANCE and GATE_PENDING lines"
+            retrieve_clause = (
+                "GATE-STATUS SOURCE OF TRUTH: the parent issue's `gate_status` "
+                "lives on its NEOTOMA issue entity, NOT in the GitHub issue body "
+                "(the GitHub body never carries gate metadata). ALWAYS retrieve it "
+            )
+            blocked_clause = "Only emit `blocked` when "
+            override_clause = (
+                "publication steps in your role prompt. Do NOT post a blocking "
+            )
+            routed_lines = "GATE_INHERITANCE and GATE_PENDING "
+            final_line = (
+                "End your reply with exactly one line: `GATE_INHERITANCE: clear` "
+            )
+            omit_clause = "Omit the line when clear."
         return (
             "Invoke the lanius agent per your appended system prompt.\n\n"
             f"A pull request event ({t.action}) fired for "
@@ -13577,12 +13790,9 @@ class SwarmDispatcher:
             f"{parent_line}\n\n"
             "Run your PR-opened protocol: enforce PR gate inheritance from "
             "the parent issue. Do NOT post GitHub comments or assign reviewers "
-            "or make any other GitHub write. Report only through the final "
-            "GATE_INHERITANCE and GATE_PENDING lines; the dispatcher posts the "
+            f"or make any other GitHub write. {report_lines}; the dispatcher posts the "
             "blocking comment and routes Vanellus into review when clear.\n\n"
-            "GATE-STATUS SOURCE OF TRUTH: the parent issue's `gate_status` "
-            "lives on its NEOTOMA issue entity, NOT in the GitHub issue body "
-            "(the GitHub body never carries gate metadata). ALWAYS retrieve it "
+            f"{retrieve_clause}"
             "first: `retrieve_entity_by_identifier(entity_type='issue', "
             "identifier=<number>, identifier_field='github_number')` (scoped to "
             "this repo), and read `gate_status` from that entity's snapshot. "
@@ -13598,7 +13808,7 @@ class SwarmDispatcher:
             "emit `GATE_INHERITANCE: clear`. Legacy init MUST MERGE, never "
             "overwrite: if the entity already has a `gate_status` with any gate "
             "at `signed_off`/`waived`, PRESERVE those exactly — never downgrade "
-            "a `signed_off` gate to `pending`. Only emit `blocked` when "
+            f"a `signed_off` gate to `pending`. {blocked_clause}"
             "`gate_status` exists AND a pre-impl gate is genuinely `pending` "
             "(unsigned). Merge stays operator-gated regardless, per the "
             "fail-open-for-review guardrail. To run the full issue pipeline on "
@@ -13606,19 +13816,19 @@ class SwarmDispatcher:
             "backfill via `trigger_swarm_pr.py issue <n>`.\n\n"
             f"{_agent_prompt_instruction('lanius', 'PR gate inheritance')}\n\n"
             "AUTHORITATIVE FOR THIS RUN: this instruction overrides the "
-            "publication steps in your role prompt. Do NOT post a blocking "
+            f"{override_clause}"
             "comment, do NOT assign or request a reviewer, and make no other "
             "GitHub write. The dispatcher posts the gate-block comment and "
-            "routes Vanellus from your GATE_INHERITANCE and GATE_PENDING "
+            f"routes Vanellus from your {routed_lines}"
             "lines.\n\n"
-            "End your reply with exactly one line: `GATE_INHERITANCE: clear` "
+            f"{final_line}"
             "or `GATE_INHERITANCE: blocked` so the dispatcher can route. When "
             "you emit `blocked`, add a SECOND line naming the unsigned pre-impl "
             "gates as a comma-separated list, e.g. `GATE_PENDING: arch,ux` — "
             "the dispatcher uses this to guarantee the lens agent that owns "
             "each pending gate a seat on the (capped) review panel, so a gate "
             "can never stay blocked because its owning lens was never "
-            "re-invoked. Omit the line when clear."
+            f"re-invoked. {omit_clause}"
         )
 
     @staticmethod
@@ -13920,6 +14130,7 @@ class SwarmDispatcher:
         reviewed_head: str | None = None,
         carried: "dict[str, review_carry.Carried] | None" = None,
         checks_green_head: str = "",
+        parent_task: str | None = None,
     ) -> str:
         # The captured lens reviews are embedded INLINE below so the aggregator
         # never has to re-fetch them via `gh`. Vanellus runs diff-only
@@ -13955,8 +14166,16 @@ class SwarmDispatcher:
             "Invoke the vanellus agent per your appended system prompt.\n\n"
             f"Aggregate the review panel for PR {t.repository}#{t.number}: "
             f"{t.title}\n{t.html_url}\n"
-            f"Parent issue: #{parent if parent else 'unknown'}. "
-            f"Panel lenses that reviewed: {', '.join(lenses) or '(none — GHA baseline only)'}.\n\n"
+            + (
+                f"Parent issue: #{parent}. "
+                if parent or not parent_task
+                else f"Parent issue: none. {verified_parent_task_note(parent_task)} "
+                "The missing issue is NOT a blocker: do not record "
+                "`block_kind=process` or BLOCKED for it, and do not sign gates "
+                "on any issue entity or create one. Every content finding "
+                "still blocks exactly as it would otherwise. "
+            )
+            + f"Panel lenses that reviewed: {', '.join(lenses) or '(none — GHA baseline only)'}.\n\n"
             "The panel lens reviews are provided INLINE below — aggregate them "
             "directly. Do NOT fetch them via gh; you run without a repo checkout "
             "and that read fails. (Optionally read the Claude GHA baseline with "
@@ -13995,6 +14214,22 @@ class SwarmDispatcher:
         )
 
     # ── GitHub helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _verified_parent_task(t: SwarmTrigger) -> str | None:
+        """The tracked task this PR was delivered from, read from Apis's own
+        delivery ledger (``build_delivery.verified_parent_task``), or None.
+        The PR body is never consulted, so editing it cannot make the claim."""
+        try:
+            return build_delivery.verified_parent_task(
+                t.repository, t.number, t.head_ref, t.head_sha
+            )
+        except Exception as exc:  # noqa: BLE001 — fail closed to no-parent
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: parent-task lookup "
+                f"failed ({type(exc).__name__}) — treating as no parent"
+            )
+            return None
 
     @staticmethod
     def _parent_issue_number(pr_body: str, repository: str = "") -> int | None:
@@ -14263,6 +14498,89 @@ class SwarmDispatcher:
             "credential"
         )
         return await send(url, headers=headers, **kwargs)
+
+    async def _path_required_lenses(self, t: SwarmTrigger) -> frozenset[str]:
+        """Every lens the panel-gated approval tool will require for this PR at
+        this head (`approve_pr_as_app.py --panel path`): the path decision's
+        lenses AND, on a full-panel decision, the tool's diff-derived floor
+        (`legal` for a `LICENSE` or `package.json` change, a pre-registered
+        contributor's lens).
+
+        Read and decided by the tool's own code: `review_scope.fetch_scope` and
+        `review_scope.path_panel_for_pr` for the path decision (the scope file
+        from the PR's BASE branch, every changed path with renames counting both
+        sides), `review_scope.fetch_pr_files` and
+        `review_panel.fetch_gate_contributors` for the floor's inputs, and
+        `review_panel.approval_required_lenses` for the set, at this daemon's
+        `panel_max` (the tool's `APIS_PANEL_MAX`). A missing, unreadable or
+        malformed scope file is the full panel; an unreadable PR, file list or
+        parent issue, or any error here, is every lens the tool could require
+        (`review_panel.every_requirable_lens`), never a smaller set; one log
+        line names the reason. Seated by `select_panel` alongside its own
+        picks, never capped away, and read by finished detection and the
+        missing-lens sweep, so Apis never finishes a panel whose approval the
+        tool must refuse for a lens that was never seated.
+        """
+        ref = f"{t.repository}#{t.number}"
+        try:
+            pr_data = await self._fetch_pr(t.repository, t.number)
+            if not isinstance(pr_data, dict):
+                raise RuntimeError("the PR could not be read")
+            headers = self._github_headers(t.repository)
+            api_base = "https://api.github.com"
+            base_ref = str((pr_data.get("base") or {}).get("ref") or "")
+            async with httpx.AsyncClient(timeout=30) as client:
+                load = await review_scope.fetch_scope(
+                    client, api_base=api_base,
+                    repo=t.repository, base_ref=base_ref, headers=headers,
+                )
+                decision = await review_scope.path_panel_for_pr(
+                    client, api_base=api_base,
+                    repo=t.repository, pr=t.number, pr_data=pr_data,
+                    headers=headers, load=load,
+                )
+                changed_files: list[str] = []
+                contributors: set[str] = set()
+                if decision.full:
+                    # The tool's floor inputs, read the way the tool reads
+                    # them; a failed read raises into the fail-closed branch.
+                    changed_files, _rows = await review_scope.fetch_pr_files(
+                        client, api_base=api_base, repo=t.repository,
+                        pr=t.number, headers=headers,
+                    )
+                    parent = self._parent_issue_number(
+                        str(pr_data.get("body") or ""), t.repository
+                    )
+                    if parent is not None:
+                        contributors = await review_panel.fetch_gate_contributors(
+                            client, api_base=api_base, repo=t.repository,
+                            issue_number=parent, headers=headers,
+                        )
+            lenses = review_panel.approval_required_lenses(
+                decision,
+                gate_contributors=contributors,
+                changed_files=changed_files,
+                max_panel=self.config.panel_max,
+            )
+        except Exception as exc:  # noqa: BLE001 — unknown: every requirable lens
+            lenses = review_panel.every_requirable_lens()
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: required panel unreadable "
+                f"({type(exc).__name__}: {exc}) — seating every lens the "
+                f"approval tool could require {sorted(lenses)}"
+            )
+            return lenses
+        if load.scope is None:
+            log.warning(
+                f"[{DAEMON_NAME}] {ref}: scope file unusable ({load.error}) — "
+                f"seating the full panel {sorted(lenses)}"
+            )
+        else:
+            log.info(
+                f"[{DAEMON_NAME}] {ref}: approval tool requires {sorted(lenses)}. "
+                f"{decision.reason}"
+            )
+        return lenses
 
     async def _changed_files(self, t: SwarmTrigger) -> list[str]:
         url = (

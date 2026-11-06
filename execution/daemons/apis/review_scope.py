@@ -20,9 +20,13 @@ bootstrap rule):
   does not touch its scope; it is re-run only when its scope changed.
 
 This module holds the pure decisions and the one file format, shared by the
-approval tool (``approve_pr_as_app``) and the carry rule (``review_carry``). It
-imports no daemon, no network client and no Neotoma: a session on any machine
-can use it for any repository.
+approval tool (``approve_pr_as_app``), the carry rule (``review_carry``) and the
+Apis review panel (``swarm_dispatch``). It also holds the one GitHub reader of
+the scope file and of the PR's file list (``fetch_scope``, ``fetch_pr_files``,
+``path_panel_for_pr``), so the approval tool and Apis decide the required panel
+from the same bytes the same way. It imports no daemon, no network client and
+no Neotoma: the readers take the caller's already-open HTTP client and headers,
+so a session on any machine can use it for any repository.
 
 The scope file lives IN the repository it governs, at ``.github/review_scope.json``,
 and is read from the PR's BASE branch, never from its head. A PR therefore
@@ -95,6 +99,15 @@ MAX_SCOPE_BYTES = 256 * 1024
 KNOWN_LENSES: frozenset[str] = frozenset(
     {"pm", "arch", "ux", "legal", "qa", "security", "content"}
 )
+
+# The lenses a full-panel decision requires: the bootstrap five-role roster
+# (Pavo pm, Waxwing arch, Falco security, Phoenicurus qa, Accipiter ux).
+# `approve_pr_as_app.BOOTSTRAP_PANEL_LENSES` is this set; Apis seats it too.
+FULL_PANEL_LENSES: frozenset[str] = frozenset({"pm", "arch", "ux", "qa", "security"})
+
+# GitHub's PR files endpoint returns at most this many files; a list that long
+# may have been cut off, and a cut-off list silently reads as a smaller change.
+PR_FILES_API_CAP = 3000
 
 _TOP_LEVEL_KEYS = frozenset(
     {"version", "full_panel_paths", "reduced_paths", "ux_paths", "lens_scopes"}
@@ -362,4 +375,171 @@ def select_path_panel(changed_files: Sequence[str], load: ScopeLoad) -> PanelDec
     return PanelDecision(
         False, "arch", "Every changed file is on reduced_paths (the paths this repo marks as safe for one lens) and none "
         "is on a full-panel path; not every one is user-facing, so architecture is the one lens.", source
+    )
+
+
+def required_lenses(decision: PanelDecision) -> frozenset[str]:
+    """The lenses *decision* requires: the full roster, or its one lens."""
+    return FULL_PANEL_LENSES if decision.full else frozenset({decision.lens})
+
+
+def file_list_problem(rows_seen: int, expected: object) -> str:
+    """Why the PR's file list cannot be trusted as complete, or "" when it can.
+
+    Fail closed: a list at the API cap may be truncated, and one that does not
+    match the PR's own `changed_files` count, or a PR that reports no count, is
+    not known to be complete.
+    """
+    if rows_seen >= PR_FILES_API_CAP:
+        return (
+            f"the PR lists {rows_seen} changed files, at or over the {PR_FILES_API_CAP}-file "
+            "limit of the GitHub files API, so the list may be truncated"
+        )
+    if isinstance(expected, bool) or not isinstance(expected, int):
+        return "the PR does not report how many files it changes, so the list cannot be checked"
+    if rows_seen != expected:
+        return (
+            f"the file list has {rows_seen} entries but the PR reports {expected} changed files"
+        )
+    return ""
+
+
+def decide_path_panel(
+    changed_files: Sequence[str],
+    load: ScopeLoad,
+    *,
+    base_ref: str,
+    default_branch: str,
+    list_problem: str = "",
+) -> PanelDecision:
+    """The panel by changed path for a PR, including the PR-level fail-closed
+    rules: a base branch that is not the repository's default (the scope file
+    is read from the base, and a PR aimed elsewhere could be retargeted after
+    review) and a file list that cannot be trusted both take the full panel."""
+    if not default_branch or default_branch != base_ref:
+        return PanelDecision(
+            True, "",
+            f"The PR's base branch ({base_ref or 'unknown'}) is not the repository's "
+            f"default branch ({default_branch or 'unreadable'}), so the full panel applies.",
+            load.source,
+        )
+    if list_problem:
+        # An incomplete list reads as a smaller change: the full panel.
+        return PanelDecision(
+            True, "", f"The changed-file list cannot be trusted ({list_problem}), so the full panel applies.",
+            load.source,
+        )
+    return select_path_panel(changed_files, load)
+
+
+# ── the GitHub readers (the caller's client and headers) ───────────────────
+
+
+async def fetch_scope(
+    client: object, *, api_base: str, repo: str, base_ref: str, headers: Mapping[str, str]
+) -> ScopeLoad:
+    """The repo's scope file as it stands on the PR's BASE branch (never the PR
+    head: a PR must not be able to downgrade its own panel). Never raises: any
+    failure is a `ScopeLoad` with no scope and the reason, which every caller
+    treats as "no declaration" (full panel for panel selection; no scope-based
+    carry)."""
+    source = f"{repo}@{base_ref or '(unknown base)'}:{SCOPE_PATH} (base branch)"
+    if not base_ref:
+        return ScopeLoad(None, source, "the PR's base branch is unknown")
+    try:
+        resp = await client.get(  # type: ignore[attr-defined]
+            f"{api_base}/repos/{repo}/contents/{SCOPE_PATH}",
+            headers=dict(headers),
+            params={"ref": base_ref},
+        )
+    except Exception as exc:  # noqa: BLE001 — unreadable: no declaration
+        return ScopeLoad(None, source, f"read failed ({exc.__class__.__name__})")
+    if resp.status_code == 404:
+        return ScopeLoad(None, source, "no scope file on the base branch")
+    if resp.status_code >= 400:
+        return ScopeLoad(None, source, f"read failed (HTTP {resp.status_code})")
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        return ScopeLoad(None, source, "the response was not JSON")
+    return load_from_contents_payload(payload, source=source)
+
+
+async def fetch_pr_files(
+    client: object, *, api_base: str, repo: str, pr: int, headers: Mapping[str, str]
+) -> tuple[list[str], int]:
+    """(every path the PR touches, how many file ROWS the API returned). Raises
+    on an HTTP error.
+
+    A rename counts BOTH its new and its old path (`previous_filename`), the same
+    rule `review_delta.interdiff` applies: a rename out of a protected path moves
+    the path a pattern would have matched.
+    """
+    out: list[str] = []
+    rows_seen = 0
+    page = 1
+    while True:
+        resp = await client.get(  # type: ignore[attr-defined]
+            f"{api_base}/repos/{repo}/pulls/{pr}/files",
+            headers=dict(headers),
+            params={"per_page": 100, "page": page},
+        )
+        resp.raise_for_status()
+        rows = resp.json() or []
+        rows_seen += len(rows)
+        for f in rows:
+            name = f.get("filename", "")
+            out.append(name)
+            previous = f.get("previous_filename")
+            if isinstance(previous, str) and previous and previous not in out:
+                out.append(previous)
+        if len(rows) < 100:
+            break
+        page += 1
+    return out, rows_seen
+
+
+async def fetch_default_branch(
+    client: object, *, api_base: str, repo: str, headers: Mapping[str, str]
+) -> str:
+    """The repository's default branch, or "" when it cannot be read."""
+    try:
+        resp = await client.get(f"{api_base}/repos/{repo}", headers=dict(headers))  # type: ignore[attr-defined]
+        if resp.status_code >= 400:
+            return ""
+        return str((resp.json() or {}).get("default_branch") or "")
+    except Exception:  # noqa: BLE001 — unreadable: not the default
+        return ""
+
+
+async def path_panel_for_pr(
+    client: object,
+    *,
+    api_base: str,
+    repo: str,
+    pr: int,
+    pr_data: Mapping[str, object],
+    headers: Mapping[str, str],
+    load: ScopeLoad,
+) -> PanelDecision:
+    """The panel by changed path for one PR, read and decided the one way the
+    approval tool and the Apis panel both use. *load* is the scope file read
+    from the PR's base branch (`fetch_scope`). Never raises for an unreadable
+    input: an unreadable file list is empty, which is the full panel."""
+    base_ref = str(((pr_data.get("base") or {}) if isinstance(pr_data.get("base"), dict) else {}).get("ref") or "")
+    list_problem = ""
+    try:
+        changed, rows_seen = await fetch_pr_files(
+            client, api_base=api_base, repo=repo, pr=pr, headers=headers
+        )
+        list_problem = file_list_problem(rows_seen, pr_data.get("changed_files"))
+    except Exception as exc:  # noqa: BLE001 — unreadable list: full panel
+        changed = []
+        list_problem = f"the file list could not be read ({exc.__class__.__name__})"
+    default_branch = await fetch_default_branch(
+        client, api_base=api_base, repo=repo, headers=headers
+    )
+    return decide_path_panel(
+        changed, load, base_ref=base_ref, default_branch=default_branch,
+        list_problem=list_problem,
     )

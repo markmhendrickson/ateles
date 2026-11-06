@@ -19,7 +19,15 @@ Checks (each a small independent function returning findings):
                          ACTIVE ones whose target thread has gone quiet.
 3. ``check_deploys``     merged to the default branch but not deployed for
                          over a day, per ``deployment_configuration`` entity.
-4. ``check_tasks``       operator tasks due soon and blocked, or past due.
+4. ``check_tasks``       tasks due soon and blocked, past due, or owned by a
+                         session and due today.
+5. ``check_apis_red``    red alerts Apis has recorded in its own state file
+                         (``apis-red-conditions.json``, a sibling of the
+                         findings file). Read-only: this job only parses that
+                         file and publishes entries as needs_operator findings,
+                         once per condition. Backlog entries and entries older
+                         than 7 days are not published. A missing or
+                         unparsable file is a failed check, never an all-clear.
 
 Findings file: every non-dry run atomically writes
 ``codex-delivery-findings.json`` (mode 0600) next to ``CODEX_DELIVERY_STATE_PATH``
@@ -84,6 +92,8 @@ TERMINAL_TASK_STATUSES = frozenset(
     {"done", "completed", "complete", "cancelled", "canceled", "closed", "dropped"}
 )
 SUBPROCESS_TIMEOUT = 60
+RED_PUBLISH_DAYS = 7
+RED_SCHEMA_VERSION = 1
 
 
 _RRULE_SECONDS = {
@@ -574,6 +584,10 @@ def check_tasks(
     fetch_page: Callable[[int], tuple[list[dict[str, Any]], bool]], now: datetime
 ) -> tuple[list[Finding], list[str]]:
     """``fetch_page(offset) -> (rows, more)``; reads are sequential and bounded."""
+    # Function-level, like the other `lib` imports here: `main` puts the repo
+    # root on sys.path before any check runs.
+    from lib.daemon_runtime.task_ownership import session_owned
+
     findings: list[Finding] = []
     notes: list[str] = []
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -633,6 +647,25 @@ def check_tasks(
                         ),
                     )
                 )
+            elif due == today and session_owned(
+                snap.get("assigned_to"), snap.get("owner")
+            ):
+                # The dispatcher no longer marks a session's task blocked, and
+                # that false block was the only thing flagging such a task
+                # before its due date. The owner's name is never put in the
+                # message: it is task-supplied text.
+                findings.append(
+                    Finding(
+                        key=f"{KEY_PREFIX}:task-due:{ident}",
+                        subject=title,
+                        message=(
+                            "A task owned by a session is due today. Find the "
+                            "task's owner and message that session; raise it with "
+                            "the operator only if it needs a decision or action "
+                            "from them."
+                        ),
+                    )
+                )
         if not more or not rows:
             more = False
             break
@@ -645,6 +678,107 @@ def check_tasks(
         notes.append(
             f"tasks: stopped after {TASK_MAX_PAGES * TASK_PAGE} rows; older entries not examined"
         )
+    return findings, notes
+
+
+# ── check 5: Apis red alerts ─────────────────────────────────────────────────
+
+# Fixed sentences, one per kind: no name, ref or number, so a finding's
+# key + message is stable across runs. The ref or version is in ``subject``.
+RED_MESSAGES = {
+    "approved-conflicting": (
+        "This approved pull request now has merge conflicts and cannot land "
+        "until it is rebased."
+    ),
+    "approved-blocked": (
+        "This approved pull request is blocked by a required check or branch "
+        "rule, so approval alone will not land it."
+    ),
+    "approved-mergeable": (
+        "This pull request is approved and can merge, but nothing has merged it."
+    ),
+    "review-escalation": (
+        "This pull request has no formal review after repeated automatic "
+        "attempts, so it cannot merge until a review lands. The review agent "
+        "is failing on it."
+    ),
+    "revision-stuck": (
+        "The author has answered the requested changes on this pull request, "
+        "but repeated automatic re-reviews produced no verdict, so it is stuck."
+    ),
+    "lens-no-verdict": (
+        "One review role has produced no verdict on this pull request after "
+        "repeated attempts, and that alone is holding the merge."
+    ),
+    "release-failed": (
+        "An approved release did not publish. It may be partly done, so check "
+        "the release log and the package registry before retrying."
+    ),
+}
+RED_GENERIC_MESSAGE = (
+    "Apis raised a red alert this job does not recognise. Look at the Apis log "
+    "for the alert and tell the operator what it says."
+)
+
+
+def apis_red_path(state_path: Path) -> Path:
+    return state_path.with_name("apis-red-conditions.json")
+
+
+def check_apis_red(path: Path, now: datetime) -> tuple[list[Finding], list[str]]:
+    """Publish Apis's recorded red conditions that are new and not backlog."""
+    try:
+        raw = path.read_text()
+    except FileNotFoundError as exc:
+        raise CheckError("apis red state file missing", "missing") from exc
+    except OSError as exc:
+        raise CheckError("apis red state file unreadable", "unreadable") from exc
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        raise CheckError("apis red state file not JSON", "unreadable") from exc
+    if (
+        not isinstance(doc, dict)
+        or doc.get("schema_version") != RED_SCHEMA_VERSION
+        or not isinstance(doc.get("conditions"), dict)
+    ):
+        raise CheckError("apis red state file wrong shape", "unreadable")
+
+    findings: list[Finding] = []
+    notes: list[str] = []
+    cutoff = now - timedelta(days=RED_PUBLISH_DAYS)
+    malformed = 0
+    for key, entry in doc["conditions"].items():
+        raised = None
+        if isinstance(entry, dict) and isinstance(entry.get("raised_at"), str):
+            try:
+                raised = datetime.strptime(
+                    entry["raised_at"], "%Y-%m-%dT%H:%M:%SZ"
+                ).replace(tzinfo=timezone.utc)
+            except ValueError:
+                raised = None
+        if (
+            not isinstance(key, str)
+            or not key
+            or raised is None
+            or not isinstance(entry.get("backlog"), bool)
+            or not isinstance(entry.get("kind", ""), str)
+            or not isinstance(entry.get("subject", ""), str)
+        ):
+            malformed += 1
+            continue
+        if entry["backlog"] or raised < cutoff:
+            continue
+        findings.append(
+            Finding(
+                key=key,
+                subject=entry.get("subject", ""),
+                needs_operator=True,
+                message=RED_MESSAGES.get(entry.get("kind", ""), RED_GENERIC_MESSAGE),
+            )
+        )
+    if malformed:
+        notes.append(f"apis red alerts: {malformed} malformed entries skipped")
     return findings, notes
 
 
@@ -814,6 +948,12 @@ def run_checks(
         _guard(
             "due and blocked tasks",
             lambda: check_tasks(reader().task_page_fetcher(now), now),
+        )
+    )
+    results.append(
+        _guard(
+            "apis red alerts",
+            lambda: check_apis_red(apis_red_path(default_state_path()), now),
         )
     )
     return results

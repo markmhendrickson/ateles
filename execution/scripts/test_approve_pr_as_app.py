@@ -1137,7 +1137,9 @@ class TestOtherEmptyOrShrunkLensPaths:
         def _raising_select_panel(*a, **kw):
             raise RuntimeError("simulated select_panel failure")
 
-        monkeypatch.setattr(target, "select_panel", _raising_select_panel)
+        # `derive_required_lenses` reaches `select_panel` through the shared
+        # `review_panel.approval_floor`, so the failure is injected there.
+        monkeypatch.setattr(target.review_panel, "select_panel", _raising_select_panel)
 
         code = await target.run(REPO, PR, [], apply=True)
 

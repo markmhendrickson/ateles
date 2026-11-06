@@ -258,3 +258,40 @@ def _panel_check_hold_off_by_default(monkeypatch):
         classes.add(package_copy.SwarmDispatcher)
     for cls in classes - {None}:
         monkeypatch.setattr(cls, "_hold_panel_until_checks_green", _not_held)
+
+
+@pytest.fixture(autouse=True)
+def _path_required_lenses_off_by_default(monkeypatch):
+    """The approval tool's path-required lenses are read from GitHub; no
+    unrelated test may.
+
+    `SwarmDispatcher._path_required_lenses` fetches the PR, its base branch's
+    `.github/review_scope.json`, its file list and the repository's default
+    branch before a panel is chosen, so every test that drives `_handle_pr` or a
+    review sweep without stubbing GitHub would otherwise hit the network (and,
+    failing closed, seat the full panel). Default it to "no extra lens", which
+    is the panel `select_panel` picks on its own. The tests of the union itself
+    (`test_review_panel.py`) restore the real method from
+    `swarm_dispatch._REAL_PATH_REQUIRED_LENSES` and script GitHub.
+
+    Patched on every `SwarmDispatcher` class a test can reach, for the same
+    reasons as `_panel_check_hold_off_by_default` above.
+    """
+    import swarm_dispatch
+
+    current = swarm_dispatch.SwarmDispatcher
+    real = getattr(current, "_path_required_lenses", None)
+
+    async def _none_extra(self, trigger):
+        return frozenset()
+
+    monkeypatch.setattr(
+        swarm_dispatch, "_REAL_PATH_REQUIRED_LENSES", real, raising=False
+    )
+    classes = {current, _FIRST_DISPATCHER_CLASS}
+    package_copy = sys.modules.get("execution.daemons.apis.swarm_dispatch")
+    if package_copy is not None:
+        classes.add(package_copy.SwarmDispatcher)
+    for cls in classes - {None}:
+        if hasattr(cls, "_path_required_lenses"):
+            monkeypatch.setattr(cls, "_path_required_lenses", _none_extra)

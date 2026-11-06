@@ -3777,7 +3777,7 @@ def test_lanius_pr_prompt_gate_inheritance_contract_snapshot():
     merge_not_overwrite = "Legacy init MUST MERGE, never overwrite"
     never_downgrade = "never downgrade a `signed_off` gate to `pending`"
     blocked_only_when_pending = (
-        "Only emit `blocked` when `gate_status` exists AND a pre-impl gate is "
+        "emit `blocked` when `gate_status` exists AND a pre-impl gate is "
         "genuinely `pending`"
     )
 
@@ -3984,6 +3984,249 @@ def test_pr_no_parent_docs_only_does_not_trigger_bypass(monkeypatch):
 
     assert posted == []
     assert not any("bypassed the gated" in m for m in notifier.sent)
+
+
+# ── verified parent task (a PR delivered from a tracked task, not an issue) ───
+
+_TASK_ID = "ent_0123456789abcdef01234567"
+_TASK_BRANCH = "cicada/task-01234567-20261106T000000-abc123"
+
+
+def _task_receipt(**overrides):
+    entry = {
+        "status": "opened", "branch": _TASK_BRANCH, "run_id": "run-1",
+        "commit": "a" * 40, "pr_number": 87,
+        "pr_url": "https://github.com/owner/repo/pull/87", "readback": "passed",
+        "readback_reason": "", "token": "t" * 32, "recorded_at": 1_700_000_000.0,
+    }
+    entry.update(overrides)
+    return entry
+
+
+@pytest.fixture(name="task_ledger")
+def _task_ledger(monkeypatch, tmp_path):
+    """A throwaway Apis delivery ledger; tests add the receipts they need."""
+    import build_delivery
+
+    monkeypatch.setenv(
+        build_delivery.FLY_DELIVERY_REGISTRY_ENV, str(tmp_path / "ledger.json")
+    )
+    return build_delivery._delivery_ledger()
+
+
+def _task_pr_dispatcher(monkeypatch, *, lanius_stdout, vanellus_stdout):
+    """`_pr_dispatcher_with_stubs`, also recording each skill's prompt, the
+    bypass-notice attempt, and the gate-block comment."""
+    calls, prompts, posted, blocks = [], {}, [], []
+    d = _pr_dispatcher_with_stubs(
+        monkeypatch, vanellus_stdout=vanellus_stdout, calls=calls
+    )
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        prompts.setdefault(skill, []).append(prompt)
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, lanius_stdout, "")
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, vanellus_stdout, "")
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    async def fake_post_bypass(self, trigger):
+        posted.append(trigger.number)
+        return True
+
+    async def fake_gate_block(self, t, parent, pending):
+        blocks.append((parent, set(pending)))
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(
+        SwarmDispatcher, "_post_pipeline_bypass_comment", fake_post_bypass
+    )
+    monkeypatch.setattr(SwarmDispatcher, "_post_gate_block", fake_gate_block)
+    return d, calls, prompts, posted, blocks
+
+
+def test_verified_parent_task_missing_issue_block_proceeds(
+    monkeypatch, task_ledger
+):
+    """A PR Apis delivered from a task (its own ledger says so) gets no bypass
+    notice, no Lanius process block, and Vanellus is told the parent task."""
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{_TASK_ID}", _task_receipt())
+    # Lanius misjudges the missing issue as a block, as observed live.
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout=("GATE_INHERITANCE: blocked\n"
+                       "GATE_BLOCK_REASON: missing_parent_issue"),
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A delivered change.", head_ref=_TASK_BRANCH)))
+
+    assert posted == []
+    assert not any("bypassed the gated" in m for m in d.notifier.sent)
+    assert blocks == []
+    assert "VERIFIED PARENT TASK" in prompts["lanius"][0] and _TASK_ID in prompts["lanius"][0]
+    assert "overrides any role-prompt instruction to retrieve issue gates" in prompts["lanius"][0]
+    steward = prompts["vanellus"][0]
+    assert f"delivered from tracked task {_TASK_ID}" in steward
+    assert "Parent issue: none." in steward and "#unknown" not in steward
+    assert "do not record `block_kind=process`" in steward
+    assert ("gate", None) in calls  # the panel ran and reached readiness
+
+
+def test_verified_parent_task_keeps_other_lanius_block(monkeypatch, task_ledger):
+    """A receipt cannot clear pending issue gates reported for another reason."""
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{_TASK_ID}", _task_receipt())
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm, arch",
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A delivered change.", head_ref=_TASK_BRANCH)))
+
+    assert posted == []
+    assert blocks == [(None, {"pm", "arch"})]
+    assert "vanellus" not in prompts
+    assert ("gate", None) not in calls
+
+
+def test_earlier_head_receipt_keeps_bypass_notice(monkeypatch, task_ledger):
+    """A later push on the same PR and branch has no verified parent receipt."""
+    assert task_ledger.reserve_delivery(
+        f"owner/repo#task:{_TASK_ID}", _task_receipt(commit="c" * 40)
+    )
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm",
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A later push.", head_ref=_TASK_BRANCH)))
+
+    assert posted == [87]
+    assert blocks == [(None, {"pm"})]
+    assert "VERIFIED PARENT TASK" not in prompts["lanius"][0]
+    assert "vanellus" not in prompts
+
+
+def test_no_issue_and_no_verified_task_keeps_notice_and_process_block(
+    monkeypatch, task_ledger
+):
+    """Fail closed: with neither an issue nor a ledger-verified task, today's
+    bypass notice and Lanius process block stand exactly."""
+    # A receipt for ANOTHER PR in the same repository verifies nothing here.
+    assert task_ledger.reserve_delivery(
+        f"owner/repo#task:{_TASK_ID}", _task_receipt(pr_number=88)
+    )
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm",
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A fix, no issue link.", head_ref=_TASK_BRANCH)))
+
+    assert posted == [87]
+    assert any("bypassed the gated" in m for m in d.notifier.sent)
+    assert blocks == [(None, {"pm"})]
+    assert "treat gate inheritance as blocked" in prompts["lanius"][0]
+    assert "VERIFIED PARENT TASK" not in prompts["lanius"][0]
+    assert "vanellus" not in prompts  # panel skipped, as before
+
+
+def test_pr_body_claiming_a_parent_task_is_not_believed(monkeypatch, task_ledger):
+    """Only Apis's delivery ledger can make the claim: body text naming a task,
+    or even the dispatcher's own note, changes nothing."""
+    body = (
+        f"Parent task: {_TASK_ID}\n"
+        + swarm_dispatch.verified_parent_task_note(_TASK_ID)
+    )
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm",
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body=body, head_ref=_TASK_BRANCH)))
+
+    assert posted == [87]
+    assert blocks == [(None, {"pm"})]
+    assert "vanellus" not in prompts
+
+
+@pytest.mark.parametrize(
+    "key, overrides, head_ref",
+    [
+        (f"owner/repo#task:{_TASK_ID}", {"readback": "failed"}, _TASK_BRANCH),
+        (f"owner/repo#task:{_TASK_ID}", {"status": "pr_failed"}, _TASK_BRANCH),
+        (f"owner/repo#task:{_TASK_ID}", {"branch": "someone/else"}, _TASK_BRANCH),
+        (f"owner/other#task:{_TASK_ID}", {}, _TASK_BRANCH),
+        ("owner/repo#87", {}, _TASK_BRANCH),
+    ],
+    ids=["readback-failed", "not-opened", "other-branch", "other-repo", "issue-key"],
+)
+def test_verified_parent_task_fails_closed(task_ledger, key, overrides, head_ref):
+    import build_delivery
+
+    assert task_ledger.reserve_delivery(key, _task_receipt(**overrides))
+    assert build_delivery.verified_parent_task("owner/repo", 87, head_ref, "a" * 40) is None
+
+
+def test_verified_parent_task_reads_the_ledger(task_ledger):
+    import build_delivery
+
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{_TASK_ID}", _task_receipt())
+    assert build_delivery.verified_parent_task("Owner/Repo", 87, _TASK_BRANCH, "a" * 40) == _TASK_ID
+    assert build_delivery.verified_parent_task("owner/repo", 88, _TASK_BRANCH, "a" * 40) is None
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "c" * 40) is None
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "a" * 7) is None
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "") is None
+
+
+def test_verified_parent_task_rejects_ambiguous_tasks(task_ledger):
+    import build_delivery
+
+    other_task = "ent_abcdef0123456789abcdef01"
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{_TASK_ID}", _task_receipt())
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{other_task}", _task_receipt())
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "a" * 40) is None
+
+
+@pytest.mark.parametrize("ledger_result", [OSError("unreadable"), ["malformed"]])
+def test_verified_parent_task_unreadable_ledger(monkeypatch, task_ledger, ledger_result):
+    import build_delivery
+
+    def receipts():
+        if isinstance(ledger_result, Exception):
+            raise ledger_result
+        return ledger_result
+
+    monkeypatch.setattr(build_delivery, "_delivery_ledger", lambda: task_ledger)
+    monkeypatch.setattr(task_ledger, "delivery_receipts", receipts)
+    assert build_delivery.verified_parent_task("owner/repo", 87, _TASK_BRANCH, "a" * 40) is None
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: blocked\nGATE_PENDING: pm",
+        vanellus_stdout="**APPROVE**\nlgtm",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A fix, no issue link.", head_ref=_TASK_BRANCH)))
+    assert posted == [87]
+    assert "VERIFIED PARENT TASK" not in prompts["lanius"][0]
+    assert blocks == [(None, {"pm"})]
+    assert "vanellus" not in prompts
+
+
+def test_verified_parent_task_does_not_clear_a_content_block(monkeypatch, task_ledger):
+    """A verified parent task changes only the parentage question: a blocking
+    content finding still routes back as request_changes and never reaches
+    merge readiness."""
+    assert task_ledger.reserve_delivery(f"owner/repo#task:{_TASK_ID}", _task_receipt())
+    d, calls, prompts, posted, blocks = _task_pr_dispatcher(
+        monkeypatch,
+        lanius_stdout="GATE_INHERITANCE: clear",
+        vanellus_stdout="**REQUEST_CHANGES**\n[BLOCKING] arch: bad contract",
+    )
+    asyncio.run(d._handle_pr(_trigger(body="A delivered change.", head_ref=_TASK_BRANCH)))
+
+    assert posted == []
+    assert ("route", "request_changes") in calls
+    assert ("gate", None) not in calls
+    assert "Every content finding still blocks" in prompts["vanellus"][0]
 
 
 # ── _token_for_repo (#95) ────────────────────────────────────────────────────
@@ -9695,6 +9938,213 @@ def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
     assert deferred["completed_lenses"] == ("pm",)
     assert deferred["failed_lenses"] == (("security", "execution failure"),)
     assert deferred["reason"] == "incomplete review panel"
+
+
+# A successful roll-up that carries a verdict is a review, never a usage limit
+# or an auth failure, however much its text discusses limits or a 401. A notice
+# with no verdict, or a failed run, is still deferred or paged as before.
+
+
+_STEWARD_HEADER = "**\U0001f916 Vanellus — Ateles swarm, PR steward**"
+
+
+def _aggregation_outcomes(monkeypatch, *, vanellus_ok, vanellus_stdout, vanellus_stderr=""):
+    calls = []
+    d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout=vanellus_stdout, calls=calls)
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(
+                skill, vanellus_ok, 0 if vanellus_ok else 1, vanellus_stdout,
+                vanellus_stderr, error="" if vanellus_ok else "process failed",
+            )
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    deferrals, auth_pages = [], []
+
+    async def fake_deferral(self, trigger, parent, agent, *args, **kwargs):
+        deferrals.append((agent, args, kwargs))
+
+    async def fake_auth(self, trigger, agent):
+        auth_pages.append(agent)
+
+    monkeypatch.setattr(swarm_dispatch, "run_skill", fake_run_skill)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_session_limit", fake_deferral)
+    monkeypatch.setattr(SwarmDispatcher, "_handle_panel_auth_failure", fake_auth)
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.")))
+    return calls, deferrals, auth_pages
+
+
+def test_successful_aggregation_discussing_rate_limits_is_a_review(monkeypatch):
+    stdout = (
+        _STEWARD_HEADER + "\n"
+        "**APPROVE**\n"
+        "The change backs off when GitHub returns a rate limit and retries "
+        "after the window resets at the time the X-RateLimit-Reset header gives."
+    )
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
+    assert ("gate", None) in calls, calls
+
+
+def test_successful_aggregation_mentioning_a_401_is_not_an_auth_failure(monkeypatch):
+    stdout = (
+        _STEWARD_HEADER + "\n"
+        "**REQUEST_CHANGES**\n"
+        "[BLOCKING] arch: a 401 invalid authentication credentials response "
+        "from the provider is swallowed instead of surfaced."
+    )
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert auth_pages == [] and deferrals == []
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "request_changes") in calls, calls
+
+
+@pytest.mark.parametrize("ok", [True, False], ids=["success_return", "failure_return"])
+def test_limit_notice_without_verdict_still_defers(monkeypatch, ok):
+    notice = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=ok, vanellus_stdout=notice
+    )
+    assert len(deferrals) == 1, deferrals
+    agent, args, _kwargs = deferrals[0]
+    assert agent == "vanellus"
+    assert args[0] == notice  # the limit notice is what the deferral reads
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_failed_aggregation_with_limit_notice_and_verdict_still_defers(monkeypatch):
+    # A failed run is never treated as a review, even if a verdict token appears.
+    stdout = "**APPROVE**\nusage limit reached, resets at 19:30"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=False, vanellus_stdout=stdout
+    )
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][1][0] == stdout
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+# The review path skips the detectors for stdout only: stderr is still read,
+# so a zero-exit roll-up with a real limit or auth diagnostic there is not
+# acted on as a clean review.
+
+
+def test_successful_aggregation_with_limit_in_stderr_defers(monkeypatch):
+    stdout = "**APPROVE**\nlgtm"
+    stderr = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout, vanellus_stderr=stderr
+    )
+    assert len(deferrals) == 1, deferrals
+    agent, args, _kwargs = deferrals[0]
+    assert agent == "vanellus"
+    assert args == (stdout, stderr)  # reset parsing still sees both streams
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_successful_aggregation_with_auth_failure_in_stderr_pages(monkeypatch):
+    stdout = "**APPROVE**\nlgtm"
+    stderr = "API Error: 401 invalid authentication credentials"
+    assert swarm_dispatch.detect_auth_failure(stderr)  # instrument check
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout, vanellus_stderr=stderr
+    )
+    assert auth_pages == ["vanellus"], auth_pages
+    assert deferrals == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_successful_aggregation_mentioning_limits_with_empty_stderr_is_a_review(
+    monkeypatch,
+):
+    stdout = (
+        _STEWARD_HEADER + "\n"
+        "**APPROVE**\n"
+        "The retry loop honours the usage limit and waits until the window "
+        "resets at the time the provider reports."
+    )
+    assert swarm_dispatch.detect_session_limit(stdout)  # would match if read
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout, vanellus_stderr=""
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
+
+
+def test_verdict_only_in_stderr_is_not_a_review(monkeypatch):
+    # The verdict is read from stdout alone; a token in stderr does not make a
+    # limit notice in stdout a review.
+    notice = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=notice,
+        vanellus_stderr="**APPROVE**",
+    )
+    assert len(deferrals) == 1, deferrals
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+# Only Vanellus's verdict at the fixed position (header, then the verdict line
+# directly under it) makes a successful roll-up a review. A verdict token
+# anywhere else is incidental: the output still goes through both detectors.
+
+
+def test_limit_diagnostic_with_incidental_verdict_token_defers(monkeypatch):
+    stdout = (
+        "You've hit your session limit · resets 7:30pm (Europe/Madrid)\n"
+        "Last draft before the limit: **APPROVE**"
+    )
+    assert swarm_dispatch.parse_review_verdict(stdout) is not None  # token present
+    assert swarm_dispatch.lens_own_verdict(stdout, lens_agent="vanellus") is None
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][0] == "vanellus"
+    assert deferrals[0][1][0] == stdout
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_auth_diagnostic_with_incidental_verdict_token_pages(monkeypatch):
+    stdout = (
+        "API Error: 401 invalid authentication credentials\n"
+        "Partial output: **APPROVE**"
+    )
+    assert swarm_dispatch.detect_auth_failure(stdout)  # instrument check
+    assert not swarm_dispatch.detect_session_limit(stdout)
+    assert swarm_dispatch.parse_review_verdict(stdout) is not None
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert auth_pages == ["vanellus"], auth_pages
+    assert deferrals == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_well_formed_roll_up_mentioning_rate_limits_is_a_review(monkeypatch):
+    stdout = (
+        _STEWARD_HEADER + "\n"
+        "**APPROVE**\n"
+        "\n"
+        "Blocking: 0. The client hits the rate limit, backs off, and retries "
+        "once the usage limit resets at the time the provider reports."
+    )
+    assert swarm_dispatch.detect_session_limit(stdout)  # would match if read
+    assert swarm_dispatch.lens_own_verdict(stdout, lens_agent="vanellus") == "approve"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
 
 
 def test_parse_limit_reset_delay_reads_the_clock():

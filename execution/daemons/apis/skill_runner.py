@@ -3965,7 +3965,9 @@ async def _run_skill_once(
                     "read-only lens review needs dispatcher-owned verdict and "
                     "expectation publication before Fly dispatch"
                 )
-            _fly_job = fly_runner.build_job(
+            # In a thread: the Neotoma admission check is a blocking request.
+            _fly_job = await asyncio.to_thread(
+                fly_runner.build_job,
                 provider=provider,
                 role=_role,
                 cmd=cmd,

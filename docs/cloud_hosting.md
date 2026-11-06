@@ -133,8 +133,15 @@ before starting the CLI, constructs its child environment from the shared
 allowlist, and keeps signing/result-publishing authority out of the child.
 A role needs its own Neotoma identity; the shared daemon bearer is not a Fly
 fallback. Probe reports contain names and presence checks, never values.
-A key-only Fly job signs its result record with AAuth, but its child has no
-agent-side Neotoma MCP tools because it has no role bearer for the MCP config.
+A Fly job reaches Neotoma through the runner's root-owned signing proxy, which
+signs each request with the role's AAuth key; the child never holds the key or
+a bearer. The role needs an active `agent_grant` that pins that key. Before a
+role granted Neotoma tools is sent to Fly, the dispatcher asks Neotoma, with a
+signed `GET /session`, whether the key is admitted; a refused key, or a
+provider the proxy does not serve yet (only Claude today), keeps the job off
+Fly rather than running it without its tools. The only other way such a role
+runs on Fly is the legacy path of its own Neotoma token on Claude; no new
+tokens are minted for it. A seated run still gets no Neotoma tools on Fly.
 
 Repository delivery additionally needs a distinct PR-opener App configuration.
 The [existing App helper](../lib/github_app_token.py) resolves that identity;

@@ -37,7 +37,7 @@ from lib.daemon_runtime import gating  # noqa: E402
 from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
 
-MUTATIONS = ("none", "no_producer", "round_before_gate", "skip_assessment", "no_content", "raw_preview")
+MUTATIONS = ("none", "no_producer", "round_before_gate", "skip_assessment", "no_content", "raw_preview", "no_session_branch")
 BINDING = {"claude": {"local": "m-local", "mechanical": "m-mech", "mid": "m-mid", "top": "m-top"}}
 
 
@@ -269,6 +269,16 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
             mp.setattr(producer_confidence, "SCORER_TIMEOUT_SECONDS", 0)
             mp.setattr(producer_confidence, "TIMEOUT_GRACE_SECONDS", 0.05)
 
+        if mutation == "no_session_branch":
+            # The session-owned answer is removed: a session owner reads as it
+            # did before, as no route at all.
+            real_skill = apis._resolve_skill
+
+            def _no_session_answer(*a, **k):
+                skill = real_skill(*a, **k)
+                return None if skill == apis._SESSION_OWNED else skill
+
+            mp.setattr(apis, "_resolve_skill", _no_session_answer)
         if mutation == "no_producer":
             async def _nothing(*a, **k):
                 return producer_confidence.ScoreAttempt(None)
@@ -317,6 +327,20 @@ def check(scenario: dict, obs: dict) -> list[str]:
     decision = brief["decision"] if brief else None
 
     outcome = "held" if held and not executed else "executed" if executed and not held else "other"
+    if outcome == "other" and not held and not executed:
+        written = [s for _i, s, _r in obs["statuses"]]
+        if not written:
+            outcome = "left_as_filed"
+        elif any(getattr(s, "value", s) == "blocked" for s in written):
+            outcome = "blocked"
+    if "notifications" in exp and len(obs["notifications"]) != exp["notifications"]:
+        fails.append(
+            f"{len(obs['notifications'])} notifications, expected {exp['notifications']}: "
+            f"{obs['notifications']!r}"
+        )
+    for needle in exp.get("any_notification_contains", []):
+        if not any(needle in n for n in obs["notifications"]):
+            fails.append(f"no notification contains {needle!r}: {obs['notifications']!r}")
     if outcome != exp["outcome"]:
         fails.append(f"outcome {outcome!r}, expected {exp['outcome']!r}")
     if bool(obs["runner_calls"]) != exp["scorer_called"]:

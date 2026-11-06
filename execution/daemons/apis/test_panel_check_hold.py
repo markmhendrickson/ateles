@@ -964,7 +964,10 @@ def test_the_periodic_retry_runs_on_the_existing_review_sweep_loop():
     src = inspect.getsource(apis.main)
     loop = src[src.index("async def deferred_review_sweep"):]
     loop = loop[: loop.index("await asyncio.sleep(deferred_interval)")]
-    assert "retry_due_labelled_panels()" in loop
+    assert "deferred_review_sweep_pass(dispatcher)" in loop
+    assert "retry_due_labelled_panels()" in inspect.getsource(
+        apis.deferred_review_sweep_pass
+    )
 
 
 def test_the_periodic_step_starts_no_second_panel_on_a_head_already_running(
