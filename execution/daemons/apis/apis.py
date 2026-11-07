@@ -1257,18 +1257,24 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
                 return (_correction_not_started(skill, exc.reason) if target
                         else SkillResult(skill, False, None, "", "", error=exc.reason))
             fly_prompt += f"\n\n{build_delivery.tracking_instructions(claim)}"
-        if target:
+
+        async def verify_correction():
+            # The task's authorization, its owner policy and the PR target, read
+            # fresh each time: before the first attempt and before every further one.
             try:
                 binding = ({"lifecycle_version": task_lifecycle_version,
                             "lifecycle_provenance": task_lifecycle_provenance}
                            if task_lifecycle_version is not None else {})
                 policy_read, policy_current = _correction_policy_reader(
                     entity_id, task_snapshot, repository, target, claim, **binding)
-                reason = await build_delivery.verify_existing_pr_target(
+                return await build_delivery.verify_existing_pr_target(
                     repository, target, lambda repo: _token_for_agent_on_repo(skill, repo),
                     policy_reader=policy_read, policy_current=policy_current)
             except build_delivery.BuildWorktreeError as exc:
-                reason = exc.reason
+                return exc.reason
+
+        if target:
+            reason = await verify_correction()
             if reason:
                 return _correction_not_started(skill, f"existing PR correction not started: {reason}")
 
@@ -1308,6 +1314,12 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
                 if p and p not in refused_providers))
             if not newly:
                 break  # nothing new to exclude: another try could only repeat it
+            reason = await verify_correction()
+            if reason:
+                # The task, its policy or the PR changed during the refused
+                # attempt. Its receipt was already released (checked above), so
+                # stopping here leaves nothing behind and launches nothing.
+                return _correction_not_started(skill, f"existing PR correction not started: {reason}")
             refused_providers = (*refused_providers, *newly)
             log.warning(f"[{DAEMON_NAME}] {skill} task {entity_id}: Fly cannot run "
                         f"{result.provider} for this correction ({result.error}); "

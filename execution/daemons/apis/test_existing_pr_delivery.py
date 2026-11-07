@@ -296,6 +296,13 @@ def test_correction_refused_for_codex_tools_runs_on_claude(monkeypatch, admitted
     # from the code): the single-provider dispatch returned the codex refusal,
     # its receipt was released and the task was held with "Existing PR
     # correction not launched"; claude was never launched.
+    verified = []
+    async def qualified():
+        verified.append(1)
+        return None
+    async def current():
+        return None
+    monkeypatch.setattr(apis, "_correction_policy_reader", lambda *a, **kw: (qualified, current))
     seen = []
     monkeypatch.setattr(apis, "run_skill", _refusing_codex_run(seen))
     got = spawn(snapshot())
@@ -312,6 +319,53 @@ def test_correction_refused_for_codex_tools_runs_on_claude(monkeypatch, admitted
     receipts = delivery._delivery_ledger().delivery_receipts()
     assert list(receipts) == [REPO + "#12"]
     assert receipts[REPO + "#12"]["run_id"] == "claude-run"
+    # Verified once before the codex attempt and again before claude's (red
+    # before this fix, observed: verified == [1]).
+    assert verified == [1, 1]
+
+
+def test_correction_retry_reverifies_target_before_next_provider(monkeypatch, admitted_reader):
+    # Red before this fix (observed, by removing the loop's re-check): the
+    # target was read once, so the moved head went unseen and claude was
+    # launched against a PR whose head had changed during the codex attempt.
+    seen = []
+    codex_then_claude = _refusing_codex_run(seen)
+    async def run(skill, *a, **kw):
+        got = await codex_then_claude(skill, *a, **kw)
+        admitted_reader["headRefOid"] = "b" * 40  # the PR head moves meanwhile
+        return got
+    monkeypatch.setattr(apis, "run_skill", run)
+    got = spawn(snapshot())
+    assert [s[0] for s in seen] == ["codex"]
+    assert not got.ok
+    assert "existing PR correction not started" in got.error
+    assert "head" in got.error.lower()
+    assert delivery._delivery_ledger().delivery_receipts() == {}
+
+
+def test_correction_retry_reverifies_policy_before_next_provider(monkeypatch, admitted_reader):
+    # Red before this fix (observed, by removing the loop's re-check): the
+    # owner policy was read once, so a policy that stopped being current during
+    # the codex attempt did not stop claude from being launched.
+    state = {"current": None}
+    async def qualified():
+        return None
+    async def current():
+        return state["current"]
+    monkeypatch.setattr(apis, "_correction_policy_reader", lambda *a, **kw: (qualified, current))
+    seen = []
+    codex_then_claude = _refusing_codex_run(seen)
+    async def run(skill, *a, **kw):
+        got = await codex_then_claude(skill, *a, **kw)
+        state["current"] = "the task's owner policy is no longer current"
+        return got
+    monkeypatch.setattr(apis, "run_skill", run)
+    got = spawn(snapshot())
+    assert [s[0] for s in seen] == ["codex"]
+    assert not got.ok
+    assert "existing PR correction not started" in got.error
+    assert "owner policy is no longer current" in got.error
+    assert delivery._delivery_ledger().delivery_receipts() == {}
 
 
 def test_correction_refused_with_no_other_fly_provider_holds(monkeypatch, admitted_reader):
