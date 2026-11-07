@@ -4805,6 +4805,18 @@ class SwarmDispatcher:
         # (source, "owner/repo#N") pairs whose label-gate skip has already been
         # logged at WARNING by a periodic sweep — see `_label_gate_log`.
         self._label_gate_warned: set[tuple[str, str]] = set()
+        # PRs `_handle_pr` is running a panel for right now, keyed like
+        # `_panel_ci_holds`, valued by how many entries are in flight. The
+        # repeating panel sweep never re-enters a PR listed here.
+        self._panels_running: dict[tuple[str, int], int] = {}
+        # (casefolded repository, PR number, head SHA) the labelled-panel
+        # sweeps have already re-entered in this process. Each head is
+        # re-entered at most once, so a panel that strands again waits for a
+        # person or a new commit instead of looping. In memory only: a restart
+        # forgets it, and the startup sweep is then the one re-entry.
+        self._panel_sweep_entered: set[tuple[str, int, str]] = set()
+        # Held by one labelled-panel sweep at a time, startup or repeating.
+        self._panel_sweep_lock = asyncio.Lock()
 
     async def handle_trigger(self, trigger: SwarmTrigger) -> None:
         """Entry point handed to the webhook gateway. Never raises."""
@@ -5552,16 +5564,57 @@ class SwarmDispatcher:
         a head with pending checks becomes held (rebuilding the hold), a head
         with green checks runs its panel.
 
+        The PR list is read once, so each PR's current head is re-read just
+        before it is judged: a PR reached minutes later must not be judged on
+        the head it had when the list was read. A failed re-read leaves that
+        PR alone.
+
         PRs are handled one at a time, at most `_STARTUP_PANEL_SWEEP_MAX` per
         sweep. It never adds a label and never admits a PR the gate would not:
         each candidate still passes `_label_gate_allows`. A GitHub read that
         fails leaves that repository or PR alone. Never raises: a failed sweep
-        must not stop Apis from starting.
+        must not stop Apis from starting. `repeat_labelled_panel_sweep` runs
+        the same sweep while Apis is running.
         """
+        async with self._panel_sweep_lock:
+            return await self._sweep_labelled_panels(repositories, repeating=False)
+
+    async def repeat_labelled_panel_sweep(self, repositories: list[str]) -> dict | None:
+        """One pass of the labelled-panel sweep while Apis is running.
+
+        GitHub gives a webhook 10 seconds and does not resend one that timed
+        out, so a lost `check_suite/completed` leaves a held panel with nothing
+        to release it until the next restart. This repeats
+        `resume_labelled_panels`' approach (GitHub is the system of record and
+        `_handle_pr` decides the rest) with limits on its cost. A PR head is
+        left alone when a panel is running on the PR now, when its hold is
+        still in `_panel_ci_holds` with checks pending, when it was already
+        re-entered once in this process and has no hold whose checks are now
+        green, or when the PR carries a usage-limit
+        deferral that has not expired.
+
+        Returns None without sweeping while another sweep holds the lock, so
+        two sweeps never run at once. Never raises on a per-PR failure.
+        """
+        if self._panel_sweep_lock.locked():
+            log.info(
+                f"[{DAEMON_NAME}] repeating panel sweep: a sweep is already "
+                "running — skipping this pass"
+            )
+            return None
+        async with self._panel_sweep_lock:
+            return await self._sweep_labelled_panels(repositories, repeating=True)
+
+    async def _sweep_labelled_panels(
+        self, repositories: list[str], *, repeating: bool
+    ) -> dict:
+        name = "repeating panel sweep" if repeating else "startup panel sweep"
         summary = {
             "scanned": 0, "resumed": 0, "finished": 0, "unreadable": 0,
             "failed": 0, "capped": False,
         }
+        if repeating:
+            summary.update(running=0, held=0, already_entered=0, deferred=0)
         label = self.config.require_label
         if not label:
             return summary
@@ -5569,7 +5622,7 @@ class SwarmDispatcher:
             await self._await_github_app_ready(repositories)
         except Exception as exc:  # noqa: BLE001 — never block startup
             log.warning(
-                f"[{DAEMON_NAME}] startup panel sweep: GitHub App readiness "
+                f"[{DAEMON_NAME}] {name}: GitHub App readiness "
                 f"failed ({exc}) — continuing with whatever token is available"
             )
         for repository in repositories:
@@ -5580,7 +5633,7 @@ class SwarmDispatcher:
                 prs = await self._open_labelled_prs(repository, label)
             except Exception as exc:  # noqa: BLE001
                 log.warning(
-                    f"[{DAEMON_NAME}] startup panel sweep: could not list open "
+                    f"[{DAEMON_NAME}] {name}: could not list open "
                     f"PRs in {repository} ({exc}) — leaving them alone"
                 )
                 continue
@@ -5588,7 +5641,7 @@ class SwarmDispatcher:
                 if summary["scanned"] >= self._STARTUP_PANEL_SWEEP_MAX:
                     summary["capped"] = True
                     log.warning(
-                        f"[{DAEMON_NAME}] startup panel sweep: cap of "
+                        f"[{DAEMON_NAME}] {name}: cap of "
                         f"{self._STARTUP_PANEL_SWEEP_MAX} PRs reached — the "
                         "rest wait for their next event or the review sweeps"
                     )
@@ -5596,37 +5649,130 @@ class SwarmDispatcher:
                 summary["scanned"] += 1
                 ref = f"{repository}#{pr.get('number')}"
                 try:
-                    trigger = dataclasses.replace(
-                        self._pr_trigger_from_api(repository, pr),
-                        delivery_id=f"startup-panel-resume-{pr.get('number')}",
+                    await self._sweep_one_labelled_pr(
+                        repository, pr, summary, repeating=repeating, name=name
                     )
-                    if not await self._label_gate_allows(
-                        trigger, source="resume_labelled_panels"
-                    ):
-                        continue
-                    finished = await self._panel_finished_for_pr(trigger)
-                    if finished is None:
-                        summary["unreadable"] += 1
-                        continue
-                    if finished:
-                        summary["finished"] += 1
-                        continue
-                    log.info(
-                        f"[{DAEMON_NAME}] startup panel sweep: {ref} head "
-                        f"{trigger.head_sha[:9]} has no finished panel — "
-                        "re-entering review"
-                    )
-                    await self._handle_pr(trigger)
-                    summary["resumed"] += 1
                 except Exception as exc:  # noqa: BLE001
                     summary["failed"] += 1
                     log.error(
-                        f"[{DAEMON_NAME}] startup panel sweep: {ref} failed "
-                        f"({exc})",
+                        f"[{DAEMON_NAME}] {name}: {ref} failed ({exc})",
                         exc_info=True,
                     )
-        log.info(f"[{DAEMON_NAME}] startup panel sweep: {summary}")
+        log.info(f"[{DAEMON_NAME}] {name}: {summary}")
         return summary
+
+    async def _sweep_one_labelled_pr(
+        self, repository: str, listed: dict, summary: dict, *, repeating: bool,
+        name: str,
+    ) -> None:
+        """Judge one listed PR at its CURRENT head; re-enter review if stranded."""
+        number = listed.get("number")
+        ref = f"{repository}#{number}"
+        # Re-read the head now: the list may be minutes old by the time this
+        # PR is reached, and an old head reads as "check state unreadable".
+        fresh = await self._fetch_pr(repository, number)
+        if not isinstance(fresh, dict) or not fresh:
+            summary["unreadable"] += 1
+            log.warning(
+                f"[{DAEMON_NAME}] {name}: could not re-read {ref} — leaving it "
+                "alone until the next sweep"
+            )
+            return
+        if fresh.get("state", "open") != "open" or fresh.get("draft"):
+            return
+        trigger = dataclasses.replace(
+            self._pr_trigger_from_api(repository, {**fresh, "number": number}),
+            delivery_id=(
+                f"{'repeat' if repeating else 'startup'}-panel-resume-{number}"
+            ),
+        )
+        head = _normalise_full_sha(trigger.head_sha or "")
+        key = (repository.casefold(), int(number))
+        if repeating:
+            if self._panels_running.get(key):
+                summary["running"] += 1
+                return
+            # The hold is looked at before the already-entered mark: an
+            # earlier entry of this head may have ended in a hold (checks
+            # pending), and if the checks-finished webhook was lost, the
+            # hold's now-green checks are what this sweep exists to catch.
+            # Only a head with no green hold stays suppressed once entered.
+            held = self._panel_ci_holds.get(key)
+            held_green = False
+            if held is not None and held.head == head:
+                gate = await self._read_head_check_gate(
+                    repository, trigger.head_sha, trigger.base_ref
+                )
+                if gate.pending:
+                    summary["held"] += 1
+                    return
+                held_green = bool(gate.green)
+            if not held_green and head and (*key, head) in self._panel_sweep_entered:
+                summary["already_entered"] += 1
+                return
+        if not await self._label_gate_allows(
+            trigger, source="resume_labelled_panels"
+        ):
+            return
+        if repeating and await self._unexpired_deferral(repository, int(number)):
+            summary["deferred"] += 1
+            return
+        finished = await self._panel_finished_for_pr(trigger)
+        if finished is None:
+            summary["unreadable"] += 1
+            return
+        if finished:
+            summary["finished"] += 1
+            return
+        log.info(
+            f"[{DAEMON_NAME}] {name}: {ref} head "
+            f"{trigger.head_sha[:9]} has no finished panel — re-entering review"
+        )
+        # Recorded before entry, so a panel that fails again is not re-entered
+        # on this head by a later sweep in this process.
+        if head:
+            self._panel_sweep_entered.add((*key, head))
+        await self._handle_pr(trigger)
+        summary["resumed"] += 1
+
+    async def _unexpired_deferral(self, repository: str, number: int) -> bool:
+        """True if the PR's latest live `review-deferred-until:` marker is in the future.
+
+        The same last-write-wins walk as `_has_live_deferral_marker`, plus the
+        maturity check `_prs_with_matured_deferral` applies: an unmatured
+        marker means a usage limit is still in force, and a matured one belongs
+        to the deferred sweep. An unreadable thread or marker counts as
+        unexpired, so a read failure leaves the PR alone. The whole thread is
+        read through `_issue_comments_scan`, as those two do: the newest marker
+        may lie past the first 100 comments, and a scan that could not reach
+        the last page also counts as unexpired.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments, complete = await self._issue_comments_scan(
+                    repository, number, client
+                )
+        except Exception:  # noqa: BLE001
+            return True
+        if not complete:
+            return True
+        latest_iso = None
+        for c in await self._swarm_authored(repository, number, comments):
+            body = c.get("body", "") if isinstance(c, dict) else ""
+            m = self._REVIEW_DEFERRED_RE.search(body)
+            if m:
+                latest_iso = m.group(1)
+            elif _VANELLUS_COMMENT_MARKER in body:
+                latest_iso = None
+        if latest_iso is None:
+            return False
+        try:
+            due_at = datetime.strptime(latest_iso, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            return True
+        return due_at > datetime.now(timezone.utc)
 
     async def _open_labelled_prs(self, repository: str, label: str) -> list[dict]:
         """Open, non-draft PRs in `repository` carrying `label` on the PR itself.
@@ -8250,17 +8396,35 @@ class SwarmDispatcher:
 
     def _panel_running(self, trigger: SwarmTrigger) -> bool:
         """True while a panel for this PR head is running in this process."""
-        running = self.__dict__.setdefault("_panels_running", set())
+        running = self.__dict__.setdefault("_panel_heads_running", set())
         return self._panel_run_key(trigger) in running
 
     async def _handle_pr(self, trigger: SwarmTrigger) -> None:
+        """The PR review entrance; records the PR as running while it works.
+
+        `_panels_running` is what lets the repeating panel sweep leave a PR
+        with a panel in progress alone. The count is released in a `finally`,
+        so a raise or cancellation never pins a PR as running.
+        """
+        key = (trigger.repository.casefold(), trigger.number)
+        self._panels_running[key] = self._panels_running.get(key, 0) + 1
+        try:
+            await self._handle_pr_entrance(trigger)
+        finally:
+            remaining = self._panels_running.get(key, 1) - 1
+            if remaining > 0:
+                self._panels_running[key] = remaining
+            else:
+                self._panels_running.pop(key, None)
+
+    async def _handle_pr_entrance(self, trigger: SwarmTrigger) -> None:
         """Run the review panel for one PR head, at most once at a time.
 
         A sweep or webhook that arrives while a panel for the same head is
         running is skipped: the running panel produces that head's verdict.
         The guard is cleared when the panel ends, including when it raises.
         """
-        running = self.__dict__.setdefault("_panels_running", set())
+        running = self.__dict__.setdefault("_panel_heads_running", set())
         key = self._panel_run_key(trigger)
         if key in running:
             log.info(
