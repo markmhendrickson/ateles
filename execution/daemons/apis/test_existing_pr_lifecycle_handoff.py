@@ -100,6 +100,16 @@ def joined(normal, admitted_reader, monkeypatch, tmp_path):
         checkpoint['entity_version'] = 'checkpoint-v2'
         return True
 
+    def take_release(entity_id, *, kind, owner_token, taken_at, expected_version):
+        # The release owner shares the stamp's version precondition; this inert
+        # store keeps the version so the stamp's own expectation is unchanged.
+        assert entity_id == checkpoint_id
+        if expected_version != checkpoint['entity_version']:
+            return None
+        checkpoint['snapshot']['release_owner'] = (
+            gating_module.encode_checkpoint_release_owner(kind, taken_at, owner_token))
+        return checkpoint['entity_version']
+
     real_reader = apis._correction_policy_reader
     def reader(entity_id, snapshot, *args, **kwargs):
         if state['before_reader']:
@@ -136,6 +146,7 @@ def joined(normal, admitted_reader, monkeypatch, tmp_path):
                         lambda *a, **kw: {'principal_sub': 'ateles@ateles-swarm'})
     monkeypatch.setattr(apis, 'resolve_policy_for_agent', lambda *a: policy)
     monkeypatch.setattr(apis, 'stamp_checkpoint_dispatched', stamp)
+    monkeypatch.setattr(apis, 'take_checkpoint_release', take_release)
     monkeypatch.setattr(apis, 'set_task_status', lifecycle.set_task_status)
     monkeypatch.setattr(lifecycle, 'NEOTOMA_BASE_URL', 'https://inert.invalid')
     monkeypatch.setattr(lifecycle, 'NEOTOMA_BEARER_TOKEN', 'inert-fixture-token')

@@ -1531,75 +1531,204 @@ def stamp_checkpoint_dispatched(
     unconditional write, which is for the deny fallback only: it consumes the
     claim without releasing anything.
     """
-    if not NEOTOMA_BEARER_TOKEN:
-        log.warning("[gating] no bearer token — cannot stamp checkpoint dispatched")
-        return False
-    body = {
-        "entity_id": checkpoint_entity_id,
-        "entity_type": "checkpoint_brief",
-        "field": "resolved_dispatched",
-        "value": True,
-        "idempotency_key": f"checkpoint-dispatched-{handler}-{checkpoint_entity_id}",
-    }
-    if isinstance(expected_version, str) and expected_version:
-        body["expected_version"] = expected_version
     try:
-        resp = httpx.post(
-            f"{NEOTOMA_BASE_URL}/correct",
-            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            json=body,
-            timeout=15,
+        claimed = _claim_checkpoint_field(
+            checkpoint_entity_id,
+            field="resolved_dispatched",
+            value=True,
+            idempotency_key=f"checkpoint-dispatched-{handler}-{checkpoint_entity_id}",
+            expected_version=expected_version,
+            materialized=checkpoint_already_dispatched,
+            label="stamp",
         )
-        if "expected_version" in body and resp.status_code == 409:
-            try:
-                code = (resp.json() or {}).get("error_code")
-            except ValueError:
-                code = None
-            if code == "ERR_FIELD_VERSION_CONFLICT":
-                log.info(
-                    "[gating] checkpoint %s changed since it was read — claim not acquired",
-                    checkpoint_entity_id,
-                )
-                return False
-        resp.raise_for_status()
-        response_body = resp.json()
-        if not isinstance(response_body, dict) or response_body.get("snapshot") is None:
-            # Neotoma's idempotent duplicate path returns snapshot=null. The
-            # field may read true because another consumer won, but this caller
-            # did not acquire the claim and therefore must not dispatch.
-            log.info(
-                "[gating] checkpoint %s stamp was an idempotent replay — claim not acquired",
-                checkpoint_entity_id,
-            )
-            return False
-        # A successful correction response is not proof that the field landed:
-        # Neotoma can accept a write that does not materialize on the entity.
-        # Read the brief itself back before treating the stamp as a replay claim.
-        data = _fetch_entity(checkpoint_entity_id)
-        if data is None:
-            log.warning(
-                "[gating] checkpoint %s stamp could not be read back",
-                checkpoint_entity_id,
-            )
-            return False
-        entity_type = (
-            str(data.get("entity_type") or data.get("type") or "").strip().lower()
-        )
-        snapshot = _snapshot_of(data)
-        if entity_type != "checkpoint_" + "brief" or not checkpoint_already_dispatched(
-            snapshot
-        ):
-            log.warning(
-                "[gating] checkpoint %s stamp was not materialized on read-back",
-                checkpoint_entity_id,
-            )
-            return False
-        return True
+        return claimed is not None
     except Exception as exc:  # noqa: BLE001
         log.warning(
             f"[gating] failed to stamp checkpoint {checkpoint_entity_id} dispatched: {exc}"
         )
         return False
+
+
+# The one field that records who holds a checkpoint's release: written by the
+# normal release before its stamp, and taken over by stranded-release recovery,
+# both with the same version-checked correction. One field means a normal
+# release and a recovery, or two recoveries, cannot both hold it: each write is
+# conditioned on the version the writer read, so only one commits per version,
+# and whichever path dispatches re-reads it first (``checkpoint_release_held_by``).
+# The value is ``"<kind>|<taken_at ISO-8601>|<owner token>"``; kind is
+# ``release`` or ``recovery``. A recovery owner is never taken over again.
+CHECKPOINT_RELEASE_OWNER_FIELD = "release_owner"
+RELEASE_OWNER_KINDS = ("release", "recovery")
+
+
+@dataclass(frozen=True)
+class CheckpointReleaseOwner:
+    kind: str
+    taken_at: datetime
+    token: str
+
+
+def encode_checkpoint_release_owner(kind: str, taken_at: datetime, token: str) -> str:
+    return f"{kind}|{taken_at.astimezone(timezone.utc).isoformat()}|{token}"
+
+
+def checkpoint_release_owner(snapshot: dict) -> CheckpointReleaseOwner | None:
+    """The release owner on a checkpoint snapshot; None when absent or unparseable.
+
+    Callers treat None as "no ownership record": not recoverable, and not held
+    by anyone who could dispatch.
+    """
+    value = snapshot.get(CHECKPOINT_RELEASE_OWNER_FIELD)
+    if not isinstance(value, str):
+        return None
+    parts = value.split("|", 2)
+    if len(parts) != 3 or parts[0] not in RELEASE_OWNER_KINDS or not parts[2]:
+        return None
+    try:
+        taken_at = datetime.fromisoformat(parts[1])
+    except ValueError:
+        return None
+    if taken_at.tzinfo is None:
+        return None
+    return CheckpointReleaseOwner(parts[0], taken_at, parts[2])
+
+
+def checkpoint_release_held_by(snapshot: dict, token: str) -> bool:
+    owner = checkpoint_release_owner(snapshot)
+    return bool(token) and owner is not None and owner.token == token
+
+
+def take_checkpoint_release(
+    checkpoint_entity_id: str,
+    *,
+    kind: str,
+    owner_token: str,
+    taken_at: datetime,
+    expected_version: str,
+) -> str | None:
+    """Take (or take over) the release ownership of a checkpoint.
+
+    The same version-checked correction the release stamp uses: two writers
+    that read the same version both send it, Neotoma commits one and refuses
+    the other with 409. Returns the checkpoint's ``entity_version`` read back
+    after the write when the record carries exactly this owner, else None (a
+    refusal, an idempotent replay, a failed write, an unreadable or different
+    read-back, or a missing version). The caller must not dispatch on None.
+    """
+    if kind not in RELEASE_OWNER_KINDS or not owner_token:
+        return None
+    if not (isinstance(expected_version, str) and expected_version):
+        log.warning(
+            "[gating] checkpoint %s has no entity_version — release ownership not taken",
+            checkpoint_entity_id,
+        )
+        return None
+    try:
+        data = _claim_checkpoint_field(
+            checkpoint_entity_id,
+            field=CHECKPOINT_RELEASE_OWNER_FIELD,
+            value=encode_checkpoint_release_owner(kind, taken_at, owner_token),
+            # Unique per owner: a shared key would let the loser's write be
+            # answered as an idempotent duplicate of the winner's.
+            idempotency_key=(
+                f"checkpoint-release-owner-{checkpoint_entity_id}-{owner_token}"
+            ),
+            expected_version=expected_version,
+            materialized=lambda snap: checkpoint_release_held_by(snap, owner_token),
+            label=f"{kind} ownership",
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "[gating] failed to take %s ownership of checkpoint %s: %s",
+            kind,
+            checkpoint_entity_id,
+            exc,
+        )
+        return None
+    if data is None:
+        return None
+    version = data.get("entity_version")
+    return version if isinstance(version, str) and version else None
+
+
+def _claim_checkpoint_field(
+    checkpoint_entity_id: str,
+    *,
+    field: str,
+    value,
+    idempotency_key: str,
+    expected_version: str | None,
+    materialized,
+    label: str,
+) -> dict | None:
+    """One version-checked checkpoint correction, read back before it counts.
+
+    Returns the read-back record when the write materialized, else None.
+    Raises on transport or HTTP errors; callers turn that into a refusal.
+    """
+    if not NEOTOMA_BEARER_TOKEN:
+        log.warning("[gating] no bearer token — cannot write checkpoint %s", label)
+        return None
+    body = {
+        "entity_id": checkpoint_entity_id,
+        "entity_type": "checkpoint_brief",
+        "field": field,
+        "value": value,
+        "idempotency_key": idempotency_key,
+    }
+    if isinstance(expected_version, str) and expected_version:
+        body["expected_version"] = expected_version
+    resp = httpx.post(
+        f"{NEOTOMA_BASE_URL}/correct",
+        headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+        json=body,
+        timeout=15,
+    )
+    if "expected_version" in body and resp.status_code == 409:
+        try:
+            code = (resp.json() or {}).get("error_code")
+        except ValueError:
+            code = None
+        if code == "ERR_FIELD_VERSION_CONFLICT":
+            log.info(
+                "[gating] checkpoint %s changed since it was read — %s not acquired",
+                checkpoint_entity_id,
+                label,
+            )
+            return None
+    resp.raise_for_status()
+    response_body = resp.json()
+    if not isinstance(response_body, dict) or response_body.get("snapshot") is None:
+        # Neotoma's idempotent duplicate path returns snapshot=null. The
+        # field may read set because another consumer won, but this caller
+        # did not acquire the claim and therefore must not dispatch.
+        log.info(
+            "[gating] checkpoint %s %s was an idempotent replay — claim not acquired",
+            checkpoint_entity_id,
+            label,
+        )
+        return None
+    # A successful correction response is not proof that the field landed:
+    # Neotoma can accept a write that does not materialize on the entity.
+    # Read the brief itself back before treating the write as a claim.
+    data = _fetch_entity(checkpoint_entity_id)
+    if data is None:
+        log.warning(
+            "[gating] checkpoint %s %s could not be read back",
+            checkpoint_entity_id,
+            label,
+        )
+        return None
+    entity_type = str(data.get("entity_type") or data.get("type") or "").strip().lower()
+    snapshot = _snapshot_of(data)
+    if entity_type != "checkpoint_" + "brief" or not materialized(snapshot):
+        log.warning(
+            "[gating] checkpoint %s %s was not materialized on read-back",
+            checkpoint_entity_id,
+            label,
+        )
+        return None
+    return data
 
 
 def _transition_checkpoint_status(
