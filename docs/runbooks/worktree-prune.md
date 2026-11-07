@@ -99,16 +99,31 @@ archiving is it removed with `git worktree remove --force`; that flag appears no
 `--apply` it deletes them. It only ever deletes a date-named directory whose layout is exactly what this
 tool writes (`<date>/<repo>/<archive>/` holding `meta.json` and only the known members, no symlinks, no
 unfinished `.partial` directory). Any other date-named directory is skipped, logged and reported as
-`skipped_foreign_dirs`.
+`skipped_foreign_dirs`. A directory is moved aside inside the archive root and verified again before it is
+deleted, and put back if it no longer matches. An archive root that is a symlink, or whose real path differs
+from the configured one, is refused: nothing is listed or deleted (status `refused-archive-root`, exit 2).
 
-A worktree that holds an untracked or ignored file with a secret-looking name is never archived and never
-removed by this tier: it is kept with the reason `secrets-present` and counted in `secrets_present` in the
-run summary. Names only are judged, file contents are never read: `.env` and `.env.*`, `*.pem`, `*.key`,
-`*.p12`, `*.pfx`, `credentials*`, anything containing `secret`, `.netrc`, `.npmrc`, `id_rsa*` and
-`id_ed25519*`. Placeholder-template names (`.example`, `.sample`, `.template`, `.dist`, as defined once in
-`lib/credential_templates.py`), and the `.env.development*` family (always left out of archives), do not
-trigger it. Move or delete the file yourself to let the worktree be
-archived.
+A worktree that touches a secret-looking name in anything the archive would carry is never archived and
+never removed by this tier: it is kept whole with the reason `secrets-present` and counted in
+`secrets_present` in the run summary. The names are looked for in every channel: untracked or ignored files
+(the tarball), every path in the working-tree and staged diff against HEAD, rename sources and targets
+included (`patch.diff`), and every path touched by a commit that exists only locally (the bundle). Every
+component of a path is judged, directories included (`config/secrets/prod.txt`, anything under `.ssh/`).
+Names only are judged, file contents are never read, case-insensitively: `.env`, `.env.*`, `.envrc`,
+`.netrc`, `.npmrc`, `.pgpass`, `.pypirc`, `.htpasswd`, `.git-credentials`, `.aws`, `.ssh`, `.gnupg`, `*.pem`,
+`*.key`, `*.p12`, `*.pfx`, `*.p8`, `*.jks`, `*.keystore`, `*.kdbx`, `*.gpg`, `*.asc`, `*.tfvars`, `*.tfstate`,
+`id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `service-account*.json`, and anything containing `secret`,
+`credential`, `token`, `password`, `passwd`, `apikey`, `api_key` or `private_key`. The list errs toward
+keeping, so an ordinary path such as `src/token_utils.py` in a diff also keeps its worktree. The check runs
+before the archive is built and again after it, and the finished archive is discarded on a hit.
+Placeholder-template names (`.example`, `.sample`, `.template`, `.dist`, as defined once in
+`lib/credential_templates.py`) are exempt unless the file is a symbolic link; if that definition cannot be
+loaded, the run log says so once and no name is exempt. Move or delete the file, or push the commit, yourself
+to let the worktree be archived.
+
+The `.env.development*` files that a repository's tooling copies into each worktree are deliberately left
+out of archives and are exempt from the check above, so they are deleted with the worktree on forced
+removal: a hand-edited `.env.development.*` file is not recoverable from an archive.
 
 Restore: in the main clone, `git worktree add --detach <dir> <head>`; if a bundle exists,
 `git fetch <archive>/local-commits.bundle HEAD:refs/heads/restored` first; then
@@ -127,7 +142,7 @@ window must pass it knowingly; the launchd template deliberately passes no `--id
 - Refuses any path outside the user's home directory, under `~/Library`, in the deployment checkouts
   (`~/ateles-rc-src`, `~/neotoma-rc-src`) or on the configured never-touch list.
 - Single-instance lock; a second run exits quietly.
-- Per-run cap `--max` (default 150) counts worktrees removed plus worktrees stripped; the rest waits for the
+- Per-run cap `--max` (default 150; the launchd template passes `--max 200`) counts worktrees removed plus worktrees stripped; the rest waits for the
   next run (`over-cap-deferred`).
 - Aborts the run (no further deletion) if more than 20% of git and gh calls fail once at least 20 calls
   were made.
@@ -193,6 +208,7 @@ Each run appends one line to `runs.jsonl` whose `status` is one of:
 | `skipped-locked` | 0 | another run holds the lock; nothing was done |
 | `skipped-manual-cleanup-active` | 0 | `--yield-to-file` named a file changed in the last 30 minutes |
 | `aborted-error-ratio` | 2 | more than 20% of git and gh calls failed; no further deletion happened |
+| `refused-archive-root` | 2 | `--prune-archives` was pointed at an archive root that is a symlink or resolves elsewhere |
 | `crashed` | 1 | an unexpected exception; the line carries a truncated `error` |
 
 ## Reasons a worktree was kept
@@ -213,7 +229,7 @@ alone. The node_modules tier has its own map, `strip_kept`.
 | `git-refused` | `git worktree remove` refused (logged with git's message) |
 | `over-cap-deferred` | the `--max` cap was reached; next run |
 | `archive-root-inside-repo`, `archive-too-big`, `archive-failed`, `archive-no-dry-tmp`, `nested-repo`, `has-submodules` | archive tier refusals |
-| `secrets-present`, `secrets-check-error` | archive tier: a secret-named file is present (or names could not be listed) |
+| `secrets-present`, `secrets-check-error` | archive tier: a secret-looking name appears in an untracked or ignored file, the diff against HEAD, or a local-only commit (or the names could not be listed) |
 | `no-node-modules`, `refused-node-modules`, `strip-failed` | node_modules tier: nothing to do, every candidate refused (`strip_refused` in the log names each with `symlink`, `not-contained`, `mount-point`, `tracked-files`, `nested-repo`), or a delete failed part-way |
 | `aborted-error-ratio` | the error-abort ratio was reached |
 
