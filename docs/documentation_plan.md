@@ -1,39 +1,38 @@
 # Documentation plan & reconciliation
 
-> **What this is.** A first-principles plan for the documentation this repository *should* have, derived from
-> an audit of what the code actually does (not from the existing docs), prioritized for the
-> [ideal operator](icp.md) — followed by an audit of the *current* documentation and a concrete plan to
-> reconcile the two. This document is the source of truth for the doc set; the
-> [docs index](README.md) is the reader-facing navigation.
+> **What this is.** Part 1 sets documentation priorities for the [current audience](icp.md).
+> Parts 2 and 3 record the original documentation audit and the reconciliation work that followed.
+> This document is the source of truth for the doc set. The [docs index](README.md) is the reader-facing
+> navigation.
 
-The bullseye reader is the **forking solo founder-operator** (see [icp.md](icp.md)). Their journey sets the
-priority order: **decide → understand → stand up → operate → extend → maintain.** Documentation priority
-follows that journey.
+The primary readers are **accountable technical operators** who run work for their own organizations or
+on behalf of client organizations. Documentation follows their journey from deciding and understanding
+to standing up, operating, extending, and maintaining Ateles.
 
 ## Purpose
 
-Specify the documentation set this repo should have (prioritized for the ideal operator), audit what exists
-today, and lay out the actions to reconcile the two — so the docs match the audited functionality.
+Specify the documentation this repo should have for its intended operators and preserve the audit and
+reconciliation history that informed the catalog.
 
 ## Scope
 
-Part 1 is the prioritized outline (what's needed). Part 2 audits the current `docs/` tree (current / stale /
-misplaced / off-topic / operator-personal). Part 3 lists the reconciliation actions taken in this pass and
-the follow-ups recommended to the operator. Excludes editing the design-note bodies themselves.
+Part 1 is the prioritized outline. Part 2 records how the audit classified the `docs/` tree at the time.
+Part 3 lists the reconciliation actions and follow-ups. Excludes editing the design-note bodies themselves.
 
 ---
 
 ## Part 1 — The documentation the repo needs (prioritized outline)
 
-Ordered by ICP priority. **P0** is what a prospective adopter needs in the first five minutes; **P5** is
-deep reference consulted occasionally. "Status" = does an adequate doc exist today (see Part 2).
+Ordered by audience priority. **P0** is what a prospective adopter needs in the first five minutes.
+**P5** is deep reference consulted occasionally. The status column records the catalog's reconciliation
+status (see Part 2).
 
 ### P0 — Decide & orient (first 5 minutes: *what is this, is it for me?*)
 
 | # | Doc | Purpose | Status |
 | --- | --- | --- | --- |
 | 1 | **README** | One-screen accurate picture: dual nature (substrate + ops suite), what it does, who it's for | ✅ rewritten |
-| 2 | **ICP** (`icp.md`) | Whom the repo is primarily for, derived from functionality; explicit anti-profile | ✅ created |
+| 2 | **[ICP](icp.md)** | Intended technical operators and adoption limits, with [audit evidence](icp.md#historical-functionality-audit-evidence) from the original profile (2026-06-25 revision) | ✅ updated |
 | 3 | **Architecture overview** (`architecture.md`) | Entity model, four tiers, substrate, Neotoma integration | ✅ exists |
 | 4 | **Documentation index** (`docs/README.md`) | Navigation map of the whole doc set, organized by the ICP journey | ⚠️ rewritten (was stale) |
 
@@ -90,11 +89,11 @@ deep reference consulted occasionally. "Status" = does an adequate doc exist tod
 
 ## Part 2 — Audit of the current documentation
 
-`docs/` today holds **294 files across 43 directories** — but a large share is **not documentation**, and a
-meaningful slice is **stale** (describes the pre-swarm "three-layer" / Cursor-rules era) or **off-topic**
-(home-automation troubleshooting, a conference transcript) or **operator-personal** (health plans, an
-outreach contact list). The reconciliation opportunity is to separate the durable architecture/operating
-docs from this sediment.
+At the time of the audit, `docs/` held **294 files across 43 directories**. Many files served purposes
+other than documentation. The audit also found **stale** material from the pre-swarm "three-layer" /
+Cursor-rules era, **off-topic** material such as home-automation troubleshooting and a conference
+transcript, and **operator-personal** material such as health plans and an outreach contact list.
+The audit proposed separating the durable architecture and operating docs from these other files.
 
 ### A. Accurate & current — keep (the real doc set)
 
@@ -181,7 +180,7 @@ operator-facing context the SKILL.md omits; otherwise link to the skill from a s
 
 1. **Rewrote `README.md`** from the functionality audit — dual framing, accurate daemon/agent counts, honest
    maturity, corrected the launchd claims, fixed the "MIT" claim by adding a real `LICENSE`.
-2. **Created `docs/icp.md`** — the ideal-operator profile from first principles.
+2. **Created the original `docs/icp.md`** from the functionality audit.
 3. **Rewrote `docs/README.md`** — a true documentation index organized by the ICP journey (replacing the
    stale Asana/Cursor-era index).
 4. **Created `docs/capabilities.md`** — the operational surface (18 daemons + skill categories by domain),

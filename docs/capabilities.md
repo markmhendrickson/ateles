@@ -1,9 +1,8 @@
 # Capabilities — the operational surface
 
 Ateles is often described by its *substrate* (AAuth identity, grants, observation, gating). This document
-covers the other half: **what the swarm actually does**, day to day, for its operator. The surface is large
-because the [ideal operator](icp.md) delegates both their company's work and their personal life to the
-fleet.
+covers the day-to-day operational surface of the reference implementation. Its workload spans company
+operations and personal tasks. The [ICP](icp.md) describes the intended operators and adoption requirements.
 
 Two kinds of components do the work:
 
@@ -17,8 +16,8 @@ The [README daemon table](../README.md#daemons) and [taxonomy](taxonomy.md) are 
 
 ## Purpose
 
-Give an accurate, single-place reference to *what the swarm does* — the daemons and skills that automate the
-operator's company and life — so the operational half of the repo is documented in proportion to its size.
+Document the daemons and skills used in the reference workload so readers can see how the operational
+surface fits together.
 
 ## Scope
 
