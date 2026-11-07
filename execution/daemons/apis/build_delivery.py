@@ -813,7 +813,10 @@ def worktree_instructions(wt: BuildWorktree) -> str:
 # ``pr_failed`` correction receipt whose pushed commit is exactly the next
 # correction's admitted (live) head is replaced by that correction's reservation
 # (``supersedable_correction``). That is a new round on the run's own result,
-# not a retry of it; the round limit stays with the PR's coordinator.
+# not a retry of it; the round limit stays with the PR's coordinator. So is a
+# settled ``not_delivered`` correction that recorded no commit and was admitted
+# against the very head the next correction declares: nothing landed, and its
+# run holds no reservation still in flight.
 
 FLY_DELIVERY_BASE_BRANCH = "main"
 FLY_DELIVERY_AUTHOR = ("cicada (ateles swarm)", "cicada@ateles-swarm.invalid")
@@ -998,6 +1001,11 @@ FLY_RECEIPT_COMMAND = "python3 execution/daemons/apis/fly_delivery_receipt.py"
 # receipt until the operator clears it: an unknown outcome, or a run that
 # changed nothing, is never renewed here.
 SUPERSEDABLE_CORRECTION_STATUSES = frozenset({"updated", "pr_failed"})
+# The one further exception: a ``not_delivered`` correction that recorded no
+# commit, admitted against the very head the next correction declares, whose
+# run has settled (``_undelivered_correction_settled``). Nothing landed, so the
+# next correction starts from the same head; no other status shares this.
+NOT_DELIVERED_CORRECTION_STATUS = "not_delivered"
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
@@ -1026,15 +1034,23 @@ def supersedable_correction(plan: "FlyDeliveryPlan", stored: str, entry: dict) -
     The new task's admission (``verify_existing_pr_target``) has already read
     the live PR and required its head to equal ``plan.target.head_sha``, so a
     match proves the earlier run's commit landed and is the PR's current head:
-    the new correction was written against that run's result."""
+    the new correction was written against that run's result.
+
+    One narrower case also qualifies: a settled ``not_delivered`` correction
+    that recorded no commit and was admitted against the same head the new
+    correction declares (``_undelivered_correction_settled``)."""
     target = plan.target
     if target is None or canonical_key(stored) != canonical_key(plan.key):
         return False  # only the PR's own receipt, never one found via an association
-    if entry.get("kind") == "lens" or entry.get("status") not in SUPERSEDABLE_CORRECTION_STATUSES:
+    if entry.get("kind") == "lens":
         return False
     admitted = entry.get("existing_pr")
     if not isinstance(admitted, dict):
         return False  # a first delivery's receipt
+    if entry.get("status") == NOT_DELIVERED_CORRECTION_STATUS:
+        return _undelivered_correction_settled(target, entry, admitted)
+    if entry.get("status") not in SUPERSEDABLE_CORRECTION_STATUSES:
+        return False
     commit = entry.get("commit")
     if not isinstance(commit, str) or not _FULL_SHA_RE.fullmatch(commit):
         return False
@@ -1042,6 +1058,34 @@ def supersedable_correction(plan: "FlyDeliveryPlan", stored: str, entry: dict) -
             and str(admitted.get("pr_number")) == str(target.number)
             and admitted.get("branch") == target.branch
             and admitted.get("base_branch") == target.base_branch)
+
+
+def _undelivered_correction_settled(target: "ExistingPRTarget", entry: dict, admitted: dict) -> bool:
+    """True only when a ``not_delivered`` correction of the same PR recorded
+    no commit, was admitted against exactly the head the new correction
+    declares, and its run holds no reservation still in flight.
+
+    Admission has already required ``target.head_sha`` to be the PR's live
+    head, so an equal admitted head proves nothing landed from that run: the
+    new correction starts from the same state the earlier one did. Any ledger
+    read failure, or a run that cannot be named, refuses."""
+    import fly_runner
+
+    if "commit" not in entry or entry["commit"] not in (None, ""):
+        return False  # a missing field is unknown evidence, not a recorded "no commit"
+    if not (isinstance(target.head_sha, str) and _FULL_SHA_RE.fullmatch(target.head_sha)
+            and admitted.get("head_sha") == target.head_sha
+            and str(admitted.get("pr_number")) == str(target.number)
+            and admitted.get("branch") == target.branch
+            and admitted.get("base_branch") == target.base_branch):
+        return False
+    run_id = entry.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return False  # the run cannot be shown to have settled
+    try:
+        return _delivery_ledger().entry(run_id) is None
+    except (OSError, fly_runner.FlyLedgerError, AttributeError, TypeError, ValueError):
+        return False
 
 
 # Receipt outcomes that name a pull request the runner opened or updated and
