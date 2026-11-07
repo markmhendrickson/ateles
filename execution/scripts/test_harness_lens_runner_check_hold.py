@@ -150,7 +150,7 @@ def test_mergeable_not_yet_computed_holds_even_on_green_checks(runner):
     state["gate"] = GREEN
     report = go()
     assert report["ok"] is False and report["held_for_checks"] is True
-    assert "has not yet computed whether this pull request conflicts" in report["reason"]
+    assert "is not yet computed or not recognised" in report["reason"]
     assert state["worktrees"] == 0
 
 
@@ -164,7 +164,7 @@ def test_missing_mergeable_field_holds(runner):
     state["gate"] = GREEN
     report = go()
     assert report["held_for_checks"] is True
-    assert "has not yet computed" in report["reason"]
+    assert "not yet computed or not recognised" in report["reason"]
     assert state["worktrees"] == 0
 
 

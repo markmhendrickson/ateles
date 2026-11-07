@@ -227,6 +227,7 @@ import httpx  # noqa: E402
 from lib import github_app_token as _github_app_token  # noqa: E402
 
 import review_carry  # noqa: E402
+from panel_check_gate import merge_conflict_gate  # noqa: E402
 import review_rounds  # noqa: E402
 import review_scope  # noqa: E402
 import lens_authors  # noqa: E402
@@ -1779,6 +1780,11 @@ async def submit_app_approval(
                 f"{live_base or 'an unreadable base'!r}) — refusing to approve under a panel "
                 "chosen from another branch's scope file"
             )
+    # Approval can be reached without the panel, so the panel's mergeability
+    # hold is applied here too, on the live PR, by the same gate.
+    conflict = merge_conflict_gate(pr_data, head_sha)
+    if conflict is not None:
+        raise RuntimeError(f"refusing: {conflict.reason}")
     pr_author = str((pr_data.get("user") or {}).get("login") or "")
     if not pr_author:
         raise RuntimeError("could not resolve PR author from the pre-submit re-fetch — refusing")
@@ -2334,6 +2340,12 @@ async def run(
         head_sha = _normalise_full_sha(str((pr_data.get("head") or {}).get("sha") or ""))
         if not head_sha:
             print(f"refusing: could not resolve a full 40-char head SHA for {repo}#{pr}")
+            return 1
+        # Approval can be reached without the panel, so the panel's
+        # mergeability hold binds here as well (one gate, not a copy).
+        conflict = merge_conflict_gate(pr_data, head_sha)
+        if conflict is not None:
+            print(f"refusing: {conflict.reason}")
             return 1
         pr_body = pr_data.get("body") or ""
         base_ref = str((pr_data.get("base") or {}).get("ref") or "")

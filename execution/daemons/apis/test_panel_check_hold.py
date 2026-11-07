@@ -301,8 +301,8 @@ def test_mergeable_not_yet_computed_with_green_checks_is_held(world, unknown):
     assert state["seated"] == [], "no lens may be seated while mergeability is unknown"
     assert KEY in d._panel_ci_holds
     reason = d._panel_ci_holds[KEY].reason
-    assert "has not yet computed whether this pull request conflicts" in reason
-    assert "held until it has" in reason
+    assert "is not yet computed or not recognised" in reason
+    assert "is held until it is a known non-conflicting state" in reason
 
 
 def test_missing_mergeable_field_holds(world):
@@ -316,8 +316,34 @@ def test_missing_mergeable_field_holds(world):
     state["gate"] = GREEN
     _run(d._handle_pr(_trigger()))
     assert state["seated"] == []
-    assert "has not yet computed" in d._panel_ci_holds[KEY].reason
+    assert "not yet computed or not recognised" in d._panel_ci_holds[KEY].reason
     assert state["gate_reads"] == 0, "checks are not read while mergeability is unknown"
+
+
+@pytest.mark.parametrize("allowed", ["clean", "unstable", "has_hooks", "blocked", "behind"])
+def test_each_known_non_conflicting_state_with_mergeable_true_proceeds(allowed):
+    # A guard on the allow set: each GitHub state that says "no conflict"
+    # proceeds to the check reading. Red if the allow set drops one (checked by
+    # removing "behind" from _MERGEABLE_STATES: the behind case failed).
+    pr = {**_pr(), "mergeable": True, "mergeable_state": allowed}
+    assert pcg.merge_conflict_gate(pr, HEAD) is None
+
+
+@pytest.mark.parametrize("pr_fields", [
+    {"mergeable": True, "mergeable_state": " Dirty "},
+    {"mergeable": True, "mergeable_state": "UNKNOWN"},
+    {"mergeable": True, "mergeable_state": "draft"},
+    {"mergeable": True, "mergeable_state": "something-new"},
+    {"mergeable": None, "mergeable_state": "clean"},
+], ids=["dirty-variant", "unknown-upper", "draft", "unrecognised", "null-clean"])
+def test_an_unrecognised_mergeability_holds_and_names_the_value(pr_fields):
+    # Red before this round, observed: the gate held only for exact
+    # "dirty"/"unknown"/empty, so " Dirty ", "UNKNOWN", "draft" and
+    # "something-new" returned None (released). null-clean already held.
+    gate = pcg.merge_conflict_gate({**_pr(), **pr_fields}, HEAD)
+    assert gate is not None and gate.green is False
+    assert "not yet computed or not recognised" in gate.reason
+    assert repr(pr_fields["mergeable_state"]) in gate.reason
 
 
 def test_mergeable_true_clean_releases_as_today(world):
