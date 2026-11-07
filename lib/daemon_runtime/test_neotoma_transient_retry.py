@@ -372,3 +372,68 @@ def test_create_run_session_relationship_readback_retry(
     assert counts[edge] == attempts
     if not ok:  # edges after a failed one are never read
         assert all(c == 0 for c in counts[edge + 1:])
+
+
+# ── async form (Apis pr_review store) ────────────────────────────────────────
+
+
+def _status_error(code):
+    req = httpx.Request("POST", "http://x")
+    return httpx.HTTPStatusError(
+        "bad", request=req, response=httpx.Response(code, request=req)
+    )
+
+
+def test_status_retry_is_429_and_5xx_only_and_not_on_the_sync_paths():
+    assert nt.is_transient_status(_status_error(429))
+    assert nt.is_transient_status(_status_error(503))
+    assert not nt.is_transient_status(_status_error(400))
+    assert not nt.is_transient_status(_status_error(422))
+    # The gating paths' classification is unchanged: no HTTP status retries.
+    assert not nt.is_transient(_status_error(503))
+
+
+def test_async_retry_does_not_retry_5xx_unless_opted_in(monkeypatch):
+    import asyncio
+
+    async def no_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(nt, "_asleep", no_sleep)
+    attempts: list[float] = []
+
+    async def fn(limit):
+        attempts.append(limit)
+        raise _status_error(503)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(nt.acall_with_transient_retry(
+            fn, label="x", attempt_timeout=5, total_seconds=60))
+    assert attempts == [5]
+
+
+def test_describe_names_the_type_when_the_message_is_empty():
+    assert nt.describe(httpx.ReadTimeout("")) == "ReadTimeout"
+    assert nt.describe(ValueError("bad")) == "ValueError: bad"
+
+
+def test_async_retry_cancels_an_attempt_that_outlives_its_limit(monkeypatch):
+    import asyncio
+
+    pauses: list[float] = []
+
+    async def no_sleep(seconds):
+        pauses.append(seconds)
+
+    monkeypatch.setattr(nt, "_asleep", no_sleep)
+    attempts: list[float] = []
+
+    async def stalled(limit):
+        attempts.append(limit)
+        await asyncio.sleep(3600)
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(nt.acall_with_transient_retry(
+            stalled, label="x", attempt_timeout=0.05, total_seconds=60))
+    assert attempts == [0.05, 0.05, 0.05]
+    assert pauses == [2.0, 5.0]
