@@ -6,9 +6,9 @@ exercised for real and nothing on the host is ever read or deleted.
 
 Sections:
   plain tier       never removes dirty / local-only / recent / locked / in-use work
-  archive tier     archive, verify, restore, size cap, safety skips
+  protect-ignored  the plain-tier option that keeps worktrees holding non-regenerable ignored files
   node_modules     the node_modules-only tier, one test per safety
-  configuration    env / CLI configuration, the hold, the 24 hour defaults
+  configuration    env / CLI configuration, the hold, the 24 hour defaults, the removed options
 
 Run: python3 -m pytest execution/scripts/test_worktree_prune.py -q
 """
@@ -21,7 +21,6 @@ import json
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import time
@@ -53,7 +52,6 @@ CONFIG_NAMES = (
     "NEVER",
     "HOLD_PREFIXES",
     "HOLD_UNTIL",
-    "ARCHIVE_ROOT",
     "FRESH_HOURS",
     "GIT_ENV",
     "LOGF",
@@ -100,7 +98,7 @@ def repo(tmp_path, monkeypatch):
     home = tmp_path.resolve() / "home"
     home.mkdir()
     saved = {k: getattr(wp, k) for k in CONFIG_NAMES}
-    saved_arch, saved_strip = dict(wp.ARCH), dict(wp.STRIP)
+    saved_strip = dict(wp.STRIP)
     monkeypatch.setenv("HOME", str(home))
     wp.configure(env={}, cli={})
     wp.GIT_ENV = dict(wp.GIT_ENV, **GIT_IDENTITY)
@@ -109,7 +107,6 @@ def repo(tmp_path, monkeypatch):
     wp._merged.clear()
     wp._slug.clear()
     wp.FRESH_HOURS = wp.DEFAULT_FRESH_HOURS
-    wp.ARCH.update(enabled=False, idle_hours=72, dry_tmp=None)
     wp.STRIP.update(enabled=True, only=False, idle_hours=24)
     procs = []
 
@@ -168,8 +165,6 @@ def repo(tmp_path, monkeypatch):
         )
     for k, v in saved.items():
         setattr(wp, k, v)
-    wp.ARCH.clear()
-    wp.ARCH.update(saved_arch)
     wp.STRIP.clear()
     wp.STRIP.update(saved_strip)
 
@@ -262,385 +257,25 @@ def test_plain_tier_never_removes_unsafe_worktrees(repo):
         "branch b-clean not deleted",
         bool(sh("git", "rev-parse", "--verify", "b-clean", cwd=main)),
     )
-    check("archive tier is off by default", wp.ARCH["enabled"] is False)
     for n in ("dirty", "localonly", "detached", "untracked"):
         check(
-            "default analyze never yields ARCHIVE-CANDIDATE [%s]" % n,
-            wp.analyze(ents[n], False)["status"] != "ARCHIVE-CANDIDATE",
+            "analyze keeps %s with its own reason, nothing else is offered" % n,
+            wp.analyze(ents[n], False)["status"]
+            in ("dirty", "unpushed", "detached-unreachable"),
         )
     assert not fails, fails
 
 
 # ======================================================================================
-# archive tier (the original self-test, Part B)
+# protect-ignored (a plain-tier option: it only ever keeps more worktrees)
 # ======================================================================================
-def test_archive_tier_archives_verifies_and_keeps_unsafe_worktrees(repo):
-    fails = []
-
-    def check(name, cond):
-        if not cond:
-            fails.append(name)
-
-    main, origin, tmp = repo.main, repo.origin, repo.home
-    aroot = tmp + "/archive"
-    dry = tmp + "/dry"
-    os.mkdir(dry)
-    wp.ARCH.update(
-        enabled=True, idle_hours=72, cap=25 * 1024 * 1024, root=aroot, dry_tmp=dry
-    )
-    today = datetime.date.today().isoformat()
-    bm = {os.path.realpath(main)}
-
-    def mk(name, base="origin/main"):
-        w = tmp + "/b-" + name
-        sh("git", "worktree", "add", "-q", "-b", "bb-" + name, w, base, cwd=main)
-        return w
-
-    def get(w):
-        return [x for x in wp.list_worktrees(main, bm) if x["wt"] == w][0]
-
-    def restore(adir, label):
-        """Rebuild the worktree from the archive alone in a fresh clone of origin; return its file snapshot."""
-        meta = json.load(open(adir + "/meta.json"))
-        rd = tmp + "/restore-" + label
-        sh("git", "clone", "-q", origin, rd + "-clone")
-        if os.path.exists(adir + "/local-commits.bundle"):
-            sh(
-                "git",
-                "fetch",
-                "-q",
-                adir + "/local-commits.bundle",
-                "HEAD:refs/heads/restored",
-                cwd=rd + "-clone",
-            )
-        sh(
-            "git",
-            "worktree",
-            "add",
-            "-q",
-            "--detach",
-            rd,
-            meta["head"],
-            cwd=rd + "-clone",
-        )
-        if os.path.getsize(adir + "/patch.diff"):
-            sh("git", "apply", adir + "/patch.diff", cwd=rd)
-        sh("tar", "-xzf", adir + "/untracked.tar.gz", "-C", rd)
-        return rd, snapshot(rd)
-
-    # (i) dirty tracked edit + staged add + deletion + binary edit + untracked + ignored small data
-    w = mk("dirty")
-    open(w + "/a.txt", "a").write("edit one\n")
-    open(w + "/bin.dat", "wb").write(os.urandom(1500))
-    os.remove(w + "/del.txt")
-    open(w + "/staged.txt", "w").write("staged\n")
-    sh("git", "add", "staged.txt", cwd=w)
-    os.makedirs(w + "/notes")
-    open(w + "/notes/n.md", "w").write("untracked note\n")
-    os.makedirs(w + "/data_backups")
-    open(w + "/data_backups/db.sql", "w").write("select 1;\n")
-    os.makedirs(w + "/node_modules/x")
-    open(w + "/node_modules/x/y.js", "w").write("regen\n")
-    os.makedirs(w + "/tmp")
-    open(w + "/tmp/scratch.txt", "w").write("regen\n")
-    age(w)
-    snap = snapshot(w)
-    e = get(w)
-    check(
-        "dirty worktree idle>=72h becomes ARCHIVE-CANDIDATE",
-        wp.analyze(e, False)["status"] == "ARCHIVE-CANDIDATE",
-    )
-    res = wp.act(e, False, False)
-    check(
-        "dry run -> WOULD-ARCHIVE-REMOVE (got %s)" % res, res == "WOULD-ARCHIVE-REMOVE"
-    )
-    check(
-        "dry run removed nothing and left no archive behind",
-        os.path.isdir(w) and not os.path.exists(aroot) and os.listdir(dry) == [],
-    )
-    res = wp.act(e, True, False)
-    check(
-        "apply -> ARCHIVED-REMOVED (got %s, %s)" % (res, e.get("detail")),
-        res == "ARCHIVED-REMOVED",
-    )
-    check("worktree removed", not os.path.exists(w))
-    adir = e.get("archive_dir")
-    check(
-        "archive dir exists under root/date/repo/<dir>-<sha>",
-        bool(adir)
-        and adir.startswith("%s/%s/main/b-dirty-%s" % (aroot, today, e["head"][:8]))
-        and os.path.isdir(adir),
-    )
-    names = set(os.listdir(adir)) if adir else set()
-    check(
-        "archive holds patch.diff, untracked.tar.gz, meta.json and no bundle (nothing local-only)",
-        {"patch.diff", "untracked.tar.gz", "meta.json"} <= names
-        and "local-commits.bundle" not in names,
-    )
-    meta = json.load(open(adir + "/meta.json"))
-    check(
-        "meta.json records repo/branch/head/status/created/original path",
-        meta["repo"] == "main"
-        and meta["branch"] == "bb-dirty"
-        and meta["head"] == e["head"]
-        and meta["original_path"] == w
-        and meta["status_porcelain"]
-        and meta["created"],
-    )
-    lst = sh("tar", "-tzf", adir + "/untracked.tar.gz").split("\n")
-    check(
-        "tar has untracked + small ignored non-regenerable (notes/n.md, data_backups/db.sql)",
-        "notes/n.md" in lst and "data_backups/db.sql" in lst,
-    )
-    check(
-        "tar excludes node_modules and tmp (regenerable)",
-        not any(x.startswith(("node_modules", "tmp")) for x in lst),
-    )
-    rd, rsnap = restore(adir, "i")
-    check(
-        "restore (worktree add + apply patch + extract tar) reproduces the exact files",
-        rsnap == snap,
-    )
-    check(
-        "branch not deleted",
-        bool(sh("git", "rev-parse", "--verify", "bb-dirty", cwd=main)),
-    )
-
-    # (ii) unpushed commit (+ dirty edit) bundled and restorable; and a detached local-only commit
-    w2 = mk("unpushed")
-    open(w2 + "/l.txt", "w").write("local commit\n")
-    sh("git", "add", "l.txt", cwd=w2)
-    sh("git", "commit", "-qm", "local", cwd=w2)
-    age(w2)
-    snap2 = snapshot(w2)
-    e2 = get(w2)
-    wp.analyze(e2, False)
-    check(
-        "unpushed worktree is ARCHIVE-CANDIDATE",
-        e2["status"] == "ARCHIVE-CANDIDATE" and e2["kind"] == "unpushed",
-    )
-    res = wp.act(e2, True, False)
-    a2 = e2.get("archive_dir")
-    check(
-        "apply -> ARCHIVED-REMOVED (got %s, %s)" % (res, e2.get("detail")),
-        res == "ARCHIVED-REMOVED" and not os.path.exists(w2),
-    )
-    check(
-        "local-commits.bundle present and verifies",
-        os.path.exists(a2 + "/local-commits.bundle")
-        and subprocess.run(
-            ["git", "-C", main, "bundle", "verify", a2 + "/local-commits.bundle"],
-            capture_output=True,
-        ).returncode
-        == 0,
-    )
-    rd2, rsnap2 = restore(a2, "ii")
-    check(
-        "restore from bundle reproduces exact files incl. the local commit",
-        rsnap2 == snap2 and "l.txt" in rsnap2,
-    )
-    w3 = mk("detached")
-    sh("git", "checkout", "-q", "--detach", cwd=w3)
-    open(w3 + "/det.txt", "w").write("only reachable from this HEAD\n")
-    sh("git", "add", ".", cwd=w3)
-    sh("git", "commit", "-qm", "det", cwd=w3)
-    age(w3)
-    sha3 = sh("git", "-C", w3, "rev-parse", "HEAD")
-    e3 = get(w3)
-    wp.analyze(e3, False)
-    res = wp.act(e3, True, False)
-    check(
-        "detached-unreachable archived (got %s)" % res,
-        res == "ARCHIVED-REMOVED" and e3["kind"] == "detached-unreachable",
-    )
-    rd3, rsnap3 = restore(e3["archive_dir"], "iii")
-    check(
-        "detached commit restorable from bundle",
-        sh("git", "-C", rd3, "rev-parse", "HEAD") == sha3 and "det.txt" in rsnap3,
-    )
-
-    w2b = mk("unpushed-dirty")  # local commit AND a dirty edit on top
-    open(w2b + "/l2.txt", "w").write("local commit 2\n")
-    sh("git", "add", "l2.txt", cwd=w2b)
-    sh("git", "commit", "-qm", "local2", cwd=w2b)
-    open(w2b + "/a.txt", "a").write("dirty on top\n")
-    open(w2b + "/untracked-new.txt", "w").write("u\n")
-    age(w2b)
-    snap2b = snapshot(w2b)
-    e2b = get(w2b)
-    wp.analyze(e2b, False)
-    res = wp.act(e2b, True, False)
-    rd2b, rsnap2b = restore(e2b["archive_dir"], "ii-b")
-    check(
-        "local commit + dirty edit + untracked archived and restored exactly (got %s)"
-        % res,
-        res == "ARCHIVED-REMOVED" and rsnap2b == snap2b,
-    )
-
-    # (iii) an archive over the cap is skipped, worktree kept, nothing left behind
-    w4 = mk("big")
-    open(w4 + "/huge.bin", "wb").write(os.urandom(26 * 1024 * 1024))
-    age(w4)
-    e4 = get(w4)
-    wp.analyze(e4, False)
-    before_dirs = sorted(os.listdir(aroot + "/" + today + "/main"))
-    res = wp.act(e4, True, False)
-    check(">25MB archive -> archive-too-big (got %s)" % res, res == "archive-too-big")
-    check(
-        "worktree kept and file intact",
-        os.path.getsize(w4 + "/huge.bin") == 26 * 1024 * 1024,
-    )
-    check(
-        "no partial/oversize archive left",
-        sorted(os.listdir(aroot + "/" + today + "/main")) == before_dirs,
-    )
-
-    # (iv) a worktree modified 1 minute ago is NOT touched
-    w5 = mk("fresh")
-    open(w5 + "/a.txt", "a").write("just now\n")
-    age(w5, 120)
-    os.utime(w5 + "/a.txt", (time.time() - 60, time.time() - 60))
-    e5 = get(w5)
-    wp.analyze(e5, False)
-    res = wp.act(e5, True, False)
-    check(
-        "modified 1 minute ago -> recent, untouched (got %s)" % res,
-        res == "recent" and os.path.isdir(w5),
-    )
-    w5b = mk(
-        "notidle"
-    )  # modified 60h ago: past the 24h plain freshness, inside the 72h idle window
-    open(w5b + "/a.txt", "a").write("60h ago\n")
-    age(w5b, 60)
-    e5b = get(w5b)
-    wp.analyze(e5b, False)
-    res = wp.act(e5b, True, False)
-    check(
-        "modified 60h ago (< idle 72h) -> not-idle, untouched (got %s)" % res,
-        res == "not-idle" and os.path.isdir(w5b),
-    )
-
-    # (v) locked and in-use are NOT touched
-    w6 = mk("locked")
-    open(w6 + "/a.txt", "a").write("locked dirty\n")
-    age(w6)
-    sh("git", "worktree", "lock", w6, cwd=main)
-    e6 = get(w6)
-    wp.analyze(e6, False)
-    res = wp.act(e6, True, False)
-    check("locked -> untouched (got %s)" % res, res == "locked" and os.path.isdir(w6))
-    w7 = mk("inuse")
-    open(w7 + "/a.txt", "a").write("in use dirty\n")
-    age(w7)
-    repo.spawn_in(w7)
-    e7 = get(w7)
-    wp.analyze(e7, False)
-    check(
-        "in-use worktree still reaches the archive gate",
-        e7["status"] == "ARCHIVE-CANDIDATE",
-    )
-    n_before = len(os.listdir(aroot + "/" + today + "/main"))
-    res = wp.act(e7, True, False)
-    check(
-        "process cwd inside -> in-use, untouched, no archive (got %s)" % res,
-        res == "in-use"
-        and os.path.isdir(w7)
-        and len(os.listdir(aroot + "/" + today + "/main")) == n_before,
-    )
-    repo.procs[-1].kill()
-
-    # extra safety: changed during archive, nested repo, submodules
-    w8 = mk("race")
-    open(w8 + "/a.txt", "a").write("race\n")
-    age(w8)
-    e8 = get(w8)
-    wp.analyze(e8, False)
-    orig_build = wp.build_archive
-
-    def racing_build(e, dest):
-        info = orig_build(e, dest)
-        open(e["wt"] + "/a.txt", "a").write("modified while archiving\n")
-        return info
-
-    wp.build_archive = racing_build
-    n_before = len(os.listdir(aroot + "/" + today + "/main"))
-    try:
-        res = wp.act(e8, True, False)
-    finally:
-        wp.build_archive = orig_build
-    check(
-        "worktree changed while archiving -> kept, archive discarded (got %s)" % res,
-        res in ("not-idle", "changed-during-archive")
-        and os.path.isdir(w8)
-        and len(os.listdir(aroot + "/" + today + "/main")) == n_before,
-    )
-    w9 = mk("nested")
-    os.makedirs(w9 + "/vendor/inner")
-    sh("git", "init", "-q", cwd=w9 + "/vendor/inner")
-    open(w9 + "/vendor/inner/f", "w").write("x")
-    sh("git", "add", "f", cwd=w9 + "/vendor/inner")
-    sh("git", "commit", "-qm", "i", cwd=w9 + "/vendor/inner")
-    age(w9)
-    e9 = get(w9)
-    wp.analyze(e9, False)
-    res = wp.act(e9, True, False)
-    check(
-        "nested git repo inside -> kept (got %s)" % res,
-        res == "nested-repo" and os.path.isdir(w9),
-    )
-    sub = tmp + "/subrepo"
-    sh("git", "init", "-q", "-b", "main", sub)
-    open(sub + "/s.txt", "w").write("s")
-    sh("git", "add", ".", cwd=sub)
-    sh("git", "commit", "-qm", "s", cwd=sub)
-    w10 = mk("subm")
-    sh(
-        "git",
-        "-c",
-        "protocol.file.allow=always",
-        "submodule",
-        "add",
-        "-q",
-        sub,
-        "subdir",
-        cwd=w10,
-    )
-    age(w10)
-    e10 = get(w10)
-    wp.analyze(e10, False)
-    res = wp.act(e10, True, False)
-    check(
-        "initialized submodule present -> kept (got %s)" % res,
-        res == "has-submodules" and os.path.isdir(w10),
-    )
-    w10b = mk(
-        "subm-uninit"
-    )  # tracked-style .gitmodules + gitlink but nothing cloned: the common real-world case
-    open(w10b + "/.gitmodules", "w").write(
-        '[submodule "subdir"]\n\tpath = subdir\n\turl = %s\n' % sub
-    )
-    sh(
-        "git",
-        "update-index",
-        "--add",
-        "--cacheinfo",
-        "160000," + sh("git", "-C", sub, "rev-parse", "HEAD") + ",subdir",
-        cwd=w10b,
-    )
-    age(w10b)
-    e10b = get(w10b)
-    wp.analyze(e10b, False)
-    res = wp.act(e10b, True, False)
-    check(
-        "uninitialized gitlink + .gitmodules does NOT block archive (got %s, %s)"
-        % (res, e10b.get("detail")),
-        res == "ARCHIVED-REMOVED" and not os.path.exists(w10b),
-    )
-
-    # protect-ignored with the extended regenerable list
+def test_protect_ignored_keeps_non_regenerable_ignored_files_and_not_regenerable_ones(
+    repo,
+):
+    main = repo.main
     with open(main + "/.git/info/exclude", "a") as fx:
         fx.write(".dev-serve/\n.mcp-venv/\n*.log\n")
-    w11 = mk("regenonly")
+    regen = repo.add_wt("regenonly", node_modules=False)
     for p, c in (
         (".vitest/cache/x", "r"),
         ("site_pages/gen/p.html", "r"),
@@ -653,802 +288,69 @@ def test_archive_tier_archives_verifies_and_keeps_unsafe_worktrees(repo):
         ("x.log", "r"),
         (".env.development", "NOT-READ-BY-TEST-OR-TOOL"),
     ):
-        os.makedirs(os.path.dirname(os.path.join(w11, p)), exist_ok=True)
-        open(os.path.join(w11, p), "w").write(c)
-    age(w11)
-    e11 = get(w11)
-    wp.analyze(e11, False)
-    res = wp.act(e11, True, True)
-    check(
-        "only-regenerable ignored files do not block plain removal under --protect-ignored (got %s, %s)"
-        % (res, e11.get("ignored_nonregen")),
-        res == "REMOVED" and not os.path.exists(w11),
+        os.makedirs(os.path.dirname(os.path.join(regen, p)), exist_ok=True)
+        open(os.path.join(regen, p), "w").write(c)
+    age(regen)
+    e = wp.analyze(repo.entry(regen), False)
+    res = wp.act(e, True, True)
+    assert res == "REMOVED" and not os.path.exists(regen), (
+        res,
+        e.get("ignored_nonregen"),
     )
-    d1, d2 = tmp + "/dtest1", tmp + "/dtest2"
+    # a non-regenerable ignored directory keeps the worktree under --protect-ignored, and only then
+    kept = repo.add_wt("ignoredsmall", node_modules=False)
+    os.makedirs(kept + "/data_backups")
+    open(kept + "/data_backups/b.sql", "w").write("select 2;\n")
+    age(kept)
+    e2 = wp.analyze(repo.entry(kept), False)
+    assert wp.act(e2, True, True) == "has-ignored-files"
+    assert os.path.isfile(kept + "/data_backups/b.sql")
+    e3 = wp.analyze(repo.entry(kept), False)
+    assert (
+        wp.act(e3, False, False) == "WOULD-REMOVE"
+    )  # the control: the option is what keeps it
+    assert e2["ignored_nonregen"] == ["data_backups/"]
+    d1, d2 = repo.home + "/dtest1", repo.home + "/dtest2"
     os.makedirs(d1 + "/data/logs")
     os.makedirs(d1 + "/data/sources")
     os.makedirs(d2 + "/data")
     open(d2 + "/data/app.db", "w").write("x")
-    check(
-        "data/ with only logs/sources subdirs is regenerable, data/ with a db file is not",
-        wp.ignored_is_regen(d1, "data/")
-        and not wp.ignored_is_regen(d2, "data/")
-        and not wp.ignored_is_regen(d2, "data_backups/"),
-    )
-    w12 = mk("ignoredsmall")
-    os.makedirs(w12 + "/data_backups")
-    open(w12 + "/data_backups/b.sql", "w").write("select 2;\n")
-    open(w12 + "/.env.development", "w").write("NOT-READ-BY-TEST-OR-TOOL")
-    age(w12)
-    e12 = get(w12)
-    wp.analyze(e12, False)
-    res = wp.act(e12, True, True)
-    lst12 = (
-        sh("tar", "-tzf", e12["archive_dir"] + "/untracked.tar.gz").split("\n")
-        if e12.get("archive_dir")
-        else []
-    )
-    check(
-        "data_backups/ goes to the archive tier instead of blocking (got %s)" % res,
-        res == "ARCHIVED-REMOVED"
-        and e12["kind"] == "has-ignored-files"
-        and "data_backups/b.sql" in lst12
-        and ".env.development" not in lst12
-        and not os.path.exists(w12),
-    )
+    assert wp.ignored_is_regen(d1, "data/")
+    assert not wp.ignored_is_regen(d2, "data/")
+    assert not wp.ignored_is_regen(d2, "data_backups/")
+    assert wp.regen_path(".env.development.notloaded")
 
-    # (vi) plain tier never uses --force
-    w13 = mk("plain")
-    age(w13)
-    e13 = get(w13)
-    wp.analyze(e13, False)
+
+def test_the_plain_tier_never_forces_a_removal(repo):
+    w = repo.add_wt("plain-noforce", node_modules=False)
+    e = wp.analyze(repo.entry(w), False)
     seen = []
-    orig_run = wp.run
+    real_run = wp.run
 
     def spy(args, *a, **k):
         seen.append(list(args))
-        return orig_run(args, *a, **k)
+        return real_run(args, *a, **k)
 
     wp.run = spy
     try:
-        res = wp.act(e13, True, False)
+        res = wp.act(e, True, False)
     finally:
-        wp.run = orig_run
-    rm = [x for x in seen if "worktree" in x and "remove" in x]
-    check(
-        "plain tier removed via `worktree remove` without --force (got %s)" % res,
-        res == "REMOVED"
-        and len(rm) == 1
-        and not any("--force" in x or "-f" in x for x in rm),
-    )
-    force = re.compile(
-        r"""["']--force["']"""
-    )  # either quote style, so a formatter cannot hide it
-    src = open(wp.__file__).read()
-    check(
-        "'--force' appears exactly once in the module, inside archive_flow",
-        len(force.findall(src)) == 1
-        and force.search(inspect.getsource(wp.archive_flow))
-        and not force.search(inspect.getsource(wp.final_check_and_remove))
-        and not force.search(inspect.getsource(wp.act))
-        and not force.search(inspect.getsource(wp.strip_flow)),
-    )
-
-    # (vii) archive dir is outside every repo and mode 0700 (files 0600)
-    repos = (
-        [main]
-        + [x["wt"] for x in wp.list_worktrees(main, bm)]
-        + [x["wt"] for x in (e, e2, e3)]
-    )
-    real_root = os.path.realpath(aroot)
-    check(
-        "archive root is outside every repo / worktree",
-        wp.outside_every_repo(aroot)
-        and not any(real_root.startswith(os.path.realpath(r_) + "/") for r_ in repos),
-    )
-    check(
-        "default archive root is outside every repo and relative to the home dir",
-        wp.outside_every_repo(wp.ARCHIVE_ROOT)
-        and wp.ARCHIVE_ROOT.startswith(wp.H + "/"),
-    )
-    modes = {
-        os.path.relpath(p, aroot): stat.S_IMODE(os.stat(p).st_mode)
-        for p in [aroot, aroot + "/" + today, aroot + "/" + today + "/main", adir, a2]
-    }
-    check(
-        "archive dirs are mode 0700 (%s)" % sorted(set(oct(m) for m in modes.values())),
-        all(m == 0o700 for m in modes.values()),
-    )
-    fm = set(
-        stat.S_IMODE(os.stat(os.path.join(adir, n)).st_mode) for n in os.listdir(adir)
-    )
-    check(
-        "archive files are mode 0600 (%s)" % sorted(oct(m) for m in fm), fm == {0o600}
-    )
-    wp.ARCH["root"] = main + "/arch-inside"
-    res = wp.archive_flow(get(mk("refuse")), True)
-    wp.ARCH["root"] = aroot
-    check(
-        "archive root inside a repo is refused (got %s)" % res,
-        res == "archive-root-inside-repo",
-    )
-
-    # retention: --prune-archives lists by default, deletes only with apply
-    pr_root = tmp + "/prune-archives"
-    for d in ("2020-01-01", "2020-02-02", today):
-        os.makedirs(pr_root + "/" + d + "/r/x")
-        open(pr_root + "/" + d + "/r/x/meta.json", "w").write("{}")
-        open(pr_root + "/" + d + "/r/x/patch.diff", "w").write("x" * 100)
-    wp.ARCH["root"] = pr_root
-    lst_ = wp.prune_archives(False, 30)
-    check(
-        "retention listing shows only >30d dirs and deletes nothing",
-        lst_["old_day_dirs"] == ["2020-01-01", "2020-02-02"]
-        and os.path.isdir(pr_root + "/2020-01-01"),
-    )
-    wp.prune_archives(True, 30)
-    check(
-        "retention apply deletes old day dirs, keeps today",
-        not os.path.exists(pr_root + "/2020-01-01")
-        and os.path.isdir(pr_root + "/" + today),
-    )
-    wp.ARCH["root"] = aroot
-    assert not fails, fails
-
-
-# ======================================================================================
-# archive tier: secret-named files, archive retention
-# ======================================================================================
-SECRET_NAMES = [
-    ".env",
-    ".env.local",
-    ".env.production",
-    "credentials.json",
-    "credentials",
-    "deploy.pem",
-    "tls.key",
-    "bundle.p12",
-    "bundle.pfx",
-    "my_secret_notes.txt",
-    "CLIENT-SECRET.txt",
-    ".netrc",
-    "id_rsa",
-    "id_rsa.bak",
-    "id_ed25519",
-    ".npmrc",
-    # round 3: wider families
-    ".envrc",
-    ".git-credentials",
-    ".pgpass",
-    ".htpasswd",
-    ".pypirc",
-    "id_ecdsa",
-    "id_ecdsa.pub",
-    "service-account-prod.json",
-    "prod.tfvars",
-    "prod.tfvars.json",
-    "terraform.tfstate",
-    "terraform.tfstate.backup",
-    "apple.p8",
-    "store.jks",
-    "release.keystore",
-    "vault.kdbx",
-    "mail.gpg",
-    "pub.asc",
-    ".aws",
-    ".ssh",
-    ".gnupg",
-    "my-token.txt",
-    "Password.txt",
-    "passwd",
-    "apikey.json",
-    "api_key.txt",
-    "private_key.der",
-    # case variants
-    ".ENV",
-    "Credentials.JSON",
-    "MY_SECRET.TXT",
-    ".Env.Local",
-]
-NOT_SECRET_NAMES = [
-    "service-account.json.example",
-    ".envrc.sample",
-    "terraform.tfvars.template",
-    "credentials.json.dist",
-    ".env.example",
-    ".env.sample",
-    ".env.template",
-    ".env.local.example",
-    "credentials.json.sample",
-    "secret.template",
-    ".env.development",
-    ".env.development.bak",
-    ".env.development.local",
-    "notes.md",
-    "app.js",
-    "monkey.txt",
-]
-
-
-@pytest.mark.parametrize("name", SECRET_NAMES)
-def test_secret_names_are_recognised(name):
-    assert wp.secret_name(name)
-
-
-@pytest.mark.parametrize("name", NOT_SECRET_NAMES)
-def test_example_and_ordinary_names_are_not_secret(name):
-    assert not wp.secret_name(name)
-
-
-def test_the_template_rule_is_the_repos_single_definition_and_fails_closed(monkeypatch):
-    import importlib.util
-
-    repo_root = Path(wp.__file__).resolve().parents[2]
-    spec = importlib.util.spec_from_file_location(
-        "ct_for_test", repo_root / "lib" / "credential_templates.py"
-    )
-    shared = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(shared)
-    for suffix in (
-        shared.PLACEHOLDER_TEMPLATE_SUFFIXES
-    ):  # every suffix the repo defines, none copied here
-        assert not wp.secret_name(".env" + suffix), suffix
-        assert not wp.secret_name("credentials.json" + suffix.upper()), suffix
-    # if the shared definition cannot be loaded, nothing counts as a template: more is kept, never less
-    real = importlib.util.spec_from_file_location
-    monkeypatch.setattr(
-        importlib.util, "spec_from_file_location", lambda *a, **k: 1 / 0
-    )
-    broken, loaded = wp._load_template_rule()
-    assert loaded is False and broken(".env.example") is False
-    monkeypatch.setattr(wp, "is_placeholder_template", broken)
-    assert wp.secret_name(".env.example")
-    monkeypatch.setattr(importlib.util, "spec_from_file_location", real)
-    assert wp._load_template_rule()[1] is True  # the control: loads normally
-
-
-@pytest.fixture
-def archive_on(repo):
-    aroot = repo.home + "/archive"
-    dry = repo.home + "/dry"
-    os.mkdir(dry)
-    wp.ARCH.update(
-        enabled=True, idle_hours=72, cap=25 * 1024 * 1024, root=aroot, dry_tmp=dry
-    )
-    return aroot
-
-
-def _dirty_archive_candidate(repo, name):
-    w = repo.add_wt(name, node_modules=False)
-    open(w + "/a.txt", "a").write("edit\n")
-    age(w)
-    e = repo.entry(w)
-    assert wp.analyze(e, False)["status"] == "ARCHIVE-CANDIDATE"
-    return w, e
-
-
-@pytest.mark.parametrize(
-    "secret",
-    [".env", ".env.local", "credentials.json", "deploy.pem", "my_secret_notes.txt"],
-)
-def test_a_worktree_with_an_untracked_secret_named_file_is_kept_whole(
-    repo, archive_on, secret
-):
-    w, e = _dirty_archive_candidate(repo, "sec")
-    open(w + "/" + secret, "w").write("NOT-READ-BY-TEST-OR-TOOL")
-    age(w)
-    for apply_ in (
-        False,
-        True,
-    ):  # a dry run reports the same, and the real run changes nothing
-        res = wp.archive_flow(e, apply_)
-        assert res == "secrets-present", (res, e.get("detail"))
-    assert e["secrets"] == [secret]
-    assert (
-        os.path.isdir(w) and open(w + "/" + secret).read() == "NOT-READ-BY-TEST-OR-TOOL"
-    )
-    assert open(w + "/a.txt").read().endswith("edit\n")
-    assert not os.path.exists(archive_on)  # nothing archived anywhere
-    assert os.listdir(repo.home + "/dry") == []
-
-
-def test_an_ignored_secret_named_file_keeps_the_worktree_too(repo, archive_on):
-    w, e = _dirty_archive_candidate(repo, "sec-ignored")
-    os.makedirs(w + "/data_backups/inner")  # ignored by the repo's .gitignore
-    open(w + "/data_backups/inner/id_ed25519", "w").write("NOT-READ-BY-TEST-OR-TOOL")
-    age(w)
-    res = wp.act(wp.analyze(repo.entry(w), False), True, False)
-    assert res == "secrets-present"
-    assert os.path.isfile(w + "/data_backups/inner/id_ed25519")
-    assert not os.path.exists(archive_on)
-
-
-def test_a_secret_found_through_protect_ignored_is_kept_not_archived(repo, archive_on):
-    w = repo.add_wt(
-        "sec-protect", node_modules=False
-    )  # clean and pushed: plain-tier eligible
-    os.makedirs(w + "/data_backups")
-    open(w + "/data_backups/.env", "w").write("NOT-READ-BY-TEST-OR-TOOL")
-    age(w)
-    e = wp.analyze(repo.entry(w), False)
-    assert e["status"] == "ELIGIBLE"
-    res = wp.act(e, True, True)
-    assert res == "secrets-present"
-    assert os.path.isfile(w + "/data_backups/.env")
-    assert not os.path.exists(archive_on)
-
-
-def test_a_secret_appearing_while_archiving_discards_the_archive(
-    repo, archive_on, monkeypatch
-):
-    w, e = _dirty_archive_candidate(repo, "sec-late")
-    real_build = wp.build_archive
-
-    def build_then_drop_a_secret(entry, dest):
-        info = real_build(entry, dest)
-        # ignored and old, so the unchanged-during-archive checks stay quiet: only the name check can catch it
-        os.makedirs(w + "/data_backups", exist_ok=True)
-        open(w + "/data_backups/.netrc", "w").write("NOT-READ-BY-TEST-OR-TOOL")
-        age(w)
-        return info
-
-    monkeypatch.setattr(wp, "build_archive", build_then_drop_a_secret)
-    res = wp.archive_flow(e, True)
-    assert res == "secrets-present", (res, e.get("detail"))
-    assert os.path.isdir(w) and os.path.isfile(w + "/data_backups/.netrc")
-    leftovers = [
-        p
-        for p in Path(archive_on).rglob("*")
-        if p.is_dir() and p.name.startswith("wt-sec-late")
-    ]
-    assert leftovers == []  # the finished archive is not left behind either
-
-
-def test_example_names_and_the_dev_env_family_do_not_block_archiving(repo, archive_on):
-    w, e = _dirty_archive_candidate(repo, "sec-ok")
-    for n in (
-        ".env.example",
-        "credentials.json.sample",
-        ".env.development",
-        ".env.development.bak",
-    ):
-        open(w + "/" + n, "w").write("NOT-READ-BY-TEST-OR-TOOL")
-    age(w)
-    e = wp.analyze(repo.entry(w), False)
-    res = wp.act(e, True, False)
-    assert res == "ARCHIVED-REMOVED", (res, e.get("detail"))
-    members = sh("tar", "-tzf", e["archive_dir"] + "/untracked.tar.gz").split("\n")
-    assert ".env.example" in members and "credentials.json.sample" in members
-    assert not any(m.startswith(".env.development") for m in members)  # as before
-    assert not os.path.exists(w)
-
-
-def test_a_pushed_unmodified_secret_named_tracked_file_carries_nothing(
-    repo, archive_on
-):
-    w = repo.add_wt("sec-tracked", node_modules=False)
-    open(w + "/credentials.txt", "w").write("committed and pushed on purpose")
-    sh("git", "add", "credentials.txt", cwd=w)
-    sh("git", "commit", "-qm", "tracked", cwd=w)
-    sh("git", "push", "-q", "origin", "b-sec-tracked", cwd=w)
-    sh("git", "fetch", "-q", "origin", cwd=repo.main)
-    open(w + "/a.txt", "a").write("edit\n")  # something to archive
-    age(w)
-    e = wp.analyze(repo.entry(w), False)
-    assert e["status"] == "ARCHIVE-CANDIDATE"  # dirty
-    assert (
-        wp.secret_files(w, "b-sec-tracked") == []
-    )  # on the remote, unmodified: no channel carries it
-    assert wp.act(e, True, False) == "ARCHIVED-REMOVED"
-
-
-def _assert_kept_whole(repo, archive_on, w, e, expect_path, intact):
-    """The worktree is kept, nothing is archived, and the file is untouched; dry run and real run agree."""
-    for apply_ in (False, True):
-        res = wp.archive_flow(e, apply_)
-        assert res == "secrets-present", (res, e.get("detail"))
-    assert expect_path in e["secrets"], e["secrets"]
-    assert os.path.isdir(w) and os.path.exists(intact)
-    assert not os.path.exists(archive_on)
-    assert os.listdir(repo.home + "/dry") == []
-
-
-@pytest.mark.parametrize(
-    "name", ["deploy.pem", "config/secrets/prod.txt", ".ssh/config"]
-)
-def test_a_staged_new_secret_named_path_keeps_the_worktree_whole(
-    repo, archive_on, name
-):
-    w, e = _dirty_archive_candidate(repo, "sec-staged")
-    os.makedirs(os.path.dirname(w + "/" + name), exist_ok=True)
-    open(w + "/" + name, "w").write("NOT-READ-BY-TEST-OR-TOOL")
-    sh("git", "add", "-f", name, cwd=w)
-    age(w)
-    # untracked-looking channels see nothing (the path is tracked in the index); only the diff channel does
-    assert name in wp.secret_files(w, e.get("branch"))
-    _assert_kept_whole(repo, archive_on, w, e, name, w + "/" + name)
-
-
-def test_a_staged_secret_named_path_is_caught_even_if_gone_from_the_worktree(
-    repo, archive_on
-):
-    w, e = _dirty_archive_candidate(repo, "sec-staged-gone")
-    open(w + "/deploy.key", "w").write("NOT-READ-BY-TEST-OR-TOOL")
-    sh("git", "add", "-f", "deploy.key", cwd=w)
-    os.remove(
-        w + "/deploy.key"
-    )  # the index still holds it; the working-tree diff no longer lists it
-    age(w)
-    working_tree_only = wp._raw_diff_paths(
-        ["diff", "--raw", "-z", "--no-renames", "HEAD"], w
-    )
-    assert "deploy.key" in wp.secret_files(w, e.get("branch")), working_tree_only
-    _assert_kept_whole(repo, archive_on, w, e, "deploy.key", w + "/a.txt")
-
-
-def _push_tracked(repo, w, name, branch):
-    os.makedirs(os.path.dirname(w + "/" + name), exist_ok=True)
-    open(w + "/" + name, "w").write("v1")
-    sh("git", "add", "-f", name, cwd=w)
-    sh("git", "commit", "-qm", "add " + name, cwd=w)
-    sh("git", "push", "-q", "origin", branch, cwd=w)
-    sh("git", "fetch", "-q", "origin", cwd=repo.main)
-
-
-@pytest.mark.parametrize("name", ["service.key", "conf/token_store/data.txt"])
-def test_a_modified_tracked_secret_named_file_keeps_the_worktree_whole(
-    repo, archive_on, name
-):
-    w = repo.add_wt("sec-modified", node_modules=False)
-    _push_tracked(repo, w, name, "b-sec-modified")
-    open(w + "/" + name, "a").write(
-        "NOT-READ-BY-TEST-OR-TOOL"
-    )  # now in the working-tree diff
-    age(w)
-    e = wp.analyze(repo.entry(w), False)
-    assert e["status"] == "ARCHIVE-CANDIDATE"
-    _assert_kept_whole(repo, archive_on, w, e, name, w + "/" + name)
-    assert open(w + "/" + name).read().endswith("NOT-READ-BY-TEST-OR-TOOL")
-
-
-def test_a_renamed_secret_named_file_is_caught_at_both_ends(repo, archive_on):
-    w = repo.add_wt("sec-rename", node_modules=False)
-    _push_tracked(repo, w, "old_secret_file.txt", "b-sec-rename")
-    sh(
-        "git", "mv", "old_secret_file.txt", "plain-name.txt", cwd=w
-    )  # target looks harmless
-    age(w)
-    e = wp.analyze(repo.entry(w), False)
-    assert e["status"] == "ARCHIVE-CANDIDATE"
-    _assert_kept_whole(
-        repo, archive_on, w, e, "old_secret_file.txt", w + "/plain-name.txt"
-    )
-    # and the other way round: a harmless source renamed to a secret-looking target
-    w2 = repo.add_wt("sec-rename2", node_modules=False)
-    _push_tracked(repo, w2, "plain2.txt", "b-sec-rename2")
-    sh("git", "mv", "plain2.txt", "id_rsa", cwd=w2)
-    age(w2)
-    e2 = wp.analyze(repo.entry(w2), False)
-    _assert_kept_whole(repo, archive_on, w2, e2, "id_rsa", w2 + "/id_rsa")
-
-
-@pytest.mark.parametrize(
-    "rel",
-    ["config/secrets/prod.txt", ".ssh/known_hosts", "a/.aws/config", "tokens/list.txt"],
-)
-def test_a_secret_named_directory_component_keeps_the_worktree_whole(
-    repo, archive_on, rel
-):
-    w, e = _dirty_archive_candidate(repo, "sec-dir")
-    os.makedirs(os.path.dirname(w + "/" + rel))
-    open(w + "/" + rel, "w").write(
-        "NOT-READ-BY-TEST-OR-TOOL"
-    )  # untracked; the file name itself is harmless
-    assert not wp.secret_name(os.path.basename(rel))  # only the directory gives it away
-    age(w)
-    _assert_kept_whole(repo, archive_on, w, e, rel, w + "/" + rel)
-
-
-def test_secret_paths_are_judged_on_every_component():
-    assert wp.secret_path("config/secrets/prod.txt")
-    assert wp.secret_path("x/.ssh/id")
-    assert wp.secret_path("DEEP/Credentials/ok.txt")
-    assert not wp.secret_path("src/lib/app.js")
-    assert not wp.secret_path("docs/.env.example")  # exempt placeholder
-    assert not wp.secret_path("a/.env.development.local")  # the husky-copy family
-    assert wp.secret_path("a/.env.example", is_link=True)  # unless it is a link
-
-
-def test_a_secret_named_file_in_a_local_only_commit_keeps_the_worktree_whole(
-    repo, archive_on
-):
-    w = repo.add_wt("sec-commit", node_modules=False)
-    open(w + "/deploy.pem", "w").write("NOT-READ-BY-TEST-OR-TOOL")
-    sh("git", "add", "-f", "deploy.pem", cwd=w)
-    sh("git", "commit", "-qm", "local only", cwd=w)
-    age(w)
-    e = wp.analyze(repo.entry(w), False)
-    assert e["status"] == "ARCHIVE-CANDIDATE"  # unpushed
-    assert wp.secret_files(w, "b-sec-commit") == ["deploy.pem"]
-    _assert_kept_whole(repo, archive_on, w, e, "deploy.pem", w + "/deploy.pem")
-    # still caught when a later local commit removed it again: the bundle would carry the history
-    w2 = repo.add_wt("sec-commit2", node_modules=False)
-    open(w2 + "/id_ed25519", "w").write("NOT-READ-BY-TEST-OR-TOOL")
-    sh("git", "add", "-f", "id_ed25519", cwd=w2)
-    sh("git", "commit", "-qm", "oops", cwd=w2)
-    sh("git", "rm", "-q", "id_ed25519", cwd=w2)
-    sh("git", "commit", "-qm", "remove it", cwd=w2)
-    age(w2)
-    e2 = wp.analyze(repo.entry(w2), False)
-    assert wp.secret_files(w2, "b-sec-commit2") == ["id_ed25519"]
-    _assert_kept_whole(repo, archive_on, w2, e2, "id_ed25519", w2 + "/a.txt")
-    # an ordinary local-only commit still archives
-    w3 = repo.add_wt("sec-commit3", node_modules=False)
-    open(w3 + "/ordinary.txt", "w").write("x")
-    sh("git", "add", "ordinary.txt", cwd=w3)
-    sh("git", "commit", "-qm", "ordinary", cwd=w3)
-    age(w3)
-    e3 = wp.analyze(repo.entry(w3), False)
-    assert wp.act(e3, True, False) == "ARCHIVED-REMOVED"
-
-
-def test_a_local_commit_secret_appearing_while_archiving_discards_the_archive(
-    repo, archive_on, monkeypatch
-):
-    w, e = _dirty_archive_candidate(repo, "sec-late-commit")
-    real_build = wp.build_archive
-
-    def build_then_commit_a_secret(entry, dest):
-        info = real_build(entry, dest)
-        open(w + "/late.p12", "w").write("NOT-READ-BY-TEST-OR-TOOL")
-        sh("git", "add", "-f", "late.p12", cwd=w)
-        sh("git", "commit", "-qm", "late", cwd=w)
-        age(w)
-        return info
-
-    monkeypatch.setattr(wp, "build_archive", build_then_commit_a_secret)
-    res = wp.archive_flow(e, True)
-    # the commit moves HEAD, which the unchanged-since check also catches; either way nothing is removed
-    assert res in ("secrets-present", "head-moved"), res
-    assert os.path.isdir(w) and os.path.isfile(w + "/late.p12")
-
-
-def test_a_template_named_symlink_gets_no_template_exemption(repo, archive_on):
-    w, e = _dirty_archive_candidate(repo, "sec-link")
-    os.symlink(
-        "a.txt", w + "/credentials.json.sample"
-    )  # looks like a placeholder, is a link
-    age(w)
-    assert wp.secret_files(w, e.get("branch")) == ["credentials.json.sample"]
-    _assert_kept_whole(repo, archive_on, w, e, "credentials.json.sample", w + "/a.txt")
-    # a staged (tracked) symlink with a template name is caught through its git mode
-    w2, e2 = _dirty_archive_candidate(repo, "sec-link2")
-    os.symlink("a.txt", w2 + "/.env.example")
-    sh("git", "add", ".env.example", cwd=w2)
-    age(w2)
-    assert ".env.example" in wp.secret_files(w2, e2.get("branch"))
-    # the control: the same names as regular files are exempt placeholders
-    w3, e3 = _dirty_archive_candidate(repo, "sec-link3")
-    open(w3 + "/credentials.json.sample", "w").write("{}")
-    open(w3 + "/.env.example", "w").write("A=")
-    sh("git", "add", ".env.example", cwd=w3)
-    age(w3)
-    assert wp.secret_files(w3, e3.get("branch")) == []
-
-
-def test_an_unavailable_template_definition_is_logged_once(repo, monkeypatch):
-    monkeypatch.setattr(wp, "TEMPLATE_RULE_LOADED", False)
-    run_main(repo, "--strip-only")
-    logs = os.listdir(repo.home + "/state/logs")
-    text = "".join(open(repo.home + "/state/logs/" + n).read() for n in logs)
-    assert text.count("credential template definition") == 1
-    assert "stricter secret-name matching applies" in text
-    monkeypatch.setattr(wp, "TEMPLATE_RULE_LOADED", True)
-    other = repo.home + "/state2"
-    wp.main(["--state-dir", other, "--repos-dir", repo.home + "/repos", "--strip-only"])
-    text2 = "".join(
-        open(other + "/logs/" + n).read() for n in os.listdir(other + "/logs")
-    )
-    assert "credential template definition" not in text2
-
-
-def _write_archive(root, day, repo_name="r", name="x-1234abcd", members=("meta.json",)):
-    d = os.path.join(root, day, repo_name, name)
-    os.makedirs(d)
-    for m in members:
-        open(os.path.join(d, m), "w").write("{}" if m == "meta.json" else "data")
-    return d
-
-
-def test_prune_archives_apply_only_deletes_what_this_tool_wrote(repo):
-    root = repo.home + "/archive-root"
-    outside = repo.home + "/outside-target"
-    os.makedirs(outside)
-    open(outside + "/precious.txt", "w").write("keep")
-    wp.ARCH["root"] = root
-    real_old = _write_archive(
-        root,
-        "2020-01-01",
-        members=("meta.json", "patch.diff", "untracked.tar.gz", "local-commits.bundle"),
-    )
-    foreign = {  # date-named directories holding something else
-        "2020-02-01": lambda d: (
-            os.makedirs(d + "/notes"),
-            open(d + "/notes/todo.txt", "w").write("mine"),
-        ),
-        "2020-02-02": lambda d: open(d + "/stray.txt", "w").write(
-            "a file at the top level"
-        ),
-        "2020-02-03": lambda d: _write_archive(
-            root, "2020-02-03", members=("meta.json", "extra.sh")
-        ),
-        "2020-02-04": lambda d: _write_archive(
-            root, "2020-02-04", members=("patch.diff",)
-        ),
-        "2020-02-05": lambda d: os.symlink(outside, d + "/linked-repo"),
-        "2020-02-06": lambda d: _write_archive(
-            root, "2020-02-06", name="x-1234abcd.partial"
-        ),
-        "2020-02-07": lambda d: None,  # empty
-    }
-    for day, make in foreign.items():
-        os.makedirs(root + "/" + day, exist_ok=True)
-        make(root + "/" + day)
-    # a date-named symlink to somewhere else entirely, whose target looks exactly like a valid archive day
-    elsewhere = repo.home + "/elsewhere-days/2020-02-08"
-    _write_archive(repo.home + "/elsewhere-days", "2020-02-08")
-    os.symlink(elsewhere, root + "/2020-02-08")
-    assert wp.archive_day_dir_matches(
-        elsewhere
-    )  # the control: only the symlink makes it foreign
-    listing = wp.prune_archives(False, 30)
-    assert listing["old_day_dirs"] == ["2020-01-01"]
-    assert listing["skipped_foreign_dirs"] == sorted(list(foreign) + ["2020-02-08"])
-    result = wp.prune_archives(True, 30)
-    assert result["deleted"] and result["old_day_dirs"] == ["2020-01-01"]
-    assert not os.path.exists(real_old) and not os.path.exists(root + "/2020-01-01")
-    for day in foreign:
-        assert os.path.lexists(root + "/" + day), day  # foreign content left untouched
-    assert open(root + "/2020-02-01/notes/todo.txt").read() == "mine"
-    assert open(root + "/2020-02-02/stray.txt").read() == "a file at the top level"
-    assert open(outside + "/precious.txt").read() == "keep"
-    assert os.path.islink(root + "/2020-02-08")
-    assert os.path.isfile(elsewhere + "/r/x-1234abcd/meta.json")
-
-
-def test_an_archive_this_tool_really_wrote_is_removed_when_old(repo, archive_on):
-    w, e = _dirty_archive_candidate(repo, "real-old")
-    open(w + "/new-note.txt", "w").write("untracked")
-    age(w)
-    e = wp.analyze(repo.entry(w), False)
-    assert wp.act(e, True, False) == "ARCHIVED-REMOVED"
-    day_dir = os.path.dirname(os.path.dirname(e["archive_dir"]))
-    assert wp.archive_day_dir_matches(day_dir)
-    old_day = os.path.join(archive_on, "2020-01-01")
-    os.rename(day_dir, old_day)
-    assert wp.prune_archives(True, 30)["old_day_dirs"] == ["2020-01-01"]
-    assert not os.path.exists(old_day)
-
-
-def test_prune_archives_refuses_a_symlinked_or_redirected_archive_root(repo):
-    real_root = repo.home + "/real-archive"
-    old = _write_archive(real_root, "2020-01-01")
-    link = repo.home + "/archive-link"
-    os.symlink(real_root, link)
-    wp.ARCH["root"] = link
-    res = wp.prune_archives(True, 30)
-    assert res["refused"] == "archive-root-not-real" and res["deleted"] is False
-    assert "symlink" in res["detail"] and res["old_day_dirs"] == []
-    assert os.path.isdir(old)  # nothing deleted through the link
-    # a real root reached through a symlinked ancestor is refused too
-    os.symlink(repo.home, repo.home + "/home-link")
-    wp.ARCH["root"] = repo.home + "/home-link/real-archive"
-    assert wp.prune_archives(True, 30)["refused"] == "archive-root-not-real"
-    assert os.path.isdir(old)
-    # the control: the configured, real path is accepted
-    wp.ARCH["root"] = real_root
-    assert wp.prune_archives(False, 30)["old_day_dirs"] == ["2020-01-01"]
-
-
-def test_main_prune_archives_reports_a_refused_root_and_exits_nonzero(repo):
-    real_root = repo.home + "/real-archive2"
-    old = _write_archive(real_root, "2020-01-01")
-    os.symlink(real_root, repo.home + "/archive-link2")
-    code, summ = run_main(
-        repo,
-        "--prune-archives",
-        "--apply",
-        "--archive-root",
-        repo.home + "/archive-link2",
-    )
-    assert code == 2 and summ["status"] == "refused-archive-root"
-    assert os.path.isdir(old)
-
-
-@pytest.mark.parametrize("swap", ["foreign-content", "symlink"])
-def test_prune_archives_rechecks_after_the_listing_and_before_deleting(
-    repo, monkeypatch, swap
-):
-    root = repo.home + "/archive-swap"
-    wp.ARCH["root"] = root
-    day = root + "/2020-01-01"
-    _write_archive(root, "2020-01-01")
-    target = repo.home + "/swap-target"
-    _write_archive(target, "2020-01-01")  # a perfectly valid-looking archive elsewhere
-    real_check = wp.archive_day_dir_matches
-    calls = []
-
-    def check_then_swap(path):
-        result = real_check(path)
-        if (
-            not calls and result
-        ):  # the listing's check: it passes, then the directory is swapped
-            if swap == "foreign-content":
-                open(path + "/notes.txt", "w").write("not an archive member")
-            else:
-                shutil.rmtree(path)
-                os.symlink(target + "/2020-01-01", path)
-        calls.append(path)
-        return result
-
-    monkeypatch.setattr(wp, "archive_day_dir_matches", check_then_swap)
-    res = wp.prune_archives(True, 30)
-    assert len(calls) >= 2, "the layout was not re-checked before deleting"
-    assert res["deleted_day_dirs"] == [] and res["skipped_foreign_dirs"] == [
-        "2020-01-01"
-    ]
-    assert os.path.lexists(day)  # put back where it was found
-    assert os.path.isfile(target + "/2020-01-01/r/x-1234abcd/meta.json")
-    if swap == "foreign-content":
-        assert open(day + "/notes.txt").read() == "not an archive member"
-    else:
-        assert os.path.islink(day)
-    assert [n for n in os.listdir(root) if n.startswith(".prune-")] == []
-
-
-def test_prune_archives_apply_deletes_a_verified_directory_via_the_aside_name(repo):
-    root = repo.home + "/archive-aside"
-    wp.ARCH["root"] = root
-    _write_archive(root, "2020-01-01")
-    res = wp.prune_archives(True, 30)
-    assert res["deleted_day_dirs"] == ["2020-01-01"]
-    assert os.listdir(root) == []
-
-
-def test_prune_archives_skips_are_logged_and_numeric_dates_are_not_dates(repo):
-    root = repo.home + "/archive-log"
-    wp.ARCH["root"] = root
-    os.makedirs(root + "/2020-03-01/stray")  # empty repo dir: not an archive
-    os.makedirs(
-        root + "/20200301/r/x"
-    )  # a compact date is not the name this tool writes
-    open(root + "/20200301/r/x/meta.json", "w").write("{}")
-    logfile = repo.home + "/prune.log"
-    wp.LOGF = open(logfile, "w", buffering=1)
-    try:
-        res = wp.prune_archives(True, 30)
-    finally:
-        wp.LOGF.close()
-    assert res["skipped_foreign_dirs"] == ["2020-03-01"]
-    assert os.path.isdir(root + "/2020-03-01/stray") and os.path.isdir(
-        root + "/20200301/r/x"
-    )
-    assert "SKIP prune-archives" in open(logfile).read()
-
-
-def test_the_run_summary_counts_worktrees_kept_for_secrets(repo):
-    w = repo.add_wt("sec-main", node_modules=False)
-    open(w + "/a.txt", "a").write("edit\n")
-    open(w + "/.env.local", "w").write("NOT-READ-BY-TEST-OR-TOOL")
-    age(w)
-    plain = repo.add_wt("sec-main-ok", node_modules=False)
-    open(plain + "/a.txt", "a").write("edit\n")
-    age(plain)
-    code, summ = run_main(repo, "--archive-remove", "--apply")
-    assert code == 0
-    assert summ["secrets_present"] == 1 and summ["kept"]["secrets-present"] == 1
-    assert summ["archived_removed"] == 1
-    assert os.path.isfile(w + "/.env.local") and not os.path.exists(plain)
+        wp.run = real_run
+    removals = [x for x in seen if "worktree" in x and "remove" in x]
+    assert res == "REMOVED" and len(removals) == 1
+    assert not any(a in ("--force", "-f") for a in removals[0])
+
+
+def test_the_module_source_never_contains_a_forced_worktree_removal():
+    src = Path(wp.__file__).read_text(encoding="utf-8")
+    # the option as a string literal (either quote style), and the short form as an argument
+    assert not re.search(r"""["']--force["']""", src)
+    assert not re.search(r"""["']-f["']""", src)
+    assert not re.search(r"""["']--force-""", src)
+    assert "remove --force" not in src
+    # exactly one place issues `worktree remove`, and a refusal by git keeps the worktree
+    assert len(re.findall(r'"worktree",\s*"remove"', src)) == 1
+    assert "git-refused" in src
 
 
 # ======================================================================================
@@ -2049,32 +951,62 @@ def test_fresh_hours_defaults_to_24_everywhere(repo):
     assert wp.analyze(repo.entry(older), False)["status"] == "ELIGIBLE"
 
 
-def test_idle_hours_default_is_24_for_node_modules_and_72_for_the_archive_tier(repo):
+def test_idle_hours_is_the_node_modules_window_default_24(repo):
     run_main(repo, "--strip-only")
     assert wp.STRIP["idle_hours"] == 24
-    run_main(repo, "--strip-node-modules", "--archive-remove")
-    assert wp.STRIP["idle_hours"] == 24 and wp.ARCH["idle_hours"] == 72
-    run_main(repo, "--strip-node-modules", "--archive-remove", "--idle-hours", "30")
-    assert wp.STRIP["idle_hours"] == 30 and wp.ARCH["idle_hours"] == 30
+    run_main(repo, "--strip-node-modules", "--idle-hours", "30")
+    assert wp.STRIP["idle_hours"] == 30
+    assert (
+        wp.idle_windows(None) == 24 and wp.idle_windows(0) == 1
+    )  # never below an hour
+    assert "archive" not in wp.build_parser().format_help().lower()
 
 
-def test_the_launchd_template_keeps_each_tier_at_its_own_idle_window():
+def test_the_launchd_template_runs_exactly_the_plain_and_strip_tiers():
     import plistlib
 
     template = Path(wp.__file__).with_name("com.ateles.worktree-prune.plist.template")
     text = template.read_text(encoding="utf-8")
     text = text.replace("{{HOME}}", "/h").replace("{{CHECKOUT}}", "/c")
     argv = plistlib.loads(text.encode("utf-8"))["ProgramArguments"]
-    args = wp.build_parser().parse_args(
-        argv[2:]
-    )  # after the interpreter and the script
-    assert (
-        args.strip_node_modules and args.archive_remove
-    )  # both tiers run from the template
-    assert args.idle_hours is None, "the shared flag would also set the archive window"
-    assert wp.idle_windows(args.idle_hours) == (24, 72)
-    # the control that shows why: given explicitly the flag sets both windows
-    assert wp.idle_windows(24) == (24, 24)
+    flags = argv[2:]  # after the interpreter and the script
+    wp.reject_removed_options(wp.build_parser(), flags)  # no archive-tier option
+    args = wp.build_parser().parse_args(flags)
+    assert args.apply and args.protect_ignored and args.strip_node_modules
+    assert args.max == 200 and not args.strip_only
+    assert args.idle_hours is None and wp.idle_windows(args.idle_hours) == 24
+    assert args.fresh_hours == 24
+    assert sorted(f for f in flags if f.startswith("--")) == [
+        "--apply",
+        "--max",
+        "--protect-ignored",
+        "--strip-node-modules",
+    ]
+
+
+@pytest.mark.parametrize("option", list(wp.REMOVED_OPTIONS))
+def test_removed_archive_options_are_refused_with_a_clear_message(option, capsys, repo):
+    for argv in ([option], [option + "=3"], ["--apply", option, "5"]):
+        with pytest.raises(SystemExit) as raised:
+            wp.main(
+                ["--state-dir", repo.home + "/state-removed", "--strip-only", *argv]
+            )
+        assert raised.value.code == 2
+        err = capsys.readouterr().err
+        assert option + " is no longer supported" in err
+        assert "archive-then-remove tier is not part of this module" in err
+    assert not os.path.exists(
+        repo.home + "/state-removed"
+    )  # refused before anything ran
+
+
+def test_the_four_named_options_are_among_the_refused_ones():
+    assert {
+        "--archive-remove",
+        "--archive-cap-mb",
+        "--prune-archives",
+        "--archive-retention-days",
+    } <= set(wp.REMOVED_OPTIONS)
 
 
 def test_inherited_git_context_does_not_reach_git_subprocesses(repo, tmp_path):
@@ -2127,7 +1059,7 @@ def test_defaults_are_relative_to_home_with_an_empty_hold(repo):
     assert warnings == []
     assert wp.H == repo.home
     assert wp.BASE == repo.home + "/.ateles-work/worktree-prune"
-    assert wp.ARCHIVE_ROOT == repo.home + "/.ateles-work/worktree-archive"
+    assert not hasattr(wp, "ARCHIVE_ROOT") and not hasattr(wp, "ARCH")
     assert wp.REPOS_DIRS == [repo.home + "/repos"]
     assert wp.HOLD_PREFIXES == () and wp.HOLD_UNTIL is None
     assert wp.MANUAL_PROGRESS is None
@@ -2142,7 +1074,6 @@ def test_environment_configures_and_flags_win(repo):
     other = repo.home + "/elsewhere"
     env = {
         "ATELES_WORKTREE_PRUNE_STATE_DIR": other + "/state",
-        "ATELES_WORKTREE_PRUNE_ARCHIVE_ROOT": other + "/archive",
         "ATELES_WORKTREE_PRUNE_REPOS_DIRS": other + "/r1" + os.pathsep + other + "/r2",
         "ATELES_WORKTREE_PRUNE_NEVER_TOUCH": other + "/prod",
         "ATELES_WORKTREE_PRUNE_HOLD_PREFIXES": "alpha-, beta-",
@@ -2154,9 +1085,6 @@ def test_environment_configures_and_flags_win(repo):
         wp.BASE == other + "/state"
         and wp.RUNS == other + "/state/runs.jsonl"
         and wp.LOCK == other + "/state/lock"
-    )
-    assert (
-        wp.ARCHIVE_ROOT == other + "/archive" and wp.ARCH["root"] == other + "/archive"
     )
     assert wp.REPOS_DIRS == [other + "/r1", other + "/r2"]
     assert (
