@@ -8916,9 +8916,38 @@ class SwarmDispatcher:
         #     diagnostic there; a verdict token found only in stderr is not a
         #     verdict. Output with no fixed-position verdict, and any failed
         #     run, is checked on both streams as before.
-        aggregation_is_review = vanellus_result.ok and (
+        #
+        #     A successful run whose stdout lacks that form but which POSTED
+        #     its aggregation comment for this head during this run, with the
+        #     verdict at the fixed position of that comment
+        #     (`posted_comment_own_verdict`), is a review too: a run that
+        #     posts its own comment often ends with a summary of it in stdout
+        #     (seen on #1635 and #1645, both deferred ~3h because their
+        #     findings were about retry limits). The comment is read only
+        #     when stdout would otherwise match a detector.
+        #
+        #     When the run is accepted on that posted comment, the comment's
+        #     verdict is the conclusion: step 5 reads it back from the comment
+        #     and never parses stdout, whose summary may mention another token.
+        stdout_has_own_verdict = (
             lens_own_verdict(vanellus_result.stdout, lens_agent="vanellus")
             is not None
+        )
+        accepted_on_posted_comment = (
+            vanellus_result.ok
+            and not stdout_has_own_verdict
+            and (
+                detect_session_limit(vanellus_result.stdout)
+                or detect_auth_failure(vanellus_result.stdout)
+            )
+            and await self._vanellus_posted_verdict_this_run(
+                trigger,
+                head_sha=review_head,
+                started_at=aggregation_started_at,
+            )
+        )
+        aggregation_is_review = vanellus_result.ok and (
+            stdout_has_own_verdict or accepted_on_posted_comment
         )
         detector_stdout = "" if aggregation_is_review else vanellus_result.stdout
         if detect_session_limit(detector_stdout, vanellus_result.stderr):
@@ -8969,10 +8998,24 @@ class SwarmDispatcher:
         #    posts the verdict reliably but repeats it in stdout only ~25% of
         #    the time, and a missed token silently downgrades a REQUEST_CHANGES
         #    to an inert COMMENT on GitHub.
-        verdict, used_comment_fallback = await self._resolve_review_verdict(
-            trigger, vanellus_result.stdout,
-            expected_head=aggregation_head, started_at=aggregation_started_at,
-        )
+        #    When the run was accepted on its posted comment (step 4a-0), that
+        #    comment is the conclusion: its verdict, and its body, drive the
+        #    formal review and the routing below, and stdout is not parsed.
+        review_body = vanellus_result.stdout
+        if accepted_on_posted_comment:
+            verdict, posted_body = await self._resolve_posted_review_verdict(
+                trigger, vanellus_result.stdout,
+                expected_head=aggregation_head,
+                started_at=aggregation_started_at,
+            )
+            used_comment_fallback = False
+            if posted_body is not None:
+                review_body = posted_body
+        else:
+            verdict, used_comment_fallback = await self._resolve_review_verdict(
+                trigger, vanellus_result.stdout,
+                expected_head=aggregation_head, started_at=aggregation_started_at,
+            )
         if verdict is None:
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus", "", "",
@@ -8992,7 +9035,7 @@ class SwarmDispatcher:
         #     here must not change the routing decision below, which remains
         #     driven by the parsed verdict.
         binding_receipt = await self._emit_formal_review(
-            trigger, verdict, vanellus_result.stdout, reviewed_head=aggregation_head
+            trigger, verdict, review_body, reviewed_head=aggregation_head
         )
 
         # 5b. ateles#565: a merge the steward was AUTHORIZED to perform and
@@ -9016,7 +9059,7 @@ class SwarmDispatcher:
         #     same blocker: branching on the token alone let a `**COMMENT**` above
         #     a `[BLOCKING]` finding block the PR on GitHub while the dispatcher
         #     told the operator it was merge-ready.
-        if review_blocks_merge(verdict, vanellus_result.stdout):
+        if review_blocks_merge(verdict, review_body):
             await self._route_blocking_findings(
                 trigger,
                 parent,
@@ -11256,6 +11299,101 @@ class SwarmDispatcher:
             state="APPROVED",
             principal=principal,
         )
+
+    async def _vanellus_posted_verdict_this_run(
+        self, t: SwarmTrigger, *, head_sha: str, started_at: datetime
+    ) -> bool:
+        """True when Vanellus's aggregation comment for *head_sha*, posted or
+        updated at or after *started_at*, carries its verdict at the fixed
+        position (`posted_comment_own_verdict`, the reader `panel_finished_at_head`
+        uses).
+
+        A roll-up that posts its own comment can end with stdout that is a
+        summary of what it posted, not the verdict at the fixed position, so
+        stdout alone cannot say the run was a review. Never raises: a read
+        failure, an unpinned head or an older comment returns False, which
+        leaves the limit and auth detectors reading stdout as before.
+        """
+        return (
+            await self._vanellus_posted_aggregation_this_run(
+                t, head_sha=head_sha, started_at=started_at
+            )
+        ) is not None
+
+    async def _vanellus_posted_aggregation_this_run(
+        self, t: SwarmTrigger, *, head_sha: str, started_at: datetime
+    ) -> tuple[str, str] | None:
+        """``(verdict, body)`` of Vanellus's aggregation comment for *head_sha*
+        posted or updated at or after *started_at*, with the verdict read at
+        the comment's fixed position (`posted_comment_own_verdict`); else None.
+
+        Never raises: a read failure, an unpinned head, an older comment or a
+        comment without a fixed-position verdict all return None.
+        """
+        head = _normalise_full_sha(head_sha)
+        if not head:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._lens_scoped_comments(
+                    t.repository, t.number, client
+                )
+            comment = latest_aggregation_comment(comments, head_sha=head)
+            if comment is None:
+                return None
+            stamp = comment.get("updated_at") or comment.get("created_at")
+            posted = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            if posted.tzinfo is None or posted < started_at:
+                return None
+            body = comment.get("body") or ""
+            verdict = posted_comment_own_verdict(body, lens_agent="vanellus")
+            if verdict is None:
+                return None
+            return verdict, body
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: posted-aggregation "
+                f"read failed ({exc}) — no posted verdict read"
+            )
+            return None
+
+    async def _resolve_posted_review_verdict(
+        self, t: SwarmTrigger, stdout: str, *,
+        expected_head: str, started_at: datetime,
+    ) -> tuple[str | None, str | None]:
+        """The verdict of a run accepted on its current-run posted comment.
+
+        That comment is the conclusion, so it is read back here and its
+        fixed-position verdict returned with its body; stdout is NOT parsed
+        for a verdict, because a summary can mention another token anywhere.
+        A different token in stdout is logged and ignored. When the comment
+        cannot be read back (head moved, comment gone, older than this run,
+        no fixed-position verdict, read failure) this returns ``(None, None)``
+        and the caller treats the review as incomplete; it never falls back
+        to stdout. Never raises.
+        """
+        current_head = await self._pr_head_sha(t)
+        if not current_head or current_head != expected_head:
+            return None, None
+        posted = await self._vanellus_posted_aggregation_this_run(
+            t, head_sha=current_head, started_at=started_at
+        )
+        if posted is None:
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: run was accepted on "
+                "its posted aggregation comment, which could not be read back — "
+                "review incomplete (stdout is not used)"
+            )
+            return None, None
+        verdict, body = posted
+        stdout_verdict = parse_review_verdict(stdout)
+        if stdout_verdict is not None and stdout_verdict != verdict:
+            log.warning(
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: stdout mentions "
+                f"verdict {stdout_verdict!r} but the posted aggregation comment "
+                f"says {verdict!r} — using the posted comment"
+            )
+        return verdict, body
 
     async def _resolve_review_verdict(
         self, t: SwarmTrigger, stdout: str, *,

@@ -9948,9 +9948,21 @@ def test_handle_pr_reports_successful_and_failed_lenses(monkeypatch):
 _STEWARD_HEADER = "**\U0001f916 Vanellus — Ateles swarm, PR steward**"
 
 
-def _aggregation_outcomes(monkeypatch, *, vanellus_ok, vanellus_stdout, vanellus_stderr=""):
+def _aggregation_outcomes(
+    monkeypatch, *, vanellus_ok, vanellus_stdout, vanellus_stderr="",
+    posted_comments=(),
+):
     calls = []
     d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout=vanellus_stdout, calls=calls)
+
+    async def fake_scoped_comments(self, repository, number, client):
+        # A callable serves a different thread per read, so a test can make
+        # the comment vanish between the acceptance check and the verdict read.
+        if callable(posted_comments):
+            return list(posted_comments())
+        return list(posted_comments)
+
+    monkeypatch.setattr(SwarmDispatcher, "_lens_scoped_comments", fake_scoped_comments)
 
     async def fake_run_skill(skill, prompt, **kwargs):
         if skill == "lanius":
@@ -10145,6 +10157,201 @@ def test_well_formed_roll_up_mentioning_rate_limits_is_a_review(monkeypatch):
     )
     assert deferrals == [] and auth_pages == []
     assert ("review", "APPROVE") in calls, calls
+
+
+# A roll-up that posts its own comment can end with a stdout summary that is
+# not the verdict at the fixed position. When its aggregation comment for this
+# head landed during this run with the verdict at the comment's fixed position,
+# the run is a review and its stdout is not scanned. Stderr is still read, and
+# with no posted verdict stdout is still scanned (#1635, #1645).
+
+
+def _posted_aggregation(verdict_line, *, created_at="2999-01-01T00:00:00Z"):
+    body = (
+        f"<!-- vanellus-aggregation commit={'a' * 40} -->\n"
+        + _STEWARD_HEADER + "\n"
+        + verdict_line + "\n\n"
+        "[BLOCKING] qa: the retry loop ignores the rate limit reset header."
+    )
+    return {"id": 7, "body": body, "created_at": created_at, "updated_at": created_at}
+
+
+_SUMMARY_STDOUT = (
+    "Posted the roll-up comment on the PR. The blocking finding is that the "
+    "client hits the rate limit and retries before the usage limit resets."
+)
+
+
+def test_posted_verdict_with_stdout_discussing_rate_limits_does_not_defer(monkeypatch):
+    comment = _posted_aggregation("**REQUEST_CHANGES**")
+    assert swarm_dispatch.detect_session_limit(_SUMMARY_STDOUT)  # would match if read
+    assert swarm_dispatch.lens_own_verdict(_SUMMARY_STDOUT, lens_agent="vanellus") is None
+    assert swarm_dispatch.posted_comment_own_verdict(
+        comment["body"], lens_agent="vanellus"
+    ) == "request_changes"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_SUMMARY_STDOUT,
+        posted_comments=[comment],
+    )
+    assert deferrals == [] and auth_pages == []
+    # The verdict is then recovered from the posted comment and acted on.
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "request_changes") in calls, calls
+
+
+_AUTH_SUMMARY_STDOUT = (
+    "Posted the roll-up comment on the PR. The blocking finding is that a 401 "
+    "invalid authentication credentials response from the provider is swallowed."
+)
+
+
+def test_posted_verdict_with_stdout_discussing_auth_failure_does_not_page(monkeypatch):
+    comment = _posted_aggregation("**REQUEST_CHANGES**")
+    assert swarm_dispatch.detect_auth_failure(_AUTH_SUMMARY_STDOUT)  # would match if read
+    assert not swarm_dispatch.detect_session_limit(_AUTH_SUMMARY_STDOUT)
+    assert swarm_dispatch.lens_own_verdict(
+        _AUTH_SUMMARY_STDOUT, lens_agent="vanellus"
+    ) is None
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_AUTH_SUMMARY_STDOUT,
+        posted_comments=[comment],
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "request_changes") in calls, calls
+
+
+# When the run is accepted on its posted comment, that comment's verdict is
+# the conclusion. Stdout is not parsed for a verdict on that path, even when
+# its summary names another token; an unreadable comment is incomplete, never
+# a fall-back to stdout. With no validated comment, stdout governs as before.
+
+
+def _clean_posted_aggregation(verdict_line, *, created_at="2999-01-01T00:00:00Z"):
+    body = (
+        f"<!-- vanellus-aggregation commit={'a' * 40} -->\n"
+        + _STEWARD_HEADER + "\n"
+        + verdict_line + "\n\n"
+        "All lenses cleared the current head."
+    )
+    return {"id": 9, "body": body, "created_at": created_at, "updated_at": created_at}
+
+
+def test_posted_request_changes_wins_over_approve_in_stdout_summary(monkeypatch, caplog):
+    stdout = _SUMMARY_STDOUT + "\nEarlier draft verdict was **APPROVE**."
+    assert swarm_dispatch.parse_review_verdict(stdout) == "approve"
+    assert swarm_dispatch.lens_own_verdict(stdout, lens_agent="vanellus") is None
+    with caplog.at_level("WARNING"):
+        calls, deferrals, auth_pages = _aggregation_outcomes(
+            monkeypatch, vanellus_ok=True, vanellus_stdout=stdout,
+            posted_comments=[_posted_aggregation("**REQUEST_CHANGES**")],
+        )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "request_changes") in calls, calls
+    assert ("gate", None) not in calls, calls
+    assert any(
+        "'approve'" in r.getMessage() and "'request_changes'" in r.getMessage()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_posted_approve_wins_over_request_changes_in_stdout_summary(monkeypatch):
+    stdout = (
+        _SUMMARY_STDOUT
+        + "\nThe first pass said **REQUEST_CHANGES** with [BLOCKING] qa: retries."
+    )
+    assert swarm_dispatch.parse_review_verdict(stdout) == "request_changes"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout,
+        posted_comments=[_clean_posted_aggregation("**APPROVE**")],
+    )
+    assert deferrals == [] and auth_pages == []
+    # The formal review and the routing both read the posted comment, so the
+    # stdout's [BLOCKING] mention cannot turn the APPROVE into a block.
+    assert ("review", "APPROVE") in calls, calls
+    assert ("gate", None) in calls, calls
+    assert not any(kind == "route" for kind, _ in calls), calls
+
+
+def test_posted_comment_unreadable_at_verdict_time_is_incomplete(monkeypatch):
+    stdout = _SUMMARY_STDOUT + "\nVerdict: **APPROVE**"
+    accepted = []
+    original = SwarmDispatcher._vanellus_posted_verdict_this_run
+
+    async def accept_then_remove(self, *a, **k):
+        result = await original(self, *a, **k)
+        accepted.append(result)
+        return result
+
+    monkeypatch.setattr(
+        SwarmDispatcher, "_vanellus_posted_verdict_this_run", accept_then_remove
+    )
+
+    def thread():
+        # Present for the acceptance check, gone when the verdict is read.
+        return [] if accepted else [_posted_aggregation("**REQUEST_CHANGES**")]
+
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout,
+        posted_comments=thread,
+    )
+    assert accepted == [True], accepted
+    assert auth_pages == []
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][2].get("reason") == "no verified current-head verdict"
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls), calls
+
+
+def test_no_validated_posted_comment_keeps_stdout_verdict(monkeypatch):
+    # Stdout matches no detector, so the posted comment is never validated as
+    # the conclusion; stdout's verdict governs exactly as before.
+    stdout = "**REQUEST_CHANGES**\n[BLOCKING] arch: the cache is never invalidated."
+    assert not swarm_dispatch.detect_session_limit(stdout)
+    assert not swarm_dispatch.detect_auth_failure(stdout)
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout,
+        posted_comments=[_clean_posted_aggregation("**APPROVE**")],
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "REQUEST_CHANGES") in calls, calls
+    assert ("route", "request_changes") in calls, calls
+
+
+def test_posted_verdict_with_real_limit_in_stderr_still_defers(monkeypatch):
+    stderr = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_SUMMARY_STDOUT,
+        vanellus_stderr=stderr, posted_comments=[_posted_aggregation("**APPROVE**")],
+    )
+    assert len(deferrals) == 1, deferrals
+    agent, args, _kwargs = deferrals[0]
+    assert agent == "vanellus"
+    assert args == (_SUMMARY_STDOUT, stderr)
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+@pytest.mark.parametrize(
+    "posted",
+    [
+        [],
+        [_posted_aggregation("**APPROVE**", created_at="2000-01-01T00:00:00Z")],
+        [{"id": 8, "body": f"<!-- vanellus-aggregation commit={'a' * 40} -->\nreview incomplete",
+          "created_at": "2999-01-01T00:00:00Z"}],
+    ],
+    ids=["no_comment", "older_run_comment", "comment_without_verdict"],
+)
+def test_no_posted_verdict_with_limit_in_stdout_still_defers(monkeypatch, posted):
+    notice = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=notice, posted_comments=posted,
+    )
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][0] == "vanellus"
+    assert deferrals[0][1][0] == notice
+    assert auth_pages == []
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
 
 
 def test_parse_limit_reset_delay_reads_the_clock():
