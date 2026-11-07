@@ -1333,7 +1333,12 @@ def fly_delivered_pr(
     makes it unknown whether or not it records a PR number, and whatever any
     other receipt says: its PR may predate its receipt. With no receipt
     establishing delivery, a missing audit file also makes it unknown, as it
-    may hold a cleared receipt's only record. A
+    may hold a cleared receipt's only record, and so does an empty
+    *head_branch*, since a receipt that records no PR number is matched only by
+    branch. A PR number or repository that cannot be read makes it unknown
+    too, never "not Fly": a missing PR number, repository or head branch holds
+    the fix round rather than running it on this host. A receipt that names
+    this PR still establishes delivery with an empty *head_branch*. A
     removal line marked ``correction`` never supplies the parent task. Used to route a fix
     round: a Fly PR's fix round runs as a Fly correction, never as a commit on
     this host."""
@@ -1342,7 +1347,10 @@ def fly_delivered_pr(
     number = _as_issue_number(pr_number)
     repo = canonical_repository(repository)
     if not number or not repo:
-        return FlyDeliveredPR(False)
+        missing = "PR number" if not number else "repository"
+        return FlyDeliveredPR(None, unknown_reason=(
+            f"this PR's {missing} could not be read, so whether a Fly delivery "
+            "opened it cannot be decided"))
     try:
         ledger = _delivery_ledger()
         # A missing file is no evidence either way: `delivery_receipts` reads
@@ -1418,6 +1426,12 @@ def fly_delivered_pr(
             "a Fly delivery for this PR or on its head branch has not settled, so "
             "whether this PR came from Fly is unknown"))
     if not delivered:
+        if not head:
+            # A first-delivery receipt that records no PR number is matched
+            # only by branch: with no head branch it could never be seen.
+            return FlyDeliveredPR(None, unknown_reason=(
+                "this PR's head branch is unknown, so whether a Fly delivery on "
+                "that branch opened it cannot be decided"))
         import fly_delivery_receipt
 
         try:

@@ -10208,9 +10208,11 @@ class SwarmDispatcher:
         the ledger or its audit file is missing or unreadable, so whether the
         PR came from Fly is unknown (whether or not deliveries are opted onto
         Fly), or the PR came from Fly but deliveries are no longer opted onto
-        it. Only a readable ledger that names the PR in no receipt, with no
-        audit record of a cleared or superseded receipt on its branch, keeps
-        the local round."""
+        it. A missing PR number, repository or head branch also holds the
+        round, since whether a Fly delivery opened the PR cannot be decided.
+        Only a readable ledger that names the PR in no receipt, with no audit
+        record of a cleared or superseded receipt on its branch, keeps the
+        local round."""
         opted_in = fly_runner.delivery_opted_in()
         facts = build_delivery.fly_delivered_pr(
             trigger.repository, trigger.number, trigger.head_ref

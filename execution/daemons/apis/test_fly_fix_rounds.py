@@ -416,13 +416,13 @@ def test_unreadable_ledger_while_on_fly_stops_for_attention(monkeypatch, world, 
                for m in d.notifier.sent)
 
 
-def _resume_scan(monkeypatch, d):
+def _resume_scan(monkeypatch, d, head_ref=BRANCH):
     async def scan(repo, now, stale):
         return [{
             "number": PR, "title": "t", "body": "Closes #80.",
             "html_url": f"https://github.com/{REPO}/pull/{PR}",
             "user": {"login": "someone"},
-            "head": {"ref": BRANCH, "sha": HEAD}, "base": {"ref": "main"},
+            "head": {"ref": head_ref, "sha": HEAD}, "base": {"ref": "main"},
             "labels": [], "_blocking_review_at": "x", "_revision_pushed_at": "y",
             "_blocking_review_body": UX_FINDING,
         }]
@@ -1116,9 +1116,79 @@ def test_an_unsettled_receipt_must_match_the_branch_exactly():
     empty_audit_file()
     assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
     seed_first_delivery_receipt(key=f"{REPO}#task:ent_synthetic_e", status="launching", branch="")
-    # An empty branch on either side never matches.
-    assert delivery.fly_delivered_pr(REPO, PR, "") == delivery.FlyDeliveredPR(False)
+    # An empty branch on either side never matches a receipt. With no head
+    # branch, though, the answer is unknown, not "not Fly": this assertion
+    # used to pin `FlyDeliveredPR(False)`, which let a fix round run on this
+    # host for a PR a branch-only receipt may have opened.
+    assert delivery.fly_delivered_pr(REPO, PR, "") == delivery.FlyDeliveredPR(
+        None, unknown_reason=NO_HEAD_REASON)
     assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
+
+
+NO_HEAD_REASON = ("this PR's head branch is unknown, so whether a Fly delivery on "
+                  "that branch opened it cannot be decided")
+
+
+def run_route_without_head(monkeypatch, route):
+    """`run_route`, with the trigger's head branch empty on every entrance."""
+    d = _dispatcher()
+    summary = None
+    if route == "review":
+        review_round(d, trigger(head_ref=""))
+    elif route == "ci":
+        monkeypatch.setattr(SwarmDispatcher, "_failing_check_runs", _failing_checks)
+        asyncio.run(d._route_ci_failure(trigger(head_ref=""), parent=80))
+    else:
+        _resume_scan(monkeypatch, d, head_ref="")
+        summary = asyncio.run(d.resume_unactioned_revisions([REPO]))
+    return d, summary
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_missing_head_branch_holds_the_round(
+    monkeypatch, world, stored, rounds_recorded, route
+):
+    # Red before this fix (observed with the new guards disabled): with an
+    # empty head branch the launching receipt on BRANCH was never matched,
+    # the empty audit file named nothing, `fly_delivered_pr` returned False
+    # and the route ran the round locally, so `rec.calls` was not empty.
+    seed_first_delivery_receipt(status="launching")  # branch BRANCH, no pr_number
+    empty_audit_file()
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route_without_head(monkeypatch, route)
+    assert_held_unrecognized(d, summary, stored, rounds_recorded, rec,
+                             text="head branch is unknown")
+
+
+def test_a_missing_head_branch_with_no_receipts_holds():
+    # Red before this fix (observed with the new guards disabled): a readable
+    # ledger with no receipt for this repository and an empty head branch
+    # returned FlyDeliveredPR(False).
+    seed_first_delivery_receipt(key="other-owner/other-repo#task:ent_synthetic_o",
+                                status="opened", pr_number=PR)
+    empty_audit_file()
+    facts = delivery.fly_delivered_pr(REPO, PR, "")
+    assert facts.delivered is None
+    assert facts.unknown_reason == NO_HEAD_REASON
+
+
+def test_a_delivery_naming_this_pr_still_routes_to_fly_without_a_head_branch():
+    # Not a red case: this pins that the new hold does not swallow a receipt
+    # that names this PR. It gives True both before and after this fix.
+    seed_first_delivery_receipt(status="opened", pr_number=PR)
+    empty_audit_file()
+    assert delivery.fly_delivered_pr(REPO, PR, "").delivered is True
+
+
+def test_an_unreadable_pr_number_or_repository_is_unknown():
+    # Red before this fix (observed with the new guards disabled; the first
+    # return was `FlyDeliveredPR(False)`): each call gave delivered False.
+    seed_first_delivery_receipt(status="opened", pr_number=PR)
+    empty_audit_file()
+    no_repo = delivery.fly_delivered_pr("", PR, BRANCH)
+    assert no_repo.delivered is None and "repository" in no_repo.unknown_reason
+    no_number = delivery.fly_delivered_pr(REPO, None, BRANCH)
+    assert no_number.delivered is None and "PR number" in no_number.unknown_reason
 
 
 @pytest.mark.parametrize("route", ["review", "ci", "resumed"])
