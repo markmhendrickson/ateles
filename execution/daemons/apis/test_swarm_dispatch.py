@@ -14068,6 +14068,7 @@ def _drive_panel_with_check_gate(monkeypatch, *, real_gate, review_head="a" * 40
             return {
                 "number": num, "state": "open", "draft": False,
                 "head": {"sha": head, "ref": "feat/x"}, "base": {"ref": "main"},
+                "mergeable": True, "mergeable_state": "clean",
             }
 
         async def read_gate(repository, head_sha, base_ref):

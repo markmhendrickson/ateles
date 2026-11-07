@@ -212,6 +212,7 @@ def run_scenario(scenario, tmp_path, *, mutation="none"):
         # real launch/validation path remain under test without GitHub reads.
         mp.setattr(active_runner, "current_pr_metadata", lambda **kw: {
             "state": "open", "head": {"sha": HEAD}, "base": {"ref": "main"},
+            "mergeable": True, "mergeable_state": "clean",
         })
 
         async def green_checks(repository, head_sha, base_ref):

@@ -3606,6 +3606,51 @@ _SELF_CLEARING_FAILURE_CLASSES = _CAPACITY_FAILURE_CLASSES | {
 }
 
 
+# GitHub answered a PR read with a rate-limit 403/429 (one carrying
+# `Retry-After`, or a body naming a secondary rate limit) and the short in-place
+# retries below did not clear it. Self-clearing like a Neotoma read failure, so
+# the panel is deferred with a resume marker instead of stopping for attention,
+# bounded by the same consecutive-deferral limit (`_neotoma_retry_limit`).
+GITHUB_TEMPORARILY_RATE_LIMITED = "GitHub temporarily rate limited"
+# In-place retry bounds for a rate-limited PR read: how many reads in total,
+# and the longest single wait, whatever `Retry-After` asks for.
+_GITHUB_RATE_LIMIT_ATTEMPTS = 3
+_GITHUB_RATE_LIMIT_MAX_WAIT_SECONDS = 120
+# Resume delay for a panel deferred on a GitHub rate limit; the 600s deferred
+# sweep picks it up.
+_GITHUB_RATE_LIMIT_DEFER_SECONDS = 300
+# The tests' seam for the in-place wait.
+_rate_limit_sleep = asyncio.sleep
+
+
+def github_rate_limit_wait(resp) -> int | None:
+    """Seconds to wait when *resp* is a temporary GitHub rate-limit answer.
+
+    A 403 or 429 counts as temporary only when it carries a `Retry-After`
+    header or its body names a secondary rate limit; the wait is the header's
+    value (60s when the body is the only sign), capped at
+    `_GITHUB_RATE_LIMIT_MAX_WAIT_SECONDS`. None for every other response,
+    including a plain 403, which stays a permanent failure.
+    """
+    if getattr(resp, "status_code", None) not in (403, 429):
+        return None
+    headers = getattr(resp, "headers", None) or {}
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if raw is not None:
+        try:
+            wait = int(str(raw).strip())
+        except ValueError:
+            wait = 60
+        return max(0, min(wait, _GITHUB_RATE_LIMIT_MAX_WAIT_SECONDS))
+    try:
+        body = (getattr(resp, "text", "") or "").lower()
+    except Exception:  # noqa: BLE001 — an unreadable body is no signal
+        body = ""
+    if "secondary rate limit" in body:
+        return 60
+    return None
+
+
 def _neotoma_retry_limit() -> int:
     """Consecutive Neotoma deferrals allowed at one head before an operator is asked.
 
@@ -8504,7 +8549,9 @@ class SwarmDispatcher:
         if problem:
             gate = panel_check_gate.unreadable_gate(head, problem)
         else:
-            gate = await self._read_head_check_gate(
+            gate = panel_check_gate.merge_conflict_gate(
+                pr, head
+            ) or await self._read_head_check_gate(
                 trigger.repository, head, pr["base"]["ref"]
             )
         if gate.green:
@@ -8856,7 +8903,11 @@ class SwarmDispatcher:
                 "panel",
                 "",
                 "",
-                reason="PR head could not be verified before review",
+                reason=(
+                    GITHUB_TEMPORARILY_RATE_LIMITED
+                    if self._pr_read_rate_limited(trigger.repository, trigger.number)
+                    else "PR head could not be verified before review"
+                ),
             )
             return
 
@@ -9321,9 +9372,18 @@ class SwarmDispatcher:
             (await self._pr_head_sha(trigger)) or ""
         )
         if not review_head or aggregation_head != review_head:
+            # Only an unread head may be a rate limit; a head that was read and
+            # differs really changed, and still stops the panel.
+            rate_limited = not aggregation_head and self._pr_read_rate_limited(
+                trigger.repository, trigger.number
+            )
             await self._handle_panel_session_limit(
                 trigger, parent, "panel", "", "",
-                reason="PR head changed during review or could not be verified",
+                reason=(
+                    GITHUB_TEMPORARILY_RATE_LIMITED
+                    if rate_limited
+                    else "PR head changed during review or could not be verified"
+                ),
             )
             return
         vanellus_result = await run_skill(
@@ -12396,6 +12456,57 @@ class SwarmDispatcher:
             )
             return False
 
+    async def _github_pr_get(self, client, url: str, repository: str, pr_number: int):
+        """GET a PR, waiting out a short GitHub rate-limit burst in place.
+
+        A 403/429 that `github_rate_limit_wait` calls temporary is retried after
+        the wait it names, at most `_GITHUB_RATE_LIMIT_ATTEMPTS` reads in all.
+        Each such answer logs its `Retry-After` and `X-RateLimit-Remaining`
+        values (never a credential), so a burst shows which limit it was. When
+        the last read is still rate-limited the PR is remembered as such, so
+        the panel defers instead of stopping (`_pr_read_rate_limited`); any
+        other outcome clears that. Returns the last response either way.
+        """
+        key = (repository.casefold(), pr_number)
+        limited = self.__dict__.setdefault("_rate_limited_pr_reads", set())
+        limited.discard(key)
+        seen = self.__dict__.setdefault("_github_rate_limit_headers", {})
+        for attempt in range(1, _GITHUB_RATE_LIMIT_ATTEMPTS + 1):
+            resp = await client.get(url, headers=self._github_headers(repository))
+            wait = github_rate_limit_wait(resp)
+            if wait is None:
+                return resp
+            headers = getattr(resp, "headers", None) or {}
+            # Only these two header values are kept (never a credential), so
+            # an exhausted deferral can name the limit it last saw.
+            seen[key] = (
+                str(headers.get("Retry-After", "absent")),
+                str(headers.get("X-RateLimit-Remaining", "absent")),
+            )
+            log.warning(
+                f"[{DAEMON_NAME}] {repository}#{pr_number}: GitHub PR read "
+                f"answered {resp.status_code} rate-limited (attempt {attempt} of "
+                f"{_GITHUB_RATE_LIMIT_ATTEMPTS}; Retry-After="
+                f"{headers.get('Retry-After', 'absent')}, X-RateLimit-Remaining="
+                f"{headers.get('X-RateLimit-Remaining', 'absent')})"
+            )
+            if attempt < _GITHUB_RATE_LIMIT_ATTEMPTS:
+                await _rate_limit_sleep(wait)
+        limited.add(key)
+        return resp
+
+    def _pr_read_rate_limited(self, repository: str, pr_number: int) -> bool:
+        """True when this PR's last read ended on a temporary GitHub rate limit."""
+        limited = self.__dict__.get("_rate_limited_pr_reads") or set()
+        return (repository.casefold(), pr_number) in limited
+
+    def _last_github_rate_limit_headers(
+        self, repository: str, pr_number: int
+    ) -> tuple[str, str]:
+        """The last `Retry-After` and `X-RateLimit-Remaining` seen for this PR."""
+        seen = self.__dict__.get("_github_rate_limit_headers") or {}
+        return seen.get((repository.casefold(), pr_number), ("absent", "absent"))
+
     async def _pr_head_sha_for(self, repository: str, pr_number: int) -> str | None:
         """Current head SHA for an arbitrary (repository, pr_number) pair.
 
@@ -12407,7 +12518,7 @@ class SwarmDispatcher:
         url = f"https://api.github.com/repos/{repository}/pulls/{pr_number}"
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(url, headers=self._github_headers(repository))
+                resp = await self._github_pr_get(client, url, repository, pr_number)
                 resp.raise_for_status()
                 return (resp.json().get("head") or {}).get("sha")
         except Exception as exc:  # noqa: BLE001 — advisory only
@@ -12956,9 +13067,7 @@ class SwarmDispatcher:
         url = f"https://api.github.com/repos/{repository}/pulls/{pr_number}"
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    url, headers=self._github_headers(repository)
-                )
+                resp = await self._github_pr_get(client, url, repository, pr_number)
                 resp.raise_for_status()
                 return resp.json()
         except Exception as exc:
@@ -17685,15 +17794,39 @@ class SwarmDispatcher:
     # prefix but fails _NEOTOMA_DEFERRAL_RE has an unknown count.
     _NEOTOMA_DEFERRAL_PREFIX = "<!-- review-deferred-neotoma"
 
+    # The same shape for a GitHub rate-limit deferral: its consecutive count at
+    # one head, so that deferral is bounded too (failure_posture.md rule 5).
+    _GITHUB_DEFERRAL_MARKER = (
+        "<!-- review-deferred-github attempt={attempt} head={head} -->"
+    )
+    _GITHUB_DEFERRAL_RE = re.compile(
+        r"<!-- review-deferred-github attempt=(\d+) head=([0-9a-f]*) -->"
+    )
+    _GITHUB_DEFERRAL_PREFIX = "<!-- review-deferred-github"
+
     async def _prior_neotoma_deferral_attempts(self, t: SwarmTrigger) -> int | None:
-        """Consecutive Neotoma deferrals already recorded for this PR head.
+        """Consecutive Neotoma deferrals already recorded for this PR head."""
+        return await self._prior_deferral_attempts(
+            t, self._NEOTOMA_DEFERRAL_RE, self._NEOTOMA_DEFERRAL_PREFIX, "Neotoma"
+        )
+
+    async def _prior_github_deferral_attempts(self, t: SwarmTrigger) -> int | None:
+        """Consecutive GitHub rate-limit deferrals already recorded for this PR head."""
+        return await self._prior_deferral_attempts(
+            t, self._GITHUB_DEFERRAL_RE, self._GITHUB_DEFERRAL_PREFIX, "GitHub"
+        )
+
+    async def _prior_deferral_attempts(
+        self, t: SwarmTrigger, marker_re: re.Pattern, prefix: str, kind: str
+    ) -> int | None:
+        """Consecutive deferrals of one *kind* already recorded for this PR head.
 
         Read from the newest live deferral marker (the same last-write-wins walk
         the deferred sweep uses): 0 when there is none, when a verdict or a
         deferral of another kind followed it, or when it was for another head.
         None when any page of the comments cannot be read, or when the newest
-        live Neotoma marker's count cannot be parsed, so the caller fails
-        closed.
+        live marker of this kind has a count that cannot be parsed, so the
+        caller fails closed.
         """
         head = _normalise_full_sha(t.head_sha)
         try:
@@ -17709,7 +17842,7 @@ class SwarmDispatcher:
                 comments = await self._swarm_authored(t.repository, t.number, raw)
         except Exception as exc:
             log.warning(
-                f"[{DAEMON_NAME}] {t.repository}#{t.number}: Neotoma retry "
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: {kind} retry "
                 f"count unreadable ({type(exc).__name__})"
             )
             return None
@@ -17717,11 +17850,11 @@ class SwarmDispatcher:
         for c in comments:
             body = c.get("body", "")
             if self._REVIEW_DEFERRED_RE.search(body):
-                m = self._NEOTOMA_DEFERRAL_RE.search(body)
+                m = marker_re.search(body)
                 if m:
                     attempts = int(m.group(1)) if m.group(2) == head else 0
-                elif self._NEOTOMA_DEFERRAL_PREFIX in body:
-                    # A Neotoma marker whose count cannot be read: unknown,
+                elif prefix in body:
+                    # A marker of this kind whose count cannot be read: unknown,
                     # not zero, or a malformed latest marker would reopen
                     # retries an earlier marker had already exhausted.
                     attempts = None
@@ -17731,7 +17864,7 @@ class SwarmDispatcher:
                 attempts = 0
         if attempts is None:
             log.warning(
-                f"[{DAEMON_NAME}] {t.repository}#{t.number}: latest Neotoma "
+                f"[{DAEMON_NAME}] {t.repository}#{t.number}: latest {kind} "
                 "deferral marker has an unreadable retry count"
             )
         return attempts
@@ -17750,11 +17883,16 @@ class SwarmDispatcher:
     ) -> None:
         """Surface an incomplete review without fabricating a verdict.
 
-        Usage limits, provider exhaustion and a Neotoma read that did not
-        complete get a durable retry marker because each can recover; the
-        Neotoma kind is bounded by ``APIS_NEOTOMA_RETRY_LIMIT`` consecutive
-        deferrals at one head, then stops for attention naming Neotoma. Stale-head, execution, and unverified-verdict
-        failures require attention and must not borrow that self-clearing copy.
+        Usage limits, provider exhaustion, a Neotoma read that did not
+        complete and a GitHub rate limit that outlasted the in-place retries
+        get a durable retry marker because each can recover. The Neotoma and
+        GitHub kinds are each bounded by ``APIS_NEOTOMA_RETRY_LIMIT``
+        consecutive deferrals of that kind at one head, counted from a marker
+        of the same shape; at the limit, or when the count cannot be read, the
+        panel stops for attention naming Neotoma or GitHub rate limits (with
+        the last ``Retry-After`` and ``X-RateLimit-Remaining`` values seen).
+        Stale-head, execution, and unverified-verdict failures require
+        attention and must not borrow that self-clearing copy.
         Successful and failed lens names remain visible on partial panels.
         Best-effort; never raises.
         """
@@ -17777,18 +17915,43 @@ class SwarmDispatcher:
                 )
             else:
                 neotoma_attempt = prior + 1
+        github_attempt = 0
+        if reason == GITHUB_TEMPORARILY_RATE_LIMITED:
+            # Bounded the same way, with the same limit: a rate limit that
+            # never lifts must not defer and resume this panel forever.
+            limit = _neotoma_retry_limit()
+            prior = await self._prior_github_deferral_attempts(t)
+            if prior is None or prior >= limit:
+                retry_after, remaining = self._last_github_rate_limit_headers(
+                    t.repository, t.number
+                )
+                reason = (
+                    "GitHub rate limits: the pull request could not be read"
+                    + (
+                        f" after {limit} automatic retries"
+                        if prior is not None
+                        else " and the retry count could not be confirmed"
+                    )
+                    + f" (last Retry-After={retry_after}, "
+                    f"X-RateLimit-Remaining={remaining})"
+                )
+            else:
+                github_attempt = prior + 1
+        attempt = neotoma_attempt or github_attempt
         auto_resume = reason in {
             "usage limit",
             "provider capacity exhausted",
             NEOTOMA_TEMPORARILY_UNAVAILABLE,
+            GITHUB_TEMPORARILY_RATE_LIMITED,
         }
         iso = ""
         if auto_resume:
-            delay = (
-                _neotoma_retry_delay_seconds(neotoma_attempt)
-                if neotoma_attempt
-                else parse_limit_reset_delay(stdout, stderr)
-            )
+            if neotoma_attempt:
+                delay = _neotoma_retry_delay_seconds(neotoma_attempt)
+            elif reason == GITHUB_TEMPORARILY_RATE_LIMITED:
+                delay = _GITHUB_RATE_LIMIT_DEFER_SECONDS
+            else:
+                delay = parse_limit_reset_delay(stdout, stderr)
             resume_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
             iso = resume_at.strftime("%Y-%m-%dT%H:%M:%SZ")
             log.warning(
@@ -17819,8 +17982,8 @@ class SwarmDispatcher:
                     f"⏳ Swarm review on {t.repository}#{t.number} paused: "
                     f"{reason}; auto-resumes at {iso}"
                     + (
-                        f" (retry {neotoma_attempt} of {_neotoma_retry_limit()})"
-                        if neotoma_attempt
+                        f" (retry {attempt} of {_neotoma_retry_limit()})"
+                        if attempt
                         else ""
                     )
                     + ". No action needed."
@@ -17855,6 +18018,20 @@ class SwarmDispatcher:
                 + "\n"
                 + self._NEOTOMA_DEFERRAL_MARKER.format(
                     attempt=neotoma_attempt, head=_normalise_full_sha(t.head_sha)
+                )
+                + "\n"
+            )
+        elif github_attempt:
+            status_copy = (
+                "The review will resume automatically once GitHub's rate limit "
+                f"lifts (scheduled ~`{iso}`, retry {github_attempt} of "
+                f"{_neotoma_retry_limit()}); no operator action is required."
+            )
+            marker = (
+                self._REVIEW_DEFERRED_MARKER.format(iso=iso)
+                + "\n"
+                + self._GITHUB_DEFERRAL_MARKER.format(
+                    attempt=github_attempt, head=_normalise_full_sha(t.head_sha)
                 )
                 + "\n"
             )

@@ -158,7 +158,15 @@ class _FakeClient:
         default_branch: "str | None" = BASE_REF,
         checks_total: "int | None" = None,
         checks_page_status: "dict[int, int] | None" = None,
+        pr_mergeable: "bool | None" = True,
+        pr_mergeable_state: "str | None" = "clean",
+        mergeability_after_first_get: "tuple[bool | None, str | None] | None" = None,
     ):
+        # GitHub's mergeability as served on the PR, and (optionally) what it
+        # turns into from the second `pulls/{n}` GET on (the pre-submit re-fetch).
+        self.pr_mergeable = pr_mergeable
+        self.pr_mergeable_state = pr_mergeable_state
+        self.mergeability_after_first_get = mergeability_after_first_get
         # Actions workflow runs on the head (check_suite_id -> workflow_id), the
         # repo's default branch (None: unreadable), and the check-runs listing's
         # reported total / per-page failures.
@@ -239,7 +247,11 @@ class _FakeClient:
             "state": self.pr_state,
             "merged_at": self.pr_merged_at,
             "base": {"ref": base},
+            "mergeable": self.pr_mergeable,
+            "mergeable_state": self.pr_mergeable_state,
         }
+        if self.pr_get_count > 1 and self.mergeability_after_first_get is not None:
+            payload["mergeable"], payload["mergeable_state"] = self.mergeability_after_first_get
         reported = self.reported_changed_files
         if reported == "auto":
             reported = len(self.file_rows) if self.file_rows is not None else len(self.changed_files)
@@ -796,6 +808,51 @@ class TestPreSubmitReVerification:
         code = await target.run(REPO, PR, ALL_FOUR, apply=True)
 
         assert code == 1
+        assert client.posted == []
+
+    @pytest.mark.parametrize(
+        "mergeable,mergeable_state,phrase",
+        [(False, "dirty", "merge conflict"), (None, "unknown", "not yet computed or not recognised")],
+        ids=["conflicting", "uncomputed"],
+    )
+    async def test_unmergeable_pr_is_refused_at_the_first_fetch(
+        self, monkeypatch, capsys, mergeable, mergeable_state, phrase
+    ):
+        """Approval can be reached without the panel, so the panel's
+        mergeability hold binds here too. Red before this round, observed: the
+        tool approved (code 0, a review posted) for both."""
+        client = _FakeClient(
+            comments=_all_clear_comments(ALL_FOUR),
+            check_runs=_green_checks(),
+            pr_mergeable=mergeable,
+            pr_mergeable_state=mergeable_state,
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1
+        assert client.posted == []
+        assert client.pr_get_count == 1, "refused at the first fetch, before any re-fetch"
+        out = capsys.readouterr().out
+        assert "refusing: " in out and phrase in out
+
+    async def test_pr_turning_conflicting_before_submit_is_refused(self, monkeypatch):
+        """Mergeable at the first fetch, conflicting at the pre-submit re-fetch.
+        Red before this round, observed: a review was posted."""
+        client = _FakeClient(
+            comments=_all_clear_comments(ALL_FOUR),
+            check_runs=_green_checks(),
+            mergeability_after_first_get=(False, "dirty"),
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+
+        code = await target.run(REPO, PR, ALL_FOUR, apply=True)
+
+        assert code == 1
+        assert client.pr_get_count >= 2, "the pre-submit re-fetch ran"
         assert client.posted == []
 
     async def test_pr_closed_before_submit_refuses(self, monkeypatch):
