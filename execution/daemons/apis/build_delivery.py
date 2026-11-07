@@ -834,6 +834,10 @@ class FlyDeliveryPlan:
     issue_number: int | None
     target: ExistingPRTarget | None = None
     source_key: str = ""
+    # The task this delivery is for, recorded on its receipt so a run stays
+    # findable by task when its key no longer derives from the task (the
+    # task's repository changed mid-run). Empty for a non-task delivery.
+    task_id: str = ""
 
     def spec(self) -> dict:
         """The job.json delivery spec the Fly job runner accepts."""
@@ -855,7 +859,7 @@ class FlyDeliveryEnded(RuntimeError):
 
 def plan_fly_delivery(repository: str, label: str, *, key: str,
                       issue_number: int | None, target: ExistingPRTarget | None = None,
-                      source_key: str = "") -> FlyDeliveryPlan | None:  # fmt: skip
+                      source_key: str = "", task_id: str = "") -> FlyDeliveryPlan | None:  # fmt: skip
     """A Fly delivery plan when the operator opted deliveries onto Fly, else
     None (the builder runs locally, exactly as before)."""
     import fly_runner
@@ -868,7 +872,8 @@ def plan_fly_delivery(repository: str, label: str, *, key: str,
     branch, _, _ = _new_branch(label) if target is None else (target.branch, "", "")
     return FlyDeliveryPlan(repository=repository, branch=branch,
                            base_branch=target.base_branch if target else FLY_DELIVERY_BASE_BRANCH, key=key,
-                           issue_number=issue_number, target=target, source_key=source_key)  # fmt: skip
+                           issue_number=issue_number, target=target, source_key=source_key,
+                           task_id=str(task_id or "").strip())  # fmt: skip
 
 
 
@@ -1247,9 +1252,13 @@ def _reserve_delivery(plan: FlyDeliveryPlan) -> str:
     return token if reserved else ""
 
 
+def _task_fields(plan: FlyDeliveryPlan) -> dict:
+    return {"task_id": plan.task_id} if plan.task_id else {}
+
+
 def _reservation_entry(plan: FlyDeliveryPlan, token: str) -> dict:
     return {"status": "launching", "branch": plan.branch, "run_id": "", "token": token,
-            "recorded_at": time.time(),
+            "recorded_at": time.time(), **_task_fields(plan),
             **({"existing_pr": plan.spec(),
                 **({"associated_keys": [canonical_key(plan.source_key)]} if plan.source_key else {})} if plan.target else {})}
 
@@ -1307,6 +1316,7 @@ def _settle_delivery(plan: FlyDeliveryPlan, token: str, entry: dict) -> bool:
     try:
         return _delivery_ledger().settle_delivery(
             canonical_key(plan.key), token, {**entry, "token": token, "recorded_at": time.time(),
+                                           **_task_fields(plan),
                                            **({"existing_pr": plan.spec(),
                  **({"associated_keys": [canonical_key(plan.source_key)]} if plan.source_key else {})} if plan.target else {})})
     except fly_runner.FlyLedgerError as exc:
