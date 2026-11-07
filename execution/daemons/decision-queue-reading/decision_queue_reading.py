@@ -102,8 +102,15 @@ NOTICE = (
     "tasks, counted apart and not a decision; outside_fly_holds_raised_24h and "
     "real_holds_raised_24h are the ones that matter; holds_raised_time_unknown_24h "
     "could not be placed and name a failed check. finish_test counts consecutive "
-    "clean daily readings (no real decision over the limit, no automatic hold outside "
-    "the lane, none unknown); it only reports."
+    "clean daily readings; it only reports. A day is clean when no real decision has "
+    "waited over the limit, no automatic hold outside the lane was raised, none is "
+    "unknown, and no check failed (a degraded run is never clean). A new real "
+    "decision does not stop a day being clean, because a real decision is not "
+    "clutter: it counts in real_holds_raised_24h, and only waiting over the limit "
+    "stops the day. clean_today null means the run was invalid, so the day did not "
+    "count. open_fly_holds lists each open hold on a delivery-lane task (checkpoint "
+    "id, task id, age in hours, oldest first), shown apart because the lane's "
+    "automatic holds are expected."
 )
 
 _NON_PROD_LABELS = frozenset(
@@ -427,9 +434,11 @@ def open_fly_holds(placements: list[dq.Placement]) -> list[dict[str, Any]]:
     return rows
 
 
-def is_clean(numbers: dict[str, Any]) -> bool:
+def is_clean(numbers: dict[str, Any], failed_checks: list[dict[str, str]]) -> bool:
+    """A degraded run is never clean: any failed check means not clean."""
     return (
-        numbers["real_decisions_over_limit"] == 0
+        not failed_checks
+        and numbers["real_decisions_over_limit"] == 0
         and numbers["outside_fly_holds_raised_24h"] == 0
         and numbers["holds_raised_time_unknown_24h"] == 0
     )
@@ -440,6 +449,7 @@ def next_finish_test(
     *,
     numbers: dict[str, Any] | None,
     now: datetime,
+    failed_checks: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """The finish test after this run. ``numbers`` None means an invalid run.
 
@@ -472,7 +482,7 @@ def next_finish_test(
 
     if numbers is None:
         return doc(prev_count, None, prev_through.isoformat() if prev_through else None)
-    if not is_clean(numbers):
+    if not is_clean(numbers, failed_checks or []):
         return doc(0, False, today.isoformat())
     if prev_through == today:
         count = max(prev_count, 1)
@@ -765,6 +775,7 @@ def run(
                 previous_finish,
                 numbers=numbers if status in ("ok", "partial") else None,
                 now=now,
+                failed_checks=failed,
             ),
         )
         if not dry_run:

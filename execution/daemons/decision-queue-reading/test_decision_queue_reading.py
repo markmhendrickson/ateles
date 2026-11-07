@@ -762,7 +762,7 @@ def test_an_old_hold_retired_in_the_window_is_not_new():
     assert doc["fly_lane_holds_raised_24h"] == 0
     assert doc["outside_fly_holds_raised_24h"] == 0
     assert doc["holds_raised_time_unknown_24h"] == 0
-    assert doc["new_holds_24h"] == 0 or doc["total_open"] == 0
+    assert doc["real_holds_raised_24h"] == 0
 
 
 def test_a_hold_untouched_in_the_window_is_never_read():
@@ -976,6 +976,7 @@ def test_finish_test_survives_an_invalid_day_and_then_resets():
     briefs = [lane_hold("c1", "t1", 2)]
     tasks = [lane_task("t1")]
     day1 = NOW
+    raised_run(briefs, tasks, now=day1 - timedelta(days=1))  # a previous file
     _, _, doc1 = raised_run(briefs, tasks, now=day1)
     assert doc1["finish_test"] == ft(1, "2026-11-05")
     day2 = day1 + timedelta(days=1)
@@ -994,6 +995,7 @@ def test_finish_test_survives_an_invalid_day_and_then_resets():
 def test_finish_test_counts_three_days_and_reports_met():
     briefs = [lane_hold("c1", "t1", 2)]
     tasks = [lane_task("t1")]
+    raised_run(briefs, tasks, now=NOW - timedelta(days=1))  # a previous file
     for i in range(3):
         _, _, doc = raised_run(briefs, tasks, now=NOW + timedelta(days=i))
     assert doc["finish_test"] == ft(3, "2026-11-07")
@@ -1008,7 +1010,13 @@ def test_an_unclean_day_zeroes_the_count_in_a_run():
 
 
 def test_status_line_carries_the_new_numbers(capsys):
-    fake = FakeNeotoma([lane_hold("c1", "t1", 2)], [lane_task("t1")])
+    seed = FakeNeotoma(
+        [lane_hold("c1", "t1", 2)], [lane_task("t1")], profile={"first_name": "Zed"}
+    )
+    dqr.run(seed, NOW - timedelta(days=1), dry_run=False, pause=0)  # a previous file
+    fake = FakeNeotoma(
+        [lane_hold("c1", "t1", 2)], [lane_task("t1")], profile={"first_name": "Zed"}
+    )
     assert dqr.main(["--once"], requester=fake, now=NOW) == 0
     line = capsys.readouterr().out
     assert "fly_lane_holds_raised_24h=1" in line
@@ -1016,3 +1024,48 @@ def test_status_line_carries_the_new_numbers(capsys):
     assert "holds_raised_time_unknown_24h=0" in line
     assert "finish_test_clean_readings=1" in line
     assert "real_decisions_over_72h=0" in line and "automatic_holds_added_24h=" in line
+
+
+def _clean_day(**fake_kw):
+    briefs = [lane_hold("c1", "t1", 2)]
+    fake = FakeNeotoma(briefs, [lane_task("t1")], **fake_kw)
+    return dqr.run(fake, NOW, dry_run=False, pause=0)[1]
+
+
+def test_a_lost_previous_reading_is_not_a_clean_day():
+    out_path().parent.mkdir(parents=True)
+    out_path().write_text("{not json")
+    doc = _clean_day(profile={"first_name": "Zed"})
+    assert doc["status"] == "ok"
+    assert any(c["check"] == "previous_reading" for c in doc["failed_checks"])
+    assert doc["finish_test"]["clean_today"] is False
+    assert doc["finish_test"]["consecutive_clean_readings"] == 0
+
+
+def test_an_unreadable_operator_profile_is_not_a_clean_day():
+    _clean_day(profile={"first_name": "Zed"})  # a good previous file
+    later = NOW + timedelta(days=1)
+    fake = FakeNeotoma([lane_hold("c1", "t1", 2)], [lane_task("t1")], profile=None)
+    doc = dqr.run(fake, later, dry_run=False, pause=0)[1]
+    assert any(c["check"] == "operator_profile" for c in doc["failed_checks"])
+    assert doc["finish_test"]["clean_today"] is False
+    assert doc["finish_test"]["consecutive_clean_readings"] == 0
+
+
+def test_a_failed_metric_store_is_not_a_clean_day():
+    doc = _clean_day(profile={"first_name": "Zed"}, drop_stored=True)
+    assert doc["status"] == "partial"
+    assert doc["finish_test"]["clean_today"] is False
+    assert doc["finish_test"]["consecutive_clean_readings"] == 0
+
+
+def test_a_run_with_no_failed_check_still_counts():
+    _clean_day(profile={"first_name": "Zed"})
+    later = NOW + timedelta(days=1)
+    fake = FakeNeotoma(
+        [lane_hold("c1", "t1", 2)], [lane_task("t1")], profile={"first_name": "Zed"}
+    )
+    doc = dqr.run(fake, later, dry_run=False, pause=0)[1]
+    assert doc["failed_checks"] == []
+    assert doc["finish_test"]["consecutive_clean_readings"] == 1
+    assert doc["finish_test"]["clean_today"] is True
