@@ -1045,3 +1045,162 @@ async def test_executing_write_exhausted_escalates_one_checkpoint(joined, no_wai
     assert "Retried 3 time(s)" in briefs[0]["reason"]
     assert joined["calls"] == []
     assert not delivery._delivery_ledger().delivery_receipts()
+
+
+# ── The retry verifies the authenticated approver ─────────────────────────────
+
+
+RECORDED_APPROVER = "ateles@ateles-swarm"
+
+
+def _approver_at_retry(monkeypatch, approval_for):
+    """Answer the authenticated resolution read with the fixture's approval
+    until the retry wait has passed its state and dispatchability checks,
+    then with ``approval_for(**kwargs)``: so the first release is proven and
+    only the retry-time check sees the change. Returns the retry-time calls."""
+    real_read = apis.read_authenticated_checkpoint_resolution
+    real_dispatchable = apis._released_retry_task_dispatchable
+    at_retry: list[dict] = []
+    retrying: list[bool] = []
+
+    def dispatchable(task_id):
+        retrying.append(True)  # only the retry wait (and escalation) asks
+        return real_dispatchable(task_id)
+
+    def read(checkpoint_id, record, **kwargs):
+        if not retrying:
+            return real_read(checkpoint_id, record, **kwargs)
+        at_retry.append(kwargs)
+        return approval_for(**kwargs)
+
+    monkeypatch.setattr(apis, "_released_retry_task_dispatchable", dispatchable)
+    monkeypatch.setattr(apis, "read_authenticated_checkpoint_resolution", read)
+    return at_retry
+
+
+async def _refused_then_retried(esc, monkeypatch):
+    """Release, refuse the first launch temporarily, and record the status
+    writes made by the moment of the refusal."""
+    esc["script"].append(_refusal("timeout"))
+    spawn = apis._spawn_harness_skill
+    statuses_at_refusal = []
+
+    async def recording_spawn(*args, **kwargs):
+        result = await spawn(*args, **kwargs)
+        statuses_at_refusal.append(list(esc["statuses"]))
+        return result
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", recording_spawn)
+    await _release(esc)
+    return statuses_at_refusal
+
+
+def _assert_retry_denied(esc, statuses_at_refusal, at_retry):
+    assert at_retry, "the retry never read the authenticated approval"
+    assert len(esc["spawned"]) == 1  # the refused first launch only
+    assert esc["statuses"] == statuses_at_refusal[0]  # no status write
+    assert esc["briefs"] == []
+    assert esc["retired"] == []
+    assert _task(esc)["status"] == "executing"
+    assert _task(esc)["blocked_reason"] == ""
+    assert any("no longer authorizes" in m for m in esc["notifier"].blockers())
+
+
+@pytest.mark.asyncio
+async def test_retry_with_unattributed_approval_is_denied(escalation, monkeypatch):
+    # Red before this fix, observed against 44cc0d2: at_retry == [], the retry
+    # judged only the reducer status, which still says approved, and never
+    # read the authenticated approval. Inferred, not observed (the first
+    # assertion stops the test): the agent then started a second time.
+    at_retry = _approver_at_retry(monkeypatch, lambda **kwargs: None)
+    statuses_at_refusal = await _refused_then_retried(escalation, monkeypatch)
+    # The checkpoint snapshot still reads approved:
+    assert apis.read_checkpoint_resolution(
+        escalation["records"][escalation["brief_id"]]["snapshot"]) == "approved"
+    _assert_retry_denied(escalation, statuses_at_refusal, at_retry)
+
+
+@pytest.mark.asyncio
+async def test_retry_with_other_approver_is_denied(escalation, monkeypatch):
+    # Red before this fix, observed against 44cc0d2: at_retry == [], so an
+    # approval recorded by a different principal was never compared at retry.
+    # Inferred, not observed: the agent then started a second time and no
+    # BLOCKER was sent.
+    recorded = {"sub": RECORDED_APPROVER}
+
+    def approval_for(*, required_approver_sub, **kwargs):
+        if required_approver_sub != recorded["sub"]:
+            return None
+        return {"principal_sub": recorded["sub"], "observation_id": "obs-approval"}
+
+    at_retry = _approver_at_retry(monkeypatch, approval_for)
+    # The approval observation the retry finds was supplied by someone else.
+    recorded["sub"] = "someone-else@elsewhere"
+    statuses_at_refusal = await _refused_then_retried(escalation, monkeypatch)
+    assert at_retry[0]["required_approver_sub"] == RECORDED_APPROVER
+    _assert_retry_denied(escalation, statuses_at_refusal, at_retry)
+
+
+@pytest.mark.asyncio
+async def test_retry_whose_approver_read_raises_is_denied(escalation, monkeypatch):
+    # Red before this fix, observed against 44cc0d2: at_retry == [], no read
+    # was made. Inferred, not observed: the retry started the agent again.
+    def broken(**kwargs):
+        raise RuntimeError("attribution read failed")
+
+    at_retry = _approver_at_retry(monkeypatch, broken)
+    statuses_at_refusal = await _refused_then_retried(escalation, monkeypatch)
+    _assert_retry_denied(escalation, statuses_at_refusal, at_retry)
+
+
+@pytest.mark.asyncio
+async def test_retry_with_attributed_approval_resumes(escalation, monkeypatch):
+    # Red before this fix, observed against 44cc0d2, only on at_retry == []:
+    # the retry resumed without reading the approval. It pins that the new
+    # check passes the authorization's approver, key and tenant and lets a
+    # proven approval start the agent exactly once more.
+    at_retry = _approver_at_retry(monkeypatch, lambda **kwargs: {
+        "principal_sub": RECORDED_APPROVER, "observation_id": "obs-approval"})
+    await _refused_then_retried(escalation, monkeypatch)
+    assert at_retry
+    assert at_retry[0]["required_approver_sub"] == RECORDED_APPROVER
+    assert at_retry[0]["required_approver_jkt"]
+    assert at_retry[0]["expected_user_id"]
+    assert len(escalation["spawned"]) == 2  # the refusal, then one retry
+    assert _task(escalation)["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_only_retry_checks_approver(joined, no_wait, monkeypatch):
+    # Red before this fix, observed against 44cc0d2: at_retry == [], the
+    # checkpoint_only retry also judged only the reducer status. Inferred, not
+    # observed: it then wrote executing again and spawned
+    # (calls == ["owner", "job"]), as
+    # test_timed_out_executing_write_that_did_not_land_is_retried shows for an
+    # attributed approval.
+    at_retry = _approver_at_retry(monkeypatch, lambda **kwargs: None)
+    briefs = []
+    monkeypatch.setattr(apis, "_file_fresh_checkpoint",
+                        lambda **kwargs: briefs.append(kwargs) or "ent_cp_new")
+    writes_at_refusal = []
+
+    def before(write):
+        if write["field"] == "status" and write["value"] == "executing" \
+                and not writes_at_refusal:
+            writes_at_refusal.append(list(joined["writes"]))
+            raise httpx.ConnectTimeout("slow")
+        return None
+
+    joined["before_write"] = before
+    notifier = _Recorder()
+    await apis.handle_checkpoint_brief(
+        joined["checkpoint_id"], copy.deepcopy(joined["checkpoint"]["snapshot"]), notifier)
+    await _drain()
+    assert writes_at_refusal
+    assert at_retry, "the checkpoint_only retry never read the authenticated approval"
+    assert joined["calls"] == []  # no agent started
+    assert joined["writes"] == writes_at_refusal[0]  # no status write
+    assert _executing_writes(joined) == []
+    assert briefs == []  # no checkpoint
+    assert not delivery._delivery_ledger().delivery_receipts()
+    assert any("no longer authorizes" in m for m in notifier.blockers())

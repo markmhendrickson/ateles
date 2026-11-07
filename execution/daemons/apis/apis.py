@@ -2341,7 +2341,10 @@ def _released_retry_authorized(task_id: str, task: dict, checkpoint_id: str,
     """The checks ``handle_checkpoint_brief`` makes before releasing an approved
     checkpoint, made again for a retry: a versioned checkpoint, still approved,
     naming this task, with the checkpoint and task owned by the same verified
-    tenant, an authenticated authorization for this task and tenant, a loaded
+    tenant, an authenticated authorization for this task and tenant, an
+    authenticated approval (``read_authenticated_checkpoint_resolution``) from
+    the authorization's required approver principal and key in that tenant,
+    since the reducer status alone does not prove who approved, a loaded
     policy whose entity and revision the authorization names, the same action
     type, gate action and blast radius, and a gate decision still consistent
     with the approval.
@@ -2349,7 +2352,8 @@ def _released_retry_authorized(task_id: str, task: dict, checkpoint_id: str,
     ``AUTHORIZED`` only when every check passes. ``POLICY_UNAVAILABLE`` only
     when the policy read returned a policy with ``loaded`` False, every check
     before it having passed: a temporary failure, retried later. Anything else
-    absent or different is ``DENIED``."""
+    absent or different is ``DENIED``, including an approval whose approver
+    cannot be proven or a resolution read that raises."""
     denied = RetryAuthorization.DENIED
     version = checkpoint.get("entity_version")
     if not isinstance(version, str) or not version:
@@ -2373,6 +2377,28 @@ def _released_retry_authorized(task_id: str, task: dict, checkpoint_id: str,
     if authorization.get("task_entity_id") != task_id:
         return denied
     if authorization.get("user_id") != brief_user_id:
+        return denied
+    # The reducer status above does not prove who approved: the approval must
+    # come from the required approver's authenticated observation in this
+    # tenant, exactly as ``handle_checkpoint_brief`` requires for the first
+    # release. Unproven, or a failed read, is DENIED, never retried later.
+    required_approver_sub = str(
+        authorization.get("required_approver_sub") or ""
+    ).strip()
+    required_approver_jkt = str(
+        authorization.get("required_approver_jkt") or ""
+    ).strip()
+    try:
+        approval = read_authenticated_checkpoint_resolution(
+            checkpoint_id,
+            checkpoint,
+            required_approver_sub=required_approver_sub,
+            required_approver_jkt=required_approver_jkt,
+            expected_user_id=brief_user_id,
+        )
+    except Exception:  # noqa: BLE001 — an unproven approver is never authorized
+        return denied
+    if approval is None:
         return denied
     task_snapshot = _record_snapshot(task)
     if task_snapshot is None:
