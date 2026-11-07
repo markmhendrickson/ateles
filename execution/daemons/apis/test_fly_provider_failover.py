@@ -63,7 +63,7 @@ def loop(fly_env, seam, monkeypatch, tmp_path):  # noqa: F811 -- pytest fixtures
     seen = {"attempts": [], "spawned": spawned, "cooled": cooled, "fake": fake,
             "minted": minted}  # fmt: skip
 
-    def run(candidates, **kw):
+    def run(candidates, *, binaries=BINARIES, fly_bound=FLY_BOUND, **kw):
         monkeypatch.setattr(skill_runner, "provider_candidates", lambda *a, **k: list(candidates))
 
         async def attempt(selected, **_):
@@ -75,8 +75,8 @@ def loop(fly_env, seam, monkeypatch, tmp_path):  # noqa: F811 -- pytest fixtures
 
         with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
             return asyncio.run(skill_runner._run_provider_attempts(
-                "lanius", attempt, binaries=dict(BINARIES), role="lanius",
-                fly_bound=FLY_BOUND, **kw,
+                "lanius", attempt, binaries=dict(binaries), role="lanius",
+                fly_bound=fly_bound, **kw,
             ))  # fmt: skip
 
     return run, seen
@@ -125,3 +125,60 @@ def test_fly_launch_failure_neither_fails_over_nor_cools(loop):
     assert not result.fly_provider_ineligible
     assert seen["attempts"] == ["claude"]
     assert seen["spawned"] == [] and seen["cooled"] == []
+
+
+# A provider the loop may select that has no binary on the Fly runner image.
+NO_RUNNER = "gemini"
+
+
+@pytest.fixture
+def no_runner_provider(monkeypatch, tmp_path):
+    """Make NO_RUNNER Fly-bound with a local binary, so its attempt reaches
+    ``fly_runner.build_job`` and the ``RUNNER_BINARIES`` check is what stops it."""
+    assert NO_RUNNER not in fly_runner.RUNNER_BINARIES
+    stub = tmp_path / NO_RUNNER
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    real_binaries = skill_runner._provider_binaries
+    monkeypatch.setattr(
+        skill_runner, "_provider_binaries", lambda: {**real_binaries(), NO_RUNNER: str(stub)}
+    )
+    # The local command builder knows only real harnesses; give NO_RUNNER a
+    # plain command so the attempt gets as far as the Fly check.
+    real_command = skill_runner._provider_command
+
+    def command(provider, binary, system_prompt, work_prompt, **kw):
+        if provider == NO_RUNNER:
+            return [binary, "--print"], work_prompt.encode()
+        return real_command(provider, binary, system_prompt, work_prompt, **kw)
+
+    monkeypatch.setattr(skill_runner, "_provider_command", command)
+    return {"fly_bound": FLY_BOUND | {NO_RUNNER}, "binaries": {**BINARIES, NO_RUNNER: str(stub)}}
+
+
+def test_provider_with_no_fly_runner_fails_over_to_claude(loop, no_runner_provider):
+    # Red, seen with provider_specific=True temporarily removed from the
+    # RUNNER_BINARIES refusal in fly_runner.build_job: the loop stopped after
+    # the first attempt, claude never ran, and `assert result.ok` failed with
+    # "fly runner refused: not eligible for Fly: provider 'gemini' has no Fly
+    # runner".
+    run, seen = loop
+    result = run([NO_RUNNER, "claude"], **no_runner_provider)
+    assert result.ok, result.error
+    assert result.provider == "claude"
+    assert seen["attempts"] == [NO_RUNNER, "claude"]
+    assert result.attempted_providers == (NO_RUNNER, "claude")
+    assert seen["minted"] == ["owner/repo"]  # exactly one Fly launch, for claude
+    assert seen["spawned"] == []
+    assert seen["cooled"] == []
+
+
+def test_only_provider_with_no_fly_runner_ends_with_the_refusal(loop, no_runner_provider):
+    run, seen = loop
+    result = run([NO_RUNNER], **no_runner_provider)
+    assert not result.ok
+    assert result.error.startswith("fly runner refused: not eligible for Fly")
+    assert f"provider {NO_RUNNER!r} has no Fly runner" in result.error
+    assert result.fly_ineligible_before_launch
+    assert seen["attempts"] == [NO_RUNNER]
+    assert seen["minted"] == [] and seen["spawned"] == [] and seen["cooled"] == []
