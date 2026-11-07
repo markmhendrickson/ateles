@@ -345,6 +345,8 @@ def test_every_tracked_plist_source_renders_without_credentials(path):
     text = path.read_text(encoding="utf-8")
     # The autodeploy template uses its own {{HOME}} marker.
     text = text.replace("{{HOME}}", rdp.HOME_PLACEHOLDER)
+    # The worktree-prune template also names the checkout that holds its script.
+    text = text.replace("{{CHECKOUT}}", "/opt/example/ateles")
     result = rdp.render(text, home="/Users/example")
     assert result.dropped_credential_keys == (), (
         f"{path.name} carries credential-named EnvironmentVariables"
