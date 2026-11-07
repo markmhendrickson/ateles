@@ -5479,7 +5479,8 @@ class SwarmDispatcher:
         `_handle_pr` decides the rest) with limits on its cost. A PR head is
         left alone when a panel is running on the PR now, when its hold is
         still in `_panel_ci_holds` with checks pending, when it was already
-        re-entered once in this process, or when the PR carries a usage-limit
+        re-entered once in this process and has no hold whose checks are now
+        green, or when the PR carries a usage-limit
         deferral that has not expired.
 
         Returns None without sweeping while another sweep holds the lock, so
@@ -5581,10 +5582,13 @@ class SwarmDispatcher:
             if self._panels_running.get(key):
                 summary["running"] += 1
                 return
-            if head and (*key, head) in self._panel_sweep_entered:
-                summary["already_entered"] += 1
-                return
+            # The hold is looked at before the already-entered mark: an
+            # earlier entry of this head may have ended in a hold (checks
+            # pending), and if the checks-finished webhook was lost, the
+            # hold's now-green checks are what this sweep exists to catch.
+            # Only a head with no green hold stays suppressed once entered.
             held = self._panel_ci_holds.get(key)
+            held_green = False
             if held is not None and held.head == head:
                 gate = await self._read_head_check_gate(
                     repository, trigger.head_sha, trigger.base_ref
@@ -5592,6 +5596,10 @@ class SwarmDispatcher:
                 if gate.pending:
                     summary["held"] += 1
                     return
+                held_green = bool(gate.green)
+            if not held_green and head and (*key, head) in self._panel_sweep_entered:
+                summary["already_entered"] += 1
+                return
         if not await self._label_gate_allows(
             trigger, source="resume_labelled_panels"
         ):

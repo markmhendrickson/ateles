@@ -5,8 +5,8 @@ lost `check_suite/completed` leaves a held panel with nothing to release it.
 `SwarmDispatcher.repeat_labelled_panel_sweep` re-runs the startup sweep's
 approach on an interval (`APIS_PANEL_SWEEP_INTERVAL_S`), bounded so it never
 re-enters a running panel, a head still held on pending checks, a head it has
-already re-entered in this process, or a PR under an unexpired usage-limit
-deferral. Both sweeps re-read a PR's head just before judging it.
+already re-entered in this process (unless that entry left a hold whose checks
+are now green), or a PR under an unexpired usage-limit deferral. Both sweeps re-read a PR's head just before judging it.
 
 Re-entry is observed through `_handle_pr_entrance` (the body behind the real
 `_handle_pr` wrapper), so the wrapper's running-panel bookkeeping is the real
@@ -198,6 +198,91 @@ def test_a_new_head_on_the_same_pr_is_re_entered(sweep):
     state["current"] = _pr(NEW_HEAD)
     _run(d.repeat_labelled_panel_sweep([REPO]))
     assert state["entered"] == [(PR, OLD_HEAD), (PR, NEW_HEAD)]
+
+
+def _holding_entrance(d, state):
+    """An entrance that holds like `_hold_panel_until_checks_green` does.
+
+    Pending checks create the hold and return; green checks release it and
+    run the panel. Each call is recorded in `state["entered"]`.
+    """
+
+    async def entrance(self, trigger):
+        state["entered"].append((trigger.number, trigger.head_sha))
+        key = (trigger.repository.casefold(), trigger.number)
+        if state["gate"].pending:
+            self._panel_ci_holds[key] = sd._PanelCIHold(
+                head=trigger.head_sha, reason="pending"
+            )
+        else:
+            self._panel_ci_holds.pop(key, None)
+
+    return entrance
+
+
+@pytest.mark.parametrize("first", ["startup", "repeating"])
+def test_a_head_entered_into_a_hold_is_re_entered_once_its_checks_go_green(
+    sweep, monkeypatch, first
+):
+    # The entry itself created the hold (checks pending), then the
+    # checks-finished webhook was lost. The already-entered mark must not
+    # hide that hold's now-green checks from the next pass.
+    d, state = sweep
+    monkeypatch.setattr(
+        sd.SwarmDispatcher, "_handle_pr_entrance", _holding_entrance(d, state)
+    )
+    state["gate"] = PENDING
+    sweeper = (
+        d.resume_labelled_panels if first == "startup" else d.repeat_labelled_panel_sweep
+    )
+    _run(sweeper([REPO]))
+    assert state["entered"] == [(PR, OLD_HEAD)]
+    assert d._panel_ci_holds[KEY].head == OLD_HEAD, "the entry created a hold"
+    # Still pending: left alone, not re-entered.
+    held = _run(d.repeat_labelled_panel_sweep([REPO]))
+    assert held["held"] == 1 and state["entered"] == [(PR, OLD_HEAD)]
+    # Checks go green; no webhook arrives.
+    state["gate"] = GREEN
+    second = _run(d.repeat_labelled_panel_sweep([REPO]))
+    assert second["resumed"] == 1
+    assert state["entered"] == [(PR, OLD_HEAD), (PR, OLD_HEAD)]
+    assert KEY not in d._panel_ci_holds
+    # The panel started and the hold is gone: suppressed from now on.
+    third = _run(d.repeat_labelled_panel_sweep([REPO]))
+    assert third["already_entered"] == 1
+    assert state["entered"] == [(PR, OLD_HEAD), (PR, OLD_HEAD)], "exactly once"
+
+
+def test_a_green_held_head_with_a_panel_running_is_not_entered_twice(
+    sweep, monkeypatch
+):
+    d, state = sweep
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def slow_entrance(self, trigger):
+        state["entered"].append((trigger.number, trigger.head_sha))
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_handle_pr_entrance", slow_entrance)
+    d._panel_ci_holds[KEY] = sd._PanelCIHold(head=OLD_HEAD, reason="pending")
+    d._panel_sweep_entered.add((REPO, PR, OLD_HEAD))
+
+    async def scenario():
+        # The green hold is being re-driven right now (webhook or sweep).
+        running = asyncio.create_task(
+            d._handle_pr(d._pr_trigger_from_api(REPO, _pr(OLD_HEAD)))
+        )
+        await started.wait()
+        summary = await d.repeat_labelled_panel_sweep([REPO])
+        release.set()
+        await running
+        return summary
+
+    summary = _run(scenario())
+    assert summary["running"] == 1 and summary["resumed"] == 0
+    assert state["entered"] == [(PR, OLD_HEAD)]
 
 
 @pytest.mark.parametrize("which", ["startup", "repeating"])
