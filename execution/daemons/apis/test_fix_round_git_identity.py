@@ -22,6 +22,7 @@ import pytest
 import skill_runner
 from test_skill_runner import _loader_with_no_policies, _make_def
 from test_tiering_call_sites import (  # noqa: F401 (world is a fixture)
+    _LOCAL_FIX_BRANCH,
     _Recorder,
     _dispatcher,
     _run_revision_sweep,
@@ -197,7 +198,9 @@ def test_identity_appends_after_existing_config_overrides():
 
 def test_ci_fix_round_asks_for_the_agent_identity(monkeypatch, world):
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
-    asyncio.run(_dispatcher()._route_ci_failure(_trigger(), parent=80))
+    asyncio.run(
+        _dispatcher()._route_ci_failure(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80)
+    )
     assert rec.only("cicada").get("agent_git_identity") is True
 
 
@@ -205,7 +208,7 @@ def test_findings_fix_round_asks_for_the_agent_identity(monkeypatch, world):
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
     asyncio.run(
         _dispatcher()._route_blocking_findings(
-            _trigger(), parent=80,
+            _trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80,
             reviews=[("ux", "[BLOCKING] naming: the flag is undiscoverable\ndetail")],
             verdict="request_changes",
         )

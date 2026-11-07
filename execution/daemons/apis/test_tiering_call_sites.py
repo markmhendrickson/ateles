@@ -30,6 +30,7 @@ import swarm_dispatch
 from skill_runner import SkillResult
 from swarm_dispatch import SwarmDispatcher
 from test_swarm_dispatch import (
+    _LOCAL_FIX_BRANCH,
     _StubNotifier,
     _async_return,
     _config,
@@ -617,7 +618,7 @@ def _run_route_findings(monkeypatch, reviews) -> _Recorder:
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
     asyncio.run(
         _dispatcher()._route_blocking_findings(
-            _trigger(), parent=80, reviews=reviews, verdict="request_changes"
+            _trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80, reviews=reviews, verdict="request_changes"
         )
     )
     return rec
@@ -672,7 +673,9 @@ def test_fix_round_repair_on_a_security_path_escalates(monkeypatch, world):
 
 def test_ci_fix_is_ci_log_triage_on_the_mechanical_tier(monkeypatch, world):
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
-    asyncio.run(_dispatcher()._route_ci_failure(_trigger(), parent=80))
+    asyncio.run(
+        _dispatcher()._route_ci_failure(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80)
+    )
     cicada = rec.only("cicada")
     assert cicada["action_class"] == "ci_log_triage"
     assert cicada["work_class"] == "ci_log_triage"  # the local-first tag stays
@@ -682,7 +685,9 @@ def test_ci_fix_is_ci_log_triage_on_the_mechanical_tier(monkeypatch, world):
 def test_ci_fix_second_round_escalates(monkeypatch, world):
     world.fix_rounds = 1
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
-    asyncio.run(_dispatcher()._route_ci_failure(_trigger(), parent=80))
+    asyncio.run(
+        _dispatcher()._route_ci_failure(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80)
+    )
     resolved = tier_of(rec.only("cicada"))
     assert resolved.tier == "top"
     assert "prior_attempt_failed" in resolved.escalation_reasons

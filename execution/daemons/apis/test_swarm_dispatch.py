@@ -79,6 +79,12 @@ def _readable_fly_ledger(_fly_runner_off_and_isolated):
     fly_delivery_receipt.audit_path(ledger).write_text("")
 
 
+# A PR head branch no Fly delivery receipt names. Production triggers always
+# carry the PR's head.ref; a fix round whose trigger has none is held, because
+# whether Fly delivered the PR cannot then be decided.
+_LOCAL_FIX_BRANCH = "fix/local-fix-round"
+
+
 def _trigger(**overrides):
     base = dict(
         kind="pr_opened",
@@ -1801,7 +1807,7 @@ def test_route_findings_groups_by_lens_then_dispatches_cicada(monkeypatch):
         ("qa", "[NON-BLOCKING] style: minor"),
     ]
     asyncio.run(
-        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+        d._route_blocking_findings(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80, reviews=reviews,
                                    verdict="request_changes")
     )
     # Each lens with a blocking finding gets its owning agent invoked, then Cicada.
@@ -1840,7 +1846,7 @@ def _route_capture_cicada_guidance(monkeypatch, *, lens_result_for):
     d = SwarmDispatcher(_StubNotifier(), _config())
     reviews = [("ux", "[BLOCKING] naming: the flag is undiscoverable\nraw-ux-detail")]
     asyncio.run(
-        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+        d._route_blocking_findings(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80, reviews=reviews,
                                    verdict="request_changes")
     )
     return captured.get("cicada_prompt", ""), d
@@ -1900,7 +1906,7 @@ def test_route_findings_mixed_lens_outcomes_include_both_sections(monkeypatch):
         ("qa", "[BLOCKING] coverage: none\nqa-raw"),
     ]
     asyncio.run(
-        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+        d._route_blocking_findings(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80, reviews=reviews,
                                    verdict="request_changes")
     )
     prompt = captured.get("prompt", "")
@@ -2020,7 +2026,7 @@ def test_route_findings_cicada_auth_failure_pages_infra(monkeypatch):
     d = SwarmDispatcher(_StubNotifier(), _config())
     asyncio.run(
         d._route_blocking_findings(
-            _trigger(), parent=80,
+            _trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80,
             reviews=[("qa", "[BLOCKING] coverage: no test\nadd one")],
             verdict="request_changes",
         )
@@ -3615,7 +3621,7 @@ def test_route_ci_failure_tags_cicada_dispatch_as_ci_log_triage(monkeypatch):
     )
 
     d = SwarmDispatcher(_StubNotifier(), _config())
-    asyncio.run(d._route_ci_failure(_trigger(), parent=80))
+    asyncio.run(d._route_ci_failure(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80))
 
     assert seen["work_class"] == "ci_log_triage"
 
@@ -3645,7 +3651,7 @@ def test_route_blocking_findings_cicada_dispatch_carries_no_work_class(monkeypat
     d = SwarmDispatcher(_StubNotifier(), _config())
     reviews = [("ux", "[BLOCKING] naming: the flag is undiscoverable\ndetail here")]
     asyncio.run(
-        d._route_blocking_findings(_trigger(), parent=80, reviews=reviews,
+        d._route_blocking_findings(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80, reviews=reviews,
                                    verdict="request_changes")
     )
 
@@ -11103,7 +11109,7 @@ def _route_fix_round_with_head(monkeypatch, *, head_before, head_after):
     reviews = [("ux", "[BLOCKING] naming: the flag is undiscoverable\ndetail")]
     asyncio.run(
         d._route_blocking_findings(
-            _trigger(), parent=80, reviews=reviews, verdict="request_changes"
+            _trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80, reviews=reviews, verdict="request_changes"
         )
     )
     return notifier, dispatched

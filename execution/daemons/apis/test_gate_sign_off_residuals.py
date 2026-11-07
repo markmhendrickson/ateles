@@ -345,7 +345,8 @@ class TestEverySeatedLensIsDeniedCorrect:
         d = SwarmDispatcher(tsd._StubNotifier(), tsd._config())
         reviews = [("security", "[BLOCKING] injection: the query is unparameterised\ndetail")]
         _run(d._route_blocking_findings(
-            tsd._trigger(), parent=80, reviews=reviews, verdict="request_changes"
+            tsd._trigger(head_ref=tsd._LOCAL_FIX_BRANCH), parent=80, reviews=reviews,
+            verdict="request_changes",
         ))
 
         assert seen["falco"].get("seated_reviewer") is True

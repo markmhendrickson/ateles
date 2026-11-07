@@ -731,7 +731,10 @@ class TestToolDenyFromTheLiveRecord:
         monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", head)
         d = SwarmDispatcher(tsd._StubNotifier(), tsd._config())
         reviews = [("arch", "[BLOCKING] contract: the gate write is unordered\ndetail")]
-        _run(d._route_blocking_findings(tsd._trigger(), parent=80, reviews=reviews, verdict="request_changes"))
+        _run(d._route_blocking_findings(
+            tsd._trigger(head_ref=tsd._LOCAL_FIX_BRANCH), parent=80, reviews=reviews,
+            verdict="request_changes",
+        ))
 
         assert seen["waxwing"].get("owns_pending_gate") is True
 
