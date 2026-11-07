@@ -2323,59 +2323,79 @@ def _released_retry_eligible(skill: str, trigger: str, gate_override: bool,
     )
 
 
+class RetryAuthorization(str, Enum):
+    """The three outcomes of re-checking a released retry's approval.
+
+    ``POLICY_UNAVAILABLE`` means only that ``resolve_policy_for_agent`` returned
+    a policy that did not load (Neotoma slow or unreachable): retry later, never
+    launch. Every other failed check is ``DENIED``."""
+
+    AUTHORIZED = "authorized"
+    DENIED = "denied"
+    POLICY_UNAVAILABLE = "policy_unavailable"
+
+
 def _released_retry_authorized(task_id: str, task: dict, checkpoint_id: str,
-                               checkpoint: dict, checkpoint_snapshot: dict) -> bool:
+                               checkpoint: dict,
+                               checkpoint_snapshot: dict) -> RetryAuthorization:
     """The checks ``handle_checkpoint_brief`` makes before releasing an approved
     checkpoint, made again for a retry: a versioned checkpoint, still approved,
     naming this task, with the checkpoint and task owned by the same verified
     tenant, an authenticated authorization for this task and tenant, a loaded
     policy whose entity and revision the authorization names, the same action
     type, gate action and blast radius, and a gate decision still consistent
-    with the approval. Anything absent or different is not authorized."""
+    with the approval.
+
+    ``AUTHORIZED`` only when every check passes. ``POLICY_UNAVAILABLE`` only
+    when the policy read returned a policy with ``loaded`` False, every check
+    before it having passed: a temporary failure, retried later. Anything else
+    absent or different is ``DENIED``."""
+    denied = RetryAuthorization.DENIED
     version = checkpoint.get("entity_version")
     if not isinstance(version, str) or not version:
-        return False
+        return denied
     if read_checkpoint_resolution(checkpoint_snapshot) != "approved":
-        return False
+        return denied
     if checkpoint_snapshot.get("task_entity_id") != task_id:
-        return False
+        return denied
     brief_user_id = read_verified_entity_owner(checkpoint_id, checkpoint)
     task_user_id = read_verified_entity_owner(task_id, task)
     if not (bool(brief_user_id) and bool(task_user_id) and brief_user_id == task_user_id):
-        return False
+        return denied
     # The authenticated approval and the live policy must still release this
     # task, as ``handle_checkpoint_brief`` requires. The task revision and
     # observation fields are not compared: the task's own status writes after
-    # release change them, and the fingerprint covers changes during the wait.
+    # release change them, and the state comparison covers changes during the
+    # wait.
     authorization = read_authenticated_checkpoint_authorization(checkpoint_id, checkpoint)
     if not isinstance(authorization, dict):
-        return False
+        return denied
     if authorization.get("task_entity_id") != task_id:
-        return False
+        return denied
     if authorization.get("user_id") != brief_user_id:
-        return False
+        return denied
     task_snapshot = _record_snapshot(task)
     if task_snapshot is None:
-        return False
+        return denied
     skill = _gate_skill(task_snapshot)
     policy = resolve_policy_for_agent(skill)
     if not policy.loaded:
-        return False
+        return RetryAuthorization.POLICY_UNAVAILABLE
     action_type = _resolve_gate_action_type(skill or "", task_snapshot, policy).value
     if action_type == "operator_only":
-        return False
+        return denied
     if str(authorization.get("action_type") or "").strip().lower() != action_type:
-        return False
+        return denied
     if authorization.get("policy_entity_id") != policy.entity_id:
-        return False
+        return denied
     if authorization.get("policy_revision") != execution_policy_revision(policy):
-        return False
+        return denied
     gate_action = str(checkpoint_snapshot.get("gate_action", "")).strip().lower()
     blast_radius = str(checkpoint_snapshot.get("blast_radius", "")).strip().lower()
     if authorization.get("gate_action") != gate_action:
-        return False
+        return denied
     if authorization.get("blast_radius") != blast_radius:
-        return False
+        return denied
     confidence, unscored = _gate_confidence(
         task_snapshot,
         skill=skill,
@@ -2390,48 +2410,108 @@ def _released_retry_authorized(task_id: str, task: dict, checkpoint_id: str,
         successful_recurrences=_successful_recurrences(task_snapshot),
         confidence_unscored=unscored,
     )
-    return _decision_consistent_with_approval(
-        decision, gate_action=gate_action, blast_radius=blast_radius)
+    if _decision_consistent_with_approval(
+            decision, gate_action=gate_action, blast_radius=blast_radius):
+        return RetryAuthorization.AUTHORIZED
+    return denied
+
+
+def _released_retry_records(task_id: str, checkpoint_id: str):
+    """``(task, checkpoint, task_snapshot, checkpoint_snapshot)``, or None when
+    either record or its snapshot cannot be read."""
+    task = fetch_task_record(task_id)
+    checkpoint = fetch_checkpoint_record(checkpoint_id)
+    if not isinstance(task, dict) or not isinstance(checkpoint, dict):
+        return None
+    task_snapshot = _record_snapshot(task)
+    checkpoint_snapshot = _record_snapshot(checkpoint)
+    if task_snapshot is None or checkpoint_snapshot is None:
+        return None
+    return task, checkpoint, task_snapshot, checkpoint_snapshot
+
+
+def _released_retry_state_of(task_id: str, checkpoint_id: str, records, *,
+                             checkpoint_only: bool = False):
+    """``_released_retry_state`` computed from records already read."""
+    if records is None:
+        return None
+    task, checkpoint, task_snapshot, checkpoint_snapshot = records
+    version = checkpoint.get("entity_version")
+    if not isinstance(version, str) or not version:
+        return None
+    if read_checkpoint_resolution(checkpoint_snapshot) != "approved":
+        return None
+    if checkpoint_snapshot.get("task_entity_id") != task_id:
+        return None
+    brief_user_id = read_verified_entity_owner(checkpoint_id, checkpoint)
+    task_user_id = read_verified_entity_owner(task_id, task)
+    if not (bool(brief_user_id) and bool(task_user_id)
+            and brief_user_id == task_user_id):
+        return None
+    checkpoint_part = (version, read_checkpoint_resolution(checkpoint_snapshot))
+    if checkpoint_only:
+        return checkpoint_part
+    task_version = task.get("entity_version")
+    if not isinstance(task_version, str) or not task_version:
+        return None
+    return (
+        task_version,
+        normalize_status(task_snapshot.get("status")),
+        task_snapshot.get("blocked_reason"),
+    ) + checkpoint_part
+
+
+def _released_retry_state(task_id: str, checkpoint_id: str, *,
+                          checkpoint_only: bool = False):
+    """What a retry must find unchanged: the task's version, status and hold,
+    and the checkpoint's version and resolution. None when either record
+    cannot be read, the checkpoint has no version, is no longer approved or no
+    longer names this task, or the checkpoint and task owners are not the same
+    verified tenant; None never counts as unchanged.
+
+    It makes NO policy or authorization check (see
+    ``_released_retry_checked``), so a policy that cannot be read yet still
+    yields a state: the baseline of a retry does not depend on the policy
+    read. ``checkpoint_only`` leaves the task part to the resume (a write whose
+    outcome is unknown may still land during the wait, so the resume reads the
+    task back itself); the checkpoint part and the owners are still checked."""
+    try:
+        return _released_retry_state_of(
+            task_id, checkpoint_id, _released_retry_records(task_id, checkpoint_id),
+            checkpoint_only=checkpoint_only)
+    except Exception:  # noqa: BLE001 — unreadable is never unchanged
+        return None
+
+
+def _released_retry_checked(task_id: str, checkpoint_id: str, *,
+                            checkpoint_only: bool = False):
+    """``(state, authorization)`` judged from ONE read of the task and
+    checkpoint, so the authorization is made on exactly the records whose
+    state a caller compares with its baseline. The authorization is
+    ``_released_retry_authorized``'s; it is ``DENIED`` when the state is None,
+    a record is unreadable or an exception is raised: never a launch."""
+    try:
+        records = _released_retry_records(task_id, checkpoint_id)
+        state = _released_retry_state_of(task_id, checkpoint_id, records,
+                                         checkpoint_only=checkpoint_only)
+        if state is None:
+            return None, RetryAuthorization.DENIED
+        task, checkpoint, _, checkpoint_snapshot = records
+        return state, _released_retry_authorized(task_id, task, checkpoint_id,
+                                                 checkpoint, checkpoint_snapshot)
+    except Exception:  # noqa: BLE001 — undeterminable is never authorized
+        return None, RetryAuthorization.DENIED
 
 
 def _released_retry_fingerprint(task_id: str, checkpoint_id: str, *,
                                 checkpoint_only: bool = False):
-    """What a retry must find unchanged: the task's version, status and hold,
-    and the checkpoint's version and resolution. None when either cannot be
-    read, or the approval no longer authorizes this task (see
-    ``_released_retry_authorized``); None never counts as unchanged.
-    ``checkpoint_only`` leaves the task part to the resume (a write whose
-    outcome is unknown may still land during the wait, so the resume reads the
-    task back itself); the checkpoint's version, approval and task link, and
-    the owners, are still checked."""
-    try:
-        task = fetch_task_record(task_id)
-        checkpoint = fetch_checkpoint_record(checkpoint_id)
-        if not isinstance(task, dict) or not isinstance(checkpoint, dict):
-            return None
-        task_snapshot = _record_snapshot(task)
-        checkpoint_snapshot = _record_snapshot(checkpoint)
-        if task_snapshot is None or checkpoint_snapshot is None:
-            return None
-        if not _released_retry_authorized(task_id, task, checkpoint_id,
-                                          checkpoint, checkpoint_snapshot):
-            return None
-        checkpoint_part = (
-            checkpoint.get("entity_version"),
-            read_checkpoint_resolution(checkpoint_snapshot),
-        )
-        if checkpoint_only:
-            return checkpoint_part
-        task_version = task.get("entity_version")
-        if not isinstance(task_version, str) or not task_version:
-            return None
-        return (
-            task_version,
-            normalize_status(task_snapshot.get("status")),
-            task_snapshot.get("blocked_reason"),
-        ) + checkpoint_part
-    except Exception:  # noqa: BLE001 — unreadable is never unchanged
-        return None
+    """``_released_retry_state`` when the approval still authorizes this task
+    (``_released_retry_checked`` is ``AUTHORIZED``), else None. A policy that
+    cannot be read yet gives None here; callers that must keep a baseline
+    through a policy slowdown read ``_released_retry_state`` instead."""
+    state, authorization = _released_retry_checked(
+        task_id, checkpoint_id, checkpoint_only=checkpoint_only)
+    return state if authorization is RetryAuthorization.AUTHORIZED else None
 
 
 # The statuses a released task holds between its release and its launch:
@@ -2487,11 +2567,21 @@ def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int
     attempt's baseline: with no baseline, or a state that has changed, nothing
     is written, the task stays as found and the exhaustion is announced.
 
-    A full (task and checkpoint) retry needs ``baseline``: the fingerprint the
-    caller read BEFORE the attempt that failed, so a change made during that
-    attempt is a difference rather than the new baseline. Without one there
-    is no retry. ``checkpoint_only`` reads its baseline here, since its resume
-    reads the task back itself."""
+    A full (task and checkpoint) retry needs ``baseline``: the state
+    (``_released_retry_state``) the caller read BEFORE the attempt that
+    failed, so a change made during that attempt is a difference rather than
+    the new baseline. Without one there is no retry. ``checkpoint_only`` reads
+    its baseline here, since its resume reads the task back itself.
+
+    After the wait, in order: the state must equal the baseline and the task
+    must still be dispatchable (``_released_retry_task_dispatchable``), else
+    the task is left as found. Then the approval is judged
+    (``_released_retry_checked``) immediately before ``resume``:
+    ``AUTHORIZED`` resumes; ``POLICY_UNAVAILABLE`` (the policy cannot be read
+    yet) never resumes, it schedules the next attempt with the same baseline,
+    or, with the attempts spent, escalates through
+    ``_escalate_released_retry_exhausted``; ``DENIED`` never resumes, leaves the
+    task as found and sends a BLOCKER notice."""
     if attempt >= len(_RELEASED_RETRY_DELAYS):
         return False
     if checkpoint_only and baseline is None:
@@ -2508,8 +2598,8 @@ def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int
 
     async def _wait_then_resume() -> None:
         await asyncio.sleep(delay)
-        current = _released_retry_fingerprint(entity_id, checkpoint_id,
-                                              checkpoint_only=checkpoint_only)
+        current = _released_retry_state(entity_id, checkpoint_id,
+                                        checkpoint_only=checkpoint_only)
         if current is None:
             log.warning("[%s] released task %s: state unreadable before retry %d — "
                         "not retrying, left as found", DAEMON_NAME, entity_id, attempt + 1)
@@ -2527,6 +2617,46 @@ def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int
             log.info("[%s] released task %s is terminal, held or unreadable before "
                      "retry %d — not retrying, left as found", DAEMON_NAME, entity_id,
                      attempt + 1)
+            return
+        # Judged on one fresh read whose state must still equal the baseline,
+        # so nothing that changed since the comparison above is authorized.
+        checked_state, authorization = _released_retry_checked(
+            entity_id, checkpoint_id, checkpoint_only=checkpoint_only)
+        if checked_state is None:
+            authorization = RetryAuthorization.DENIED  # unreadable: BLOCKER below
+        elif checked_state != baseline:
+            log.info("[%s] released task %s changed before retry %d — not retrying, "
+                     "left as found", DAEMON_NAME, entity_id, attempt + 1)
+            return
+        if authorization is RetryAuthorization.POLICY_UNAVAILABLE:
+            # Retry later, never launch: the policy cannot be read yet.
+            log.warning("[%s] released task %s: agent_policy unavailable before retry %d — "
+                        "not starting", DAEMON_NAME, entity_id, attempt + 1)
+            later_why = f"{why}; agent_policy unavailable before the retry"
+            if _schedule_released_retry(
+                entity_id=entity_id, checkpoint_id=checkpoint_id, attempt=attempt + 1,
+                why=why, notifier=notifier, resume=resume,
+                checkpoint_only=checkpoint_only, baseline=baseline,
+            ):
+                return
+            reason = later_why + _released_retry_note(attempt + 1, why)
+            if not _escalate_released_retry_exhausted(
+                entity_id=entity_id, checkpoint_id=checkpoint_id, reason=reason,
+                notifier=notifier, baseline=baseline, checkpoint_only=checkpoint_only,
+            ):
+                notifier.send(
+                    f"Released task {entity_id}: rounds_exhausted could not be recorded; "
+                    f"nothing was started and the task was left as found. {reason}",
+                    priority=Priority.BLOCKER, handler=DAEMON_NAME)
+            return
+        if authorization is not RetryAuthorization.AUTHORIZED:
+            log.warning("[%s] released task %s no longer authorized before retry %d — "
+                        "not retrying, left as found", DAEMON_NAME, entity_id, attempt + 1)
+            notifier.send(
+                f"Released task {entity_id} was waiting to retry ({why}) but its state "
+                "could not be read back or no longer authorizes the retry; nothing "
+                "was started. Reconcile it.",
+                priority=Priority.BLOCKER, handler=DAEMON_NAME)
             return
         log.info("[%s] released task %s: retry %d/%d starting", DAEMON_NAME,
                  entity_id, attempt + 1, len(_RELEASED_RETRY_DELAYS))
@@ -2550,15 +2680,20 @@ def _escalate_released_retry_exhausted(*, entity_id: str, checkpoint_id: str,
     so FAILED would be false.
 
     It escalates only while the task and checkpoint still match this released
-    attempt: ``baseline`` (the fingerprint read for this attempt, with
-    ``checkpoint_only`` as it was read) must equal a fresh fingerprint and the
+    attempt: ``baseline`` (the state read for this attempt, with
+    ``checkpoint_only`` as it was read) must equal a fresh
+    ``_released_retry_state`` and the
     task must still be dispatchable (``_released_retry_task_dispatchable``),
     checked immediately before the status write. With no baseline, or a state
     that has changed (a person's hold, a terminal status, a changed
     checkpoint), nothing is written and the task stays as found. True only
     when the replacement checkpoint was written; any of those refusals, an
     unreadable record, a failed write or an exception returns False (never
-    FAILED); the caller then announces the exhaustion on the notifier."""
+    FAILED); the caller then announces the exhaustion on the notifier.
+
+    No loaded policy is needed: escalating starts nothing, it only raises a
+    checkpoint for a person, so a policy slowdown that outlasted the
+    attempts still escalates."""
     if baseline is None:
         return False
     try:
@@ -2567,7 +2702,7 @@ def _escalate_released_retry_exhausted(*, entity_id: str, checkpoint_id: str,
             return False
         from_status = snapshot.get("status")
         held_reason = f"rounds_exhausted: {reason}"
-        if _released_retry_fingerprint(
+        if _released_retry_state(
                 entity_id, checkpoint_id, checkpoint_only=checkpoint_only) != baseline:
             return False
         if not _released_retry_task_dispatchable(entity_id):
@@ -3454,11 +3589,14 @@ async def dispatch_task(
                 dispatch_snapshot = json.loads(correction_lifecycle.snapshot_json)
                 lifecycle_binding["_lifecycle_version"] = correction_lifecycle.version
                 lifecycle_binding["_lifecycle_provenance"] = correction_lifecycle
-            # What the approval authorized, read before the launch: a retry of
-            # a refusal compares against this, never against a state the
-            # launch itself left behind. None means no retry, not no launch.
-            # A baseline outside the released statuses binds nothing: no retry.
-            prelaunch = (_released_retry_fingerprint(entity_id, release_key)
+            # The state a retry must find unchanged, read before the launch: a
+            # retry of a refusal compares against this, never against a state
+            # the launch itself left behind. It makes no policy read, so a
+            # policy slowdown spanning this read and the agent's own still
+            # leaves a baseline; the retry judges authorization itself, just
+            # before it resumes. None means no retry, not no launch. A
+            # baseline outside the released statuses binds nothing: no retry.
+            prelaunch = (_released_retry_state(entity_id, release_key)
                          if retry_ok else None)
             if prelaunch is not None and not _released_retry_status_allowed(prelaunch[1]):
                 prelaunch = None

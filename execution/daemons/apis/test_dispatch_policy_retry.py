@@ -300,7 +300,7 @@ async def test_no_baseline_writes_nothing_and_announces(escalation, monkeypatch)
     # rounds_exhausted checkpoint, so `"awaiting_approval" not in statuses`
     # failed.
     escalation["script"].append(_refusal("timeout"))
-    monkeypatch.setattr(apis, "_released_retry_fingerprint",
+    monkeypatch.setattr(apis, "_released_retry_state",
                         lambda task_id, checkpoint_id, **kwargs: None)
     await _release(escalation)
     assert len(escalation["spawned"]) == 1
@@ -362,7 +362,7 @@ async def test_checkpoint_changed_at_exhaustion_writes_nothing(escalation, monke
 
 
 def _change_during_wait(esc, monkeypatch, change):
-    real = apis._released_retry_fingerprint
+    real = apis._released_retry_state
     calls = []
 
     def fingerprint(task_id, checkpoint_id, **kwargs):
@@ -371,7 +371,7 @@ def _change_during_wait(esc, monkeypatch, change):
             change()
         return real(task_id, checkpoint_id, **kwargs)
 
-    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    monkeypatch.setattr(apis, "_released_retry_state", fingerprint)
     return calls
 
 
@@ -451,7 +451,7 @@ async def test_permanent_refusal_fails_at_once(released, code):
 @pytest.mark.asyncio
 async def test_state_changed_during_wait_stops_retry_without_spawn(released, monkeypatch):
     released["script"].append(_refusal("timeout"))
-    real = apis._released_retry_fingerprint
+    real = apis._released_retry_state
     calls = []
 
     def fingerprint(task_id, checkpoint_id, **kwargs):
@@ -461,7 +461,7 @@ async def test_state_changed_during_wait_stops_retry_without_spawn(released, mon
             _task(released)["blocked_reason"] = "held by a person"
         return real(task_id, checkpoint_id, **kwargs)
 
-    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    monkeypatch.setattr(apis, "_released_retry_state", fingerprint)
     await _release(released)
     # Red without the change: no retry existed, so the task went FAILED; with a
     # retry that ignored the change it would have spawned twice.
@@ -501,7 +501,7 @@ async def test_task_changed_during_launch_is_not_retried(released, monkeypatch):
 async def test_task_terminal_or_held_during_wait_is_not_retried(
         released, monkeypatch, status):
     released["script"].append(_refusal("timeout"))
-    real = apis._released_retry_fingerprint
+    real = apis._released_retry_state
     calls = []
 
     def fingerprint(task_id, checkpoint_id, **kwargs):
@@ -513,7 +513,7 @@ async def test_task_terminal_or_held_during_wait_is_not_retried(
             _task(released)["status"] = status
         return result
 
-    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    monkeypatch.setattr(apis, "_released_retry_state", fingerprint)
     await _release(released)
     assert len(calls) == 2 and calls[0] == calls[1] and calls[0] is not None
     assert len(released["spawned"]) == 1
@@ -532,7 +532,7 @@ async def test_task_held_in_baseline_and_during_wait_is_not_retried(
     # the retry resumed _finish_dispatch past the new hold's approval. A
     # non-string status already made the baseline unreadable, so 7 was green.
     released["script"].append(_refusal("timeout"))
-    real = apis._released_retry_fingerprint
+    real = apis._released_retry_state
     calls = []
     resumed = []
     finish_retry = apis._schedule_released_retry
@@ -552,7 +552,7 @@ async def test_task_held_in_baseline_and_during_wait_is_not_retried(
 
         return finish_retry(**{**kwargs, "resume": spy})
 
-    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    monkeypatch.setattr(apis, "_released_retry_state", fingerprint)
     monkeypatch.setattr(apis, "_schedule_released_retry", schedule)
     await _release(released)
     assert resumed == []
@@ -591,7 +591,7 @@ async def test_hold_reason_at_retry_entry_is_not_retried(released, monkeypatch, 
     # status, so a routed or executing task carrying a hold reason resumed and
     # the agent was spawned a second time.
     released["script"].append(_refusal("timeout"))
-    real = apis._released_retry_fingerprint
+    real = apis._released_retry_state
     calls = []
 
     def fingerprint(task_id, checkpoint_id, **kwargs):
@@ -604,7 +604,7 @@ async def test_hold_reason_at_retry_entry_is_not_retried(released, monkeypatch, 
             _task(released)["blocked_reason"] = "held by a person"
         return result
 
-    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    monkeypatch.setattr(apis, "_released_retry_state", fingerprint)
     await _release(released)
     assert len(calls) == 2 and calls[0] == calls[1] and calls[0] is not None
     assert len(released["spawned"]) == 1
@@ -622,7 +622,7 @@ async def test_unreadable_prelaunch_state_launches_but_refusal_is_not_retried(
         calls.append(task_id)
         return None
 
-    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    monkeypatch.setattr(apis, "_released_retry_state", fingerprint)
     await _release(released)
     assert len(calls) == 1  # the pre-launch read only; no retry was scheduled
     assert len(released["spawned"]) == 1
@@ -635,7 +635,7 @@ async def test_unreadable_prelaunch_state_launches_but_refusal_is_not_retried(
 def _change_checkpoint_during_wait(released, monkeypatch, change):
     """Apply ``change`` to the checkpoint record just before the read that
     follows the retry wait."""
-    real = apis._released_retry_fingerprint
+    real = apis._released_retry_state
     calls = []
 
     def fingerprint(task_id, checkpoint_id, **kwargs):
@@ -644,7 +644,7 @@ def _change_checkpoint_during_wait(released, monkeypatch, change):
             change(released["records"][released["brief_id"]])
         return real(task_id, checkpoint_id, **kwargs)
 
-    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    monkeypatch.setattr(apis, "_released_retry_state", fingerprint)
     return calls
 
 
@@ -689,7 +689,7 @@ async def test_checkpoint_resolution_changed_during_wait_stops_retry_without_spa
 def _break_checkpoint_before_baseline(released, monkeypatch, change):
     """Apply ``change`` to the checkpoint record before the baseline read, so
     the retry is never scheduled."""
-    real = apis._released_retry_fingerprint
+    real = apis._released_retry_state
     results = []
 
     def fingerprint(task_id, checkpoint_id, **kwargs):
@@ -699,7 +699,7 @@ def _break_checkpoint_before_baseline(released, monkeypatch, change):
         results.append(result)
         return result
 
-    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    monkeypatch.setattr(apis, "_released_retry_state", fingerprint)
     return results
 
 
@@ -723,7 +723,7 @@ async def test_unauthorized_checkpoint_gets_no_retry_and_no_spawn(
     released["script"].append(_refusal("timeout"))
     results = _break_checkpoint_before_baseline(released, monkeypatch, change)
     await _release(released)
-    # Unreadable: no retry was scheduled, so the fingerprint ran once.
+    # Unreadable: no retry was scheduled, so the state read ran once.
     assert results == [None]
     assert len(released["spawned"]) == 1
     # No baseline: nothing is written (never FAILED, never awaiting_approval);
@@ -755,6 +755,137 @@ def test_no_agent_runs_while_policy_is_unavailable(admission):
         assert not result.ok and result.policy_unavailable
         assert neotoma_read_failure_is_transient(result)
     assert admission["effects"] == []
+
+
+# ── A policy slowdown spanning the prelaunch read and the agent's own ────────
+
+
+def _policy_slowdown(esc, monkeypatch, *, recover_after_first_spawn: bool):
+    """From the moment the task enters EXECUTING (just before the prelaunch
+    read), ``resolve_policy_for_agent`` returns a policy that did not load, as
+    it does when Neotoma is slow. The agent's own first read fails the same
+    way (a scripted temporary refusal). With ``recover_after_first_spawn`` the
+    policy loads again once that refusal has returned. Each spawn records
+    whether the policy was loadable when it ran."""
+    import dataclasses
+
+    slow = {"on": False}
+    real_resolve = apis.resolve_policy_for_agent
+
+    def resolve(skill, *args, **kwargs):
+        policy = real_resolve(skill, *args, **kwargs)
+        return dataclasses.replace(policy, loaded=False) if slow["on"] else policy
+
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", resolve)
+    real_set = apis.set_task_status
+
+    def set_status(task_id, status, **kwargs):
+        value = status.value if hasattr(status, "value") else str(status)
+        if value == "executing" and not esc["launches"]:
+            slow["on"] = True
+        return real_set(task_id, status, **kwargs)
+
+    monkeypatch.setattr(apis, "set_task_status", set_status)
+    spawn = apis._spawn_harness_skill
+
+    async def watched_spawn(*args, **kwargs):
+        esc["launches"].append(not slow["on"])
+        if slow["on"]:
+            result = _refusal("timeout")  # the runner refuses: no agent starts
+            if recover_after_first_spawn:
+                slow["on"] = False
+            return result
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", watched_spawn)
+    scheduled = []
+    real_schedule = apis._schedule_released_retry
+
+    def schedule(**kwargs):
+        ok = real_schedule(**kwargs)
+        scheduled.append(ok)
+        return ok
+
+    monkeypatch.setattr(apis, "_schedule_released_retry", schedule)
+    return slow, scheduled
+
+
+@pytest.fixture
+def slowdown(escalation):
+    return dict(escalation, launches=[])
+
+
+@pytest.mark.asyncio
+async def test_policy_slowdown_spanning_prelaunch_and_agent_read_retries_automatically(
+        slowdown, monkeypatch):
+    # Red before this fix (observed against the previous head, bbd2bc8):
+    #   assert ([False] and False is True)
+    # The prelaunch baseline was _released_retry_fingerprint, which returned
+    # None while the policy was not loaded, so _schedule_released_retry
+    # refused (no baseline) and the task needed a person. That the
+    # escalation also refused is inferred from the code.
+    slow, scheduled = _policy_slowdown(slowdown, monkeypatch,
+                                       recover_after_first_spawn=True)
+    await _release(slowdown)
+    assert scheduled and scheduled[0] is True
+    # The first launch ran while the policy was unavailable and the runner
+    # refused it; the retry started the agent exactly once, after it loaded.
+    assert slowdown["launches"] == [False, True]
+    assert _task(slowdown)["status"] == "done"
+    assert "failed" not in slowdown["statuses"]
+    assert slowdown["briefs"] == []
+    assert slowdown["notifier"].blockers() == []
+
+
+@pytest.mark.asyncio
+async def test_policy_unavailable_through_every_attempt_escalates_once(
+        slowdown, monkeypatch):
+    # Red before this fix (observed against the previous head, bbd2bc8):
+    #   AssertionError: assert 'executing' == 'awaiting_approval'
+    # No baseline was read, so nothing was scheduled or escalated. (Inferred,
+    # not run: with a baseline but no authorization check in the wait, each
+    # retry would have resumed into the runner.)
+    _policy_slowdown(slowdown, monkeypatch, recover_after_first_spawn=False)
+    await _release(slowdown)
+    # Only the first launch ran (and the runner refused it); every retry
+    # found the policy unavailable and started nothing.
+    assert slowdown["launches"] == [False]
+    assert True not in slowdown["launches"]
+    _assert_rounds_exhausted(slowdown)
+    assert "Retried 3 time(s)" in _task(slowdown)["blocked_reason"]
+
+
+@pytest.mark.asyncio
+async def test_denied_authorization_at_retry_is_left_as_found(slowdown, monkeypatch):
+    # Not red before this fix: run against the previous head (bbd2bc8) it
+    # passed, since the old fingerprint also refused a changed revision with
+    # the same BLOCKER. It pins that the new three-way check keeps "denied"
+    # apart from "policy unavailable": a denied approval neither resumes nor
+    # escalates. (Inferred red state: treating denied as unavailable would
+    # have rescheduled and then filed a rounds_exhausted checkpoint.)
+    slowdown["script"].append(_refusal("timeout"))
+    real = apis.execution_policy_revision
+    changed = []
+    monkeypatch.setattr(apis, "execution_policy_revision",
+                        lambda policy: "changed-revision" if changed else real(policy))
+    spawn = apis._spawn_harness_skill
+    statuses_at_refusal = []
+
+    async def changing_spawn(*args, **kwargs):
+        result = await spawn(*args, **kwargs)
+        changed.append(True)  # the policy loads, at a revision the approval did not name
+        statuses_at_refusal.append(list(slowdown["statuses"]))
+        return result
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", changing_spawn)
+    await _release(slowdown)
+    assert len(slowdown["spawned"]) == 1  # the refused first launch only
+    assert slowdown["statuses"] == statuses_at_refusal[0]  # no status write
+    assert slowdown["briefs"] == []
+    assert slowdown["retired"] == []
+    assert _task(slowdown)["status"] == "executing"
+    assert _task(slowdown)["blocked_reason"] == ""
+    assert any("no longer authorizes" in m for m in slowdown["notifier"].blockers())
 
 
 # ── Case 2: the executing status write ────────────────────────────────────────
