@@ -1091,6 +1091,17 @@ def _undelivered_correction_settled(target: "ExistingPRTarget", entry: dict, adm
 # Receipt outcomes that name a pull request the runner opened or updated and
 # that Apis read back from GitHub (``verify_fly_delivery``) before recording.
 _PARENT_TASK_STATUSES = frozenset({"opened", "updated"})
+# Every status a delivery receipt can carry (see the note above
+# ``FLY_DELIVERY_BASE_BRANCH``): the reservation's ``launching``, the
+# dispatcher's ``unknown``/``unreported``, and every status the runner reports.
+# A receipt naming a PR with any other status, or a non-string one, makes that
+# PR's origin unknown in ``fly_delivered_pr``: it is never read as "not Fly".
+_RECOGNIZED_RECEIPT_STATUSES = frozenset({
+    "launching", "unknown", "unreported", "opened", "updated", "no_changes",
+    "clone_failed", "not_delivered", "push_failed", "pr_failed", "no_time"})
+# Statuses of a receipt whose outcome has not settled yet: a delivery's effect
+# (a pushed branch, an opened PR) can come before its receipt records it.
+_UNSETTLED_RECEIPT_STATUSES = frozenset({"launching", "unknown", "unreported"})
 _TASK_KEY_MARK = "#task:"
 
 
@@ -1139,6 +1150,292 @@ def verified_parent_task(
             continue
         found.add(task_id)
     return found.pop() if len(found) == 1 else None
+
+
+@dataclass(frozen=True)
+class FlyDeliveredPR:
+    """Whether Apis's own ledger shows a pull request came from Fly.
+
+    ``delivered`` is True when a receipt names the PR or the audit file records
+    a cleared or superseded receipt on its branch, False when a readable ledger
+    names it in none and the audit file adds nothing, and None when the ledger
+    or its audit file is missing or could not be read (unknown, never "not
+    Fly"). A missing audit file adds nothing: no receipt was ever cleared.
+    ``branch``/``base_branch`` are what the receipts recorded, when they did;
+    ``source_task`` is the task a first delivery was keyed by, when exactly one
+    such receipt names the PR, or the task an audit line recorded for the
+    cleared or superseded receipt. ``unknown_reason`` says why ``delivered`` is
+    None when the cause is not an unreadable ledger or audit file."""
+
+    delivered: bool | None
+    branch: str = ""
+    base_branch: str = ""
+    source_task: str = ""
+    unknown_reason: str = ""
+
+
+def receipt_source_task(stored: object, entry: object) -> str:
+    """The task a delivery receipt was keyed by, or "".
+
+    The same value ``fly_delivered_pr`` reads from an active receipt: the id
+    after ``#task:`` in its key, or in one of its ``associated_keys``. Empty
+    when none names a task, or more than one task. Written on the audit line
+    when a receipt is cleared or superseded (``source_task``), so a correction
+    filed from that line keeps its parent."""
+    keys = [stored]
+    if isinstance(entry, dict) and isinstance(entry.get("associated_keys"), list):
+        keys += entry["associated_keys"]
+    found: set[str] = set()
+    for key in keys:
+        if not isinstance(key, str):
+            continue
+        _, mark, task_id = canonical_key(key).partition(_TASK_KEY_MARK)
+        if mark and task_id.strip():
+            found.add(task_id.strip())
+    return found.pop() if len(found) == 1 else ""
+
+
+_RECEIPT_REMOVAL_ACTIONS = frozenset({"clear_delivery_receipt", "supersede_delivery_receipt"})
+
+
+def _removal_audit_lines(ledger) -> list[dict] | None:
+    """Every cleared or superseded non-lens receipt line in the ledger's audit
+    file, validated in full before any caller decides a route.
+
+    An empty list when the file does not exist (no receipt was ever cleared or
+    superseded). None when the file exists but cannot be read or decoded, when
+    any line is not a JSON object, or when a removal line carries a field this
+    reader uses in a shape it cannot read (a non-string key, branch or
+    ``source_task``, a non-object ``existing_pr`` or a non-string branch
+    inside it): one bad line
+    makes the whole file unknown, whatever the other lines say."""
+    import fly_delivery_receipt
+
+    path = fly_delivery_receipt.audit_path(ledger)
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    removals: list[dict] = []
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        try:
+            line = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(line, dict):
+            return None
+        if line.get("action") not in _RECEIPT_REMOVAL_ACTIONS:
+            continue
+        if not isinstance(line.get("key"), str):
+            return None
+        if not isinstance(line.get("branch"), (str, type(None))):
+            return None
+        if not isinstance(line.get("source_task"), (str, type(None))):
+            return None
+        if not isinstance(line.get("correction"), (bool, type(None))):
+            return None
+        prior = line.get("existing_pr")
+        if prior is not None:
+            if not isinstance(prior, dict) or not isinstance(prior.get("branch"), (str, type(None))):
+                return None
+        if line.get("kind") == "lens":
+            continue
+        removals.append(line)
+    return removals
+
+
+def _removed_receipt_names_branch(ledger, repo: str, head_branch: str) -> list[dict] | None:
+    """The ledger's audit lines for cleared or superseded non-lens receipts
+    for *repo* on *head_branch* (empty when none).
+
+    The audit line carries no PR number, so it is matched on the repository in
+    its key and on its branch; Fly branches are unique to a task. The whole
+    file is read and validated before a match counts (``_removal_audit_lines``).
+    Empty when the file does not exist (no receipt was ever cleared or
+    superseded). None when the file exists but cannot be read, any line cannot
+    be parsed, or no head branch is known while the file names a removed
+    receipt for *repo*: unknown, never "not Fly"."""
+    removals = _removal_audit_lines(ledger)
+    if removals is None:
+        return None
+    unmatched_for_repo = False
+    matched: list[dict] = []
+    for line in removals:
+        if canonical_key(line["key"]).partition("#")[0] != repo:
+            continue
+        branches = {line.get("branch") or ""}
+        prior = line.get("existing_pr")
+        if isinstance(prior, dict):
+            branches.add(prior.get("branch") or "")
+        branches.discard("")
+        if not head_branch:
+            unmatched_for_repo = True
+            continue
+        if head_branch in branches:
+            matched.append(line)
+    if matched:
+        return matched
+    return None if unmatched_for_repo else []
+
+
+def _parent_sources(removed: list[dict]) -> set[str]:
+    """The source tasks of the removal lines that were not correction receipts.
+
+    A removed correction receipt (marked ``correction``) is keyed by its own
+    correction task, or by none, so it never names the parent: the parent comes
+    only from unmarked lines. Lines written before the mark existed are all
+    unmarked, so a mix they cannot resolve still yields several sources (or an
+    empty one) and the caller holds."""
+    return {line.get("source_task") or "" for line in removed if line.get("correction") is not True}
+
+
+def fly_delivered_pr(
+    repository: object, pr_number: object, head_branch: object = ""
+) -> FlyDeliveredPR:
+    """Whether *pr_number* in *repository* is a pull request Fly delivered.
+
+    Read only from the delivery ledger and its audit file, never from the PR's
+    author or body. A PR counts when a non-lens receipt for the same repository
+    either settled a first delivery as ``opened``/``updated`` with that PR
+    number, or records an existing-PR correction of it; or, when no active
+    receipt names it, when the audit file records a cleared or superseded
+    non-lens receipt for the same repository on the PR's *head_branch*. A
+    cleared receipt still means the PR came from Fly; that route returns the
+    ``source_task`` its audit line recorded, and is unknown (None, with
+    ``unknown_reason``) when the matching lines record no single source task,
+    so no correction is filed with no parent. An existing audit file
+    that cannot be read or has any line that cannot be parsed makes the
+    origin unknown (None) even when an active receipt matches. With no receipt
+    establishing delivery, an unsettled first delivery (``launching``,
+    ``unknown``, ``unreported``) on exactly this *head_branch* that records no
+    PR number yet also makes it unknown: its PR may predate its receipt. A
+    removal line marked ``correction`` never supplies the parent task. Used to route a fix
+    round: a Fly PR's fix round runs as a Fly correction, never as a commit on
+    this host."""
+    import fly_runner
+
+    number = _as_issue_number(pr_number)
+    repo = canonical_repository(repository)
+    if not number or not repo:
+        return FlyDeliveredPR(False)
+    try:
+        ledger = _delivery_ledger()
+        # A missing file is no evidence either way: `delivery_receipts` reads
+        # it as an empty map, which must not pass for "no Fly receipt".
+        if not ledger.path.exists():
+            return FlyDeliveredPR(None)
+        receipts = ledger.delivery_receipts()
+    except (OSError, fly_runner.FlyLedgerError, ValueError):
+        return FlyDeliveredPR(None)
+    if not isinstance(receipts, dict):
+        return FlyDeliveredPR(None)
+    branches: set[str] = set()
+    bases: set[str] = set()
+    tasks: set[str] = set()
+    delivered = False
+    unrecognized = False
+    unsettled_on_branch = False
+    head = str(head_branch or "").strip()
+    for stored, entry in receipts.items():
+        if not isinstance(stored, str) or not isinstance(entry, dict) or entry.get("kind") == "lens":
+            continue
+        key_repo, _, rest = canonical_key(stored).partition("#")
+        if key_repo != repo:
+            continue
+        admitted = entry.get("existing_pr")
+        status = entry.get("status")
+        if (not isinstance(admitted, dict)
+                and (not isinstance(status, str) or status not in _RECOGNIZED_RECEIPT_STATUSES)
+                and (_as_issue_number(entry.get("pr_number")) == number or rest == str(number))):
+            # A receipt for this PR whose outcome this reader cannot interpret:
+            # never "not Fly", and no other receipt for the PR can outweigh it.
+            unrecognized = True
+            continue
+        if (not isinstance(admitted, dict) and head and status in _UNSETTLED_RECEIPT_STATUSES
+                and entry.get("branch") == head and not _as_issue_number(entry.get("pr_number"))):
+            # A first delivery on this PR's head branch that has not recorded
+            # its PR yet: it may have opened this PR before its receipt settled.
+            unsettled_on_branch = True
+        if isinstance(admitted, dict):
+            if _as_issue_number(admitted.get("pr_number")) != number:
+                continue
+            delivered = True
+            branches.add(str(admitted.get("branch") or ""))
+            bases.add(str(admitted.get("base_branch") or ""))
+            continue
+        if (entry.get("status") not in _PARENT_TASK_STATUSES
+                or _as_issue_number(entry.get("pr_number")) != number):
+            continue
+        delivered = True
+        branches.add(str(entry.get("branch") or ""))
+        task_mark = _TASK_KEY_MARK.lstrip("#")
+        if rest.startswith(task_mark) and rest[len(task_mark):].strip():
+            tasks.add(rest[len(task_mark):].strip())
+    branches.discard("")
+    bases.discard("")
+    # The audit file is read and validated whether or not an active receipt
+    # matched: a corrupt one holds the route either way, never a definite
+    # Fly route and never local.
+    try:
+        audit_ok = _removal_audit_lines(ledger) is not None
+    except OSError:
+        audit_ok = False
+    if not audit_ok:
+        return FlyDeliveredPR(None)
+    if unrecognized:
+        return FlyDeliveredPR(None, unknown_reason=(
+            "a Fly delivery receipt names this PR with a status this reader does "
+            "not recognize, so whether this PR came from Fly is unknown"))
+    if not delivered and unsettled_on_branch:
+        return FlyDeliveredPR(None, unknown_reason=(
+            "a Fly delivery on this PR's head branch has not settled and records no "
+            "PR number yet, so whether this PR came from Fly is unknown"))
+    if not delivered:
+        try:
+            removed = _removed_receipt_names_branch(ledger, repo, head)
+        except OSError:
+            removed = None
+        if removed is None:
+            return FlyDeliveredPR(None)
+        if removed:
+            # The correction is filed PART_OF the receipt's source task. A
+            # line that recorded none (every line written before the field
+            # existed) holds the route rather than file a task with no parent.
+            sources = _parent_sources(removed)
+            if len(sources) != 1 or "" in sources:
+                return FlyDeliveredPR(None, unknown_reason=(
+                    "this PR came from Fly, but the audit record of its cleared or "
+                    "superseded delivery receipt names no single source task, so "
+                    "no correction can be filed under its parent task"))
+            return FlyDeliveredPR(True, branch=head, source_task=sources.pop())
+    elif not tasks:
+        # Only a correction receipt (``existing_pr``) names this PR: its first
+        # delivery receipt was cleared or superseded. The parent task comes
+        # from that removal's audit line; a correction is never filed with no
+        # parent, so none, several or an unreadable file holds the route.
+        head = head or (next(iter(branches)) if len(branches) == 1 else "")
+        try:
+            removed = _removed_receipt_names_branch(ledger, repo, head)
+        except OSError:
+            removed = None
+        sources = _parent_sources(removed or [])
+        if removed is None or len(sources) != 1 or "" in sources:
+            return FlyDeliveredPR(None, unknown_reason=(
+                "this PR came from Fly and a correction receipt names it, but no "
+                "active receipt or audit record of its cleared or superseded first "
+                "delivery names a single source task, so no correction can be "
+                "filed under its parent task"))
+        tasks.add(sources.pop())
+    return FlyDeliveredPR(
+        delivered,
+        branch=branches.pop() if len(branches) == 1 else "",
+        base_branch=bases.pop() if len(bases) == 1 else "",
+        source_task=tasks.pop() if len(tasks) == 1 else "",
+    )
 
 
 def fly_delivery_facts(key: str, status, branch, run_id, commit=None) -> str:
@@ -1284,9 +1581,13 @@ def _supersede_settled_correction(plan: FlyDeliveryPlan) -> str | None:
         fly_delivery_receipt._append_audit(ledger, {
             "by": "apis", "action": "supersede_delivery_receipt", "stage": "superseding",
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "key": stored, "status": expected.get("status"), "run_id": expected.get("run_id"),
+            "key": stored, "source_task": receipt_source_task(stored, expected),
+            "status": expected.get("status"), "run_id": expected.get("run_id"),
             "branch": expected.get("branch"), "commit": expected.get("commit"),
             "recorded_at": expected.get("recorded_at"), "existing_pr": expected.get("existing_pr"),
+            # The removed receipt was a correction: its key names the correction
+            # task, never the parent, so readers skip this line's source_task.
+            **({"correction": True} if isinstance(expected.get("existing_pr"), dict) else {}),
             "superseded_by": {"key": key, "head_sha": plan.target.head_sha}})
 
     try:
