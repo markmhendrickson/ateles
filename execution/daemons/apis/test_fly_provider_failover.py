@@ -28,7 +28,7 @@ BINARIES = {"claude": "/usr/bin/claude-test", "codex": "/usr/bin/codex", "cursor
 
 
 @pytest.fixture
-def loop(fly_env, seam, monkeypatch):  # noqa: F811 -- pytest fixtures
+def loop(fly_env, seam, monkeypatch, tmp_path):  # noqa: F811 -- pytest fixtures
     """The provider loop over real Fly-forced attempts. Returns a runner and
     what it observed: attempts, local spawns, cooldowns, Machines API."""
     spawned, fake_exec = seam
@@ -38,6 +38,16 @@ def loop(fly_env, seam, monkeypatch):  # noqa: F811 -- pytest fixtures
     monkeypatch.setattr(fly_runner, "LOGIN_PROVIDERS", frozenset({"codex", "cursor"}))
     monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
     monkeypatch.delenv("APIS_FLY_CURSOR_MACHINE_ID", raising=False)
+    # _run_skill_once looks up the provider binary before the Fly path, so a
+    # host without codex or cursor would end on "binary unavailable" rather
+    # than the Fly refusal. The *_BIN constants are resolved at import, so set
+    # the constant as well as the variable.
+    for name in ("codex", "cursor"):
+        stub = tmp_path / name
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+        monkeypatch.setenv(f"APIS_{name.upper()}_BIN", str(stub))
+        monkeypatch.setattr(skill_runner, f"{name.upper()}_BIN", str(stub))
     fake = FakeFly()
     executor, minted, _ = make_executor(
         fake, record={"exit_code": 0, "stdout": "GATE_INHERITANCE: clear\n"}
