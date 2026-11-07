@@ -1892,10 +1892,14 @@ def delivery_result_from_record(record: dict) -> dict:
 #
 # A delivering run can push its branch and open its pull request and still
 # lose its result record (Neotoma overloaded at the moment it was written).
-# What GitHub shows for the job's OWN branch can then prove the delivery: only
-# an opened or updated pull request is ever settled this way. A missing record
-# is never read as ``no_changes`` or as a failure, and anything unproven stays
-# an unknown outcome.
+# What GitHub shows for the job's OWN branch can then prove a FIRST delivery:
+# only a pull request opened by the PR-opener App is ever settled this way. A
+# correction (the job targets an existing pull request) is never settled from
+# GitHub: its branch can move for reasons other than this run (another push to
+# the same pull request), and nothing GitHub shows proves that this run pushed
+# the new head, so a correction with a lost record stays unknown. A missing
+# record is never read as ``no_changes`` or as a failure, and anything
+# unproven stays an unknown outcome.
 
 GITHUB_SETTLED_REASON = "settled from GitHub: the run's result record was not received"
 _SHA_RE = re.compile(r"[0-9a-f]{40}", re.ASCII)
@@ -1909,11 +1913,14 @@ def github_delivery_proof(job: "FlyJob", branch_commit: Any, pulls: Any,
     job's repository (None when the branch does not exist); *pulls* is every
     pull request whose head is that branch, in any state. Proven when exactly
     one pull request, open or merged, has that exact head branch in that
-    repository and its head commit is the branch's; for a first delivery its
-    author is the PR-opener App (*opener_login*), for a correction its number
-    is the job's target and the branch moved off the admitted head."""
+    repository, its head commit is the branch's, and its author is the
+    PR-opener App (*opener_login*). Only a first delivery is ever proven: for
+    a correction (``pr_number`` in the delivery plan) this is always None,
+    because a moved branch does not prove that this run pushed it."""
     delivery = job.delivery
     if not isinstance(delivery, dict) or not isinstance(delivery.get("branch"), str):
+        return None
+    if "pr_number" in delivery:
         return None
     branch, repository = delivery["branch"], job.repository
     if not isinstance(branch_commit, str) or not _SHA_RE.fullmatch(branch_commit):
@@ -1942,17 +1949,11 @@ def github_delivery_proof(job: "FlyJob", branch_commit: Any, pulls: Any,
         return None
     if pr["head"].get("sha") != branch_commit:
         return None
-    if "pr_number" in delivery:
-        if str(number) != delivery["pr_number"] or branch_commit == delivery.get("head_sha"):
-            return None
-        status = "updated"
-    else:
-        user = pr.get("user") if isinstance(pr.get("user"), dict) else {}
-        if not opener_login or user.get("login") != opener_login:
-            return None
-        status = "opened"
+    user = pr.get("user") if isinstance(pr.get("user"), dict) else {}
+    if not opener_login or user.get("login") != opener_login:
+        return None
     return {
-        "delivery_status": status,
+        "delivery_status": "opened",
         "delivery_reason": GITHUB_SETTLED_REASON,
         "delivery_branch": branch,
         "delivery_commit": branch_commit,
@@ -3516,13 +3517,13 @@ class FlyExecutor:
     async def _settle_from_github(self, job: FlyJob) -> tuple[int, bytes, bytes] | None:
         """A finished delivering run with no readable record, settled from what
         GitHub proves for its own branch (``github_delivery_proof``); None when
-        nothing is proven or any read fails, so the outcome stays unknown."""
-        if job.delivery is None:
+        nothing is proven or any read fails, so the outcome stays unknown. A
+        correction is never settled from GitHub, so GitHub is not read for one."""
+        if job.delivery is None or "pr_number" in job.delivery:
             return None
         try:
             sha, pulls = await asyncio.to_thread(self._read_github, job)
-            opener = (await asyncio.to_thread(self._opener_login)
-                      if "pr_number" not in job.delivery else "")  # fmt: skip
+            opener = await asyncio.to_thread(self._opener_login)
             got = github_delivery_proof(job, sha, pulls, opener)
         except asyncio.CancelledError:
             raise

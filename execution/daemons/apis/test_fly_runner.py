@@ -5577,11 +5577,17 @@ def test_lost_record_with_a_matching_branch_and_pr_settles_as_opened(fly_env, ca
     assert fields["fly_delivery_status"] == "opened" and fields["fly_pr_number"] == 7
 
 
-def test_lost_record_on_a_correction_settles_as_updated(fly_env):
-    job, rc, _, _, _ = _settle(fly_env, correction=True, pulls=[_pr(author="someone")])
-    assert rc == 0 and job.outcome_unknown is False
-    assert job.delivery_result["delivery_status"] == "updated"
-    assert job.delivery_result["pr_number"] == 7
+def test_correction_is_never_settled_from_github(fly_env):
+    # Red before this fix (observed: the test this replaces asserted it): a
+    # correction whose branch moved off the admitted head and whose target PR
+    # matched settled as ``updated``, though nothing proved this run pushed it.
+    job, rc, _, err, calls = _settle(fly_env, correction=True)
+    assert rc == 1 and job.outcome_unknown is True and job.delivery_result is None
+    assert b"no result recorded" in err
+    assert calls == []  # GitHub is not even read for a correction
+    job = _job()
+    job.delivery = {"branch": _BRANCH, "pr_number": "7", "head_sha": _ADMITTED}
+    assert fly_runner.github_delivery_proof(job, _NEW, [_pr()], _OPENER) is None
 
 
 def test_a_merged_pr_also_settles(fly_env):
@@ -5596,12 +5602,9 @@ def test_a_merged_pr_also_settles(fly_env):
     {"pulls": [_pr(sha="c" * 40)]},                           # PR head is not the branch's
     {"pulls": [_pr(state="closed")]},                         # closed, not merged
     {"sha": None},                                            # branch absent
-    {"correction": True, "sha": _ADMITTED,
-     "pulls": [_pr(sha=_ADMITTED)]},                          # correction head unmoved
-    {"correction": True, "pulls": [_pr(number=9)]},           # not the target PR
     {"read_error": RuntimeError("GET /repos -> HTTP 502")},   # GitHub read failed
 ], ids=["no-pr", "two-prs", "other-author", "head-mismatch", "closed", "no-branch",
-        "correction-unmoved", "correction-other-pr", "github-read-failure"])  # fmt: skip
+        "github-read-failure"])  # fmt: skip
 def test_an_unproven_delivery_stays_unknown(fly_env, kw):
     job, rc, _, err, _ = _settle(fly_env, **kw)
     assert rc == 1 and job.outcome_unknown is True and job.delivery_result is None
@@ -5617,3 +5620,121 @@ def test_an_unreadable_record_without_proof_keeps_its_unknown_notice(fly_env):
     job, rc, _, err, _ = _settle(fly_env, pulls=[],
                                  record_error=fly_runner.FlyResultUnreadable("x"))
     assert rc == 1 and job.outcome_unknown is True and b"outcome is unknown" in err
+
+
+# ── The default GitHub reader, driven through a fake HTTP layer ─────────────
+
+
+class _FakeResponse:
+    def __init__(self, body):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def _fake_github(monkeypatch, routes, *, token="app-token"):
+    """Route ``urlopen`` by path prefix to a body (bytes or JSON-able) or an
+    HTTP status (int). Records every request and the identity asked for."""
+    import urllib.error
+
+    from lib import github_app_token as gat
+
+    seen = {"identity": [], "requests": []}
+
+    def identity_token(identity, repo=None):
+        seen["identity"].append((identity, repo))
+        if isinstance(token, Exception):
+            raise token
+        return token
+
+    def urlopen(req, timeout=None):
+        path = req.full_url[len(fly_runner.GITHUB_API):]
+        seen["requests"].append((req.get_method(), path, req.get_header("Authorization")))
+        for prefix, answer in routes.items():
+            if path.startswith(prefix):
+                if isinstance(answer, int):
+                    raise urllib.error.HTTPError(req.full_url, answer, "x", {}, None)
+                body = answer if isinstance(answer, bytes) else json.dumps(answer).encode()
+                return _FakeResponse(body)
+        raise AssertionError(f"unexpected GitHub request {path}")
+
+    monkeypatch.setattr(gat, "identity_token", identity_token)
+    monkeypatch.setattr(fly_runner.urllib.request, "urlopen", urlopen)
+    return seen
+
+
+def _reader_job(branch=_BRANCH):
+    job = _job()
+    job.delivery = {"branch": branch, "base_branch": "main"}
+    return job
+
+
+def test_read_github_delivery_requests_branch_and_pulls_as_app(fly_env, monkeypatch):
+    # Red before this fix (inferred, not observed): no test called
+    # read_github_delivery, so a wrong identity, an unquoted branch or a wrong
+    # pulls query would have passed every settlement test, which inject the
+    # reader.
+    from lib import github_app_token as gat
+
+    branch = "cicada/task #1"
+    quoted = "cicada%2Ftask%20%231"
+    seen = _fake_github(monkeypatch, {
+        f"/repos/owner/repo/branches/{quoted}": {"commit": {"sha": _NEW}},
+        "/repos/owner/repo/pulls?": [_pr(ref=branch)],
+    })
+    sha, pulls = fly_runner.read_github_delivery(_reader_job(branch))
+    assert seen["identity"] == [(gat.PR_OPENER_IDENTITY, "owner/repo")]
+    assert [(m, p) for m, p, _ in seen["requests"]] == [
+        ("GET", f"/repos/owner/repo/branches/{quoted}"),
+        ("GET", "/repos/owner/repo/pulls?state=all&per_page=100"
+                "&head=owner%3Acicada%2Ftask%20%231"),
+    ]
+    assert all(auth == "Bearer app-token" for _, _, auth in seen["requests"])
+    assert sha == _NEW and pulls == [_pr(ref=branch)]
+    got = fly_runner.github_delivery_proof(_reader_job(branch), sha, pulls, _OPENER)
+    assert got["delivery_status"] == "opened" and got["pr_number"] == 7
+
+
+def test_read_github_delivery_branch_404_is_unproven(fly_env, monkeypatch):
+    # Red before this fix (inferred, not observed): untested, a 404 raising or
+    # reading as an existing branch would have gone unnoticed.
+    seen = _fake_github(monkeypatch, {"/repos/owner/repo/branches/": 404})
+    job = _reader_job()
+    sha, pulls = fly_runner.read_github_delivery(job)
+    assert (sha, pulls) == (None, [])
+    assert len(seen["requests"]) == 1  # no pulls read for an absent branch
+    assert fly_runner.github_delivery_proof(job, sha, pulls, _OPENER) is None
+
+
+@pytest.mark.parametrize("case", ["http-500", "token-mint-failure", "malformed-json"])
+def test_read_github_delivery_errors_are_unproven(fly_env, monkeypatch, case):
+    # Red before this fix (inferred, not observed): untested, an error that
+    # read_github_delivery swallowed into an empty answer, or that escaped the
+    # settlement, would have gone unnoticed.
+    routes = {"/repos/owner/repo/branches/": {"commit": {"sha": _NEW}},
+              "/repos/owner/repo/pulls?": [_pr()]}
+    token = "app-token"
+    if case == "http-500":
+        routes["/repos/owner/repo/pulls?"] = 500
+    elif case == "malformed-json":
+        routes["/repos/owner/repo/branches/"] = b"{not json"
+    else:
+        token = RuntimeError("mint failed")
+    _fake_github(monkeypatch, routes, token=token)
+    with pytest.raises(Exception):
+        fly_runner.read_github_delivery(_reader_job())
+    # Through the settlement, with the default reader: unknown (None), never
+    # no_changes or a failure.
+    executor, _, _ = make_executor(FakeFly())
+    executor._read_github = fly_runner.read_github_delivery
+    executor._opener_login = lambda: _OPENER
+    job = _reader_job()
+    assert asyncio.run(executor._settle_from_github(job)) is None
+    assert job.delivery_result is None
