@@ -43,6 +43,8 @@ ALLOWLIST: dict[str, str] = {
 
     'execution/daemons/apis/fly_runner.py:FlyExecutor._lease_for_cleanup:return None':
         'None is "no usable lease": the machine is left alone and the reservation kept',
+    'execution/daemons/apis/fly_runner.py:FlyExecutor._settle_from_github:return None':
+        'None is "not proven from GitHub": its caller marks the outcome unknown and the receipt is kept',
     "deploy/fly-runner/run_job.py:run_cli:exc.stderr or b''":
         'a bounded collection that timed out carries None when no output arrived; reported as a timeout',
     "deploy/fly-runner/run_job.py:run_cli:exc.stdout or b''":
