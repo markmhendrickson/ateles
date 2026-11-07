@@ -9961,19 +9961,31 @@ class SwarmDispatcher:
         """File this fix round as an existing-PR correction task for Fly.
 
         Returns True once the task is stored and read back by id with the
-        repository, PR number, head, branch, action type and `PART_OF` edge it
-        was filed with; a returned id alone is not proof. On any
+        repository, PR number, head, branch, action type, `PART_OF` edge to
+        the plan and `REFERS_TO` edge to the source task it was filed with; a
+        returned id alone is not proof. The correction is a peer of the task
+        that delivered the PR, filed under that task's plan, never a child of
+        it: a task is not an aggregate parent
+        (docs/foundation/work_model.md#parent-and-child-tasks). On any
         failure the PR stops for attention with the reason, and nothing runs
         locally. The task carries `open_or_merge_pr`, so the task path holds it
         at a PLAN checkpoint until a signed release; that gate is unchanged."""
         ref = f"{trigger.repository}#{trigger.number}"
         if not facts.source_task:
-            # A correction is always filed PART_OF its source task; with none
-            # known, hold rather than file a task with no parent.
+            # A correction is filed under its source task's plan and refers to
+            # that task; with none known, hold rather than file it nowhere.
             self._hold_fix_round(
                 trigger, kind, round_n,
                 "no source task is recorded for this Fly delivery, so the "
                 "correction has no parent task to be filed under",
+            )
+            return False
+        plan = await self._fly_correction_plan(facts.source_task)
+        if not plan:
+            self._hold_fix_round(
+                trigger, kind, round_n,
+                "the task that delivered this PR has no single plan to file "
+                "the correction under",
             )
             return False
         head = _normalise_full_sha((await self._pr_head_sha(trigger)) or "")
@@ -10019,8 +10031,12 @@ class SwarmDispatcher:
                 trigger, kind, round_n, f"the correction is not admissible ({exc})"
             )
             return False
-        relationships = [{"relationship_type": "PART_OF", "source_index": 0,
-                          "target_entity_id": facts.source_task}]
+        relationships = [
+            {"relationship_type": "PART_OF", "source_index": 0,
+             "target_entity_id": plan},
+            {"relationship_type": "REFERS_TO", "source_index": 0,
+             "target_entity_id": facts.source_task},
+        ]
         stored = await self._store_entities(
             [task],
             idempotency_key=(
@@ -10042,7 +10058,7 @@ class SwarmDispatcher:
             )
             return False
         problem = await self._fly_correction_read_back(
-            task_id, task, branch=branch, part_of=facts.source_task
+            task_id, task, branch=branch, plan=plan, refers_to=facts.source_task
         )
         if problem:
             self._hold_fix_round(
@@ -10058,13 +10074,45 @@ class SwarmDispatcher:
         )
         return True
 
+    async def _fly_correction_plan(self, source_task: str) -> str:
+        """The plan the task that delivered the PR is filed under, or "".
+
+        The source task's `PART_OF` targets are read back; there must be
+        exactly one, and it must read back as a `plan`. Anything else,
+        including a failed read, is "": the correction then has nowhere it may
+        be filed."""
+        rels = await self._neotoma_get(f"entities/{source_task}/relationships")
+        if not isinstance(rels, dict):
+            return ""
+        listed = rels.get("relationships")
+        if not isinstance(listed, list):
+            return ""
+        targets = {
+            r.get("target_entity_id")
+            for r in listed
+            if isinstance(r, dict)
+            and r.get("relationship_type") == "PART_OF"
+            and r.get("source_entity_id") == source_task
+        }
+        if len(targets) != 1:
+            return ""
+        [target] = targets
+        if not isinstance(target, str) or not target:
+            return ""
+        entity = await self._neotoma_get(f"entities/{target}")
+        if not isinstance(entity, dict) or entity.get("entity_type") != "plan":
+            return ""
+        return target
+
     async def _fly_correction_read_back(
-        self, task_id: str, task: dict, *, branch: str, part_of: str
+        self, task_id: str, task: dict, *, branch: str, plan: str, refers_to: str
     ) -> str:
         """Why the stored correction does not match what was filed, or "".
 
-        Reads the task and its relationships back by id. A failed read is a
-        mismatch: the filing is unconfirmed."""
+        Reads the task and its relationships back by id: its `PART_OF` edge to
+        *plan* and its `REFERS_TO` edge to *refers_to* must both be present. A
+        failed read, or a missing edge, is a mismatch: the filing is
+        unconfirmed."""
         entity = await self._neotoma_get(f"entities/{task_id}")
         if not isinstance(entity, dict):
             return "the task could not be read back"
@@ -10091,19 +10139,34 @@ class SwarmDispatcher:
         ]
         if wrong:
             return "wrong " + ", ".join(wrong)
-        if not part_of:
-            return "it has no parent task"
+        if not plan:
+            return "it has no plan"
+        if not refers_to:
+            return "it has no source task"
         rels = await self._neotoma_get(f"entities/{task_id}/relationships")
         if not isinstance(rels, dict):
             return "its relationships could not be read back"
-        if not any(
-            isinstance(r, dict)
-            and r.get("relationship_type") == "PART_OF"
-            and r.get("source_entity_id") == task_id
-            and r.get("target_entity_id") == part_of
-            for r in rels.get("relationships") or []
-        ):
-            return "missing its PART_OF edge"
+        listed = rels.get("relationships")
+        if not isinstance(listed, list):
+            return "its relationships could not be read back"
+
+        def has(kind: str, target: str) -> bool:
+            return any(
+                isinstance(r, dict)
+                and r.get("relationship_type") == kind
+                and r.get("source_entity_id") == task_id
+                and r.get("target_entity_id") == target
+                for r in listed
+            )
+
+        missing = [
+            name for name, ok in (
+                ("PART_OF edge to its plan", has("PART_OF", plan)),
+                ("REFERS_TO edge to its source task", has("REFERS_TO", refers_to)),
+            ) if not ok
+        ]
+        if missing:
+            return "missing its " + " and ".join(missing)
         return ""
 
     _ESCALATION_MARKER = "<!-- apis-escalated:{kind} -->"

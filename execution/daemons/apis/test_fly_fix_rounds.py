@@ -40,13 +40,28 @@ def isolated_ledger(monkeypatch, tmp_path):
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "open_or_merge_pr")
 
 
+PLAN = "ent_synthetic_plan"
+SOURCE_TASKS = ("ent_synthetic_src", "ent_synthetic_other", "ent_synthetic_corr")
+
+
+def part_of(source, *targets):
+    return {"relationships": [
+        {"relationship_type": "PART_OF", "source_entity_id": source,
+         "target_entity_id": t} for t in targets]}
+
+
 @pytest.fixture
 def stored(monkeypatch):
     """Capture every Neotoma store the dispatcher makes; answer with an id, and
     read the stored task and its edges back as written. A test changes
-    ``readback`` (fields overridden on read) or sets ``read_fails``."""
+    ``readback`` (fields overridden on read) or sets ``read_fails`` (the stored
+    correction's reads). ``graph`` answers every other read: by default each
+    source task is PART_OF one plan, ``PLAN``; a test replaces an entry, and
+    None there is a failed read."""
+    graph = {f"entities/{src}/relationships": part_of(src, PLAN) for src in SOURCE_TASKS}
+    graph[f"entities/{PLAN}"] = {"entity_id": PLAN, "entity_type": "plan"}
     box = {"calls": [], "answer": {"entities": [{"entity_id": "ent_synthetic_fix"}]},
-           "readback": {}, "read_fails": False, "reads": []}
+           "readback": {}, "read_fails": False, "reads": [], "graph": graph}
 
     async def store(self, entities, idempotency_key, relationships=None):
         box["calls"].append((entities, idempotency_key, relationships))
@@ -54,6 +69,8 @@ def stored(monkeypatch):
 
     async def get(self, path):
         box["reads"].append(path)
+        if not path.startswith("entities/ent_synthetic_fix"):
+            return box["graph"].get(path)
         if box["read_fails"] or not box["calls"]:
             return None
         entities, _, rels = box["calls"][-1]
@@ -140,10 +157,15 @@ def test_review_round_for_a_fly_pr_is_filed_as_a_fly_correction(monkeypatch, wor
     # The correction route itself admits it, on the PR's existing branch.
     target = delivery.existing_pr_target(task, REPO)
     assert (target.number, target.branch, target.head_sha) == (PR, BRANCH, HEAD)
-    # The task hangs off the task the PR was delivered from.
+    # The task is a peer of the task the PR was delivered from: filed under
+    # that task's plan, referring to the task, and never PART_OF it.
     [(_, _, rels)] = stored["calls"]
     assert rels == [{"relationship_type": "PART_OF", "source_index": 0,
+                     "target_entity_id": PLAN},
+                    {"relationship_type": "REFERS_TO", "source_index": 0,
                      "target_entity_id": "ent_synthetic_src"}]
+    assert not any(r["relationship_type"] == "PART_OF"
+                   and r["target_entity_id"] == "ent_synthetic_src" for r in rels)
 
 
 def test_ci_fix_round_for_a_fly_pr_is_filed_as_a_fly_correction(monkeypatch, world, stored):
@@ -207,8 +229,11 @@ def test_a_confirmed_filing_records_its_round(
     review_round() if route == "review" else ci_round(monkeypatch)
     assert len(corrections(stored)) == 1
     assert rounds_recorded == [1]
-    # Read back by id, fields and PART_OF edge both.
-    assert stored["reads"] == ["entities/ent_synthetic_fix",
+    # The plan is resolved from the source task first; then the stored task
+    # is read back by id, fields and both edges.
+    assert stored["reads"] == ["entities/ent_synthetic_src/relationships",
+                               f"entities/{PLAN}",
+                               "entities/ent_synthetic_fix",
                                "entities/ent_synthetic_fix/relationships"]
 
 
@@ -232,22 +257,96 @@ def test_a_filing_that_reads_back_wrong_is_no_filing(
                for m in d.notifier.sent)
 
 
-def test_a_filing_missing_its_part_of_edge_is_no_filing(
-    monkeypatch, world, stored, rounds_recorded
+@pytest.mark.parametrize("dropped,text", [
+    ("PART_OF", "missing its PART_OF edge to its plan"),
+    ("REFERS_TO", "missing its REFERS_TO edge to its source task"),
+    ("both", "missing its PART_OF edge to its plan and REFERS_TO edge"),
+], ids=["no-part-of", "no-refers-to", "neither"])
+def test_a_filing_missing_an_edge_is_no_filing(
+    monkeypatch, world, stored, rounds_recorded, dropped, text
 ):
+    # Red before this fix (observed against the unfixed code): the read-back checked only a
+    # PART_OF edge to the source task, so a read-back with no REFERS_TO edge
+    # passed and the round was recorded, and a read-back missing the plan
+    # edge was never checked for one.
     seed_fly_delivery()
     real_get = SwarmDispatcher._neotoma_get
 
-    async def no_edges(self, path):
-        if path.endswith("/relationships"):
-            return {"relationships": []}
+    async def drop_edges(self, path):
+        answer = await real_get(self, path)
+        if path == "entities/ent_synthetic_fix/relationships":
+            answer = {"relationships": [
+                r for r in answer["relationships"]
+                if dropped != "both" and r["relationship_type"] != dropped]}
+        return answer
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_get", drop_edges)
+    rec = _Recorder(monkeypatch)
+    d = ci_round(monkeypatch)
+    assert rec.of("cicada") == []
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any(text in m and "Needs your attention" in m for m in d.notifier.sent)
+
+
+@pytest.mark.parametrize("answer", [None, {"relationships": None}],
+                         ids=["read-failed", "no-list"])
+def test_a_filing_whose_edges_cannot_be_read_is_no_filing(
+    monkeypatch, world, stored, rounds_recorded, answer
+):
+    # Red before this fix, no-list case (observed): an absent list
+    # read as no edges and was reported as a missing PART_OF edge rather than
+    # an unread one. The failed read already held.
+    seed_fly_delivery()
+    real_get = SwarmDispatcher._neotoma_get
+
+    async def unread(self, path):
+        if path == "entities/ent_synthetic_fix/relationships":
+            return answer
         return await real_get(self, path)
 
-    monkeypatch.setattr(SwarmDispatcher, "_neotoma_get", no_edges)
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_get", unread)
     _Recorder(monkeypatch)
     d = ci_round(monkeypatch)
     assert rounds_recorded == []
-    assert any("missing its PART_OF edge" in m for m in d.notifier.sent)
+    assert any("relationships could not be read back" in m for m in d.notifier.sent)
+
+
+# --- The correction is filed under the source task's single plan -------------
+
+
+@pytest.mark.parametrize("case", [
+    "no-parent", "two-parents", "parent-is-a-task", "relationships-read-failed",
+    "plan-read-failed",
+])
+@pytest.mark.parametrize("route", ["review", "ci"])
+def test_a_source_task_with_no_single_plan_holds(
+    monkeypatch, world, stored, rounds_recorded, case, route
+):
+    # Red before this fix (observed): the correction was stored with
+    # one PART_OF edge to the source task whatever that task's own parents
+    # were, and the source task was never read, so every case here stored a
+    # task (`stored["calls"]` non-empty), used up a round, and sent no notice.
+    seed_fly_delivery()
+    rels = "entities/ent_synthetic_src/relationships"
+    if case == "no-parent":
+        stored["graph"][rels] = part_of("ent_synthetic_src")
+    elif case == "two-parents":
+        stored["graph"][rels] = part_of("ent_synthetic_src", PLAN, "ent_synthetic_plan_2")
+        stored["graph"]["entities/ent_synthetic_plan_2"] = {"entity_type": "plan"}
+    elif case == "parent-is-a-task":
+        stored["graph"][rels] = part_of("ent_synthetic_src", "ent_synthetic_parent_task")
+        stored["graph"]["entities/ent_synthetic_parent_task"] = {"entity_type": "task"}
+    elif case == "relationships-read-failed":
+        stored["graph"][rels] = None
+    else:
+        stored["graph"][f"entities/{PLAN}"] = None
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d = review_round() if route == "review" else ci_round(monkeypatch)
+    assert rec.of("cicada") == []
+    assert stored["calls"] == []  # no task stored
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any("has no single plan to file the correction under" in m
+               and "Needs your attention" in m for m in d.notifier.sent)
 
 
 def test_a_filing_that_cannot_be_read_back_is_no_filing(
@@ -433,9 +532,12 @@ def test_a_cleared_receipt_still_routes_to_fly(monkeypatch, world, stored, tmp_p
 
 
 def assert_filed_part_of_source(stored):
-    """The correction was filed, and read back, PART_OF the source task."""
+    """The correction was filed, and read back, PART_OF the source task's plan
+    and REFERS_TO the source task."""
     rels = stored["calls"][-1][2]
     assert rels == [{"relationship_type": "PART_OF", "source_index": 0,
+                     "target_entity_id": PLAN},
+                    {"relationship_type": "REFERS_TO", "source_index": 0,
                      "target_entity_id": "ent_synthetic_src"}]
     assert "entities/ent_synthetic_fix/relationships" in stored["reads"]
 
@@ -925,7 +1027,7 @@ def test_an_audit_line_with_a_non_boolean_correction_mark_is_unreadable(tmp_path
     assert delivery.fly_delivered_pr(REPO, PR, BRANCH).delivered is None
 
 
-# --- An audit line whose action is not a string, and a missing audit file --
+# --- An audit line whose action is not a recognized one, and a missing file --
 
 
 @pytest.mark.parametrize("route", ["review", "ci", "resumed"])
@@ -943,6 +1045,27 @@ def test_an_audit_line_with_a_non_string_action_holds(
     d, summary = run_route(monkeypatch, route)
     assert_held(d, summary, stored, rounds_recorded, rec)
     assert world.fix_rounds == 0
+
+
+@pytest.mark.parametrize("line", [
+    {"action": "something_else"},
+    audit_line(action="something_else", source_task="ent_synthetic_src"),
+    {"by": "operator", "key": SRC_KEY, "branch": BRANCH, "source_task": "ent_synthetic_src"},
+], ids=["unrecognized-action", "unrecognized-action-on-this-branch", "no-action"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_audit_line_with_an_unrecognized_or_missing_action_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, line, route
+):
+    # Before this fix `_removal_audit_lines` skipped a line whose action it did
+    # not recognize, or which had none, so with no receipt left the file read
+    # as "no removal" and the round ran locally: `rec.calls` held the cicada
+    # builder, `rounds_recorded == [1]`, and no attention notice was sent
+    # (observed against the unfixed code).
+    write_audit(tmp_path, line)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held(d, summary, stored, rounds_recorded, rec)
+    assert stored["calls"] == [] and world.fix_rounds == 0
 
 
 @pytest.mark.parametrize("route", ["review", "ci", "resumed"])

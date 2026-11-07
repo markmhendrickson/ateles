@@ -1204,12 +1204,13 @@ def _removal_audit_lines(ledger) -> list[dict] | None:
 
     An empty list when the file does not exist (no receipt was ever cleared or
     superseded). None when the file exists but cannot be read or decoded, when
-    any line is not a JSON object, or when a removal line carries a field this
-    reader uses in a shape it cannot read (an ``action`` that is present and
-    not a string, on any line; a non-string key, branch or
-    ``source_task``, a non-object ``existing_pr`` or a non-string branch
-    inside it): one bad line
-    makes the whole file unknown, whatever the other lines say."""
+    any line is not a JSON object, when any line's ``action`` is missing or is
+    not one of ``_RECEIPT_REMOVAL_ACTIONS`` (the only actions this file's
+    writers emit, so any other line is one this reader cannot interpret), or
+    when a removal line carries a field this reader uses in a shape it cannot
+    read (a non-string key, branch or ``source_task``, a non-object
+    ``existing_pr`` or a non-string branch inside it): one bad line makes the
+    whole file unknown, whatever the other lines say."""
     import fly_delivery_receipt
 
     path = fly_delivery_receipt.audit_path(ledger)
@@ -1229,10 +1230,9 @@ def _removal_audit_lines(ledger) -> list[dict] | None:
             return None
         if not isinstance(line, dict):
             return None
-        if "action" in line and not isinstance(line["action"], str):
+        action = line.get("action")
+        if not isinstance(action, str) or action not in _RECEIPT_REMOVAL_ACTIONS:
             return None
-        if line.get("action") not in _RECEIPT_REMOVAL_ACTIONS:
-            continue
         if not isinstance(line.get("key"), str):
             return None
         if not isinstance(line.get("branch"), (str, type(None))):
