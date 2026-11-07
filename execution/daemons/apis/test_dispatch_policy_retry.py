@@ -19,6 +19,7 @@ import pytest
 import apis
 import build_delivery as delivery
 import skill_runner
+from lib.daemon_runtime.gating import entity_record_digest
 from test_checkpoint_release import (  # noqa: F401 — fixtures
     _resolve, _cicada_delivers_a_pr, release_store,
 )
@@ -56,6 +57,19 @@ def no_wait(monkeypatch):
 @pytest.fixture
 def released(monkeypatch, release_store, no_wait):
     records, brief_id, task_id = release_store
+    # A retry requires a version on every record it compares, as Neotoma's
+    # records carry; the shared store gives only the checkpoint one.
+    records[task_id]["entity_version"] = "task-v1"
+    # The approval binds the task revision it was shown; bind it to this one.
+    revision = entity_record_digest(records[task_id])
+    read_authority = apis.read_authenticated_checkpoint_authorization
+
+    def read_versioned_authority(checkpoint_id, record):
+        authority = read_authority(checkpoint_id, record)
+        return None if authority is None else {**authority, "task_revision": revision}
+
+    monkeypatch.setattr(apis, "read_authenticated_checkpoint_authorization",
+                        read_versioned_authority)
     monkeypatch.setattr(apis, "DRY_RUN", False)
     monkeypatch.setattr(apis, "RUN_CONVERSATIONS", False)
     monkeypatch.setattr(apis, "RUN_EMAIL", False)
@@ -139,6 +153,116 @@ async def test_state_changed_during_wait_stops_retry_without_spawn(released, mon
     assert len(released["spawned"]) == 1
     assert _task(released)["status"] == "blocked"
     assert _task(released)["blocked_reason"] == "held by a person"
+
+
+def _change_checkpoint_during_wait(released, monkeypatch, change):
+    """Apply ``change`` to the checkpoint record just before the read that
+    follows the retry wait."""
+    real = apis._released_retry_fingerprint
+    calls = []
+
+    def fingerprint(task_id, checkpoint_id, **kwargs):
+        calls.append(task_id)
+        if len(calls) == 2:  # the read after the wait
+            change(released["records"][released["brief_id"]])
+        return real(task_id, checkpoint_id, **kwargs)
+
+    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_version_changed_during_wait_stops_retry_without_spawn(
+        released, monkeypatch):
+    # Run against the old fingerprint (f817125) this case and the resolution
+    # case below PASSED: it already compared version and resolution, so they
+    # pin that comparison. What it got wrong is the authorization: there the
+    # parametrized test below failed for every case with, e.g.,
+    #   assert [('task-v1', 'executing', '', None, 'approved')] == [None]
+    # (a checkpoint with no version still produced a fingerprint, so a retry
+    # was scheduled), likewise ('task-v1', 'executing', '', 'v3', None) for an
+    # unapproved one and a full tuple for one naming another task; and
+    # test_owner_mismatch_is_not_authorized failed with a full tuple where
+    # None was expected.
+    released["script"].append(_refusal("timeout"))
+
+    def bump(record):
+        record["entity_version"] = "v99"
+
+    calls = _change_checkpoint_during_wait(released, monkeypatch, bump)
+    await _release(released)
+    assert len(calls) == 2  # the retry was scheduled and then declined
+    assert len(released["spawned"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_resolution_changed_during_wait_stops_retry_without_spawn(
+        released, monkeypatch):
+    released["script"].append(_refusal("timeout"))
+
+    def reopen(record):
+        record["snapshot"]["status"] = "awaiting_operator"
+
+    calls = _change_checkpoint_during_wait(released, monkeypatch, reopen)
+    await _release(released)
+    assert len(calls) == 2
+    assert len(released["spawned"]) == 1
+
+
+def _break_checkpoint_before_baseline(released, monkeypatch, change):
+    """Apply ``change`` to the checkpoint record before the baseline read, so
+    the retry is never scheduled."""
+    real = apis._released_retry_fingerprint
+    results = []
+
+    def fingerprint(task_id, checkpoint_id, **kwargs):
+        if not results:
+            change(released["records"][released["brief_id"]])
+        result = real(task_id, checkpoint_id, **kwargs)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    return results
+
+
+def _drop_version(record):
+    record.pop("entity_version", None)
+
+
+def _unapprove(record):
+    record["snapshot"]["status"] = "awaiting_operator"
+
+
+def _other_task(record):
+    record["snapshot"]["task_entity_id"] = "ent_task_other"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", [_drop_version, _unapprove, _other_task],
+                         ids=["no_version", "unapproved", "other_task"])
+async def test_unauthorized_checkpoint_gets_no_retry_and_no_spawn(
+        released, monkeypatch, change):
+    released["script"].append(_refusal("timeout"))
+    results = _break_checkpoint_before_baseline(released, monkeypatch, change)
+    await _release(released)
+    # Unreadable: no retry was scheduled, so the fingerprint ran once.
+    assert results == [None]
+    assert len(released["spawned"]) == 1
+    assert _task(released)["status"] == "failed"
+    assert "Retried" not in _task(released)["blocked_reason"]
+
+
+def test_owner_mismatch_is_not_authorized(released, monkeypatch):
+    records = released["records"]
+    brief_id, task_id = released["brief_id"], released["task_id"]
+    records[brief_id]["snapshot"]["status"] = "approved"
+    assert apis._released_retry_fingerprint(task_id, brief_id) is not None
+    records["_observations"][task_id][0]["user_id"] = (
+        "22222222-2222-4222-8222-222222222222")
+    assert apis._released_retry_fingerprint(task_id, brief_id) is None
+    assert apis._released_retry_fingerprint(
+        task_id, brief_id, checkpoint_only=True) is None
 
 
 def test_no_agent_runs_while_policy_is_unavailable(admission):

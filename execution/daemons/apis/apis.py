@@ -2172,13 +2172,34 @@ def _released_retry_eligible(skill: str, trigger: str, gate_override: bool,
     )
 
 
+def _released_retry_authorized(task_id: str, task: dict, checkpoint_id: str,
+                               checkpoint: dict, checkpoint_snapshot: dict) -> bool:
+    """The checks ``handle_checkpoint_brief`` makes before releasing an approved
+    checkpoint, made again for a retry: a versioned checkpoint, still approved,
+    naming this task, with the checkpoint and task owned by the same verified
+    tenant. Anything absent or different is not authorized."""
+    version = checkpoint.get("entity_version")
+    if not isinstance(version, str) or not version:
+        return False
+    if read_checkpoint_resolution(checkpoint_snapshot) != "approved":
+        return False
+    if checkpoint_snapshot.get("task_entity_id") != task_id:
+        return False
+    brief_user_id = read_verified_entity_owner(checkpoint_id, checkpoint)
+    task_user_id = read_verified_entity_owner(task_id, task)
+    return bool(brief_user_id) and bool(task_user_id) and brief_user_id == task_user_id
+
+
 def _released_retry_fingerprint(task_id: str, checkpoint_id: str, *,
                                 checkpoint_only: bool = False):
     """What a retry must find unchanged: the task's version, status and hold,
     and the checkpoint's version and resolution. None when either cannot be
-    read, which never counts as unchanged. ``checkpoint_only`` leaves the task
-    part to the resume (a write whose outcome is unknown may still land during
-    the wait, so the resume reads the task back itself)."""
+    read, or the approval no longer authorizes this task (see
+    ``_released_retry_authorized``); None never counts as unchanged.
+    ``checkpoint_only`` leaves the task part to the resume (a write whose
+    outcome is unknown may still land during the wait, so the resume reads the
+    task back itself); the checkpoint's version, approval and task link, and
+    the owners, are still checked."""
     try:
         task = fetch_task_record(task_id)
         checkpoint = fetch_checkpoint_record(checkpoint_id)
@@ -2188,14 +2209,20 @@ def _released_retry_fingerprint(task_id: str, checkpoint_id: str, *,
         checkpoint_snapshot = _record_snapshot(checkpoint)
         if task_snapshot is None or checkpoint_snapshot is None:
             return None
+        if not _released_retry_authorized(task_id, task, checkpoint_id,
+                                          checkpoint, checkpoint_snapshot):
+            return None
         checkpoint_part = (
             checkpoint.get("entity_version"),
             read_checkpoint_resolution(checkpoint_snapshot),
         )
         if checkpoint_only:
             return checkpoint_part
+        task_version = task.get("entity_version")
+        if not isinstance(task_version, str) or not task_version:
+            return None
         return (
-            task.get("entity_version"),
+            task_version,
             normalize_status(task_snapshot.get("status")),
             task_snapshot.get("blocked_reason"),
         ) + checkpoint_part
@@ -3739,11 +3766,15 @@ async def dispatch_task(
                     )
                 log.warning("[%s] correction %s executing lifecycle handoff could not be verified — not spawning",
                             DAEMON_NAME, entity_id)
-                notifier.send(f"Approved correction {entity_id} lifecycle handoff could not be verified; "
-                              "this attempt was not started. Reconcile current task/admission state."
-                              + (" A retry is scheduled." if retrying
-                                 else _released_retry_note(retries_used, why)),
-                              priority=Priority.BLOCKER, handler=DAEMON_NAME)
+                if retrying:
+                    notice = (f"Approved correction {entity_id} lifecycle handoff could not be "
+                              "verified; this attempt was not started. Apis will retry "
+                              "automatically.")
+                else:
+                    notice = (f"Approved correction {entity_id} lifecycle handoff could not be "
+                              "verified; this attempt was not started. Reconcile current "
+                              "task/admission state." + _released_retry_note(retries_used, why))
+                notifier.send(notice, priority=Priority.BLOCKER, handler=DAEMON_NAME)
                 if not retrying:
                     job.failed(f"task {entity_id} executing handoff was not qualified")
                 return False
