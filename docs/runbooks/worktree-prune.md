@@ -105,8 +105,9 @@ A worktree that holds an untracked or ignored file with a secret-looking name is
 removed by this tier: it is kept with the reason `secrets-present` and counted in `secrets_present` in the
 run summary. Names only are judged, file contents are never read: `.env` and `.env.*`, `*.pem`, `*.key`,
 `*.p12`, `*.pfx`, `credentials*`, anything containing `secret`, `.netrc`, `.npmrc`, `id_rsa*` and
-`id_ed25519*`. Names ending in `.example`, `.sample` or `.template`, and the `.env.development*` family
-(always left out of archives), do not trigger it. Move or delete the file yourself to let the worktree be
+`id_ed25519*`. Placeholder-template names (`.example`, `.sample`, `.template`, `.dist`, as defined once in
+`lib/credential_templates.py`), and the `.env.development*` family (always left out of archives), do not
+trigger it. Move or delete the file yourself to let the worktree be
 archived.
 
 Restore: in the main clone, `git worktree add --detach <dir> <head>`; if a bundle exists,

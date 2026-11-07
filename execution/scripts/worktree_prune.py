@@ -61,6 +61,7 @@ import argparse
 import atexit
 import datetime
 import fcntl
+import importlib.util
 import json
 import os
 import re
@@ -345,14 +346,36 @@ SECRET_EXACT = (".env", ".netrc", ".npmrc")
 SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 SECRET_PREFIXES = ("credentials", "id_rsa", "id_ed25519")
 SECRET_SUBSTRINGS = ("secret",)
-SECRET_EXAMPLE_SUFFIXES = (".example", ".sample", ".template")
+
+
+def _load_template_rule():
+    """The repo's single definition of a placeholder-template name (lib/credential_templates.py).
+
+    Loaded by path, as the credential hook does. If it cannot be loaded, no name counts as a template,
+    so more files look secret and more worktrees are kept: it fails closed and never uses a copy.
+    """
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "lib",
+        "credential_templates.py",
+    )
+    try:
+        spec = importlib.util.spec_from_file_location("credential_templates", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.is_placeholder_template
+    except Exception:
+        return lambda name: False
+
+
+is_placeholder_template = _load_template_rule()
 SECRET_SCAN_SKIP = ("node_modules", ".venv", "venv", "__pycache__", ".mcp-venv")
 
 
 def secret_name(name):
     """True if a file's base name looks like it holds a secret (name only; the content is never read)."""
     n = name.lower()
-    if n.startswith(ENV_COPY_PREFIX) or n.endswith(SECRET_EXAMPLE_SUFFIXES):
+    if n.startswith(ENV_COPY_PREFIX) or is_placeholder_template(n):
         return False
     return (
         n in SECRET_EXACT

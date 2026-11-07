@@ -843,6 +843,30 @@ def test_example_and_ordinary_names_are_not_secret(name):
     assert not wp.secret_name(name)
 
 
+def test_the_template_rule_is_the_repos_single_definition_and_fails_closed(monkeypatch):
+    import importlib.util
+
+    repo_root = Path(wp.__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "ct_for_test", repo_root / "lib" / "credential_templates.py"
+    )
+    shared = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(shared)
+    for suffix in (
+        shared.PLACEHOLDER_TEMPLATE_SUFFIXES
+    ):  # every suffix the repo defines, none copied here
+        assert not wp.secret_name(".env" + suffix), suffix
+        assert not wp.secret_name("credentials.json" + suffix.upper()), suffix
+    # if the shared definition cannot be loaded, nothing counts as a template: more is kept, never less
+    monkeypatch.setattr(
+        importlib.util, "spec_from_file_location", lambda *a, **k: 1 / 0
+    )
+    broken = wp._load_template_rule()
+    assert broken(".env.example") is False
+    monkeypatch.setattr(wp, "is_placeholder_template", broken)
+    assert wp.secret_name(".env.example")
+
+
 @pytest.fixture
 def archive_on(repo):
     aroot = repo.home + "/archive"
