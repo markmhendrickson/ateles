@@ -266,3 +266,107 @@ def test_existing_pr_target_survives_real_deferral_and_fresh_recovery(dispatch_e
     target = delivery.existing_pr_target(fresh, REPO)
     assert target.branch == BRANCH and target.number == 12
     assert store.rows[eid]["notes"] == original["notes"]
+
+
+def _refusing_codex_run(seen, *, fly_providers=("codex", "claude")):
+    """A run_skill stand-in: the first Fly candidate not excluded is selected;
+    Fly refuses codex for a provider-only reason (as fly_runner does for a
+    codex job that needs its Neotoma tools) and launches claude."""
+    async def run(skill, *a, exclude_providers=(), **kw):
+        left = [p for p in fly_providers if p not in exclude_providers]
+        selected = left[0]
+        seen.append((selected, tuple(exclude_providers),
+                     dict(delivery._delivery_ledger().delivery_receipts())))
+        if selected == "codex":
+            return SkillResult(
+                skill, False, None, "", "", provider="codex",
+                error="fly runner refused: not eligible for Fly: the Fly runner cannot "
+                      "yet give a codex job its Neotoma tools",
+                fly_ineligible_before_launch=True, fly_provider_ineligible=True,
+                fly_next_providers=tuple(left[1:]), attempted_providers=("codex",))
+        return SkillResult(skill, False, 0, "", "", provider=selected,
+                           fly_delivery_status="no_changes", remote_run_id=f"{selected}-run",
+                           attempted_providers=(selected,))
+    return run
+
+
+def test_correction_refused_for_codex_tools_runs_on_claude(monkeypatch, admitted_reader):
+    # Red before this fix (observed): the stand-in could not even build its
+    # result (SkillResult had no fly_next_providers). Behaviourally (inferred
+    # from the code): the single-provider dispatch returned the codex refusal,
+    # its receipt was released and the task was held with "Existing PR
+    # correction not launched"; claude was never launched.
+    seen = []
+    monkeypatch.setattr(apis, "run_skill", _refusing_codex_run(seen))
+    got = spawn(snapshot())
+    assert [s[0] for s in seen] == ["codex", "claude"]
+    assert seen[1][1] == ("codex",)
+    # Each attempt ran under its own prelaunch reservation: codex's was
+    # removed and claude's is a fresh one, not the refused attempt's.
+    first, second = seen[0][2][REPO + "#12"], seen[1][2][REPO + "#12"]
+    assert first["status"] == second["status"] == "launching"
+    assert first["token"] != second["token"]
+    assert not got.fly_delivery_not_launched
+    assert got.fly_delivery_status == "no_changes" and got.provider == "claude"
+    assert got.attempted_providers == ("codex", "claude")
+    receipts = delivery._delivery_ledger().delivery_receipts()
+    assert list(receipts) == [REPO + "#12"]
+    assert receipts[REPO + "#12"]["run_id"] == "claude-run"
+
+
+def test_correction_refused_with_no_other_fly_provider_holds(monkeypatch, admitted_reader):
+    # Unchanged behaviour, pinned here. Red before this fix only because the
+    # stand-in's SkillResult(fly_next_providers=...) did not exist (observed);
+    # the hold itself is what the code did before (inferred).
+    seen = []
+    monkeypatch.setattr(apis, "run_skill", _refusing_codex_run(seen, fly_providers=("codex",)))
+    got = spawn(snapshot())
+    assert [s[0] for s in seen] == ["codex"]
+    assert got.fly_delivery_not_launched and got.fly_delivery_cleanup == "released"
+    assert "Existing PR correction not launched; its own prelaunch receipt was removed" in (
+        delivery.fly_prelaunch_failure_summary(got))
+    assert delivery._delivery_ledger().delivery_receipts() == {}
+
+
+@pytest.mark.parametrize("release", ["not_owned", "raises"])
+def test_correction_refusal_without_proven_receipt_removal_holds(monkeypatch, admitted_reader, release):
+    # Guards the new retry's precondition. Red before this fix only because the
+    # stand-in's SkillResult(fly_next_providers=...) did not exist (observed);
+    # a retry without the receipt check would launch claude a second time
+    # (inferred, not observed).
+    def unproven(plan, token):
+        if release == "raises":
+            raise OSError("inert ledger failure")
+        return False
+    monkeypatch.setattr(delivery, "_release_delivery", unproven)
+    seen = []
+    monkeypatch.setattr(apis, "run_skill", _refusing_codex_run(seen))
+    got = spawn(snapshot())
+    assert [s[0] for s in seen] == ["codex"]
+    assert got.fly_delivery_not_launched
+    assert got.fly_delivery_cleanup == ("not_owned" if release == "not_owned" else "unconfirmed")
+
+
+def test_single_provider_fly_refusal_names_next_fly_provider_without_launching_it(monkeypatch):
+    # Red before this fix (observed): _run_provider_attempts had no
+    # exclude_providers and the refusal named no next provider, because a
+    # single-provider dispatch cut its candidates to the first one.
+    import skill_runner
+    monkeypatch.setattr(skill_runner, "provider_candidates", lambda *a, **kw: ["codex", "claude"])
+    monkeypatch.setattr(skill_runner, "_refresh_usage_snapshot", lambda *a: None)
+    seen = []
+    async def attempt(provider):
+        seen.append(provider)
+        return SkillResult("cicada", False, None, "", "", provider=provider,
+                           fly_provider_ineligible=True)
+    got = asyncio.run(skill_runner._run_provider_attempts(
+        "cicada", attempt, binaries={"codex": "fake", "claude": "fake"},
+        fly_bound=frozenset({"codex", "claude"}), single_provider=True))
+    assert seen == ["codex"]
+    assert got.fly_next_providers == ("claude",)
+    seen.clear()
+    asyncio.run(skill_runner._run_provider_attempts(
+        "cicada", attempt, binaries={"codex": "fake", "claude": "fake"},
+        fly_bound=frozenset({"codex", "claude"}), single_provider=True,
+        exclude_providers=("codex",)))
+    assert seen == ["claude"]
