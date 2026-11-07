@@ -180,7 +180,9 @@ async def test_task_changed_during_launch_is_not_retried(released, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["done", "completed", "cancelled", "verified", "blocked"])
+@pytest.mark.parametrize("status", ["done", "completed", "cancelled", "verified", "blocked",
+                                    "awaiting_approval", "awaiting_input",
+                                    "some_unknown_status", 7, None])
 async def test_task_terminal_or_held_during_wait_is_not_retried(
         released, monkeypatch, status):
     released["script"].append(_refusal("timeout"))
@@ -201,6 +203,58 @@ async def test_task_terminal_or_held_during_wait_is_not_retried(
     assert len(calls) == 2 and calls[0] == calls[1] and calls[0] is not None
     assert len(released["spawned"]) == 1
     assert _task(released)["status"] == status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["awaiting_approval", "awaiting_input",
+                                    "some_unknown_status", 7])
+async def test_task_held_in_baseline_and_during_wait_is_not_retried(
+        released, monkeypatch, status):
+    # A fresh hold that lands before the pre-launch read is in the baseline
+    # AND the read after the wait, so the fingerprints agree. Red before the
+    # allow-list (awaiting_approval, awaiting_input, unknown) this failed with
+    #   assert [1] == []  (resumed)
+    # the retry resumed _finish_dispatch past the new hold's approval. A
+    # non-string status already made the baseline unreadable, so 7 was green.
+    released["script"].append(_refusal("timeout"))
+    real = apis._released_retry_fingerprint
+    calls = []
+    resumed = []
+    finish_retry = apis._schedule_released_retry
+
+    def fingerprint(task_id, checkpoint_id, **kwargs):
+        if not calls:
+            _task(released)["status"] = status
+        calls.append(task_id)
+        return real(task_id, checkpoint_id, **kwargs)
+
+    def schedule(**kwargs):
+        resume = kwargs["resume"]
+
+        async def spy(attempt):
+            resumed.append(attempt)
+            await resume(attempt)
+
+        return finish_retry(**{**kwargs, "resume": spy})
+
+    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    monkeypatch.setattr(apis, "_schedule_released_retry", schedule)
+    await _release(released)
+    assert resumed == []
+    assert len(released["spawned"]) == 1  # the first launch only
+    assert len(calls) == 1  # the pre-launch read; no retry was scheduled
+
+
+@pytest.mark.parametrize("status,allowed", [
+    ("routed", True), ("executing", True), ("EXECUTING", True),
+    ("awaiting_approval", False), ("awaiting_input", False), ("pending", False),
+    ("blocked", False), ("done", False), ("some_unknown_status", False),
+    ("", False), (None, False), (7, False), (["executing"], False),
+])
+def test_released_retry_dispatchable_is_an_allow_list(monkeypatch, status, allowed):
+    monkeypatch.setattr(apis, "fetch_task_record",
+                        lambda task_id: {"snapshot": {"status": status}})
+    assert apis._released_retry_task_dispatchable("t") is allowed
 
 
 @pytest.mark.asyncio

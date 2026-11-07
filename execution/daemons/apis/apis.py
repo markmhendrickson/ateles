@@ -2230,22 +2230,32 @@ def _released_retry_fingerprint(task_id: str, checkpoint_id: str, *,
         return None
 
 
+# The statuses a released task holds between its release and its launch:
+# ``dispatch_task`` writes ROUTED on the approved path, then EXECUTING just
+# before ``_finish_dispatch``; a retry of an executing write whose outcome was
+# unknown finds one or the other. Anything else, including a fresh hold
+# (AWAITING_APPROVAL, AWAITING_INPUT), an unknown or a non-string status, was
+# not authorized by the release a retry reuses.
+_RELEASED_RETRY_STATUSES = frozenset({TaskStatus.ROUTED.value,
+                                      TaskStatus.EXECUTING.value})
+
+
+def _released_retry_status_allowed(status) -> bool:
+    return isinstance(status, str) and normalize_status(status) in _RELEASED_RETRY_STATUSES
+
+
 def _released_retry_task_dispatchable(task_id: str) -> bool:
-    """False when the task now stands where ``dispatch_task``'s terminal guard
-    would refuse it (``is_terminal``, or VERIFIED), or is held (BLOCKED), or
-    cannot be read. A retry resumes past that guard, so it checks the same
-    states again just before resuming; the fingerprint comparison alone does
-    not reject a state the baseline itself already held."""
+    """True only when the task still stands in a status a released task holds
+    between its release and its launch (``_RELEASED_RETRY_STATUSES``). A retry
+    resumes past ``dispatch_task``'s guards and gate, so every other status,
+    including a new hold, an unknown or a non-string one, or an unreadable
+    record, is refused. The fingerprint comparison alone does not reject a
+    state the baseline itself already held."""
     try:
         snapshot = _record_snapshot(fetch_task_record(task_id))
         if snapshot is None:
             return False
-        status = snapshot.get("status")
-        return not (
-            is_terminal(status)
-            or normalize_status(status) in (TaskStatus.VERIFIED.value,
-                                            TaskStatus.BLOCKED.value)
-        )
+        return _released_retry_status_allowed(snapshot.get("status"))
     except Exception:  # noqa: BLE001 — unreadable is never dispatchable
         return False
 
@@ -3127,8 +3137,11 @@ async def dispatch_task(
             # What the approval authorized, read before the launch: a retry of
             # a refusal compares against this, never against a state the
             # launch itself left behind. None means no retry, not no launch.
+            # A baseline outside the released statuses binds nothing: no retry.
             prelaunch = (_released_retry_fingerprint(entity_id, release_key)
                          if retry_ok else None)
+            if prelaunch is not None and not _released_retry_status_allowed(prelaunch[1]):
+                prelaunch = None
             result = await _spawn_harness_skill(
                 skill,
                 entity_id,
