@@ -57,9 +57,9 @@ def _client_returning(monkeypatch, responses, gets):
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
 
 
-def _limited(retry_after="7"):
+def _limited(retry_after="7", status=403):
     return _Resp(
-        403,
+        status,
         headers={"Retry-After": retry_after, "X-RateLimit-Remaining": "4321"},
         text='{"message": "You have exceeded a secondary rate limit."}',
     )
@@ -112,6 +112,54 @@ def test_burst_that_does_not_clear_defers_the_panel(monkeypatch):
     assert d._pr_read_rate_limited("owner/repo", 87)
 
     # The deferral itself: a resume marker and no call for attention.
+    comment_bodies: list[str] = []
+
+    class _CapturingClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, **kwargs):
+            return tsd._FakeListResp([])
+
+        async def post(self, url, **kwargs):
+            comment_bodies.append(kwargs.get("json", {}).get("body", ""))
+            return tsd._FakeResp(201)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CapturingClient)
+    monkeypatch.setenv("ATELES_AGENT_PAT", "test-token")
+    asyncio.run(
+        d._handle_panel_session_limit(
+            tsd._trigger(number=87), None, "panel", "", "",
+            reason=swarm_dispatch.GITHUB_TEMPORARILY_RATE_LIMITED,
+        )
+    )
+    assert d.notifier.priorities == [swarm_dispatch.Priority.INFO]
+    assert len(comment_bodies) == 1
+    assert d._REVIEW_DEFERRED_RE.search(comment_bodies[0])
+
+
+def test_429_burst_is_retried_bounded_then_marked_and_deferred(monkeypatch):
+    # The classifier takes 429 as well as 403; this drives `_github_pr_get`
+    # (through `_pr_head_sha_for`) with 429s the same way the 403 test does.
+    # Red check: with 429 dropped from `github_rate_limit_wait`'s status set,
+    # the first 429 was returned at once (one GET, no sleep, no marking).
+    gets: list[str] = []
+    sleeps = _record_sleeps(monkeypatch)
+    _client_returning(
+        monkeypatch, [_limited("9", status=429)] * swarm_dispatch._GITHUB_RATE_LIMIT_ATTEMPTS, gets
+    )
+    d = _dispatcher()
+    assert asyncio.run(d._pr_head_sha_for("owner/repo", 87)) is None
+    assert len(gets) == swarm_dispatch._GITHUB_RATE_LIMIT_ATTEMPTS
+    assert sleeps == [9] * (swarm_dispatch._GITHUB_RATE_LIMIT_ATTEMPTS - 1)
+    assert d._pr_read_rate_limited("owner/repo", 87)
+
     comment_bodies: list[str] = []
 
     class _CapturingClient:
