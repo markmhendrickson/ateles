@@ -724,6 +724,39 @@ def node_modules_contained(wt, path):
     return rp == os.path.join(os.path.realpath(os.path.dirname(path)), STRIP_DIR_NAME)
 
 
+def _device(path):
+    """st_dev of `path` itself (a symlink is not followed)."""
+    return os.lstat(path).st_dev
+
+
+def _raise(err):
+    raise err
+
+
+def crosses_mount(wt, path):
+    """'' if `path` and everything beneath it is on the worktree's own device, else 'mount-point'.
+
+    A volume mounted at (or anywhere under) a node_modules directory would otherwise be emptied by
+    rmtree. Unreadable or vanished entries count as a crossing: when in doubt, keep.
+    """
+    try:
+        if os.path.ismount(path):
+            return "mount-point"
+        root_dev = _device(wt)
+        if _device(path) != root_dev:
+            return "mount-point"
+        for dp, dn, _ in os.walk(path, followlinks=False, onerror=_raise):
+            for d in dn:
+                full = os.path.join(dp, d)
+                if os.path.islink(full):
+                    continue
+                if _device(full) != root_dev or os.path.ismount(full):
+                    return "mount-point"
+    except OSError:
+        return "mount-point"
+    return ""
+
+
 def find_node_modules(wt):
     """Walk the worktree without following symlinks -> (real node_modules dirs, refused 'rel:reason' list).
 
@@ -840,6 +873,8 @@ def strip_flow(e, apply_):
             refused.append("%s:tracked-check-error" % rel)
         elif t:
             refused.append("%s:tracked-files" % rel)
+        elif crosses_mount(wt, d):
+            refused.append("%s:mount-point" % rel)
         else:
             plan.append((d, tree_bytes(d)))
     e["strip_refused"] = refused
@@ -859,6 +894,11 @@ def strip_flow(e, apply_):
     for d, nbytes in plan:
         if not node_modules_contained(wt, d):
             refused.append("%s:not-contained" % os.path.relpath(d, wt))
+            continue
+        if crosses_mount(
+            wt, d
+        ):  # re-checked now: a volume may have been mounted since planning
+            refused.append("%s:mount-point" % os.path.relpath(d, wt))
             continue
         try:
             shutil.rmtree(d)

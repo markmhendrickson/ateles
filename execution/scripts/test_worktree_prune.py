@@ -1164,6 +1164,104 @@ def test_the_error_abort_ratio_stops_the_strip(repo):
     assert not wp.STATS.aborted
 
 
+def _fake_ismount(monkeypatch, mounted):
+    """os.path.ismount that reports True for the paths in `mounted()` (a callable, so it can change)."""
+    real = os.path.ismount
+    monkeypatch.setattr(
+        wp.os.path, "ismount", lambda p: os.path.abspath(p) in mounted() or real(p)
+    )
+
+
+def test_a_mount_point_at_node_modules_is_refused_at_plan_time(repo, monkeypatch):
+    w = repo.add_wt("mounted")
+    _fake_ismount(monkeypatch, lambda: {w + "/node_modules"})
+    e = repo.entry(w)
+    res = wp.strip_flow(e, True)
+    assert res == "refused-node-modules", (res, e.get("detail"))
+    assert e["strip_refused"] == ["node_modules:mount-point"]
+    assert os.path.isfile(w + "/node_modules/pkg/index.js")
+    assert os.path.isfile(w + "/node_modules/pkg/lib/util.js")
+    # a dry run reports the same refusal instead of promising a strip
+    assert wp.strip_flow(repo.entry(w), False) == "refused-node-modules"
+
+
+def test_a_nested_directory_on_another_device_is_refused(repo, monkeypatch):
+    w = repo.add_wt("otherdev")
+    other = w + "/node_modules/pkg/lib"
+    real_device = wp._device
+    root = os.path.realpath(w)
+    monkeypatch.setattr(
+        wp,
+        "_device",
+        lambda p: real_device(p) + 1 if os.path.abspath(p) == other else real_device(p),
+    )
+    assert real_device(root) == real_device(
+        w
+    )  # the control: same device everywhere else
+    e = repo.entry(w)
+    res = wp.strip_flow(e, True)
+    assert res == "refused-node-modules", (res, e.get("detail"))
+    assert e["strip_refused"] == ["node_modules:mount-point"]
+    assert os.path.isfile(other + "/util.js")
+    # a mount point nested deeper is refused too
+    monkeypatch.setattr(wp, "_device", real_device)
+    _fake_ismount(monkeypatch, lambda: {other})
+    assert wp.strip_flow(repo.entry(w), True) == "refused-node-modules"
+    assert os.path.isfile(other + "/util.js")
+
+
+def test_a_mount_appearing_after_planning_is_refused_at_delete_time(repo, monkeypatch):
+    w = repo.add_wt("late-mount")
+    state = {"mounted": False}
+    _fake_ismount(
+        monkeypatch, lambda: {w + "/node_modules"} if state["mounted"] else set()
+    )
+    real_cwdset = wp.cwdset
+
+    def mount_then_scan():
+        state["mounted"] = (
+            True  # runs inside the final gate, after planning, before deleting
+        )
+        return real_cwdset()
+
+    monkeypatch.setattr(wp, "cwdset", mount_then_scan)
+    e = repo.entry(w)
+    res = wp.strip_flow(e, True)
+    assert state["mounted"]
+    assert res == "refused-node-modules", (res, e.get("detail"))
+    assert e["strip_refused"] == ["node_modules:mount-point"]
+    assert os.path.isfile(w + "/node_modules/pkg/index.js")
+
+
+def test_a_device_change_appearing_after_planning_is_refused_at_delete_time(
+    repo, monkeypatch
+):
+    w = repo.add_wt("late-device")
+    nested = w + "/node_modules/pkg"
+    state = {"moved": False}
+    real_device = wp._device
+    monkeypatch.setattr(
+        wp,
+        "_device",
+        lambda p: (
+            real_device(p) + 1
+            if state["moved"] and os.path.abspath(p) == nested
+            else real_device(p)
+        ),
+    )
+    real_cwdset = wp.cwdset
+
+    def move_then_scan():
+        state["moved"] = True
+        return real_cwdset()
+
+    monkeypatch.setattr(wp, "cwdset", move_then_scan)
+    e = repo.entry(w)
+    res = wp.strip_flow(e, True)
+    assert res == "refused-node-modules", (res, e.get("detail"))
+    assert os.path.isfile(nested + "/index.js")
+
+
 def run_main(repo, *args):
     """Run the CLI end to end against the temp HOME; return (exit code, last runs.jsonl line)."""
     state = repo.home + "/state"
