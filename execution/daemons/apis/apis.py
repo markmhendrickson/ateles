@@ -329,6 +329,10 @@ log = logging.getLogger("apis")
 # an exception-draining callback for the rest of the daemon process lifetime.
 _background_dispatch_tasks: set[asyncio.Task[None]] = set()
 _background_checkpoint_tasks: set[asyncio.Task[None]] = set()
+# Task ids whose detached run is still in progress. `_seen_created` evicts old
+# ids, so a `task.created` redelivered after eviction would otherwise start a
+# second run alongside the first. Removed when the run ends, however it ends.
+_detached_runs_in_progress: set[str] = set()
 
 
 def _background_dispatch_done(task: asyncio.Task[None]) -> None:
@@ -336,9 +340,12 @@ def _background_dispatch_done(task: asyncio.Task[None]) -> None:
     try:
         task.result()
     except asyncio.CancelledError:
-        log.warning("[%s] detached dispatch was cancelled", DAEMON_NAME)
+        log.warning(
+            "[%s] detached dispatch %s was cancelled", DAEMON_NAME, task.get_name()
+        )
     except Exception:
-        log.exception("[%s] detached dispatch failed", DAEMON_NAME)
+        # The task name carries the task id (apis-dispatch-<id>-<trigger>).
+        log.exception("[%s] detached dispatch %s failed", DAEMON_NAME, task.get_name())
 
 
 def _background_checkpoint_done(task: asyncio.Task[None]) -> None:
@@ -2249,6 +2256,13 @@ async def dispatch_task(
         )
         return
 
+    if entity_id in _detached_runs_in_progress:
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} already has a detached run in "
+            f"progress (trigger={trigger}) — not starting a second run"
+        )
+        return
+
     # The snapshot read fine, so any prior unreadable streak for this task is
     # over; forget it so a later blip starts counting from zero rather than
     # inheriting an old streak and reporting prematurely.
@@ -3565,10 +3579,23 @@ async def dispatch_task(
             job.failed(f"task {entity_id} → {skill} failed: {reason[:60]}")
 
     if detach_after_accept:
+        # Re-checked here with no await since the create_task below, so two
+        # dispatches that both passed the early check cannot both detach.
+        if entity_id in _detached_runs_in_progress:
+            log.info(
+                f"[{DAEMON_NAME}] task {entity_id!r} already has a detached run "
+                f"in progress (trigger={trigger}) — not starting a second run"
+            )
+            return None
         task = asyncio.create_task(
             _finish_dispatch(), name=f"apis-dispatch-{entity_id}-{trigger}"
         )
+        _detached_runs_in_progress.add(entity_id)
         _background_dispatch_tasks.add(task)
+        # Done callbacks run on success, failure and cancellation alike.
+        task.add_done_callback(
+            lambda _t: _detached_runs_in_progress.discard(entity_id)
+        )
         task.add_done_callback(_background_dispatch_done)
         return True if correction_lifecycle is not None else None
 
@@ -4775,7 +4802,12 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     log.info(f"[{DAEMON_NAME}] Event: {entity_type}/{entity_id} action={action}")
 
     if entity_type == "checkpoint_brief":
-        await handle_checkpoint_brief(entity_id, snapshot, notifier)
+        # Detach the released run: reading, the replay guard and the stamp stay
+        # on the stream, one event at a time; only the agent run itself (up to
+        # 30 minutes) leaves it, so the stream keeps hearing events meanwhile.
+        await handle_checkpoint_brief(
+            entity_id, snapshot, notifier, detach_after_accept=True
+        )
         return
 
     if entity_type != "task":
@@ -4820,12 +4852,15 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
                 priority=Priority.INFO,
                 handler=DAEMON_NAME,
             )
+        # Reading, scoring, the gate and the hold path stay on the stream; only
+        # the run after the task durably enters EXECUTING is detached.
         await dispatch_task(
             entity_id,
             snapshot,
             trigger="created",
             notifier=notifier,
             snapshot_hydrated=event.hydrated,
+            detach_after_accept=True,
         )
 
     elif action == "updated":

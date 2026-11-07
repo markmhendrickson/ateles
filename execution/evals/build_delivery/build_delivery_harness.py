@@ -504,14 +504,24 @@ async def _wait_for(path: Path, timeout: float = 30.0) -> None:
         await asyncio.sleep(0.02)
 
 
-async def _settle() -> None:
-    """Let any recovery sweep and the dispatches it started run to completion."""
-    for _ in range(5):
-        await asyncio.sleep(0)
+async def _drain_dispatches() -> None:
+    """Wait for the dispatches `handle_event` started in the background.
+
+    The created path returns before its run starts, so a scenario must wait for
+    these before it reads what was dispatched.
+    """
     pending = list(apis._background_dispatch_tasks)
     while pending:
         await asyncio.gather(*pending, return_exceptions=True)
         pending = [t for t in apis._background_dispatch_tasks if not t.done()]
+
+
+async def _settle() -> None:
+    """Let any recovery sweep and the dispatches it started run to completion."""
+    for _ in range(5):
+        await asyncio.sleep(0)
+    await _drain_dispatches()
+
 
 
 def run_scenario(scenario: dict, tmp_path: Path, *, mutation: str = "none") -> dict:
@@ -907,6 +917,7 @@ async def _drive_rollback_race(scenario: dict, world: World, obs: dict, notifier
     task = _task_snapshot(action_type="local_edit")
     store.put("ent_eval_race_0000", task)
     await apis.handle_event(_created("ent_eval_race_0000", task), notifier)
+    await _drain_dispatches()
     obs["row_after_notice"] = dict(store.rows["ent_eval_race_0000"])
     cm.__exit__(None, None, None)
     await _settle()
@@ -1081,6 +1092,7 @@ async def _drive_restart(scenario: dict, world: World, obs: dict, notifier) -> N
         task = _task_snapshot(action_type="local_edit", **(event.get("task") or {}))
         store.put(entity_id, task)
         await apis.handle_event(_created(entity_id, task), notifier)
+    await _drain_dispatches()
     obs["before_restart"] = {k: dict(v) for k, v in store.rows.items()}
     obs["spawns_before_restart"] = list(obs["spawns"])
 
@@ -1162,6 +1174,9 @@ async def _drive(scenario: dict, world: World, obs: dict) -> None:
             else:
                 for _ in range(event.get("deliveries", 1)):
                     await apis.handle_event(_created(entity_id, task), notifier)
+        # Drain while the build claim is still held, so a run that should start
+        # mid-build is observed starting mid-build.
+        await _drain_dispatches()
         obs["mid"] = {
             "launches": len(world.launches()),
             "statuses": list(obs["statuses"]),

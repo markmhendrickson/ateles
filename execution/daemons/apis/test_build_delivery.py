@@ -477,6 +477,18 @@ def _created(entity_id: str, snapshot: dict):
     )
 
 
+async def _drain_background_dispatches():
+    """Wait for the dispatches `handle_event` started in the background.
+
+    The created path returns before its run starts, so a test that checks a run
+    started must wait for these first.
+    """
+    pending = list(apis._background_dispatch_tasks)
+    while pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+        pending = [t for t in apis._background_dispatch_tasks if not t.done()]
+
+
 async def _settle():
     """Let a released build's recovery sweep and its dispatches run to completion."""
     for _ in range(5):
@@ -487,11 +499,14 @@ async def _settle():
         pending = [t for t in apis._background_dispatch_tasks if not t.done()]
 
 
-def _during_build(dispatch_env, *events, fail=False, notifier=None, release=True):
+def _during_build(
+    dispatch_env, *events, fail=False, notifier=None, release=True, drain=False
+):
     """Deliver `events` while a build of the issue holds its claim; then release it.
 
     Each event's task is first put in the (stand-in) task store, as Neotoma would
-    hold it. Returns what was observed mid-build, and the notifier.
+    hold it. Returns what was observed mid-build, and the notifier. With `drain`,
+    the background dispatches are awaited, still mid-build, before observing.
     """
     _, _, store = dispatch_env
     notifier = notifier or _RecNotifier()
@@ -507,6 +522,8 @@ def _during_build(dispatch_env, *events, fail=False, notifier=None, release=True
                     if event.entity_id not in store.rows:
                         store.put(event.entity_id, event.snapshot)
                     await apis.handle_event(event, notifier)
+                if drain:
+                    await _drain_background_dispatches()
                 out["spawns_mid_build"] = list(dispatch_env[1])
                 out["writes_mid_build"] = list(dispatch_env[0])
                 out["rows_mid_build"] = {k: dict(v) for k, v in store.rows.items()}
@@ -691,13 +708,17 @@ def test_several_deferred_tasks_each_run_once(dispatch_env):
 def test_task_for_a_different_issue_is_dispatched_at_once(dispatch_env):
     _, spawns, _ = dispatch_env
     other = _local(issue_number=1449, description="Implement the spec in %s#1449." % REPO)
-    out, _ = _during_build(dispatch_env, lambda c: _created("ent_other_issue_001", other))
+    out, _ = _during_build(
+        dispatch_env, lambda c: _created("ent_other_issue_001", other), drain=True
+    )
     assert out["spawns_mid_build"] == [("cicada", "ent_other_issue_001", "created")]
 
 
 def test_task_for_a_different_repository_is_dispatched_at_once(dispatch_env):
     other = _local(repository="someone/else")
-    out, _ = _during_build(dispatch_env, lambda c: _created("ent_other_repo_0001", other))
+    out, _ = _during_build(
+        dispatch_env, lambda c: _created("ent_other_repo_0001", other), drain=True
+    )
     assert out["spawns_mid_build"] == [("cicada", "ent_other_repo_0001", "created")]
 
 
@@ -730,14 +751,18 @@ def test_operator_approved_release_is_not_second_guessed(dispatch_env, monkeypat
 def test_only_builders_are_deferred(dispatch_env):
     """A different role's task about the same issue is a different piece of work."""
     other = _local(assigned_to="fringilla")
-    out, _ = _during_build(dispatch_env, lambda c: _created("ent_other_role_0001", other))
+    out, _ = _during_build(
+        dispatch_env, lambda c: _created("ent_other_role_0001", other), drain=True
+    )
     assert [s for s, _, _ in out["spawns_mid_build"]] == ["fringilla"]
 
 
 def test_a_reference_in_prose_does_not_make_a_key_without_a_repository(dispatch_env):
     """No resolved repository, no key: nothing to defer behind."""
     snap = _local(repository="", issue_number="")
-    out, _ = _during_build(dispatch_env, lambda c: _created("ent_prose_only_0001", snap))
+    out, _ = _during_build(
+        dispatch_env, lambda c: _created("ent_prose_only_0001", snap), drain=True
+    )
     assert out["spawns_mid_build"] == [("cicada", "ent_prose_only_0001", "created")]
 
 
