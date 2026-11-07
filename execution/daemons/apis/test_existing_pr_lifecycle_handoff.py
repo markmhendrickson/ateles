@@ -589,6 +589,7 @@ def test_executing_version_conflict_sends_one_blocker_and_writes_nothing(joined)
     assert len(blockers) == 1, notifier.sent
     (notice,) = blockers
     assert joined['task_id'] in notice
-    assert 'stays routed' in notice
+    assert 'could not be verified' in notice and 'last read as routed' in notice
+    assert 'refused' not in notice and 'changed under it' not in notice
     assert 'Nothing was started' in notice
     assert 'cannot be released again' in notice and 'refile' in notice

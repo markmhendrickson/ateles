@@ -2199,11 +2199,12 @@ def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
         return None
 
 
-def _executing_handoff_refused_notice(entity_id: str, binding) -> str:
+def _executing_handoff_unverified_notice(entity_id: str, binding) -> str:
     """The one BLOCKER notice for an approved correction whose versioned
-    executing write was refused: names the task and the status it was left
-    in, says nothing was started and that the spent approval cannot be
-    released again, so the task needs refiling."""
+    executing write could not be verified. Names no cause: a refused write,
+    a lost reply and an unreadable record look the same from here. Names the
+    task and the status it was last read in, says nothing was started and that
+    the spent approval cannot be released again, so the task needs refiling."""
     import json
 
     status = ""
@@ -2212,11 +2213,11 @@ def _executing_handoff_refused_notice(entity_id: str, binding) -> str:
     except Exception:  # noqa: BLE001 - an unreadable shape still gets the notice
         pass
     return (
-        f"Approved correction {entity_id} was NOT started: its executing status write "
-        "was refused (the task changed under it, for example another writer's note). "
-        f"The task stays {status or TaskStatus.ROUTED.value}. Nothing was started and "
-        "this approval cannot be released again: refile the task for a new approval. "
-        "No automatic retry."
+        f"Approved correction {entity_id} executing status write could not be verified; "
+        f"this attempt was not started. The task was last read as "
+        f"{status or TaskStatus.ROUTED.value}. Nothing was started and this approval "
+        "cannot be released again: refile the task for a new approval. "
+        "Reconcile current task/admission state. No automatic retry."
     )
 
 
@@ -3080,10 +3081,11 @@ async def dispatch_task(
         if correction_lifecycle is None:
             log.warning("[%s] correction %s executing lifecycle handoff could not be verified — not spawning",
                         DAEMON_NAME, entity_id)
-            # The versioned executing write was refused or not verified (e.g.
-            # another writer moved the task's version). Nothing was started and
-            # the approval is spent: say so once, with no retry and no write.
-            notifier.send(_executing_handoff_refused_notice(entity_id, routed_binding),
+            # The versioned executing write could not be verified (refused, lost
+            # reply or unreadable record; Apis cannot tell which). Nothing was
+            # started and the approval is spent: say so once, with no retry and
+            # no write, naming no cause.
+            notifier.send(_executing_handoff_unverified_notice(entity_id, routed_binding),
                           priority=Priority.BLOCKER, handler=DAEMON_NAME)
             job.failed(f"task {entity_id} executing handoff was not qualified")
             return
