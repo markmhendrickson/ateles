@@ -1888,6 +1888,118 @@ def delivery_result_from_record(record: dict) -> dict:
     return out
 
 
+# ── Settling a delivery from GitHub when its record never arrived ───────────
+#
+# A delivering run can push its branch and open its pull request and still
+# lose its result record (Neotoma overloaded at the moment it was written).
+# What GitHub shows for the job's OWN branch can then prove the delivery: only
+# an opened or updated pull request is ever settled this way. A missing record
+# is never read as ``no_changes`` or as a failure, and anything unproven stays
+# an unknown outcome.
+
+GITHUB_SETTLED_REASON = "settled from GitHub: the run's result record was not received"
+_SHA_RE = re.compile(r"[0-9a-f]{40}", re.ASCII)
+
+
+def github_delivery_proof(job: "FlyJob", branch_commit: Any, pulls: Any,
+                          opener_login: str) -> dict | None:  # fmt: skip
+    """The delivery result GitHub proves for *job*, or None.
+
+    *branch_commit* is the head commit of ``job.delivery["branch"]`` on the
+    job's repository (None when the branch does not exist); *pulls* is every
+    pull request whose head is that branch, in any state. Proven when exactly
+    one pull request, open or merged, has that exact head branch in that
+    repository and its head commit is the branch's; for a first delivery its
+    author is the PR-opener App (*opener_login*), for a correction its number
+    is the job's target and the branch moved off the admitted head."""
+    delivery = job.delivery
+    if not isinstance(delivery, dict) or not isinstance(delivery.get("branch"), str):
+        return None
+    branch, repository = delivery["branch"], job.repository
+    if not isinstance(branch_commit, str) or not _SHA_RE.fullmatch(branch_commit):
+        return None
+    if not isinstance(pulls, list):
+        return None
+    matching = []
+    for pr in pulls:
+        if not isinstance(pr, dict) or not isinstance(pr.get("head"), dict):
+            return None
+        head = pr["head"]
+        head_repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+        if head.get("ref") == branch and head_repo.get("full_name") == repository:
+            matching.append(pr)
+    if len(matching) != 1:
+        return None
+    pr = matching[0]
+    number = pr.get("number")
+    if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+        return None
+    if not (pr.get("state") == "open" or pr.get("merged_at")):
+        return None
+    base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
+    base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
+    if base_repo.get("full_name") != repository:
+        return None
+    if pr["head"].get("sha") != branch_commit:
+        return None
+    if "pr_number" in delivery:
+        if str(number) != delivery["pr_number"] or branch_commit == delivery.get("head_sha"):
+            return None
+        status = "updated"
+    else:
+        user = pr.get("user") if isinstance(pr.get("user"), dict) else {}
+        if not opener_login or user.get("login") != opener_login:
+            return None
+        status = "opened"
+    return {
+        "delivery_status": status,
+        "delivery_reason": GITHUB_SETTLED_REASON,
+        "delivery_branch": branch,
+        "delivery_commit": branch_commit,
+        "pr_number": number,
+        "pr_url": f"https://github.com/{repository}/pull/{number}",
+        "settled_from": "github",
+    }
+
+
+def read_github_delivery(job: "FlyJob") -> tuple[str | None, list]:
+    """GitHub's answer for the job's own branch: its head commit (None when
+    the branch is absent) and every pull request with that head. Read as the
+    PR-opener App for exactly the job's repository. Raises on any failed read
+    other than an absent branch."""
+    import urllib.parse
+
+    from lib import github_app_token as gat
+
+    repository = _delivery_repository(job.repository)
+    branch = job.delivery["branch"]
+    token = gat.identity_token(gat.PR_OPENER_IDENTITY, repository)
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("no PR-opener token for the delivery read")
+    quoted = urllib.parse.quote(branch, safe="")
+    try:
+        ref = _github_request("GET", f"/repos/{repository}/branches/{quoted}", token)
+    except RuntimeError as exc:
+        if str(exc).endswith("HTTP 404"):
+            return None, []
+        raise
+    commit = ref.get("commit") if isinstance(ref, dict) else None
+    sha = commit.get("sha") if isinstance(commit, dict) else None
+    owner = repository.split("/", 1)[0]
+    head = urllib.parse.quote(f"{owner}:{branch}", safe="")
+    pulls = _github_request(
+        "GET", f"/repos/{repository}/pulls?state=all&per_page=100&head={head}", token)
+    if not isinstance(pulls, list):
+        raise RuntimeError("the pull request list is not a list")
+    return sha, pulls
+
+
+def pr_opener_login() -> str:
+    from lib import github_app_token as gat
+
+    return gat.identity_bot_login(gat.PR_OPENER_IDENTITY)
+
+
 # ── Job assembly ─────────────────────────────────────────────────────────────
 
 
@@ -2734,8 +2846,12 @@ class FlyExecutor:
         clock: Callable[[], float] = time.time,
         mint_delivery: Callable[..., "DeliveryToken"] = mint_delivery_github_token,
         sleep: Callable[[float], Any] = asyncio.sleep,
+        read_github: Callable[["FlyJob"], tuple] = read_github_delivery,
+        opener_login: Callable[[], str] = pr_opener_login,
     ):
         self.config = config
+        self._read_github = read_github
+        self._opener_login = opener_login
         self._sleep = sleep  # the clean-up retry's backoff (a fake clock in tests)
         self._mint_delivery = mint_delivery
         self.client = client or FlyMachinesClient(config)
@@ -3371,8 +3487,20 @@ class FlyExecutor:
             raise asyncio.TimeoutError()
         try:
             record = await self._read_result(job.run_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — unreadable: settled below or unknown
+            record, read_error = None, exc
+        else:
+            read_error = None
+        try:
             if not record:
+                settled = await self._settle_from_github(job)
+                if settled is not None:
+                    return settled
                 job.outcome_unknown = True
+                if read_error is not None:
+                    raise read_error
                 return 1, b"", f"fly runner: no result recorded for run {job.run_id}".encode()
             return self._result_from_record(job, record)
         except asyncio.CancelledError:
@@ -3384,6 +3512,35 @@ class FlyExecutor:
                 f"fly runner: the result of run {job.run_id} could not be read "
                 f"({type(exc).__name__}); the run's outcome is unknown"
             ).encode()
+
+    async def _settle_from_github(self, job: FlyJob) -> tuple[int, bytes, bytes] | None:
+        """A finished delivering run with no readable record, settled from what
+        GitHub proves for its own branch (``github_delivery_proof``); None when
+        nothing is proven or any read fails, so the outcome stays unknown."""
+        if job.delivery is None:
+            return None
+        try:
+            sha, pulls = await asyncio.to_thread(self._read_github, job)
+            opener = (await asyncio.to_thread(self._opener_login)
+                      if "pr_number" not in job.delivery else "")  # fmt: skip
+            got = github_delivery_proof(job, sha, pulls, opener)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — an unread GitHub proves nothing
+            log.warning(f"[fly] run={job.run_id}: no result record, and GitHub could not be "
+                        f"read to settle it ({type(exc).__name__}); outcome unknown")
+            return None
+        if got is None:
+            log.warning(f"[fly] run={job.run_id}: no result record, and GitHub does not prove "
+                        "a delivery on its branch; outcome unknown")
+            return None
+        job.delivery_result = got
+        log.warning(f"[fly] run={job.run_id}: no result record; delivery settled from GitHub "
+                    f"as {got['delivery_status']} {got['pr_url']} at {got['delivery_commit']}")
+        return 0, (
+            f"fly runner: run {job.run_id} {GITHUB_SETTLED_REASON}; "
+            f"{got['delivery_status']} {got['pr_url']}\n"
+        ).encode(), b""
 
     def _result_from_record(self, job: FlyJob, record: dict) -> tuple[int, bytes, bytes]:
         """The CLI's result, from a VALIDATED record. A record that is not

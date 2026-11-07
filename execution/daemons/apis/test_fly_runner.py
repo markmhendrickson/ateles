@@ -19,6 +19,7 @@ import math
 import os
 import re
 import sys
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -5510,3 +5511,109 @@ def test_cancelled_during_claim_wait_leaves_admission_free(fly_env, claude_login
 
     asyncio.run(scenario())
     assert not fake.calls("POST", "/start")
+
+
+# ── A delivery whose record never arrived, settled from GitHub ──────────────
+
+_OPENER = "ateles-pr-opener[bot]"
+_BRANCH = "cicada/task-abc-20261107T000000-aaaaaa"
+_NEW = "a" * 40
+_ADMITTED = "b" * 40
+
+
+def _pr(number=7, *, sha=_NEW, ref=_BRANCH, author=_OPENER, state="open", merged_at=None):
+    repo = {"full_name": "owner/repo"}
+    return {"number": number, "state": state, "merged_at": merged_at, "user": {"login": author},
+            "head": {"ref": ref, "sha": sha, "repo": repo}, "base": {"repo": repo}}
+
+
+def _settle(fly_env, *, sha=_NEW, pulls=None, correction=False, read_error=None,
+            record_error=None):
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake)
+    calls = []
+
+    def read_github(job):
+        calls.append(job.delivery["branch"])
+        if read_error is not None:
+            raise read_error
+        return sha, [_pr()] if pulls is None else pulls
+
+    async def read_result(run_id):
+        if record_error is not None:
+            raise record_error
+        return None
+
+    async def done(handle):
+        return "stopped"
+
+    executor._read_github = read_github
+    executor._opener_login = lambda: _OPENER
+    executor._read_result = read_result
+    executor._wait_until_done = done
+    job = _job()
+    job.delivery = {"branch": _BRANCH, "base_branch": "main", "author_name": "a",
+                    "author_email": "a@example.invalid"}
+    if correction:
+        job.delivery.update(pr_number="7", head_sha=_ADMITTED)
+    handle = types.SimpleNamespace(job=job, machine_id="m1")
+    rc, out, err = asyncio.run(executor._collect(handle))
+    return job, rc, out, err, calls
+
+
+def test_lost_record_with_a_matching_branch_and_pr_settles_as_opened(fly_env, caplog):
+    caplog.set_level("WARNING", logger="apis.fly_runner")
+    job, rc, out, _, calls = _settle(fly_env)
+    assert calls == [_BRANCH]
+    assert rc == 0 and job.outcome_unknown is False
+    got = job.delivery_result
+    assert got["delivery_status"] == "opened" and got["pr_number"] == 7
+    assert got["pr_url"] == "https://github.com/owner/repo/pull/7"
+    assert got["delivery_branch"] == _BRANCH and got["delivery_commit"] == _NEW
+    assert got["settled_from"] == "github"
+    assert any("settled from GitHub" in r.message and job.run_id in r.message
+               for r in caplog.records)
+    fields = skill_runner._fly_delivery_fields(job, unknown=job.outcome_unknown)
+    assert fields["fly_delivery_status"] == "opened" and fields["fly_pr_number"] == 7
+
+
+def test_lost_record_on_a_correction_settles_as_updated(fly_env):
+    job, rc, _, _, _ = _settle(fly_env, correction=True, pulls=[_pr(author="someone")])
+    assert rc == 0 and job.outcome_unknown is False
+    assert job.delivery_result["delivery_status"] == "updated"
+    assert job.delivery_result["pr_number"] == 7
+
+
+def test_a_merged_pr_also_settles(fly_env):
+    job, rc, _, _, _ = _settle(fly_env, pulls=[_pr(state="closed", merged_at="2026-11-07")])
+    assert rc == 0 and job.delivery_result["delivery_status"] == "opened"
+
+
+@pytest.mark.parametrize("kw", [
+    {"pulls": []},                                            # branch, no PR
+    {"pulls": [_pr(7), _pr(8)]},                              # two PRs on the branch
+    {"pulls": [_pr(author="someone-else")]},                  # not the opener App
+    {"pulls": [_pr(sha="c" * 40)]},                           # PR head is not the branch's
+    {"pulls": [_pr(state="closed")]},                         # closed, not merged
+    {"sha": None},                                            # branch absent
+    {"correction": True, "sha": _ADMITTED,
+     "pulls": [_pr(sha=_ADMITTED)]},                          # correction head unmoved
+    {"correction": True, "pulls": [_pr(number=9)]},           # not the target PR
+    {"read_error": RuntimeError("GET /repos -> HTTP 502")},   # GitHub read failed
+], ids=["no-pr", "two-prs", "other-author", "head-mismatch", "closed", "no-branch",
+        "correction-unmoved", "correction-other-pr", "github-read-failure"])  # fmt: skip
+def test_an_unproven_delivery_stays_unknown(fly_env, kw):
+    job, rc, _, err, _ = _settle(fly_env, **kw)
+    assert rc == 1 and job.outcome_unknown is True and job.delivery_result is None
+    assert b"no result recorded" in err
+
+
+def test_an_unreadable_record_with_github_proof_settles(fly_env):
+    job, rc, _, _, _ = _settle(fly_env, record_error=fly_runner.FlyResultUnreadable("x"))
+    assert rc == 0 and job.delivery_result["delivery_status"] == "opened"
+
+
+def test_an_unreadable_record_without_proof_keeps_its_unknown_notice(fly_env):
+    job, rc, _, err, _ = _settle(fly_env, pulls=[],
+                                 record_error=fly_runner.FlyResultUnreadable("x"))
+    assert rc == 1 and job.outcome_unknown is True and b"outcome is unknown" in err

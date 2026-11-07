@@ -126,21 +126,54 @@ def test_existing_target_opt_out_does_not_substitute_local(monkeypatch):
     assert not spawn(snapshot()).ok
 
 
-def test_noop_is_durable_and_preserves_exhausted_history(monkeypatch, admitted_reader):
+def _noop_run(calls, **extra):
+    async def run(skill, *a, **kw):
+        calls.append(kw)
+        return SkillResult(skill, False, 0, "", "", fly_delivery_status="no_changes",
+                           remote_run_id="same-run", **extra)
+    return run
+
+
+def test_noop_correction_makes_way_and_preserves_exhausted_history(monkeypatch, admitted_reader):
+    # Red before this fix (observed in CI as `assert 2 == 1` under the old
+    # name, inverted here): a settled no_changes receipt with no recorded
+    # commit at the same head held the PR, so the second spawn never ran.
     calls = []
     row = snapshot(attempt_count=7, notes="auto-fix:1;auto-fix:2;auto-fix-noop;auto-fix-exhausted")
     original = dict(row)
-    async def run(skill, *a, **kw):
-        calls.append(kw)
-        return SkillResult(skill, False, 0, "", "", fly_delivery_status="no_changes", remote_run_id="same-run")
-    monkeypatch.setattr(apis, "run_skill", run)
+    monkeypatch.setattr(apis, "run_skill", _noop_run(calls))
     assert not spawn(row).ok
     assert not spawn(row).ok
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert row == original
     receipt = delivery._delivery_ledger().delivery_receipts()[REPO + "#12"]
     assert receipt["status"] == "no_changes" and receipt["existing_pr"]["head_sha"] == HEAD
     assert apis._fly_receipt_key(row, "ent_synthetic_correction") == REPO + "#12"
+
+
+def test_noop_correction_with_recorded_commit_keeps_receipt(monkeypatch, admitted_reader):
+    # Inferred, not observed: this guards the recorded-no-commit check in
+    # _undelivered_correction_settled. Were that check dropped, the second
+    # spawn would reach the runner and this would fail with `assert 2 == 1`.
+    calls = []
+    monkeypatch.setattr(apis, "run_skill", _noop_run(calls, fly_delivery_commit="b" * 40))
+    assert not spawn(snapshot()).ok
+    assert delivery._delivery_ledger().delivery_receipts()[REPO + "#12"]["commit"] == "b" * 40
+    assert not spawn(snapshot()).ok
+    assert len(calls) == 1
+
+
+def test_noop_correction_at_other_head_keeps_receipt(monkeypatch, admitted_reader):
+    # Inferred, not observed: this guards the same-admitted-head check in
+    # _undelivered_correction_settled. Were that check dropped, a correction
+    # declared at another head would reach the runner (`assert 2 == 1`).
+    calls = []
+    monkeypatch.setattr(apis, "run_skill", _noop_run(calls))
+    assert not spawn(snapshot()).ok
+    other = "c" * 40
+    admitted_reader["headRefOid"] = other  # admission passes; only the receipt refuses
+    assert not spawn(snapshot(head_sha=other)).ok
+    assert len(calls) == 1
 
 
 def test_existing_target_prelaunch_ineligibility_does_not_fall_back(monkeypatch, admitted_reader):

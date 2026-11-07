@@ -1409,3 +1409,82 @@ def test_a_bad_volume_token_is_a_refusal_record_that_runs_nothing(tmp_path):
     assert rc == run_job.EXIT_JOB_INVALID
     assert "token file" in data["refused"] and data["stdout"] == ""
     assert _TOKEN.encode() not in logs
+
+
+# ── The record write retries a temporary failure, within the deadline ───────
+
+
+class _RecordWorld:
+    """A fake clock, sleep and opener for ``write_record``."""
+
+    def __init__(self, answers):
+        self.now = 1000.0
+        self.answers = list(answers)
+        self.attempts = 0
+        self.sleeps: list[float] = []
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def opener(self, req, timeout):
+        import urllib.error
+
+        self.attempts += 1
+        answer = self.answers.pop(0) if self.answers else 503
+        if answer == "timeout":
+            raise TimeoutError("timed out")
+        if answer >= 400:
+            raise urllib.error.HTTPError(req.full_url, answer, "x", {}, None)
+
+        class _Resp:
+            status = answer
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return _Resp()
+
+
+def _write(world, deadline=None):
+    return run_job.write_record(
+        "https://neotoma.invalid", lambda url, body: {"Authorization": "Bearer t"},
+        {"run_id": "r1", "stdout": "SECRET-RECORD-BODY"}, deadline=deadline,
+        clock=world.clock, sleep=world.sleep, opener=world.opener)
+
+
+def test_record_write_retries_a_503_then_stores(capsys):
+    world = _RecordWorld([503, "timeout", 503, 201])
+    assert _write(world) is True
+    assert world.attempts == 4 and world.sleeps == [2.0, 4.0, 8.0]
+    out = capsys.readouterr().out
+    assert "HTTP 503" in out and "TimeoutError" in out and "HTTP 201" in out
+    assert "SECRET-RECORD-BODY" not in out and "Bearer" not in out
+
+
+def test_record_write_stops_on_a_403_at_once(capsys):
+    world = _RecordWorld([403])
+    assert _write(world) is False
+    assert world.attempts == 1 and world.sleeps == []
+    assert "HTTP 403; refused" in capsys.readouterr().out
+
+
+def test_record_write_gives_up_after_about_three_minutes():
+    world = _RecordWorld([])  # 503 forever
+    assert _write(world) is False
+    assert 170 <= world.now - 1000.0 <= run_job.RECORD_RETRY_SECONDS
+    assert world.attempts > 3
+
+
+def test_record_write_stops_at_its_deadline():
+    world = _RecordWorld([])  # 503 forever
+    deadline = 1000.0 + 20.0
+    assert _write(world, deadline=deadline) is False
+    assert world.now <= deadline - run_job.RECORD_DEADLINE_MARGIN_SECONDS
+    assert world.attempts >= 2
