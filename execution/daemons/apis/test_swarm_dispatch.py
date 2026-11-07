@@ -9950,7 +9950,7 @@ _STEWARD_HEADER = "**\U0001f916 Vanellus — Ateles swarm, PR steward**"
 
 def _aggregation_outcomes(
     monkeypatch, *, vanellus_ok, vanellus_stdout, vanellus_stderr="",
-    posted_comments=(),
+    posted_comments=(), vanellus_provider="",
 ):
     calls = []
     d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout=vanellus_stdout, calls=calls)
@@ -9971,6 +9971,7 @@ def _aggregation_outcomes(
             return SkillResult(
                 skill, vanellus_ok, 0 if vanellus_ok else 1, vanellus_stdout,
                 vanellus_stderr, error="" if vanellus_ok else "process failed",
+                provider=vanellus_provider,
             )
         return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
 
@@ -10318,18 +10319,131 @@ def test_no_validated_posted_comment_keeps_stdout_verdict(monkeypatch):
     assert ("route", "request_changes") in calls, calls
 
 
-def test_posted_verdict_with_real_limit_in_stderr_still_defers(monkeypatch):
+def test_posted_verdict_with_limit_words_in_stderr_does_not_defer(monkeypatch):
+    # Changed by ateles task ent_79097958658a23663f0ad586: this test used to
+    # assert a deferral. A successful run that posted its verdict for this head
+    # during this run is a finished review from any provider, so its stderr is
+    # no longer read; the review the detectors would protect already exists.
     stderr = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
     calls, deferrals, auth_pages = _aggregation_outcomes(
         monkeypatch, vanellus_ok=True, vanellus_stdout=_SUMMARY_STDOUT,
-        vanellus_stderr=stderr, posted_comments=[_posted_aggregation("**APPROVE**")],
+        vanellus_stderr=stderr, posted_comments=[_clean_posted_aggregation("**APPROVE**")],
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
+
+
+# `codex exec` prints only its final message to stdout; its stderr holds the
+# prompt and session text, which on a clean exit-0 run can quote "rate limit
+# resets" or a 401. Those words in stderr are not a limit or an auth failure
+# when the run succeeded and either posted its verdict or was a Codex run.
+
+_CODEX_SESSION_STDERR = (
+    "OpenAI Codex v0.1\n--------\nuser\nIf the provider says the rate limit "
+    "resets at 19:30, wait.\n...\nuser\nIf the provider says the rate limit "
+    "resets at 19:30, wait.\n"
+)
+_CODEX_AUTH_STDERR = (
+    "OpenAI Codex v0.1\n--------\nuser\nReport any 401 invalid authentication "
+    "credentials response as an infra failure.\n"
+)
+_CLEAN_ROLL_UP = _STEWARD_HEADER + "\n**APPROVE**\nAll lenses cleared."
+
+
+@pytest.mark.parametrize(
+    "stderr, detector",
+    [
+        (_CODEX_SESSION_STDERR, "detect_session_limit"),
+        (_CODEX_AUTH_STDERR, "detect_auth_failure"),
+    ],
+    ids=["limit_words", "auth_words"],
+)
+@pytest.mark.parametrize("stdout_verdict", [True, False], ids=["stdout_verdict", "summary_stdout"])
+def test_successful_codex_roll_up_with_posted_verdict_ignores_stderr(
+    monkeypatch, stderr, detector, stdout_verdict
+):
+    assert getattr(swarm_dispatch, detector)(stderr)  # would match if read
+    stdout = _CLEAN_ROLL_UP if stdout_verdict else "Posted the roll-up comment."
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=stdout,
+        vanellus_stderr=stderr, vanellus_provider="codex",
+        posted_comments=[_clean_posted_aggregation("**APPROVE**")],
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
+
+
+@pytest.mark.parametrize(
+    "stderr", [_CODEX_SESSION_STDERR, _CODEX_AUTH_STDERR], ids=["limit_words", "auth_words"]
+)
+def test_successful_codex_run_without_posted_verdict_ignores_stderr(monkeypatch, stderr):
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_CLEAN_ROLL_UP,
+        vanellus_stderr=stderr, vanellus_provider="codex",
+    )
+    assert deferrals == [] and auth_pages == []
+    assert ("review", "APPROVE") in calls, calls
+
+
+def test_failed_codex_run_with_real_limit_still_defers(monkeypatch):
+    stderr = "You've hit your usage limit. Usage limit reached, resets at 19:30."
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=False, vanellus_stdout="",
+        vanellus_stderr=stderr, vanellus_provider="codex",
     )
     assert len(deferrals) == 1, deferrals
-    agent, args, _kwargs = deferrals[0]
-    assert agent == "vanellus"
-    assert args == (_SUMMARY_STDOUT, stderr)
+    assert deferrals[0][1] == ("", stderr)
     assert auth_pages == []
     assert not any(kind in {"review", "route", "gate"} for kind, _ in calls)
+
+
+def test_failed_codex_run_with_real_auth_failure_still_pages(monkeypatch):
+    stderr = "API Error: 401 invalid authentication credentials"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=False, vanellus_stdout="",
+        vanellus_stderr=stderr, vanellus_provider="codex",
+    )
+    assert auth_pages == ["vanellus"], auth_pages
+    assert deferrals == []
+
+
+@pytest.mark.parametrize("provider", ["claude", "cursor", ""])
+def test_successful_non_codex_run_with_real_limit_in_stderr_still_defers(
+    monkeypatch, provider
+):
+    stderr = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_CLEAN_ROLL_UP,
+        vanellus_stderr=stderr, vanellus_provider=provider,
+    )
+    assert len(deferrals) == 1, deferrals
+    assert deferrals[0][1] == (_CLEAN_ROLL_UP, stderr)
+    assert auth_pages == []
+
+
+@pytest.mark.parametrize("provider", ["claude", "cursor", ""])
+def test_successful_non_codex_run_with_real_auth_failure_in_stderr_still_pages(
+    monkeypatch, provider
+):
+    stderr = "API Error: 401 invalid authentication credentials"
+    calls, deferrals, auth_pages = _aggregation_outcomes(
+        monkeypatch, vanellus_ok=True, vanellus_stdout=_CLEAN_ROLL_UP,
+        vanellus_stderr=stderr, vanellus_provider=provider,
+    )
+    assert auth_pages == ["vanellus"], auth_pages
+    assert deferrals == []
+
+
+def test_detector_log_names_the_stream_not_its_contents(monkeypatch, caplog):
+    stderr = "You've hit your session limit · resets 7:30pm (Europe/Madrid)"
+    with caplog.at_level("WARNING"):
+        _aggregation_outcomes(
+            monkeypatch, vanellus_ok=True, vanellus_stdout=_CLEAN_ROLL_UP,
+            vanellus_stderr=stderr, vanellus_provider="claude",
+        )
+    messages = [r.getMessage() for r in caplog.records if "detector matched" in r.getMessage()]
+    assert messages and messages[0].endswith("matched on stderr"), messages
+    assert not any("session limit" in m for m in messages), messages
 
 
 @pytest.mark.parametrize(
