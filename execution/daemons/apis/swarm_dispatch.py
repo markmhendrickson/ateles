@@ -124,6 +124,7 @@ from skill_runner import (
 
 from lib.daemon_runtime.checkpoint_posture import PostureOutcome, evaluate_with_posture
 from lib.daemon_runtime import label_gate as _label_gate
+from lib.daemon_runtime import neotoma_transient as _neotoma_transient
 from lib.daemon_runtime.gating import load_policy
 from lib.notify import Notifier, Priority
 from lib import github_app_token as _github_app_token
@@ -148,6 +149,13 @@ DAEMON_NAME = "apis"
 # back with: a task a worker may take carries it (the claimable predicate in
 # docs/foundation/work_model.md#parent-and-child-tasks).
 CORRECTION_ADMISSION_CLASS = "workflow_entering"
+
+# The exact-head ``pr_review`` store carries the full text of every panel
+# review, so one attempt can outlast the 30s every other store gets. Each
+# attempt may take this long; the whole store, retries and pauses included,
+# never takes longer than the total (a panel must not wait without bound).
+PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS = 90.0
+PR_REVIEW_STORE_TOTAL_SECONDS = 240.0
 
 # Parent-issue resolution (ateles#434, ateles#613, ateles#300).
 #
@@ -15979,27 +15987,68 @@ class SwarmDispatcher:
         entities: list[dict],
         idempotency_key: str,
         relationships: list[dict] | None = None,
+        *,
+        retry_transient: bool = False,
     ) -> dict | None:
+        """POST ``entities`` to Neotoma ``/store``; None on any failure.
+
+        Default: one attempt with a 30s time limit, as every caller has always
+        had. ``retry_transient=True`` (the large ``pr_review`` store) uses the
+        shared bounded Neotoma retry instead: timeouts, connection errors, 429
+        and 5xx are retried with the same body and idempotency key, each
+        attempt may take up to ``PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS``,
+        and the whole store is capped at ``PR_REVIEW_STORE_TOTAL_SECONDS``.
+        Any other 4xx fails at once. A 2xx reporting undeclared fields is
+        returned as before, for the caller to refuse.
+        """
         if not self.config.neotoma_token:
             log.warning(f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — store skipped")
             return None
+        try:
+            if not retry_transient:
+                return await self._store_entities_once(
+                    entities, idempotency_key, 30, relationships
+                )
+            return await _neotoma_transient.acall_with_transient_retry(
+                lambda time_limit: self._store_entities_once(
+                    entities, idempotency_key, time_limit, relationships
+                ),
+                label=f"store {idempotency_key}",
+                attempt_timeout=PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS,
+                total_seconds=PR_REVIEW_STORE_TOTAL_SECONDS,
+                retry_status=True,
+            )
+        except Exception as exc:
+            log.error(
+                f"[{DAEMON_NAME}] Neotoma store failed ({idempotency_key}): "
+                f"{_neotoma_transient.describe(exc)}"
+            )
+            return None
+
+    async def _store_entities_once(
+        self,
+        entities: list[dict],
+        idempotency_key: str,
+        time_limit: float,
+        relationships: list[dict] | None = None,
+    ) -> dict:
+        """One Neotoma ``/store`` POST; raises on any failure.
+
+        A named method rather than a nested function so the dispatcher's
+        GitHub-write guard test can allow exactly this Neotoma write by name.
+        ``relationships`` is added to the payload only when given.
+        """
         payload: dict = {"entities": entities, "idempotency_key": idempotency_key}
         if relationships:
             payload["relationships"] = relationships
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"{self.config.neotoma_base_url}/store",
-                    json=payload,
-                    headers={
-                        "Authorization": f"Bearer {self.config.neotoma_token}"
-                    },
-                )
-                resp.raise_for_status()
-                return resp.json() if resp.content else {}
-        except Exception as exc:
-            log.error(f"[{DAEMON_NAME}] Neotoma store failed ({idempotency_key}): {exc}")
-            return None
+        async with httpx.AsyncClient(timeout=time_limit) as client:
+            resp = await client.post(
+                f"{self.config.neotoma_base_url}/store",
+                json=payload,
+                headers={"Authorization": f"Bearer {self.config.neotoma_token}"},
+            )
+            resp.raise_for_status()
+            return resp.json() if resp.content else {}
 
     async def _log_harness_event(self, t: SwarmTrigger) -> None:
         entities = [
@@ -16126,6 +16175,7 @@ class SwarmDispatcher:
                     f"pr-review-{t.repository}-{t.number}-{sha[:12]}-"
                     f"{content_digest(digest_basis)}"
                 ),
+                retry_transient=True,
             )
             expected_lenses = {entity["review_lens"] for entity in entities}
             review_store_confirmed = bool(store_result) and not (
