@@ -111,16 +111,172 @@ async def test_temporary_policy_refusal_then_good_read_dispatches_once(released)
     assert "agent_policy" not in (_task(released).get("blocked_reason") or "")
 
 
+class _Recorder:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, message, priority=None, handler=None, **kwargs):
+        self.sent.append((message, priority))
+
+    def blockers(self):
+        return [m for m, p in self.sent if p == apis.Priority.BLOCKER]
+
+
+@pytest.fixture
+def escalation(released, monkeypatch):
+    """Record checkpoint writes, retirements, status writes and notices."""
+    briefs: list[dict] = []
+    retired: list[str] = []
+    statuses: list[str] = []
+    state = {"brief_id": "ent_cp_exhausted"}
+    notifier = _Recorder()
+
+    def file_fresh(**kwargs):
+        briefs.append(kwargs)
+        return state["brief_id"]
+
+    real_retire = apis.require_fresh_checkpoint_approval
+
+    def retire(checkpoint_id, **kwargs):
+        retired.append(checkpoint_id)
+        return real_retire(checkpoint_id, **kwargs)
+
+    real_set = apis.set_task_status
+
+    def set_status(task_id, status, **kwargs):
+        statuses.append(status.value if hasattr(status, "value") else str(status))
+        return real_set(task_id, status, **kwargs)
+
+    monkeypatch.setattr(apis, "_file_fresh_checkpoint", file_fresh)
+    monkeypatch.setattr(apis, "require_fresh_checkpoint_approval", retire)
+    monkeypatch.setattr(apis, "set_task_status", set_status)
+    monkeypatch.setattr(apis.Notifier, "from_neotoma", lambda: notifier)
+    monkeypatch.setattr(apis, "TelegramNotifier", lambda *a, **k: notifier, raising=False)
+    return dict(released, briefs=briefs, retired=retired, statuses=statuses,
+                state=state, notifier=notifier)
+
+
+def _assert_rounds_exhausted(esc):
+    task = _task(esc)
+    assert task["status"] == "awaiting_approval"
+    assert task["blocked_reason"].startswith("rounds_exhausted")
+    assert len(esc["briefs"]) == 1
+    assert esc["briefs"][0]["gate_reason"] == "rounds_exhausted"
+    assert esc["briefs"][0]["context_label"] == "rounds_exhausted"
+    assert esc["retired"] == [esc["brief_id"]]
+    assert "failed" not in esc["statuses"]
+
+
 @pytest.mark.asyncio
-async def test_three_temporary_refusals_end_as_today_with_retry_notice(released):
-    released["script"].extend(_refusal("timeout") for _ in range(4))
-    await _release(released)
-    # The first dispatch plus three retries, then FAILED as before.
-    assert len(released["spawned"]) == 4
-    task = _task(released)
-    assert task["status"] == "failed"
-    assert "Retried 3 time(s)" in task["blocked_reason"]
-    assert "agent_policy unavailable" in task["blocked_reason"]
+async def test_three_temporary_refusals_escalate_rounds_exhausted(escalation):
+    escalation["script"].extend(_refusal("timeout") for _ in range(4))
+    await _release(escalation)
+    # The first dispatch plus three retries, then ONE rounds_exhausted
+    # checkpoint. Red before the change: status 'failed', no checkpoint.
+    assert len(escalation["spawned"]) == 4
+    _assert_rounds_exhausted(escalation)
+    reason = _task(escalation)["blocked_reason"]
+    assert "Retried 3 time(s)" in reason
+    assert "agent_policy unavailable" in reason
+
+
+@pytest.mark.asyncio
+async def test_exhausted_retry_checkpoint_unwritable_is_not_failed(escalation):
+    escalation["state"]["brief_id"] = None
+    escalation["script"].extend(_refusal("timeout") for _ in range(4))
+    await _release(escalation)
+    assert len(escalation["spawned"]) == 4
+    assert "failed" not in escalation["statuses"]
+    assert _task(escalation)["status"] != "failed"
+    assert escalation["retired"] == []
+    assert any("rounds_exhausted" in m for m in escalation["notifier"].blockers())
+
+
+@pytest.mark.asyncio
+async def test_no_baseline_escalates_rounds_exhausted(escalation, monkeypatch):
+    escalation["script"].append(_refusal("timeout"))
+    monkeypatch.setattr(apis, "_released_retry_fingerprint",
+                        lambda task_id, checkpoint_id, **kwargs: None)
+    await _release(escalation)
+    assert len(escalation["spawned"]) == 1
+    _assert_rounds_exhausted(escalation)
+
+
+def _change_during_wait(esc, monkeypatch, change):
+    real = apis._released_retry_fingerprint
+    calls = []
+
+    def fingerprint(task_id, checkpoint_id, **kwargs):
+        calls.append(task_id)
+        if len(calls) == 2:  # the read after the wait
+            change()
+        return real(task_id, checkpoint_id, **kwargs)
+
+    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_policy_revision_changed_during_wait_no_spawn(escalation, monkeypatch):
+    escalation["script"].append(_refusal("timeout"))
+    real = apis.execution_policy_revision
+    changed = []
+
+    def revision(policy):
+        return "changed-revision" if changed else real(policy)
+
+    monkeypatch.setattr(apis, "execution_policy_revision", revision)
+    calls = _change_during_wait(escalation, monkeypatch, lambda: changed.append(True))
+    await _release(escalation)
+    # Red before the change: the retry spawned under the stale approval.
+    assert len(calls) == 2
+    assert len(escalation["spawned"]) == 1
+    assert any("no longer authorizes" in m for m in escalation["notifier"].blockers())
+
+
+@pytest.mark.asyncio
+async def test_authorization_absent_during_wait_no_spawn(escalation, monkeypatch):
+    escalation["script"].append(_refusal("timeout"))
+    real = apis.read_authenticated_checkpoint_authorization
+    gone = []
+    monkeypatch.setattr(apis, "read_authenticated_checkpoint_authorization",
+                        lambda cid, rec: None if gone else real(cid, rec))
+    calls = _change_during_wait(escalation, monkeypatch, lambda: gone.append(True))
+    await _release(escalation)
+    assert len(calls) == 2
+    assert len(escalation["spawned"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_action_type_changed_during_wait_no_spawn(escalation, monkeypatch):
+    escalation["script"].append(_refusal("timeout"))
+    real = apis._resolve_gate_action_type
+    changed = []
+
+    def resolve(skill, snapshot, policy):
+        if changed:
+            return SimpleNamespace(value="send_external_email")
+        return real(skill, snapshot, policy)
+
+    monkeypatch.setattr(apis, "_resolve_gate_action_type", resolve)
+    calls = _change_during_wait(escalation, monkeypatch, lambda: changed.append(True))
+    await _release(escalation)
+    assert len(calls) == 2
+    assert len(escalation["spawned"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_gate_decision_inconsistent_during_wait_no_spawn(escalation, monkeypatch):
+    escalation["script"].append(_refusal("timeout"))
+    changed = []
+    real = apis._decision_consistent_with_approval
+    monkeypatch.setattr(
+        apis, "_decision_consistent_with_approval",
+        lambda decision, **kw: False if changed else real(decision, **kw))
+    calls = _change_during_wait(escalation, monkeypatch, lambda: changed.append(True))
+    await _release(escalation)
+    assert len(calls) == 2
+    assert len(escalation["spawned"]) == 1
 
 
 @pytest.mark.asyncio
@@ -271,7 +427,9 @@ async def test_unreadable_prelaunch_state_launches_but_refusal_is_not_retried(
     await _release(released)
     assert len(calls) == 1  # the pre-launch read only; no retry was scheduled
     assert len(released["spawned"]) == 1
-    assert _task(released)["status"] == "failed"
+    # No baseline: escalated with rounds_exhausted, never FAILED.
+    assert _task(released)["status"] == "awaiting_approval"
+    assert _task(released)["blocked_reason"].startswith("rounds_exhausted")
     assert "Retried" not in _task(released)["blocked_reason"]
 
 
@@ -369,7 +527,9 @@ async def test_unauthorized_checkpoint_gets_no_retry_and_no_spawn(
     # Unreadable: no retry was scheduled, so the fingerprint ran once.
     assert results == [None]
     assert len(released["spawned"]) == 1
-    assert _task(released)["status"] == "failed"
+    # No baseline: escalated with rounds_exhausted, never FAILED.
+    assert _task(released)["status"] == "awaiting_approval"
+    assert _task(released)["blocked_reason"].startswith("rounds_exhausted")
     assert "Retried" not in _task(released)["blocked_reason"]
 
 
@@ -532,5 +692,26 @@ async def test_executing_write_4xx_is_not_retried(joined, no_wait, monkeypatch):
     await _release_correction(joined)
     assert seen == []
     assert _executing_writes(joined) == []
+    assert joined["calls"] == []
+    assert not delivery._delivery_ledger().delivery_receipts()
+
+
+@pytest.mark.asyncio
+async def test_executing_write_exhausted_escalates_one_checkpoint(joined, no_wait, monkeypatch):
+    briefs = []
+    monkeypatch.setattr(apis, "_escalate_released_retry_exhausted",
+                        lambda **kwargs: briefs.append(kwargs) or True)
+
+    def before(write):
+        if write["field"] == "status" and write["value"] == "executing":
+            raise httpx.ConnectTimeout("slow")
+        return None
+
+    joined["before_write"] = before
+    await _release_correction(joined)
+    # The first pass and three retries all timed out: one rounds_exhausted
+    # escalation, nothing spawned. Red before the change: briefs == [].
+    assert len(briefs) == 1
+    assert "Retried 3 time(s)" in briefs[0]["reason"]
     assert joined["calls"] == []
     assert not delivery._delivery_ledger().delivery_receipts()

@@ -2177,7 +2177,10 @@ def _released_retry_authorized(task_id: str, task: dict, checkpoint_id: str,
     """The checks ``handle_checkpoint_brief`` makes before releasing an approved
     checkpoint, made again for a retry: a versioned checkpoint, still approved,
     naming this task, with the checkpoint and task owned by the same verified
-    tenant. Anything absent or different is not authorized."""
+    tenant, an authenticated authorization for this task and tenant, a loaded
+    policy whose entity and revision the authorization names, the same action
+    type, gate action and blast radius, and a gate decision still consistent
+    with the approval. Anything absent or different is not authorized."""
     version = checkpoint.get("entity_version")
     if not isinstance(version, str) or not version:
         return False
@@ -2187,7 +2190,57 @@ def _released_retry_authorized(task_id: str, task: dict, checkpoint_id: str,
         return False
     brief_user_id = read_verified_entity_owner(checkpoint_id, checkpoint)
     task_user_id = read_verified_entity_owner(task_id, task)
-    return bool(brief_user_id) and bool(task_user_id) and brief_user_id == task_user_id
+    if not (bool(brief_user_id) and bool(task_user_id) and brief_user_id == task_user_id):
+        return False
+    # The authenticated approval and the live policy must still release this
+    # task, as ``handle_checkpoint_brief`` requires. The task revision and
+    # observation fields are not compared: the task's own status writes after
+    # release change them, and the fingerprint covers changes during the wait.
+    authorization = read_authenticated_checkpoint_authorization(checkpoint_id, checkpoint)
+    if not isinstance(authorization, dict):
+        return False
+    if authorization.get("task_entity_id") != task_id:
+        return False
+    if authorization.get("user_id") != brief_user_id:
+        return False
+    task_snapshot = _record_snapshot(task)
+    if task_snapshot is None:
+        return False
+    skill = _gate_skill(task_snapshot)
+    policy = resolve_policy_for_agent(skill)
+    if not policy.loaded:
+        return False
+    action_type = _resolve_gate_action_type(skill or "", task_snapshot, policy).value
+    if action_type == "operator_only":
+        return False
+    if str(authorization.get("action_type") or "").strip().lower() != action_type:
+        return False
+    if authorization.get("policy_entity_id") != policy.entity_id:
+        return False
+    if authorization.get("policy_revision") != execution_policy_revision(policy):
+        return False
+    gate_action = str(checkpoint_snapshot.get("gate_action", "")).strip().lower()
+    blast_radius = str(checkpoint_snapshot.get("blast_radius", "")).strip().lower()
+    if authorization.get("gate_action") != gate_action:
+        return False
+    if authorization.get("blast_radius") != blast_radius:
+        return False
+    confidence, unscored = _gate_confidence(
+        task_snapshot,
+        skill=skill,
+        action_type=action_type,
+        policy=policy,
+        bound_confidence=_bound_hold_confidence(authorization),
+    )
+    decision = evaluate_gate(
+        confidence=confidence,
+        action_type=action_type,
+        policy=policy,
+        successful_recurrences=_successful_recurrences(task_snapshot),
+        confidence_unscored=unscored,
+    )
+    return _decision_consistent_with_approval(
+        decision, gate_action=gate_action, blast_radius=blast_radius)
 
 
 def _released_retry_fingerprint(task_id: str, checkpoint_id: str, *,
@@ -2273,7 +2326,8 @@ def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int
                              baseline: tuple | None = None) -> bool:
     """Schedule ``resume(attempt + 1)`` after the next delay, off the event
     stream. False when the attempts are spent or the state to compare against
-    cannot be read, so the caller ends as it did before retries existed.
+    cannot be read; the caller then escalates with one ``rounds_exhausted``
+    checkpoint (``_escalate_released_retry_exhausted``) rather than failing.
 
     A full (task and checkpoint) retry needs ``baseline``: the fingerprint the
     caller read BEFORE the attempt that failed, so a change made during that
@@ -2303,7 +2357,8 @@ def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int
                         "not retrying, left as found", DAEMON_NAME, entity_id, attempt + 1)
             notifier.send(
                 f"Released task {entity_id} was waiting to retry ({why}) but its state "
-                "could not be read back; nothing was started. Reconcile it.",
+                "could not be read back or no longer authorizes the retry; nothing "
+                "was started. Reconcile it.",
                 priority=Priority.BLOCKER, handler=DAEMON_NAME)
             return
         if current != baseline:
@@ -2324,6 +2379,67 @@ def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int
     _background_dispatch_tasks.add(task)
     task.add_done_callback(_background_dispatch_done)
     return True
+
+
+def _escalate_released_retry_exhausted(*, entity_id: str, checkpoint_id: str,
+                                       reason: str, notifier: Notifier) -> bool:
+    """A released retry whose temporary Neotoma failure outlasted its attempts
+    (or had no baseline to retry against) escalates with ONE checkpoint,
+    reason ``rounds_exhausted`` (failure_posture.md rules 5 and 8): the task
+    goes to AWAITING_APPROVAL and a replacement checkpoint retires the prior
+    approval. Nothing was started, so FAILED would be false. True only when
+    the replacement checkpoint was written; any unreadable record, failed
+    write or exception returns False and writes nothing further (never
+    FAILED); the caller then announces the exhaustion on the notifier."""
+    try:
+        snapshot = _record_snapshot(fetch_task_record(entity_id))
+        if snapshot is None:
+            return False
+        from_status = snapshot.get("status")
+        held_reason = f"rounds_exhausted: {reason}"
+        if not set_task_status(
+            entity_id, TaskStatus.AWAITING_APPROVAL, handler=DAEMON_NAME,
+            from_status=from_status, reason=held_reason,
+            key_suffix="rounds_exhausted",
+        ):
+            return False
+        # Read the hold back. ``_release_lifecycle_proven`` also requires an
+        # empty blocked_reason (it proves a release), which this hold never
+        # has, so the same read-back is made against the reason just written.
+        written = fetch_task_snapshot(entity_id)
+        if not (
+            isinstance(written, dict)
+            and normalize_status(written.get("status")) == TaskStatus.AWAITING_APPROVAL.value
+            and written.get("blocked_reason") == held_reason
+        ):
+            return False
+        fresh = _record_snapshot(fetch_task_record(entity_id))
+        if fresh is None:
+            return False
+        brief_id = _require_fresh_release_authority(
+            checkpoint_id,
+            task_id=entity_id,
+            task_snapshot=fresh,
+            notifier=notifier,
+            reason="rounds_exhausted",
+            gate_reason="rounds_exhausted",
+            context_label="rounds_exhausted",
+            plan_summary=(
+                "A temporary Neotoma failure outlasted its retries, so the approved "
+                "work was not started. Nothing was started; approving this checkpoint "
+                f"tries again. {reason.strip()}"
+            ),
+            notice=(
+                f"Task {entity_id}: a temporary Neotoma failure outlasted its retries "
+                "(rounds_exhausted); nothing was started. Approving the new checkpoint "
+                f"tries again. {reason.strip()}"
+            ),
+        )
+        return bool(brief_id)
+    except Exception:  # noqa: BLE001 — never FAILED; the caller announces it
+        log.exception("[%s] rounds_exhausted escalation for %s failed",
+                      DAEMON_NAME, entity_id)
+        return False
 
 
 async def dispatch_task(
@@ -3762,7 +3878,32 @@ async def dispatch_task(
                         stage=f"retry-{retries_used + 1}",
                     )
                     return
+                # Attempts spent, or no baseline: escalate, never FAILED —
+                # nothing was started (failure_posture.md rules 5 and 8).
                 reason += _released_retry_note(retries_used, why)
+                escalated = _escalate_released_retry_exhausted(
+                    entity_id=entity_id, checkpoint_id=release_key,
+                    reason=reason, notifier=notifier,
+                )
+                _run_stage(
+                    "assistant",
+                    f"{skill} not started (trigger={trigger}): {reason} — rounds_exhausted",
+                    stage="rounds_exhausted",
+                )
+                if run_session:
+                    update_run_session_status(run_session, status="failed")
+                if not escalated:
+                    notifier.send(
+                        f"{skill} on {entity_id}: rounds_exhausted could not be recorded "
+                        f"for this task; nothing was started. {reason}",
+                        priority=Priority.BLOCKER,
+                        handler=DAEMON_NAME,
+                    )
+                job.escalated(
+                    f"task {entity_id} → {skill} rounds_exhausted"
+                    + ("" if escalated else " (not recorded)")
+                )
+                return
             _run_stage(
                 "assistant",
                 f"{skill} failed (trigger={trigger}): {reason}",
@@ -3817,6 +3958,15 @@ async def dispatch_task(
                     )
                 log.warning("[%s] correction %s executing lifecycle handoff could not be verified — not spawning",
                             DAEMON_NAME, entity_id)
+                if not retrying and retry_ok and outcome.get("transient"):
+                    if _escalate_released_retry_exhausted(
+                        entity_id=entity_id, checkpoint_id=release_key,
+                        reason=why + _released_retry_note(retries_used, why),
+                        notifier=notifier,
+                    ):
+                        job.escalated(
+                            f"task {entity_id} executing handoff rounds_exhausted")
+                        return False
                 if retrying:
                     notice = (f"Approved correction {entity_id} lifecycle handoff could not be "
                               "verified; this attempt was not started. Apis will retry "
@@ -4161,11 +4311,15 @@ def _file_fresh_checkpoint(
     plan_summary: str | None = None,
     reason: str = "task authorization context changed; fresh approval required",
     context_label: str = "fresh",
+    gate_reason: str | None = None,
+    notice: str | None = None,
 ) -> str | None:
     """Create a replacement checkpoint under the current live policy.
 
     ``notifier=None`` files it silently (the bulk re-issue path sends one
-    summary instead of one page per task).
+    summary instead of one page per task). ``gate_reason``, when set, becomes
+    the decision's reason (e.g. ``rounds_exhausted``); ``notice``, when set,
+    is the notifier text.
     """
     skill, action_type, policy, decision = _task_gate_context(task_snapshot)
     if decision.action == GateAction.AUTO_EXECUTE:
@@ -4178,6 +4332,8 @@ def _file_fresh_checkpoint(
             reason=reason,
             confidence_unscored=decision.confidence_unscored,
         )
+    if gate_reason is not None:
+        decision = dataclasses.replace(decision, reason=gate_reason)
     task_record = fetch_task_record(task_id)
     tenant_id = str(fetch_entity_user_id(task_id) or "").strip()
     if task_record is None or not tenant_id:
@@ -4211,7 +4367,9 @@ def _file_fresh_checkpoint(
     )
     if brief_id and notifier is not None:
         notifier.send(
-            f"Fresh approval required for changed task {task_id}\n  brief={brief_id}",
+            notice
+            if notice is not None
+            else f"Fresh approval required for changed task {task_id}\n  brief={brief_id}",
             priority=Priority.BLOCKER,
             handler=DAEMON_NAME,
         )
@@ -4225,13 +4383,24 @@ def _require_fresh_release_authority(
     task_snapshot: dict,
     notifier: Notifier,
     reason: str,
+    gate_reason: str | None = None,
+    plan_summary: str | None = None,
+    context_label: str | None = None,
+    notice: str | None = None,
 ) -> str | None:
     """Create replacement authority before retiring the stale approval."""
+    extra: dict = {}
+    if context_label is not None:
+        extra["context_label"] = context_label
     replacement_id = _file_fresh_checkpoint(
         prior_checkpoint_id=checkpoint_id,
         task_id=task_id,
         task_snapshot=task_snapshot,
         notifier=notifier,
+        plan_summary=plan_summary,
+        gate_reason=gate_reason,
+        notice=notice,
+        **extra,
     )
     if replacement_id == checkpoint_id:
         # Never retire the brief that is itself the replacement: that would
