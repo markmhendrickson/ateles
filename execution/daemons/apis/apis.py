@@ -2230,6 +2230,26 @@ def _released_retry_fingerprint(task_id: str, checkpoint_id: str, *,
         return None
 
 
+def _released_retry_task_dispatchable(task_id: str) -> bool:
+    """False when the task now stands where ``dispatch_task``'s terminal guard
+    would refuse it (``is_terminal``, or VERIFIED), or is held (BLOCKED), or
+    cannot be read. A retry resumes past that guard, so it checks the same
+    states again just before resuming; the fingerprint comparison alone does
+    not reject a state the baseline itself already held."""
+    try:
+        snapshot = _record_snapshot(fetch_task_record(task_id))
+        if snapshot is None:
+            return False
+        status = snapshot.get("status")
+        return not (
+            is_terminal(status)
+            or normalize_status(status) in (TaskStatus.VERIFIED.value,
+                                            TaskStatus.BLOCKED.value)
+        )
+    except Exception:  # noqa: BLE001 — unreadable is never dispatchable
+        return False
+
+
 def _released_retry_note(retries_used: int, why: str) -> str:
     if not retries_used:
         return ""
@@ -2239,14 +2259,22 @@ def _released_retry_note(retries_used: int, why: str) -> str:
 
 def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int,
                              why: str, notifier: Notifier, resume,
-                             checkpoint_only: bool = False) -> bool:
+                             checkpoint_only: bool = False,
+                             baseline: tuple | None = None) -> bool:
     """Schedule ``resume(attempt + 1)`` after the next delay, off the event
     stream. False when the attempts are spent or the state to compare against
-    cannot be read, so the caller ends as it did before retries existed."""
+    cannot be read, so the caller ends as it did before retries existed.
+
+    A full (task and checkpoint) retry needs ``baseline``: the fingerprint the
+    caller read BEFORE the attempt that failed, so a change made during that
+    attempt is a difference rather than the new baseline. Without one there
+    is no retry. ``checkpoint_only`` reads its baseline here, since its resume
+    reads the task back itself."""
     if attempt >= len(_RELEASED_RETRY_DELAYS):
         return False
-    baseline = _released_retry_fingerprint(entity_id, checkpoint_id,
-                                           checkpoint_only=checkpoint_only)
+    if checkpoint_only and baseline is None:
+        baseline = _released_retry_fingerprint(entity_id, checkpoint_id,
+                                               checkpoint_only=True)
     if baseline is None:
         return False
     delay = _RELEASED_RETRY_DELAYS[attempt]
@@ -2271,6 +2299,11 @@ def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int
         if current != baseline:
             log.info("[%s] released task %s changed during the retry wait — "
                      "not retrying, left as found", DAEMON_NAME, entity_id)
+            return
+        if not _released_retry_task_dispatchable(entity_id):
+            log.info("[%s] released task %s is terminal, held or unreadable before "
+                     "retry %d — not retrying, left as found", DAEMON_NAME, entity_id,
+                     attempt + 1)
             return
         log.info("[%s] released task %s: retry %d/%d starting", DAEMON_NAME,
                  entity_id, attempt + 1, len(_RELEASED_RETRY_DELAYS))
@@ -3091,6 +3124,11 @@ async def dispatch_task(
                 dispatch_snapshot = json.loads(correction_lifecycle.snapshot_json)
                 lifecycle_binding["_lifecycle_version"] = correction_lifecycle.version
                 lifecycle_binding["_lifecycle_provenance"] = correction_lifecycle
+            # What the approval authorized, read before the launch: a retry of
+            # a refusal compares against this, never against a state the
+            # launch itself left behind. None means no retry, not no launch.
+            prelaunch = (_released_retry_fingerprint(entity_id, release_key)
+                         if retry_ok else None)
             result = await _spawn_harness_skill(
                 skill,
                 entity_id,
@@ -3703,7 +3741,7 @@ async def dispatch_task(
                 if _schedule_released_retry(
                     entity_id=entity_id, checkpoint_id=release_key,
                     attempt=retries_used, why=why, notifier=notifier,
-                    resume=_finish_dispatch,
+                    resume=_finish_dispatch, baseline=prelaunch,
                 ):
                     _run_stage(
                         "assistant",

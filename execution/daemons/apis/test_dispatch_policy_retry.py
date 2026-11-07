@@ -155,6 +155,72 @@ async def test_state_changed_during_wait_stops_retry_without_spawn(released, mon
     assert _task(released)["blocked_reason"] == "held by a person"
 
 
+@pytest.mark.asyncio
+async def test_task_changed_during_launch_is_not_retried(released, monkeypatch):
+    # Red against the old baseline (taken AFTER the refusal came back), this
+    # failed with
+    #   assert 2 == 1  (len(released["spawned"]))
+    # the change made during the launch was in both the baseline and the read
+    # after the wait, so the two agreed and the retry spawned the agent again.
+    spawn = apis._spawn_harness_skill
+
+    async def changing_spawn(*args, **kwargs):
+        if not released["spawned"]:
+            task = released["records"][released["task_id"]]
+            task["snapshot"]["notes"] = "changed while the launch ran"
+            task["entity_version"] = "task-v-changed"
+            released["script"].append(_refusal("timeout"))
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", changing_spawn)
+    await _release(released)
+    assert len(released["spawned"]) == 1
+    assert _task(released)["notes"] == "changed while the launch ran"
+    assert _task(released)["status"] != "done"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["done", "completed", "cancelled", "verified", "blocked"])
+async def test_task_terminal_or_held_during_wait_is_not_retried(
+        released, monkeypatch, status):
+    released["script"].append(_refusal("timeout"))
+    real = apis._released_retry_fingerprint
+    calls = []
+
+    def fingerprint(task_id, checkpoint_id, **kwargs):
+        result = real(task_id, checkpoint_id, **kwargs)
+        calls.append(result)
+        if len(calls) == 2:
+            # Lands after the read that follows the wait, so the fingerprints
+            # agree; only the status guard before resuming can see it.
+            _task(released)["status"] = status
+        return result
+
+    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    await _release(released)
+    assert len(calls) == 2 and calls[0] == calls[1] and calls[0] is not None
+    assert len(released["spawned"]) == 1
+    assert _task(released)["status"] == status
+
+
+@pytest.mark.asyncio
+async def test_unreadable_prelaunch_state_launches_but_refusal_is_not_retried(
+        released, monkeypatch):
+    released["script"].append(_refusal("timeout"))
+    calls = []
+
+    def fingerprint(task_id, checkpoint_id, **kwargs):
+        calls.append(task_id)
+        return None
+
+    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    await _release(released)
+    assert len(calls) == 1  # the pre-launch read only; no retry was scheduled
+    assert len(released["spawned"]) == 1
+    assert _task(released)["status"] == "failed"
+    assert "Retried" not in _task(released)["blocked_reason"]
+
+
 def _change_checkpoint_during_wait(released, monkeypatch, change):
     """Apply ``change`` to the checkpoint record just before the read that
     follows the retry wait."""
@@ -368,6 +434,49 @@ async def test_executing_write_changed_by_another_writer_stops_with_no_spawn(joi
 
     joined["before_write"] = before
     await _release_correction(joined)
+    assert _executing_writes(joined) == []
+    assert joined["calls"] == []
+    assert not delivery._delivery_ledger().delivery_receipts()
+
+
+def _status_error(code: int, write: dict) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://inert.invalid/correct")
+    response = httpx.Response(code, json={"error": "server"}, request=request)
+    return httpx.HTTPStatusError(f"{code}", request=request, response=response)
+
+
+@pytest.mark.asyncio
+async def test_executing_write_5xx_is_retried_once_then_spawns_once(joined, no_wait, monkeypatch):
+    failed = []
+
+    def before(write):
+        if write["field"] == "status" and write["value"] == "executing" and not failed:
+            failed.append(True)
+            raise _status_error(503, write)
+        return None
+
+    joined["before_write"] = before
+    seen = _watch_retry_start(joined, monkeypatch)
+    await _release_correction(joined)
+    # FieldWrite.transient counts a 5xx as temporary: one retry, which read the
+    # task back before anything spawned, then exactly one spawn.
+    assert failed
+    assert len(seen) == 1 and seen[0]["calls"] == []
+    assert len(_executing_writes(joined)) == 1
+    assert joined["calls"] == ["owner", "job"]
+
+
+@pytest.mark.asyncio
+async def test_executing_write_4xx_is_not_retried(joined, no_wait, monkeypatch):
+    def before(write):
+        if write["field"] == "status" and write["value"] == "executing":
+            raise _status_error(400, write)
+        return None
+
+    joined["before_write"] = before
+    seen = _watch_retry_start(joined, monkeypatch)
+    await _release_correction(joined)
+    assert seen == []
     assert _executing_writes(joined) == []
     assert joined["calls"] == []
     assert not delivery._delivery_ledger().delivery_receipts()
