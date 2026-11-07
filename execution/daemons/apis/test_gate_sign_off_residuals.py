@@ -51,13 +51,16 @@ def _readable_fly_ledger(_fly_runner_off_and_isolated):
     """Give a fix-round test a readable Fly ledger with no receipts.
 
     A fix round reads the ledger to tell whether the PR came from Fly, and a
-    missing ledger holds the round (origin unknown). Such a test exercises
+    missing ledger holds the round (origin unknown), and so does a missing
+    audit file. Such a test exercises
     the local round, so the PR must be one a readable ledger does not name."""
     import build_delivery
+    import fly_delivery_receipt
 
     ledger = build_delivery._delivery_ledger()
     with ledger._locked():
         ledger._save(ledger._load())
+    fly_delivery_receipt.audit_path(ledger).write_text("")
 
 
 def _run(coro):
