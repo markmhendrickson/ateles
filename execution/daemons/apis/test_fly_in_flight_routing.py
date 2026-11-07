@@ -265,3 +265,42 @@ def test_issue_keyed_run_is_missed_after_repository_change(real_dispatch):
     assert apis._fly_run_in_flight(_snapshot(issue_number=42), TASK) is True
     moved = _snapshot(issue_number=42, repo="markmhendrickson/other-repo")
     assert apis._fly_run_in_flight(moved, TASK) is False
+
+
+# ── Another task's run on the same key ──────────────────────────────────────
+# Two cases share one delivery key and the check must tell them apart. (1) The
+# run in flight belongs to ANOTHER task that holds this task's issue in the
+# build registry (a correction holding its source issue): this task is
+# independent work, so it must reach the existing deferral path, which records
+# the deferral on the task so it resumes when that run ends, and spawns
+# nothing. Before this, the in-flight check returned first, no deferral was
+# written and the source work never resumed. (2) The run is this task's own:
+# nothing is written and nothing is spawned, as before. Neither case may start
+# a second run on the key.
+
+def test_other_tasks_run_defers_and_own_run_writes_nothing(real_dispatch, monkeypatch):
+    ledger, writes, spawns, _ = real_dispatch
+    monkeypatch.setattr(apis, "_stored_tags", lambda snapshot: [])
+    deferred: list = []
+
+    async def _record(entity_id, snapshot, claim, notifier):
+        deferred.append((entity_id, claim.holder))
+        return type("Outcome", (), {"sweep_owns_it": False})()
+
+    monkeypatch.setattr(apis, "_record_deferral", _record)
+    key = build_delivery.fly_delivery_key(REPO, 42, TASK)
+    assert fly_runner.FlyLedger(ledger).reserve_delivery(
+        key, {"status": "launching", "branch": "b", "run_id": "", "token": "x"})
+    task = _snapshot(status="pending", issue_number=42, assigned_to="cicada",
+                     action_type="open_or_merge_pr", confidence=0.95)
+    assert apis._fly_run_in_flight(task, TASK) is True
+
+    with build_delivery.claim_build(REPO, 42, "task:ent_other_task"):
+        asyncio.run(apis.dispatch_task(TASK, task, "created", _Notifier()))
+    assert deferred == [(TASK, "task:ent_other_task")]
+    assert writes == [] and spawns == []
+
+    deferred.clear()
+    with build_delivery.claim_build(REPO, 42, f"task:{TASK}"):
+        asyncio.run(apis.dispatch_task(TASK, task, "created", _Notifier()))
+    assert deferred == [] and writes == [] and spawns == []
