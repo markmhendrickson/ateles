@@ -2592,6 +2592,14 @@ def test_no_other_status_gets_the_undelivered_exception(monkeypatch, status):
     assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
 
 
+def test_an_undelivered_receipt_missing_its_commit_field_is_not_superseded(monkeypatch):
+    # A missing field is unknown evidence, not a recorded "no commit".
+    entry = _undelivered_receipt()
+    entry.pop("commit")
+    _use_ledger(monkeypatch, entry)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
 def test_an_undelivered_receipt_that_records_a_commit_is_not_superseded(monkeypatch):
     entry = _undelivered_receipt(commit="b" * 40)
     _use_ledger(monkeypatch, entry)

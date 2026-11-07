@@ -1071,8 +1071,8 @@ def _undelivered_correction_settled(target: "ExistingPRTarget", entry: dict, adm
     read failure, or a run that cannot be named, refuses."""
     import fly_runner
 
-    if entry.get("commit") not in (None, ""):
-        return False
+    if "commit" not in entry or entry["commit"] not in (None, ""):
+        return False  # a missing field is unknown evidence, not a recorded "no commit"
     if not (isinstance(target.head_sha, str) and _FULL_SHA_RE.fullmatch(target.head_sha)
             and admitted.get("head_sha") == target.head_sha
             and str(admitted.get("pr_number")) == str(target.number)
