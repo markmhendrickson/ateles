@@ -46,6 +46,23 @@ EXAMPLE_POLICY = EXAMPLE_DIR / "action-policy.json"
 EXAMPLE_BINDING = EXAMPLE_DIR / "vendor-binding.json"
 
 
+@pytest.fixture(autouse=True)
+def _readable_fly_ledger(_fly_runner_off_and_isolated):
+    """Give this file's tests a readable Fly ledger with no receipts.
+
+    A fix round reads the ledger to tell whether the PR came from Fly, and a
+    missing ledger holds the round (origin unknown), and so does a missing
+    audit file. These tests exercise
+    the local round, so the PR must be one a readable ledger does not name."""
+    import build_delivery
+    import fly_delivery_receipt
+
+    ledger = build_delivery._delivery_ledger()
+    with ledger._locked():
+        ledger._save(ledger._load())
+    fly_delivery_receipt.audit_path(ledger).write_text("")
+
+
 class _World:
     """The facts `SwarmDispatcher` measures about a PR, settable per test."""
 
