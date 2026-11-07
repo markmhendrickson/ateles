@@ -234,6 +234,10 @@ def _notifier(tmp_path, rubric, sent):
     n = Notifier(rubric=rubric)
     n._digest_path = tmp_path / "digest.json"
     n._dedupe_path = tmp_path / "dedupe.json"
+    # Held items are only handed to _deliver when a route exists; stand in a
+    # truthy Apprise, and keep email off regardless of the process env.
+    n._apprise = object()
+    n._email_primary = False
     n._deliver = lambda m, force=False, email_eligible=True: (
         sent.append(m),
         True,
@@ -267,7 +271,7 @@ def test_failed_digest_delivery_keeps_items_queued(tmp_path):
     n.send("held escalation", Priority.OPERATOR_DECISION, handler="apis")
     assert len(n._digest_queue) == 1
 
-    n._deliver = lambda m, force=False: False  # transport down
+    n._deliver = lambda m, force=False, email_eligible=True: False  # transport down
     assert n.flush_digest() is False
     # Must NOT be dropped on a failed send.
     assert len(n._digest_queue) == 1
@@ -623,3 +627,323 @@ def test_email_eligible_default_true_is_unchanged_behaviour(monkeypatch):
     ok = n.send("routine blocker", priority=Priority.BLOCKER, handler="apis")
     assert ok is True
     assert email_calls == ["[apis] routine blocker"]
+
+
+# ── held notices go out only by a route the raising send allowed ────────────
+#
+# Incident shape: Apis (no transport) held operator notices overnight in the
+# shared queue; the first routine INFO from an email-armed daemon after the
+# silence window drained the whole queue as one email per notice (55 and 68
+# emails on two mornings). These tests use the real _deliver/_deliver_email
+# with only subprocess.run (gws) and, where stated, Apprise faked.
+
+import json  # noqa: E402
+import os  # noqa: E402
+import logging  # noqa: E402
+
+from lib.notify import held_view  # noqa: E402
+
+
+class _GwsRuns:
+    """Stand-in for subprocess.run that records gws invocations."""
+
+    def __init__(self, returncode=0, on_run=None):
+        self.cmds = []
+        self.returncode = returncode
+        self.on_run = on_run
+
+    def __call__(self, cmd, **kwargs):
+        self.cmds.append(cmd)
+        if self.on_run:
+            self.on_run(cmd)
+
+        class _P:
+            stderr = ""
+
+        p = _P()
+        p.returncode = self.returncode
+        return p
+
+    def bodies(self):
+        return [c[c.index("--body") + 1] for c in self.cmds]
+
+
+def _daemon(tmp_path, *, email, silent, now=1_000_000.0, apprise=None):
+    """A Notifier on a private queue dir. ``silent`` pins the silence window
+    regardless of wall-clock time."""
+    n = Notifier(rubric=NO_SILENCE)
+    n._digest_path = tmp_path / "digest.json"
+    n._dedupe_path = tmp_path / "dedupe.json"
+    n._email_primary = email
+    n._notify_to = "alerts@test" if email else ""
+    n._swarm_email = ""
+    n._apprise = apprise
+    n._in_silence_window = lambda: silent
+    # The 08:30/20:00 release windows are clock-dependent (ateles#1215); a
+    # holding send must not opportunistically drain at those times of day.
+    n.should_flush_digest = lambda: False
+    n._wall_clock = lambda: now
+    return n
+
+
+def _hold(n, count, handler="apis", **kw):
+    for i in range(count):
+        n.send(f"PR #{i} needs a decision", Priority.OPERATOR_DECISION, handler=handler, **kw)
+
+
+def _file(tmp_path, name):
+    p = tmp_path / name
+    return json.loads(p.read_text()) if p.exists() else []
+
+
+def test_regression_other_daemons_held_notices_are_not_emailed(tmp_path, monkeypatch):
+    runs = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    apis = _daemon(tmp_path, email=False, silent=True)
+    _hold(apis, 55)
+    assert len(_file(tmp_path, "digest.json")) == 55
+
+    monedula = _daemon(tmp_path, email=True, silent=False)
+    monedula.send("monedula started", Priority.INFO, handler="monedula")
+
+    assert runs.cmds == []
+    assert len(_file(tmp_path, "digest.json")) == 55
+
+
+def test_email_ineligible_send_is_never_emailed_on_drain(tmp_path, monkeypatch):
+    runs = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    armed = _daemon(tmp_path, email=True, silent=True)
+    _hold(armed, 3, email_eligible=False)
+    assert _file(tmp_path, "digest-email.json") == []
+    assert len(_file(tmp_path, "digest.json")) == 3
+
+    _daemon(tmp_path, email=True, silent=False).flush_digest()
+    assert runs.cmds == []
+
+
+def test_hold_routes_by_raising_send(tmp_path):
+    armed = _daemon(tmp_path, email=True, silent=True)
+    armed.send("a", Priority.WARN, handler="x")
+    armed.send("b", Priority.WARN, handler="x", email_eligible=False)
+    unarmed = _daemon(tmp_path, email=False, silent=True)
+    unarmed.send("c", Priority.WARN, handler="x")
+    assert _file(tmp_path, "digest-email.json") == ["⚠ [x] a"]
+    assert _file(tmp_path, "digest.json") == ["⚠ [x] b", "⚠ [x] c"]
+
+
+def test_legacy_main_queue_strings_are_never_emailed(tmp_path, monkeypatch):
+    runs = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    (tmp_path / "digest.json").write_text(
+        json.dumps([f"⚠️ [apis] legacy {i}" for i in range(3)])
+    )
+    _daemon(tmp_path, email=True, silent=False).flush_digest()
+    assert runs.cmds == []
+    assert len(_file(tmp_path, "digest.json")) == 3
+
+
+def test_main_queue_drains_through_apprise_without_email(tmp_path, monkeypatch):
+    runs = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    pushed = []
+
+    class _Apprise:
+        def notify(self, body):
+            pushed.append(body)
+            return True
+
+    _hold(_daemon(tmp_path, email=False, silent=True), 2)
+    _daemon(tmp_path, email=True, silent=False, apprise=_Apprise()).flush_digest()
+    assert len(pushed) == 2 and runs.cmds == []
+    assert _file(tmp_path, "digest.json") == []
+
+
+def test_held_email_budget_caps_a_drain_and_persists(tmp_path, monkeypatch):
+    runs = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    _hold(_daemon(tmp_path, email=True, silent=True), 55)
+    assert len(_file(tmp_path, "digest-email.json")) == 55
+
+    t0 = 2_000_000.0
+    _daemon(tmp_path, email=True, silent=False, now=t0).flush_digest()
+    assert len(runs.cmds) == 5
+    assert len(_file(tmp_path, "digest-email.json")) == 50
+
+    # A different instance (another daemon/process) sees the same budget.
+    _daemon(tmp_path, email=True, silent=False, now=t0 + 600).flush_digest()
+    assert len(runs.cmds) == 5
+    assert len(_file(tmp_path, "digest-email.json")) == 50
+
+    # Oldest-first order is preserved across drains.
+    assert "PR #5 " in _file(tmp_path, "digest-email.json")[0]
+
+    _daemon(tmp_path, email=True, silent=False, now=t0 + 3601).flush_digest()
+    assert len(runs.cmds) == 10
+    assert len(_file(tmp_path, "digest-email.json")) == 45
+
+
+def test_failed_email_send_consumes_no_budget_and_keeps_item(tmp_path, monkeypatch):
+    runs = _GwsRuns(returncode=1)
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    _hold(_daemon(tmp_path, email=True, silent=True), 3)
+    _daemon(tmp_path, email=True, silent=False).flush_digest()
+    assert len(_file(tmp_path, "digest-email.json")) == 3
+    assert len(runs.cmds) == 1  # stopped hammering after the first failure
+    assert not (tmp_path / "digest-email-budget.json").exists()
+
+    ok = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", ok)
+    _daemon(tmp_path, email=True, silent=False).flush_digest()
+    assert len(ok.cmds) == 3
+    assert json.loads((tmp_path / "digest-email-budget.json").read_text())["count"] == 3
+
+
+def test_over_budget_email_item_still_goes_via_apprise(tmp_path, monkeypatch):
+    runs = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    pushed = []
+
+    class _Apprise:
+        def notify(self, body):
+            pushed.append(body)
+            return True
+
+    _hold(_daemon(tmp_path, email=True, silent=True), 7)
+    _daemon(tmp_path, email=True, silent=False, apprise=_Apprise()).flush_digest()
+    assert len(runs.cmds) == 5 and len(pushed) == 2
+    assert _file(tmp_path, "digest-email.json") == []
+
+
+def test_notice_queued_during_a_drain_survives_and_delivered_do_not_return(
+    tmp_path, monkeypatch
+):
+    other = _daemon(tmp_path, email=True, silent=True)
+    fired = []
+
+    def queue_mid_drain(cmd):
+        if not fired:
+            fired.append(1)
+            other._queue_digest("⚠️ [late] arrived mid-drain")
+
+    runs = _GwsRuns(on_run=queue_mid_drain)
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    _hold(other, 2)
+    _daemon(tmp_path, email=True, silent=False).flush_digest()
+    left = _file(tmp_path, "digest-email.json")
+    assert left == ["⚠️ [late] arrived mid-drain"]
+    assert len(runs.cmds) == 2
+
+
+def test_a_second_concurrent_drain_skips(tmp_path, monkeypatch):
+    runs = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    _hold(_daemon(tmp_path, email=True, silent=True), 2)
+    n = _daemon(tmp_path, email=True, silent=False)
+    with held_view.file_lock(held_view.drain_lock_path(n._digest_path), blocking=False):
+        assert n.flush_digest() is False
+    assert runs.cmds == []
+    assert len(_file(tmp_path, "digest-email.json")) == 2
+    assert n.flush_digest() is True  # lock released: drains normally
+
+
+def test_no_route_drain_is_quiet_and_does_not_rewrite(tmp_path, monkeypatch, caplog):
+    _hold(_daemon(tmp_path, email=False, silent=True), 4)
+    n = _daemon(tmp_path, email=False, silent=False)
+    delivered = []
+    n._deliver = lambda *a, **k: delivered.append(a) or True
+    writes = []
+    real_write = held_view.write_queue
+    monkeypatch.setattr(
+        held_view, "write_queue", lambda p, i: (writes.append(p), real_write(p, i))[1]
+    )
+    before = (tmp_path / "digest.json").stat().st_mtime_ns
+    with caplog.at_level(logging.DEBUG, logger="lib.notify.notifier"):
+        n.flush_digest()
+        n.flush_digest()
+    assert delivered == [] and writes == []
+    assert (tmp_path / "digest.json").stat().st_mtime_ns == before
+    assert not any("Would send" in r.getMessage() for r in caplog.records)
+    # One summary line for the whole drain, none on the repeat.
+    assert sum("no delivery route" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_queue_is_capped_to_newest_items(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(notifier_mod, "HELD_QUEUE_MAX", 10)
+    n = _daemon(tmp_path, email=False, silent=True)
+    with caplog.at_level(logging.ERROR, logger="lib.notify.notifier"):
+        _hold(n, 13)
+    items = _file(tmp_path, "digest.json")
+    assert len(items) == 10
+    assert "PR #3 " in items[0] and "PR #12 " in items[-1]
+    assert sum("dropped the 1 oldest" in r.getMessage() for r in caplog.records) == 3
+
+
+# ── budget state validation, atomic writes, private files ───────────────────
+
+
+def _budget_file(tmp_path, payload):
+    (tmp_path / "digest-budget-placeholder").write_text("")  # keep dir non-empty
+    (tmp_path / "digest-email-budget.json").write_text(payload)
+
+
+def test_nan_window_start_starts_a_fresh_window(tmp_path, monkeypatch):
+    runs = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    _budget_file(tmp_path, '{"window_start": NaN, "count": 5}')
+    _hold(_daemon(tmp_path, email=True, silent=True), 8)
+    _daemon(tmp_path, email=True, silent=False).flush_digest()
+    assert len(runs.cmds) == 5  # a NaN start would otherwise never roll over: 0 sent
+    saved = json.loads((tmp_path / "digest-email-budget.json").read_text())
+    assert saved["window_start"] == saved["window_start"] and saved["count"] == 5
+
+
+def test_negative_count_does_not_raise_the_cap(tmp_path, monkeypatch):
+    runs = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    _budget_file(tmp_path, '{"window_start": 1000000.0, "count": -100}')
+    _hold(_daemon(tmp_path, email=True, silent=True), 20)
+    _daemon(tmp_path, email=True, silent=False).flush_digest()
+    assert len(runs.cmds) == 5
+
+
+def test_infinite_window_start_is_rejected(tmp_path, monkeypatch):
+    runs = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    _budget_file(tmp_path, '{"window_start": Infinity, "count": 0}')
+    _hold(_daemon(tmp_path, email=True, silent=True), 8)
+    n = _daemon(tmp_path, email=True, silent=False)
+    n.flush_digest()
+    assert len(runs.cmds) == 5
+    _daemon(tmp_path, email=True, silent=False, now=1_000_100.0).flush_digest()
+    assert len(runs.cmds) == 5  # and the new window holds
+
+
+def test_budget_write_is_atomic_and_private(tmp_path, monkeypatch):
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", _GwsRuns())
+    _hold(_daemon(tmp_path, email=True, silent=True), 1)
+    seen = []
+    real_replace = os.replace
+    monkeypatch.setattr(
+        os, "replace", lambda a, b: (seen.append((str(a), str(b))), real_replace(a, b))[1]
+    )
+    _daemon(tmp_path, email=True, silent=False).flush_digest()
+    budget = str(tmp_path / "digest-email-budget.json")
+    assert any(dst == budget and src != budget for src, dst in seen), seen
+    assert ((tmp_path / "digest-email-budget.json").stat().st_mode & 0o777) == 0o600
+
+
+def test_queue_and_lock_files_are_private(tmp_path):
+    _hold(_daemon(tmp_path, email=True, silent=True), 1)
+    for name in ("digest-email.json", "digest.json.lock"):
+        assert ((tmp_path / name).stat().st_mode & 0o777) == 0o600, name
+
+
+def test_a_planted_symlink_at_the_queue_path_is_replaced_not_followed(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep")
+    (tmp_path / "digest.json").symlink_to(victim)
+    _hold(_daemon(tmp_path, email=False, silent=True), 1)
+    assert victim.read_text() == "keep"
+    assert not (tmp_path / "digest.json").is_symlink()
+    assert len(_file(tmp_path, "digest.json")) == 1
