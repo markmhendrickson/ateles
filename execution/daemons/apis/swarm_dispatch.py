@@ -3494,6 +3494,28 @@ def detect_auth_failure(*texts: str) -> bool:
     return any(sig in blob for sig in _AUTH_FAILURE_SIGNATURES)
 
 
+def review_detector_stderr(result: SkillResult, *, posted_verdict_this_run: bool) -> str:
+    """The stderr the review-path limit and auth detectors may read.
+
+    Empty for a successful run that posted its verdict for this head during
+    this run (the review the detectors would protect already exists), and for
+    a successful Codex run, whose stderr holds its prompt and session text
+    rather than diagnostics. Every other run, including any failed run and a
+    run whose provider is not named, is read as before.
+    """
+    if result.ok and posted_verdict_this_run:
+        return ""
+    if result.ok and (getattr(result, "provider", "") or "").strip().lower() == "codex":
+        return ""
+    return result.stderr
+
+
+def _matched_streams(detector, stdout: str, stderr: str) -> str:
+    """Name the streams *detector* matched ("stdout", "stderr"), never contents."""
+    names = [name for name, text in (("stdout", stdout), ("stderr", stderr)) if detector(text)]
+    return "+".join(names) or "combined"
+
+
 # A lens or Vanellus refused at launch because its agent_definition or
 # agent_policy could not be READ (Neotoma slow, unreachable or answering 5xx).
 # The refusal itself is right — no agent runs without its policy — but the
@@ -9211,9 +9233,9 @@ class SwarmDispatcher:
         #     would otherwise match the broad signatures, defer, and match
         #     again on every resume. A verdict token anywhere else does not
         #     count, so a provider diagnostic carrying an incidental token is
-        #     still detected. Both detectors still read STDERR on the review
-        #     path, since a zero-exit run can carry a real limit or auth
-        #     diagnostic there; a verdict token found only in stderr is not a
+        #     still detected. Both detectors read STDERR on the review path
+        #     (subject to the stderr rule below), since a zero-exit run can
+        #     carry a real limit or auth diagnostic there; a verdict token found only in stderr is not a
         #     verdict. Output with no fixed-position verdict, and any failed
         #     run, is checked on both streams as before.
         #
@@ -9224,33 +9246,59 @@ class SwarmDispatcher:
         #     posts its own comment often ends with a summary of it in stdout
         #     (seen on #1635 and #1645, both deferred ~3h because their
         #     findings were about retry limits). The comment is read only
-        #     when stdout would otherwise match a detector.
+        #     when stdout or stderr would otherwise match a detector.
         #
         #     When the run is accepted on that posted comment, the comment's
         #     verdict is the conclusion: step 5 reads it back from the comment
         #     and never parses stdout, whose summary may mention another token.
+        #
+        #     Stderr (ateles task ent_79097958658a23663f0ad586): `codex exec`
+        #     prints only its final message to stdout; its stderr carries the
+        #     prompt and session text, which on a clean exit-0 run can quote
+        #     "rate limit resets" twice. So two rules decide whether the
+        #     detectors read stderr (`review_detector_stderr`): a successful
+        #     run that posted its verdict for this head during this run is a
+        #     finished review from any provider, and its stderr is not read;
+        #     a successful Codex run's stderr is never read (a real Codex
+        #     limit fails the run, so it is still caught). Failed runs, and
+        #     successful runs from other providers with no posted verdict,
+        #     read stderr as before. The posted-verdict check therefore runs
+        #     whenever EITHER stream would match a detector.
         stdout_has_own_verdict = (
             lens_own_verdict(vanellus_result.stdout, lens_agent="vanellus")
             is not None
         )
-        accepted_on_posted_comment = (
+        stdout_matches = detect_session_limit(
+            vanellus_result.stdout
+        ) or detect_auth_failure(vanellus_result.stdout)
+        stderr_matches = detect_session_limit(
+            vanellus_result.stderr
+        ) or detect_auth_failure(vanellus_result.stderr)
+        posted_verdict_this_run = (
             vanellus_result.ok
-            and not stdout_has_own_verdict
-            and (
-                detect_session_limit(vanellus_result.stdout)
-                or detect_auth_failure(vanellus_result.stdout)
-            )
+            and (stdout_matches or stderr_matches)
             and await self._vanellus_posted_verdict_this_run(
                 trigger,
                 head_sha=review_head,
                 started_at=aggregation_started_at,
             )
         )
+        accepted_on_posted_comment = (
+            posted_verdict_this_run and not stdout_has_own_verdict and stdout_matches
+        )
         aggregation_is_review = vanellus_result.ok and (
             stdout_has_own_verdict or accepted_on_posted_comment
         )
         detector_stdout = "" if aggregation_is_review else vanellus_result.stdout
-        if detect_session_limit(detector_stdout, vanellus_result.stderr):
+        detector_stderr = review_detector_stderr(
+            vanellus_result, posted_verdict_this_run=posted_verdict_this_run
+        )
+        if detect_session_limit(detector_stdout, detector_stderr):
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                "vanellus usage-limit detector matched on "
+                f"{_matched_streams(detect_session_limit, detector_stdout, detector_stderr)}"
+            )
             await self._handle_panel_session_limit(
                 trigger, parent, "vanellus",
                 vanellus_result.stdout, vanellus_result.stderr,
@@ -9260,7 +9308,12 @@ class SwarmDispatcher:
         #     auth (expired OAuth / missing ANTHROPIC_API_KEY), its "verdict" is
         #     just the 401. Reframe it as an infra failure and page the operator
         #     to re-auth, rather than posting the raw error as a review.
-        if detect_auth_failure(detector_stdout, vanellus_result.stderr):
+        if detect_auth_failure(detector_stdout, detector_stderr):
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                "vanellus auth-failure detector matched on "
+                f"{_matched_streams(detect_auth_failure, detector_stdout, detector_stderr)}"
+            )
             await self._handle_panel_auth_failure(trigger, "vanellus")
             return
         if not vanellus_result.ok:
