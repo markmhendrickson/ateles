@@ -72,6 +72,34 @@ def test_confirm_removes_exactly_one_receipt_and_audits_it(ledger):
         assert line["branch"] == ENTRY["branch"] and line["recorded_at"] == ENTRY["recorded_at"]
     assert "token" not in cli.audit_path(ledger).read_text().lower()
     assert delivery.fly_delivery_blocker(KEY) == ""
+    assert all(line["source_task"] == "" for line in lines)  # an issue key names no task
+
+
+def test_clearing_a_task_keyed_receipt_records_its_source_task(ledger):
+    key = "owner/repo#task:ent_synthetic_src"
+    assert ledger.reserve_delivery(key, {**ENTRY, "status": "opened", "pr_number": 87})
+    rc, _, err = run("clear", key, "--confirm", key)
+    assert rc == 0, err
+    lines = [x for x in audit(ledger) if x["key"] == key]
+    assert [x["stage"] for x in lines] == ["removing", "removed"]
+    assert all(x["source_task"] == "ent_synthetic_src" for x in lines)
+
+
+def test_clearing_a_correction_receipt_marks_its_line_as_a_correction(ledger):
+    key = "owner/repo#87"
+    assert ledger.reserve_delivery(key, {
+        **ENTRY, "status": "updated",
+        "existing_pr": {"pr_number": 87, "branch": "cicada/x", "base_branch": "main"}})
+    rc, _, err = run("clear", key, "--confirm", key)
+    assert rc == 0, err
+    lines = [x for x in audit(ledger) if x["key"] == key]
+    assert lines and all(x["correction"] is True for x in lines)
+
+
+def test_clearing_a_first_delivery_receipt_is_not_marked_as_a_correction(ledger):
+    rc, _, err = run("clear", KEY, "--confirm", KEY)
+    assert rc == 0, err
+    assert all("correction" not in x for x in audit(ledger))
 
 
 def test_a_wrong_or_mismatched_key_refuses_and_changes_nothing(ledger):

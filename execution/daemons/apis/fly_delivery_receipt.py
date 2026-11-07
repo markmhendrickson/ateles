@@ -209,6 +209,13 @@ def main(argv: list[str] | None = None, *, ledger=None, out=None, err=None) -> i
         "commit": entry.get("commit"),
         "recorded_at": entry.get("recorded_at"),
     }
+    if entry.get("kind") != "lens":
+        # A correction filed from this line later is PART_OF this task.
+        identity["source_task"] = build_delivery.receipt_source_task(stored, entry)
+        if isinstance(entry.get("existing_pr"), dict):
+            # A correction receipt: its key names the correction task, never the
+            # parent, so readers take the parent from other lines.
+            identity["correction"] = True
     if entry.get("kind") == "lens":
         identity.update({"kind": "lens", "lens": entry.get("lens"), "pr": entry.get("pr"),
                          "head": entry.get("head"), "notified_at": entry.get("notified_at")})

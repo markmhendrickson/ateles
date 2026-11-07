@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 import gate_waive
 import swarm_dispatch
 from gate_waive import (
@@ -54,6 +56,23 @@ LATER = "2099-01-01T00:00:00+00:00"
 
 
 # ── A fake issue store whose signed writes LAND ─────────────────────────────
+
+
+@pytest.fixture
+def _readable_fly_ledger(_fly_runner_off_and_isolated):
+    """Give a fix-round test a readable Fly ledger with no receipts.
+
+    A fix round reads the ledger to tell whether the PR came from Fly, and a
+    missing ledger holds the round (origin unknown), and so does a missing
+    audit file. Such a test exercises
+    the local round, so the PR must be one a readable ledger does not name."""
+    import build_delivery
+    import fly_delivery_receipt
+
+    ledger = build_delivery._delivery_ledger()
+    with ledger._locked():
+        ledger._save(ledger._load())
+    fly_delivery_receipt.audit_path(ledger).write_text("")
 
 
 class _Record:
@@ -684,7 +703,9 @@ class TestToolDenyFromTheLiveRecord:
 
         assert seen["waxwing"].get("owns_pending_gate") is True
 
-    def test_fix_guidance_run_of_a_gate_owner_carries_the_deny(self, monkeypatch):
+    def test_fix_guidance_run_of_a_gate_owner_carries_the_deny(
+        self, monkeypatch, _readable_fly_ledger
+    ):
         seen: dict = {}
 
         async def load(self, repo, issue_number):
@@ -710,7 +731,10 @@ class TestToolDenyFromTheLiveRecord:
         monkeypatch.setattr(SwarmDispatcher, "_pr_head_sha", head)
         d = SwarmDispatcher(tsd._StubNotifier(), tsd._config())
         reviews = [("arch", "[BLOCKING] contract: the gate write is unordered\ndetail")]
-        _run(d._route_blocking_findings(tsd._trigger(), parent=80, reviews=reviews, verdict="request_changes"))
+        _run(d._route_blocking_findings(
+            tsd._trigger(head_ref=tsd._LOCAL_FIX_BRANCH), parent=80, reviews=reviews,
+            verdict="request_changes",
+        ))
 
         assert seen["waxwing"].get("owns_pending_gate") is True
 

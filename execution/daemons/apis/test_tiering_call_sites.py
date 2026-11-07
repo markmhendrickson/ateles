@@ -30,6 +30,7 @@ import swarm_dispatch
 from skill_runner import SkillResult
 from swarm_dispatch import SwarmDispatcher
 from test_swarm_dispatch import (
+    _LOCAL_FIX_BRANCH,
     _StubNotifier,
     _async_return,
     _config,
@@ -44,6 +45,23 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE_DIR = _REPO_ROOT / "docs" / "examples" / "model-tiering"
 EXAMPLE_POLICY = EXAMPLE_DIR / "action-policy.json"
 EXAMPLE_BINDING = EXAMPLE_DIR / "vendor-binding.json"
+
+
+@pytest.fixture(autouse=True)
+def _readable_fly_ledger(_fly_runner_off_and_isolated):
+    """Give this file's tests a readable Fly ledger with no receipts.
+
+    A fix round reads the ledger to tell whether the PR came from Fly, and a
+    missing ledger holds the round (origin unknown), and so does a missing
+    audit file. These tests exercise
+    the local round, so the PR must be one a readable ledger does not name."""
+    import build_delivery
+    import fly_delivery_receipt
+
+    ledger = build_delivery._delivery_ledger()
+    with ledger._locked():
+        ledger._save(ledger._load())
+    fly_delivery_receipt.audit_path(ledger).write_text("")
 
 
 class _World:
@@ -600,7 +618,7 @@ def _run_route_findings(monkeypatch, reviews) -> _Recorder:
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
     asyncio.run(
         _dispatcher()._route_blocking_findings(
-            _trigger(), parent=80, reviews=reviews, verdict="request_changes"
+            _trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80, reviews=reviews, verdict="request_changes"
         )
     )
     return rec
@@ -655,7 +673,9 @@ def test_fix_round_repair_on_a_security_path_escalates(monkeypatch, world):
 
 def test_ci_fix_is_ci_log_triage_on_the_mechanical_tier(monkeypatch, world):
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
-    asyncio.run(_dispatcher()._route_ci_failure(_trigger(), parent=80))
+    asyncio.run(
+        _dispatcher()._route_ci_failure(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80)
+    )
     cicada = rec.only("cicada")
     assert cicada["action_class"] == "ci_log_triage"
     assert cicada["work_class"] == "ci_log_triage"  # the local-first tag stays
@@ -665,7 +685,9 @@ def test_ci_fix_is_ci_log_triage_on_the_mechanical_tier(monkeypatch, world):
 def test_ci_fix_second_round_escalates(monkeypatch, world):
     world.fix_rounds = 1
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
-    asyncio.run(_dispatcher()._route_ci_failure(_trigger(), parent=80))
+    asyncio.run(
+        _dispatcher()._route_ci_failure(_trigger(head_ref=_LOCAL_FIX_BRANCH), parent=80)
+    )
     resolved = tier_of(rec.only("cicada"))
     assert resolved.tier == "top"
     assert "prior_attempt_failed" in resolved.escalation_reasons
