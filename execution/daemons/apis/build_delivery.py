@@ -1110,6 +1110,12 @@ _RECOGNIZED_RECEIPT_STATUSES = frozenset({
 # Statuses of a receipt whose outcome has not settled yet: a delivery's effect
 # (a pushed branch, an opened PR) can come before its receipt records it.
 _UNSETTLED_RECEIPT_STATUSES = frozenset({"launching", "unknown", "unreported"})
+# Statuses whose outcome has settled. A first-delivery receipt on this PR's
+# repository that names the PR or sits on its head branch with any status
+# outside this set (unsettled, unrecognized, empty, missing or non-string)
+# makes the PR's origin unknown in ``fly_delivered_pr``, whether or not the
+# receipt records a PR number: the route holds, it never runs locally.
+_SETTLED_RECEIPT_STATUSES = _RECOGNIZED_RECEIPT_STATUSES - _UNSETTLED_RECEIPT_STATUSES
 _TASK_KEY_MARK = "#task:"
 
 
@@ -1320,11 +1326,14 @@ def fly_delivered_pr(
     ``unknown_reason``) when the matching lines record no single source task,
     so no correction is filed with no parent. An existing audit file
     that cannot be read or has any line that cannot be parsed makes the
-    origin unknown (None) even when an active receipt matches. With no receipt
-    establishing delivery, an unsettled first delivery (``launching``,
-    ``unknown``, ``unreported``) on exactly this *head_branch* that records no
-    PR number yet also makes it unknown: its PR may predate its receipt; so
-    does a missing audit file, which may hold a cleared receipt's only record. A
+    origin unknown (None) even when an active receipt matches. A first-delivery
+    receipt that names this PR or sits on exactly this *head_branch*, with any
+    status that is not a recognized settled one (``launching``, ``unknown``,
+    ``unreported``, an unrecognized, empty, missing or non-string status),
+    makes it unknown whether or not it records a PR number, and whatever any
+    other receipt says: its PR may predate its receipt. With no receipt
+    establishing delivery, a missing audit file also makes it unknown, as it
+    may hold a cleared receipt's only record. A
     removal line marked ``correction`` never supplies the parent task. Used to route a fix
     round: a Fly PR's fix round runs as a Fly correction, never as a commit on
     this host."""
@@ -1360,18 +1369,20 @@ def fly_delivered_pr(
             continue
         admitted = entry.get("existing_pr")
         status = entry.get("status")
-        if (not isinstance(admitted, dict)
-                and (not isinstance(status, str) or status not in _RECOGNIZED_RECEIPT_STATUSES)
-                and (_as_issue_number(entry.get("pr_number")) == number or rest == str(number))):
-            # A receipt for this PR whose outcome this reader cannot interpret:
-            # never "not Fly", and no other receipt for the PR can outweigh it.
-            unrecognized = True
-            continue
-        if (not isinstance(admitted, dict) and head and status in _UNSETTLED_RECEIPT_STATUSES
-                and entry.get("branch") == head and not _as_issue_number(entry.get("pr_number"))):
-            # A first delivery on this PR's head branch that has not recorded
-            # its PR yet: it may have opened this PR before its receipt settled.
-            unsettled_on_branch = True
+        if not isinstance(admitted, dict):
+            names_pr = _as_issue_number(entry.get("pr_number")) == number or rest == str(number)
+            on_branch = bool(head) and entry.get("branch") == head
+            if (names_pr or on_branch) and (
+                    not isinstance(status, str) or status not in _SETTLED_RECEIPT_STATUSES):
+                # A first delivery for this PR, or on its head branch, whose
+                # outcome has not settled or that this reader cannot interpret:
+                # it may have opened this PR before its receipt recorded it, so
+                # it is never "not Fly", and no other receipt can outweigh it.
+                if isinstance(status, str) and status in _UNSETTLED_RECEIPT_STATUSES:
+                    unsettled_on_branch = True
+                else:
+                    unrecognized = True
+                continue
         if isinstance(admitted, dict):
             if _as_issue_number(admitted.get("pr_number")) != number:
                 continue
@@ -1400,12 +1411,12 @@ def fly_delivered_pr(
         return FlyDeliveredPR(None)
     if unrecognized:
         return FlyDeliveredPR(None, unknown_reason=(
-            "a Fly delivery receipt names this PR with a status this reader does "
-            "not recognize, so whether this PR came from Fly is unknown"))
-    if not delivered and unsettled_on_branch:
+            "a Fly delivery receipt for this PR or its head branch carries a status "
+            "this reader does not recognize, so whether this PR came from Fly is unknown"))
+    if unsettled_on_branch:
         return FlyDeliveredPR(None, unknown_reason=(
-            "a Fly delivery on this PR's head branch has not settled and records no "
-            "PR number yet, so whether this PR came from Fly is unknown"))
+            "a Fly delivery for this PR or on its head branch has not settled, so "
+            "whether this PR came from Fly is unknown"))
     if not delivered:
         import fly_delivery_receipt
 

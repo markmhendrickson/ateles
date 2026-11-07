@@ -144,6 +144,10 @@ def _lens_return_only_on_fly(lens: Lens) -> bool:
 
 
 DAEMON_NAME = "apis"
+# The admission class a Fly fix-round correction task is filed with and read
+# back with: a task a worker may take carries it (the claimable predicate in
+# docs/foundation/work_model.md#parent-and-child-tasks).
+CORRECTION_ADMISSION_CLASS = "workflow_entering"
 
 # Parent-issue resolution (ateles#434, ateles#613, ateles#300).
 #
@@ -10316,6 +10320,9 @@ class SwarmDispatcher:
             "assigned_to": "cicada",
             "action_type": build_delivery.DELIVERY_ACTION_TYPE,
             "task_type": "existing_pr_correction",
+            # A task a worker may take carries this class
+            # (docs/foundation/work_model.md#parent-and-child-tasks).
+            "admission_class": CORRECTION_ADMISSION_CLASS,
             "pr_number": trigger.number,
             # The PR is its own issue key, so the correction's entrance reads
             # the PR's own receipt and never the first delivery's issue receipt.
@@ -10413,9 +10420,10 @@ class SwarmDispatcher:
         """Why the stored correction does not match what was filed, or "".
 
         Reads the task and its relationships back by id: its `PART_OF` edge to
-        *plan* and its `REFERS_TO` edge to *refers_to* must both be present. A
-        failed read, or a missing edge, is a mismatch: the filing is
-        unconfirmed."""
+        *plan* and its `REFERS_TO` edge to *refers_to* must both be present,
+        and its `admission_class` must be `workflow_entering`. A failed read, a
+        missing edge, or a missing or different class is a mismatch: the
+        filing is unconfirmed."""
         entity = await self._neotoma_get(f"entities/{task_id}")
         if not isinstance(entity, dict):
             return "the task could not be read back"
@@ -10438,6 +10446,8 @@ class SwarmDispatcher:
                 ("head", snapshot.get("head_sha") == task["head_sha"]),
                 ("branch", stored_branch == branch),
                 ("action type", snapshot.get("action_type") == task["action_type"]),
+                ("admission class",
+                 snapshot.get("admission_class") == CORRECTION_ADMISSION_CLASS),
             ) if not ok
         ]
         if wrong:

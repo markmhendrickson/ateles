@@ -893,12 +893,100 @@ def test_a_not_delivered_receipt_for_this_pr_keeps_its_existing_handling(
 def test_an_unrecognized_receipt_that_cannot_be_linked_to_this_pr_is_ignored(
     monkeypatch, world, stored, rounds_recorded
 ):
-    seed_first_delivery_receipt(status="exhausted")  # no pr_number; key names a task
+    # A receipt on another branch that names no PR, or another PR, says
+    # nothing about this one. (Before the fail-closed fix this test pinned an
+    # unrecognized receipt on THIS branch with no PR number as "not Fly"; that
+    # was the defect, now covered by the status-partition table below.)
+    seed_first_delivery_receipt(status="exhausted", branch=BRANCH + "-other")
     empty_audit_file()
     assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
     seed_first_delivery_receipt(key=f"{REPO}#task:ent_synthetic_x", status="exhausted",
-                                pr_number=PR + 1)
+                                pr_number=PR + 1, branch=BRANCH + "-other")
     assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
+
+
+# --- Every receipt status, with and without a PR number ---------------------
+#
+# A first-delivery receipt on this PR's repository and head branch decides the
+# route only when its status is a recognized settled one. Any other status
+# (unsettled, unrecognized, empty, missing, non-string) is unknown whether or
+# not the receipt records a PR number, and unknown holds every entrance.
+#
+# Red before this fix (observed for the unrecognized, empty and missing rows
+# without a PR number, and inferred from the code for the non-string row): the
+# receipt matched neither the "names this PR" check nor the three-status
+# unsettled check, so `fly_delivered_pr` returned `FlyDeliveredPR(False)`
+# ("not Fly") and the review, CI and resumed rounds ran the local builder.
+
+_MISSING = object()
+_UNKNOWN_STATUSES = (
+    sorted(delivery._UNSETTLED_RECEIPT_STATUSES) + ["exhausted", "", _MISSING, 7])
+_UNKNOWN_IDS = (
+    sorted(delivery._UNSETTLED_RECEIPT_STATUSES) + ["unrecognized", "empty", "missing", "int"])
+
+
+def fake_ledger(monkeypatch, status, with_pr):
+    """Serve one receipt on this branch straight to `fly_delivered_pr`,
+    bypassing the ledger file's own validation (which would reject a missing
+    or non-string status before this reader saw it)."""
+    readable_empty_ledger()
+    empty_audit_file()
+    entry = {"branch": BRANCH, "run_id": "run-1", "token": "seeded", "commit": HEAD,
+             "readback": "passed"}
+    if status is not _MISSING:
+        entry["status"] = status
+    if with_pr:
+        entry["pr_number"] = PR
+    path = delivery._delivery_ledger().path
+
+    class Ledger:
+        def __init__(self):
+            self.path = path
+
+        def delivery_receipts(self):
+            return {SRC_KEY: dict(entry)}
+
+    monkeypatch.setattr(delivery, "_delivery_ledger", Ledger)
+
+
+def _expected(status, with_pr):
+    if status in delivery._PARENT_TASK_STATUSES:
+        return True if with_pr else False
+    if isinstance(status, str) and status in delivery._SETTLED_RECEIPT_STATUSES:
+        return False
+    return None
+
+
+@pytest.mark.parametrize("with_pr", [True, False], ids=["pr", "no-pr"])
+@pytest.mark.parametrize(
+    "status", sorted(delivery._SETTLED_RECEIPT_STATUSES) + _UNKNOWN_STATUSES,
+    ids=sorted(delivery._SETTLED_RECEIPT_STATUSES) + _UNKNOWN_IDS)
+def test_every_receipt_status_reads_as_fly_not_fly_or_unknown(monkeypatch, status, with_pr):
+    fake_ledger(monkeypatch, status, with_pr)
+    facts = delivery.fly_delivered_pr(REPO, PR, BRANCH)
+    assert facts.delivered is _expected(status, with_pr)
+    if facts.delivered is None:
+        assert facts.unknown_reason  # held with a reason, never a bare unknown
+
+
+def test_the_status_partition_is_complete():
+    assert delivery._SETTLED_RECEIPT_STATUSES | delivery._UNSETTLED_RECEIPT_STATUSES \
+        == delivery._RECOGNIZED_RECEIPT_STATUSES
+    assert not delivery._SETTLED_RECEIPT_STATUSES & delivery._UNSETTLED_RECEIPT_STATUSES
+
+
+@pytest.mark.parametrize("with_pr", [True, False], ids=["pr", "no-pr"])
+@pytest.mark.parametrize("status", _UNKNOWN_STATUSES, ids=_UNKNOWN_IDS)
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_unknown_receipt_status_holds_every_entrance(
+    monkeypatch, world, stored, rounds_recorded, route, status, with_pr
+):
+    fake_ledger(monkeypatch, status, with_pr)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    text = ("has not settled" if status in delivery._UNSETTLED_RECEIPT_STATUSES
+            else "does not recognize")
+    assert_held_unrecognized(d, summary, stored, rounds_recorded, rec, text=text)
 
 
 # --- A first delivery on this branch that has not settled ------------------
