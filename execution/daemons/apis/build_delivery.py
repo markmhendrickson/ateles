@@ -1091,6 +1091,14 @@ def _undelivered_correction_settled(target: "ExistingPRTarget", entry: dict, adm
 # Receipt outcomes that name a pull request the runner opened or updated and
 # that Apis read back from GitHub (``verify_fly_delivery``) before recording.
 _PARENT_TASK_STATUSES = frozenset({"opened", "updated"})
+# Every status a delivery receipt can carry (see the note above
+# ``FLY_DELIVERY_BASE_BRANCH``): the reservation's ``launching``, the
+# dispatcher's ``unknown``/``unreported``, and every status the runner reports.
+# A receipt naming a PR with any other status, or a non-string one, makes that
+# PR's origin unknown in ``fly_delivered_pr``: it is never read as "not Fly".
+_RECOGNIZED_RECEIPT_STATUSES = frozenset({
+    "launching", "unknown", "unreported", "opened", "updated", "no_changes",
+    "clone_failed", "not_delivered", "push_failed", "pr_failed", "no_time"})
 _TASK_KEY_MARK = "#task:"
 
 
@@ -1309,6 +1317,7 @@ def fly_delivered_pr(
     bases: set[str] = set()
     tasks: set[str] = set()
     delivered = False
+    unrecognized = False
     for stored, entry in receipts.items():
         if not isinstance(stored, str) or not isinstance(entry, dict) or entry.get("kind") == "lens":
             continue
@@ -1316,6 +1325,14 @@ def fly_delivered_pr(
         if key_repo != repo:
             continue
         admitted = entry.get("existing_pr")
+        status = entry.get("status")
+        if (not isinstance(admitted, dict)
+                and (not isinstance(status, str) or status not in _RECOGNIZED_RECEIPT_STATUSES)
+                and (_as_issue_number(entry.get("pr_number")) == number or rest == str(number))):
+            # A receipt for this PR whose outcome this reader cannot interpret:
+            # never "not Fly", and no other receipt for the PR can outweigh it.
+            unrecognized = True
+            continue
         if isinstance(admitted, dict):
             if _as_issue_number(admitted.get("pr_number")) != number:
                 continue
@@ -1342,6 +1359,10 @@ def fly_delivered_pr(
         audit_ok = False
     if not audit_ok:
         return FlyDeliveredPR(None)
+    if unrecognized:
+        return FlyDeliveredPR(None, unknown_reason=(
+            "a Fly delivery receipt names this PR with a status this reader does "
+            "not recognize, so whether this PR came from Fly is unknown"))
     if not delivered:
         head = str(head_branch or "").strip()
         try:

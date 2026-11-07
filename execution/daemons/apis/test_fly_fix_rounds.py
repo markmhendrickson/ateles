@@ -666,3 +666,122 @@ def test_a_correction_with_no_parent_is_never_stored(monkeypatch, world, stored)
         trigger(), kind="review", round_n=1, body=UX_FINDING, facts=facts))
     assert ok is False and stored["calls"] == []
     assert any("no parent task" in m for m in d.notifier.sent)
+
+
+# --- A receipt for this PR with a status the reader does not recognize ------
+#
+# Skipping it would leave a readable ledger that names the PR nowhere, and the
+# round would run locally: the very thing this module exists to stop. A
+# recognized receipt for the same PR does not outweigh it, and a recognized
+# non-delivery status such as `not_delivered` behaves as before.
+
+def seed_first_delivery_receipt(key=SRC_KEY, **entry):
+    """Write one receipt straight into the ledger file, whatever its status
+    (``reserve_delivery`` refuses a non-string one)."""
+    ledger = delivery._delivery_ledger()
+    with ledger._locked():
+        ledger._save(ledger._load())  # a valid ledger, keeping any receipts
+    raw = json.loads(ledger.path.read_text(encoding="utf-8"))
+    raw.setdefault("deliveries", {})[key] = {
+        "branch": BRANCH, "run_id": "run-1", "token": "seeded", "commit": HEAD,
+        "readback": "passed", **entry}
+    ledger.path.write_text(json.dumps(raw), encoding="utf-8")
+
+
+def assert_held_unrecognized(d, summary, stored, rounds_recorded, rec, text="does not recognize"):
+    if summary is not None:
+        assert summary["resumed"] == 0
+    assert rec.calls == []  # no builder, no guidance lenses, no local commit
+    assert corrections(stored) == [] and rounds_recorded == [] and stored["calls"] == []
+    assert any(text in m and "Needs your attention" in m for m in d.notifier.sent)
+
+
+@pytest.mark.parametrize("named_by", ["pr_number", "key"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_receipt_for_this_pr_with_an_unrecognized_status_holds(
+    monkeypatch, world, stored, rounds_recorded, route, named_by
+):
+    # Red without the fix (run against the unfixed `fly_delivered_pr`; the
+    # output kept below is from the review and CI routes): the receipt was
+    # skipped, the route came back "local", and the round ran here. Review:
+    #   AssertionError: assert [('accipiter'...nosed', ...})] == []
+    #   Left contains 2 more items, first extra item: ('accipiter', {...})
+    # CI:
+    #   AssertionError: assert [('cicada', {...riage', ...})] == []
+    #   Left contains one more item: ('cicada', {... 'work_class': 'ci_log_triage', ...})
+    if named_by == "pr_number":
+        seed_first_delivery_receipt(status="exhausted", pr_number=PR)
+    else:
+        seed_first_delivery_receipt(key=f"{REPO}#{PR}", status="exhausted")
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held_unrecognized(d, summary, stored, rounds_recorded, rec)
+
+
+@pytest.mark.parametrize("status", [None, 7, ["opened"], {"s": "opened"}],
+                         ids=["none", "int", "list", "dict"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_receipt_for_this_pr_with_a_non_string_status_holds(
+    monkeypatch, world, stored, rounds_recorded, route, status
+):
+    # The ledger reader itself rejects a receipt with no string status, so the
+    # whole ledger reads as unknown and the round holds on that ground.
+    seed_first_delivery_receipt(status=status, pr_number=PR)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held_unrecognized(d, summary, stored, rounds_recorded, rec, text="could not be read")
+
+
+@pytest.mark.parametrize("status", [None, 7, ["opened"]], ids=["none", "int", "list"])
+def test_fly_delivered_pr_reads_a_non_string_status_as_unknown(monkeypatch, status):
+    # Belt and braces behind the ledger's own validation: should a receipt
+    # with a non-string status ever reach `fly_delivered_pr`, it is unknown.
+    readable_empty_ledger()
+
+    class Ledger:
+        path = delivery._delivery_ledger().path
+
+        def delivery_receipts(self):
+            return {SRC_KEY: {"status": status, "pr_number": PR, "branch": BRANCH}}
+
+    monkeypatch.setattr(delivery, "_delivery_ledger", Ledger)
+    facts = delivery.fly_delivered_pr(REPO, PR, BRANCH)
+    assert facts.delivered is None and "does not recognize" in facts.unknown_reason
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_recognized_receipt_does_not_hide_an_unrecognized_one(
+    monkeypatch, world, stored, rounds_recorded, route
+):
+    seed_fly_delivery()  # alone, this routes to Fly
+    seed_first_delivery_receipt(key=f"{REPO}#task:ent_synthetic_other",
+                                status="exhausted", pr_number=PR)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held_unrecognized(d, summary, stored, rounds_recorded, rec)
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_not_delivered_receipt_for_this_pr_keeps_its_existing_handling(
+    monkeypatch, world, stored, rounds_recorded, route
+):
+    # `not_delivered` is a recognized status naming no delivered PR: it adds
+    # nothing, so with nothing else naming the PR the local round runs, as
+    # it did before this check.
+    seed_first_delivery_receipt(status="not_delivered", pr_number=PR)
+    assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert rec.of("cicada") != []
+    assert corrections(stored) == []
+    assert not any("does not recognize" in m for m in d.notifier.sent)
+
+
+def test_an_unrecognized_receipt_that_cannot_be_linked_to_this_pr_is_ignored(
+    monkeypatch, world, stored, rounds_recorded
+):
+    seed_first_delivery_receipt(status="exhausted")  # no pr_number; key names a task
+    assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
+    seed_first_delivery_receipt(key=f"{REPO}#task:ent_synthetic_x", status="exhausted",
+                                pr_number=PR + 1)
+    assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
