@@ -470,6 +470,69 @@ def test_a_corrupt_audit_file_holds_the_round(
                for m in d.notifier.sent)
 
 
+# Every kind of bad line this reader can meet. The whole file is validated
+# before any match counts, so each one holds the round wherever it sits.
+BAD_AUDIT_LINES = {
+    "unparseable-line": "{not json\n",
+    "not-an-object": "[1, 2]\n",
+    "removal-key-not-a-string": json.dumps(audit_line(key=7)) + "\n",
+    "removal-branch-not-a-string": json.dumps(audit_line(branch=["x"])) + "\n",
+    "removal-existing-pr-not-an-object": json.dumps(audit_line(existing_pr="87")) + "\n",
+    "removal-existing-pr-branch-not-a-string": json.dumps(
+        audit_line(existing_pr={"pr_number": PR, "branch": 5})) + "\n",
+}
+
+
+def assert_held(d, summary, stored, rounds_recorded, rec):
+    if summary is not None:
+        assert summary["resumed"] == 0
+    assert rec.calls == []  # no builder, no guidance lenses, no local commit
+    assert corrections(stored) == [] and rounds_recorded == []
+    assert any("could not be read" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
+@pytest.mark.parametrize("bad", sorted(BAD_AUDIT_LINES))
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_matching_audit_line_followed_by_a_bad_line_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, bad, route
+):
+    # The first line alone would route to Fly; the bad line after it must
+    # still be read, and makes the whole file unknown.
+    write_audit(tmp_path, audit_line(), raw=BAD_AUDIT_LINES[bad])
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held(d, summary, stored, rounds_recorded, rec)
+
+
+@pytest.mark.parametrize("bad", sorted(BAD_AUDIT_LINES) + ["undecodable"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_active_receipt_with_a_corrupt_audit_file_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, bad, route
+):
+    seed_fly_delivery()  # an active receipt names this PR
+    if bad == "undecodable":
+        audit_file(tmp_path).write_bytes(b"\xff\xfe\x00 not utf-8\n")
+    else:
+        audit_file(tmp_path).write_text(BAD_AUDIT_LINES[bad], encoding="utf-8")
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held(d, summary, stored, rounds_recorded, rec)
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_active_receipt_with_a_clean_audit_file_still_routes_to_fly(
+    monkeypatch, world, stored, tmp_path, route
+):
+    seed_fly_delivery()
+    audit_file(tmp_path).write_text(
+        json.dumps(audit_line(branch="cicada/another-task-5678")) + "\n", encoding="utf-8")
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    run_route(monkeypatch, route)
+    assert rec.of("cicada") == []
+    assert len(corrections(stored)) == 1
+
+
 def test_no_audit_file_and_no_receipt_keeps_the_local_round(
     monkeypatch, world, stored, rounds_recorded, tmp_path
 ):

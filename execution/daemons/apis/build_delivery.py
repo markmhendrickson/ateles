@@ -1163,26 +1163,26 @@ class FlyDeliveredPR:
 _RECEIPT_REMOVAL_ACTIONS = frozenset({"clear_delivery_receipt", "supersede_delivery_receipt"})
 
 
-def _removed_receipt_names_branch(ledger, repo: str, head_branch: str) -> bool | None:
-    """Whether the ledger's audit file shows a cleared or superseded non-lens
-    receipt for *repo* on *head_branch*.
+def _removal_audit_lines(ledger) -> list[dict] | None:
+    """Every cleared or superseded non-lens receipt line in the ledger's audit
+    file, validated in full before any caller decides a route.
 
-    The audit line carries no PR number, so it is matched on the repository in
-    its key and on its branch; Fly branches are unique to a task. False when the
-    file does not exist (no receipt was ever cleared or superseded). None when
-    the file exists but cannot be read, a line cannot be parsed, or no head
-    branch is known while the file names a removed receipt for *repo*: unknown,
-    never "not Fly"."""
+    An empty list when the file does not exist (no receipt was ever cleared or
+    superseded). None when the file exists but cannot be read or decoded, when
+    any line is not a JSON object, or when a removal line carries a field this
+    reader uses in a shape it cannot read (a non-string key or branch, a
+    non-object ``existing_pr`` or a non-string branch inside it): one bad line
+    makes the whole file unknown, whatever the other lines say."""
     import fly_delivery_receipt
 
     path = fly_delivery_receipt.audit_path(ledger)
     if not path.exists():
-        return False
+        return []
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
-    unmatched_for_repo = False
+    removals: list[dict] = []
     for raw in text.splitlines():
         if not raw.strip():
             continue
@@ -1192,15 +1192,44 @@ def _removed_receipt_names_branch(ledger, repo: str, head_branch: str) -> bool |
             return None
         if not isinstance(line, dict):
             return None
-        if line.get("action") not in _RECEIPT_REMOVAL_ACTIONS or line.get("kind") == "lens":
+        if line.get("action") not in _RECEIPT_REMOVAL_ACTIONS:
             continue
-        key = line.get("key")
-        if not isinstance(key, str) or canonical_key(key).partition("#")[0] != repo:
+        if not isinstance(line.get("key"), str):
+            return None
+        if not isinstance(line.get("branch"), (str, type(None))):
+            return None
+        prior = line.get("existing_pr")
+        if prior is not None:
+            if not isinstance(prior, dict) or not isinstance(prior.get("branch"), (str, type(None))):
+                return None
+        if line.get("kind") == "lens":
             continue
-        branches = {str(line.get("branch") or "")}
+        removals.append(line)
+    return removals
+
+
+def _removed_receipt_names_branch(ledger, repo: str, head_branch: str) -> bool | None:
+    """Whether the ledger's audit file shows a cleared or superseded non-lens
+    receipt for *repo* on *head_branch*.
+
+    The audit line carries no PR number, so it is matched on the repository in
+    its key and on its branch; Fly branches are unique to a task. The whole
+    file is read and validated before a match counts (``_removal_audit_lines``).
+    False when the file does not exist (no receipt was ever cleared or
+    superseded). None when the file exists but cannot be read, any line cannot
+    be parsed, or no head branch is known while the file names a removed
+    receipt for *repo*: unknown, never "not Fly"."""
+    removals = _removal_audit_lines(ledger)
+    if removals is None:
+        return None
+    unmatched_for_repo = False
+    for line in removals:
+        if canonical_key(line["key"]).partition("#")[0] != repo:
+            continue
+        branches = {line.get("branch") or ""}
         prior = line.get("existing_pr")
         if isinstance(prior, dict):
-            branches.add(str(prior.get("branch") or ""))
+            branches.add(prior.get("branch") or "")
         branches.discard("")
         if not head_branch:
             unmatched_for_repo = True
@@ -1221,7 +1250,9 @@ def fly_delivered_pr(
     number, or records an existing-PR correction of it; or, when no active
     receipt names it, when the audit file records a cleared or superseded
     non-lens receipt for the same repository on the PR's *head_branch*. A
-    cleared receipt still means the PR came from Fly. Used to route a fix
+    cleared receipt still means the PR came from Fly. An existing audit file
+    that cannot be read or has any line that cannot be parsed makes the
+    origin unknown (None) even when an active receipt matches. Used to route a fix
     round: a Fly PR's fix round runs as a Fly correction, never as a commit on
     this host."""
     import fly_runner
@@ -1269,6 +1300,15 @@ def fly_delivered_pr(
             tasks.add(rest[len(task_mark):].strip())
     branches.discard("")
     bases.discard("")
+    # The audit file is read and validated whether or not an active receipt
+    # matched: a corrupt one holds the route either way, never a definite
+    # Fly route and never local.
+    try:
+        audit_ok = _removal_audit_lines(ledger) is not None
+    except OSError:
+        audit_ok = False
+    if not audit_ok:
+        return FlyDeliveredPR(None)
     if not delivered:
         head = str(head_branch or "").strip()
         try:
