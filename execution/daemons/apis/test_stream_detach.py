@@ -228,3 +228,161 @@ async def test_detached_run_that_raises_is_logged_and_marks_failed(
     assert failures, "detached failure was not logged"
     assert task_id in failures[0].getMessage()
     assert failures[0].exc_info and isinstance(failures[0].exc_info[1], RuntimeError)
+
+
+# ── Security question from the #1652 review: redelivery after cache eviction ──
+#
+# This settles the open security-review question on #1652. `_seen_created`
+# evicts its oldest ids, and dispatch_task had no check for a detached run
+# already in progress, so a `task.created` redelivered after eviction could
+# start a second run alongside the first. The tests below drive the REAL
+# dispatch_task: hold the first run open, fill the cache until its id is
+# evicted, redeliver the event, and count harness spawns. Before the fix this
+# observed two spawns; dispatch_task now keeps the ids of detached runs still
+# in progress, logs and refuses a second run for one of them, and drops the id
+# when the run ends (success, failure or cancellation) so a later legitimate
+# retry is not blocked.
+
+
+def _created_path_runs_real(monkeypatch, records, task_id, spawn):
+    snap = records[task_id]["snapshot"]
+    # A task the gate auto-executes on creation (low blast, high confidence).
+    snap.update(status="pending", confidence=0.99, blocked_reason=None)
+    monkeypatch.setattr(apis, "hydrate_snapshot", _no_hydrate)
+    monkeypatch.setattr(apis, "DRY_RUN", False)
+    monkeypatch.setattr(apis, "RUN_CONVERSATIONS", False)
+    monkeypatch.setattr(apis, "RUN_EMAIL", False)
+    monkeypatch.setattr(apis, "_created_seen", {})
+    monkeypatch.setattr(apis, "_announced", {})
+    monkeypatch.setattr(apis, "_detached_runs_in_progress", set())
+    monkeypatch.setattr(apis, "_CREATED_SEEN_MAX", 4)
+    monkeypatch.setattr(apis, "_spawn_harness_skill", spawn)
+    return snap
+
+
+async def _evict_from_created_cache(monkeypatch, task_id, notifier):
+    real_dispatch = apis.dispatch_task
+
+    async def no_dispatch(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(apis, "dispatch_task", no_dispatch)
+    for i in range(apis._CREATED_SEEN_MAX):
+        await apis.handle_event(
+            _event("task", f"ent_filler_{i}", "created", {"title": "F"}), notifier
+        )
+    monkeypatch.setattr(apis, "dispatch_task", real_dispatch)
+    assert task_id not in apis._created_seen, "cache did not evict the first id"
+
+
+async def _settle():
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_created_redelivered_after_eviction_starts_one_run(
+    monkeypatch, release_store, caplog
+):
+    records, _brief_id, task_id = release_store
+    _Success = _cicada_delivers_a_pr(monkeypatch, records)
+    finish = asyncio.Event()
+    spawns: list[str] = []
+
+    async def held_spawn(*args, **kwargs):
+        spawns.append(task_id)
+        await finish.wait()
+        return _Success()
+
+    snap = _created_path_runs_real(monkeypatch, records, task_id, held_spawn)
+    notifier = _Notifier()
+    caplog.set_level(logging.INFO, logger=apis.log.name)
+    try:
+        await asyncio.wait_for(
+            apis.handle_event(_event("task", task_id, "created", dict(snap)), notifier),
+            timeout=RETURN_TIMEOUT,
+        )
+        await _settle()
+        assert spawns == [task_id]
+        assert snap["status"] == "executing"
+
+        await _evict_from_created_cache(monkeypatch, task_id, notifier)
+        # Neotoma redelivers the event; its snapshot now reads EXECUTING.
+        await asyncio.wait_for(
+            apis.handle_event(_event("task", task_id, "created", dict(snap)), notifier),
+            timeout=RETURN_TIMEOUT,
+        )
+        await _settle()
+
+        assert spawns == [task_id], "redelivery started a second run"
+        assert any(
+            "not starting a second run" in r.getMessage() for r in caplog.records
+        )
+    finally:
+        finish.set()
+        await _drain_background()
+    assert task_id not in apis._detached_runs_in_progress
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["failure", "cancellation"])
+async def test_in_progress_id_cleared_when_run_ends_so_retry_runs(
+    monkeypatch, release_store, ending
+):
+    records, _brief_id, task_id = release_store
+    _Success = _cicada_delivers_a_pr(monkeypatch, records)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    spawns: list[str] = []
+
+    async def spawn(*args, **kwargs):
+        spawns.append(task_id)
+        if len(spawns) == 1:
+            started.set()
+            await finish.wait()
+            if ending == "failure":
+                raise RuntimeError("harness exploded")
+        return _Success()
+
+    snap = _created_path_runs_real(monkeypatch, records, task_id, spawn)
+    notifier = _Notifier()
+
+    class _Job:
+        def finished(self, message):
+            return None
+
+        def failed(self, message):
+            return None
+
+    monkeypatch.setattr(apis._activity, "started", lambda message: _Job())
+    try:
+        await asyncio.wait_for(
+            apis.handle_event(_event("task", task_id, "created", dict(snap)), notifier),
+            timeout=RETURN_TIMEOUT,
+        )
+        await asyncio.wait_for(started.wait(), timeout=RETURN_TIMEOUT)
+        assert task_id in apis._detached_runs_in_progress
+
+        (run,) = [
+            t for t in apis._background_dispatch_tasks if task_id in t.get_name()
+        ]
+        if ending == "cancellation":
+            run.cancel()
+        else:
+            finish.set()
+        await asyncio.gather(run, return_exceptions=True)
+        await _settle()
+        assert task_id not in apis._detached_runs_in_progress
+
+        # A later legitimate retry of the same task is not blocked.
+        snap.update(status="pending", blocked_reason=None)
+        await _evict_from_created_cache(monkeypatch, task_id, notifier)
+        await asyncio.wait_for(
+            apis.handle_event(_event("task", task_id, "created", dict(snap)), notifier),
+            timeout=RETURN_TIMEOUT,
+        )
+        await _settle()
+        assert spawns == [task_id, task_id]
+    finally:
+        finish.set()
+        await _drain_background()

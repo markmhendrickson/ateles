@@ -329,6 +329,10 @@ log = logging.getLogger("apis")
 # an exception-draining callback for the rest of the daemon process lifetime.
 _background_dispatch_tasks: set[asyncio.Task[None]] = set()
 _background_checkpoint_tasks: set[asyncio.Task[None]] = set()
+# Task ids whose detached run is still in progress. `_seen_created` evicts old
+# ids, so a `task.created` redelivered after eviction would otherwise start a
+# second run alongside the first. Removed when the run ends, however it ends.
+_detached_runs_in_progress: set[str] = set()
 
 
 def _background_dispatch_done(task: asyncio.Task[None]) -> None:
@@ -2252,6 +2256,13 @@ async def dispatch_task(
         )
         return
 
+    if entity_id in _detached_runs_in_progress:
+        log.info(
+            f"[{DAEMON_NAME}] task {entity_id!r} already has a detached run in "
+            f"progress (trigger={trigger}) — not starting a second run"
+        )
+        return
+
     # The snapshot read fine, so any prior unreadable streak for this task is
     # over; forget it so a later blip starts counting from zero rather than
     # inheriting an old streak and reporting prematurely.
@@ -3568,10 +3579,23 @@ async def dispatch_task(
             job.failed(f"task {entity_id} → {skill} failed: {reason[:60]}")
 
     if detach_after_accept:
+        # Re-checked here with no await since the create_task below, so two
+        # dispatches that both passed the early check cannot both detach.
+        if entity_id in _detached_runs_in_progress:
+            log.info(
+                f"[{DAEMON_NAME}] task {entity_id!r} already has a detached run "
+                f"in progress (trigger={trigger}) — not starting a second run"
+            )
+            return None
         task = asyncio.create_task(
             _finish_dispatch(), name=f"apis-dispatch-{entity_id}-{trigger}"
         )
+        _detached_runs_in_progress.add(entity_id)
         _background_dispatch_tasks.add(task)
+        # Done callbacks run on success, failure and cancellation alike.
+        task.add_done_callback(
+            lambda _t: _detached_runs_in_progress.discard(entity_id)
+        )
         task.add_done_callback(_background_dispatch_done)
         return True if correction_lifecycle is not None else None
 
