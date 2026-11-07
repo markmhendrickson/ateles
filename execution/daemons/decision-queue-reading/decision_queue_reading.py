@@ -16,6 +16,16 @@ page by page, one request at a time), classifies the open checkpoints with
 * two ``metric_reading`` records (and their ``metric_definition`` records),
   stored with ``store_and_verify`` so each is read back.
 
+Holds are also counted by when they were raised, not only while they are open.
+``last_observation_at`` moves when a hold is approved or retired, so the raised
+time is the hold's earliest observation: read from
+``/entities/{id}/observations`` for each hold touched in the last 24 hours,
+sequentially, up to ``MAX_OBSERVATION_READS`` per run. Holds raised in the
+window are bucketed as real, delivery lane (counted apart, never hidden) or
+outside the lane. A raised time that cannot be established is counted as
+unknown and keeps the finish test from counting the day as clean.
+``finish_test`` carries the run of consecutive clean readings.
+
 Nothing else is ever written. It sends nothing to anyone, never approves,
 resolves or supersedes a checkpoint, and never writes to a task: every request
 goes through :func:`guarded_request`, which refuses any write that is not a
@@ -56,6 +66,8 @@ COLLECTOR = "execution/daemons/decision-queue-reading/decision_queue_reading.py"
 ARTIFACT_REF = "ateles-checkpoint-queue"
 METRIC_OVER_LIMIT = "Q1_real_decisions_waiting_over_72h"
 METRIC_AUTOMATIC = "Q2_automatic_holds_added_24h"
+METRIC_OUTSIDE_FLY = "Q3_automatic_holds_outside_fly_raised_24h"
+METRIC_FLY_LANE = "Q4_fly_lane_holds_raised_24h"
 #: The live record type that holds the operator's open holds. Its name is retired in the
 #: foundation vocabulary but the records are still written under it until migration.md runs.
 CHECKPOINT_RECORD_TYPE = (
@@ -72,6 +84,10 @@ DRIFT_ABSOLUTE = 15
 DRIFT_FRACTION = 0.01
 #: A paged read that returns fewer rows than the server's own total is short.
 SHORT_READ_FRACTION = 0.98
+#: Observation reads per run, for the hold raised times. Past it, unknown.
+MAX_OBSERVATION_READS = 1000
+#: Consecutive clean daily readings that finish the milestone.
+FINISH_NEEDED = 3
 SCHEMA_VERSION = 1
 NOTICE = (
     "Daily reading of the open checkpoint queue. Values are counts, ids, classes "
@@ -80,7 +96,21 @@ NOTICE = (
     "numbers are given: it is never an all-clear. status partial means the "
     "numbers are sound but could not be recorded as readings. An entry in "
     "failed_checks names what did not run or degraded. If generated_at is more "
-    "than 36 hours old, the job has stopped: tell the operator it needs looking at."
+    "than 36 hours old, the job has stopped: tell the operator it needs looking at. "
+    "Holds raised in the last 24 hours are counted by their earliest observation, "
+    "not their last: fly_lane_holds_raised_24h are automatic holds on delivery-lane "
+    "tasks, counted apart and not a decision; outside_fly_holds_raised_24h and "
+    "real_holds_raised_24h are the ones that matter; holds_raised_time_unknown_24h "
+    "could not be placed and name a failed check. finish_test counts consecutive "
+    "clean daily readings; it only reports. A day is clean when no real decision has "
+    "waited over the limit, no automatic hold outside the lane was raised, none is "
+    "unknown, and no check failed (a degraded run is never clean). A new real "
+    "decision does not stop a day being clean, because a real decision is not "
+    "clutter: it counts in real_holds_raised_24h, and only waiting over the limit "
+    "stops the day. clean_today null means the run was invalid, so the day did not "
+    "count. open_fly_holds lists each open hold on a delivery-lane task (checkpoint "
+    "id, task id, age in hours, oldest first), shown apart because the lane's "
+    "automatic holds are expected."
 )
 
 _NON_PROD_LABELS = frozenset(
@@ -282,12 +312,203 @@ def real_decision_list(
     return rows
 
 
+def _earliest_observation(
+    requester: Requester, entity_id: str, count: Any
+) -> tuple[datetime | None, str | None]:
+    """The hold's earliest observation time, or (None, category) when unknown."""
+    size = (count if isinstance(count, int) and count > 0 else 20) + 5
+    path = (
+        f"/entities/{urllib.parse.quote(entity_id, safe='')}/observations?limit={size}"
+    )
+    try:
+        res = requester("GET", path, None)
+    except Exception as exc:  # noqa: BLE001 - category only, never raw text
+        return None, _category(exc)
+    rows = res.get("observations") if isinstance(res, dict) else None
+    total = res.get("total") if isinstance(res, dict) else None
+    if not isinstance(rows, list) or not isinstance(total, int):
+        return None, "bad_response"
+    if len(rows) < total:
+        return None, "short_read"
+    times = [
+        t
+        for t in (
+            dq._parse_time(r.get("observed_at")) for r in rows if isinstance(r, dict)
+        )
+        if t
+    ]
+    if not times:
+        return None, "no_observed_at"
+    return min(times), None
+
+
+def measure_raised_holds(
+    briefs: list[dict[str, Any]],
+    tasks_by_id: dict[str, dict[str, Any]],
+    placements: list[dq.Placement],
+    *,
+    now: datetime,
+    requester: Requester,
+    pause: float = PAGE_PAUSE,
+    max_reads: int | None = None,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Bucket the automatic holds raised in the last 24 hours, open or closed.
+
+    Returns the numbers and at most one failed-check entry. A hold touched in
+    the window whose first observation is older does not count: approving or
+    retiring an old hold moves ``last_observation_at`` but not its raised time.
+    A hold with one observation is raised at its last observation, with no
+    request; any other is read one request at a time, never in parallel.
+    """
+    max_reads = MAX_OBSERVATION_READS if max_reads is None else max_reads
+    klass_of = {p.checkpoint_id: p.klass for p in placements}
+    cutoff = timedelta(hours=NEW_HOLD_HOURS)
+    counts = {dq.BUCKET_REAL: 0, dq.BUCKET_FLY_LANE: 0, dq.BUCKET_OUTSIDE_FLY: 0}
+    outside_tasks: set[str] = set()
+    unknown = 0
+    reads = 0
+    categories: set[str] = set()
+    for record in briefs:
+        brief = record.get("snapshot") or {}
+        touched = dq._parse_time(record.get("last_observation_at"))
+        if touched is None or now - touched > cutoff:
+            continue
+        reason = str(brief.get("reason") or "").strip()
+        if not dq.is_gate_written(brief) or not dq.is_automatic_reason(reason):
+            continue
+        cid = str(record.get("entity_id") or "")
+        raised: datetime | None = touched
+        if record.get("observation_count") != 1:
+            if reads >= max_reads or not cid:
+                raised, why = None, "read_cap" if cid else "no_entity_id"
+            else:
+                if reads:
+                    time.sleep(pause)
+                reads += 1
+                raised, why = _earliest_observation(
+                    requester, cid, record.get("observation_count")
+                )
+            if raised is None:
+                unknown += 1
+                categories.add(why or "unknown")
+                continue
+        if now - raised > cutoff:
+            continue
+        task_id = brief.get("task_entity_id")
+        task = ((tasks_by_id.get(task_id) if task_id else None) or {}).get("snapshot")
+        bucket = dq.bucket_raised_hold(brief, task, klass_of.get(cid))
+        if bucket is None:
+            continue
+        counts[bucket] += 1
+        if bucket == dq.BUCKET_OUTSIDE_FLY and task_id:
+            outside_tasks.add(str(task_id))
+    failed: list[dict[str, str]] = []
+    if unknown:
+        failed.append(
+            {
+                "check": "hold_raised_time",
+                "reason": ",".join(sorted(categories)),
+            }
+        )
+    return {
+        "fly_lane_holds_raised_24h": counts[dq.BUCKET_FLY_LANE],
+        "outside_fly_holds_raised_24h": counts[dq.BUCKET_OUTSIDE_FLY],
+        "real_holds_raised_24h": counts[dq.BUCKET_REAL],
+        "holds_raised_time_unknown_24h": unknown,
+        "outside_fly_hold_tasks": sorted(outside_tasks),
+    }, failed
+
+
+def open_fly_holds(placements: list[dq.Placement]) -> list[dict[str, Any]]:
+    """One row per open lane hold, oldest first. No titles."""
+    rows = [
+        {
+            "checkpoint_id": p.checkpoint_id,
+            "task_id": p.task_id,
+            "age_hours": p.age_hours,
+        }
+        for p in placements
+        if p.klass == dq.FLY_LANE_HOLD
+    ]
+    rows.sort(key=lambda r: -(r["age_hours"] or 0))
+    return rows
+
+
+def is_clean(numbers: dict[str, Any], failed_checks: list[dict[str, str]]) -> bool:
+    """A degraded run is never clean: any failed check means not clean."""
+    return (
+        not failed_checks
+        and numbers["real_decisions_over_limit"] == 0
+        and numbers["outside_fly_holds_raised_24h"] == 0
+        and numbers["holds_raised_time_unknown_24h"] == 0
+    )
+
+
+def next_finish_test(
+    previous: dict[str, Any] | None,
+    *,
+    numbers: dict[str, Any] | None,
+    now: datetime,
+    failed_checks: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """The finish test after this run. ``numbers`` None means an invalid run.
+
+    An invalid run passes the previous value through, with ``clean_today``
+    null: ``through`` then stops being yesterday, so a missed day resets the
+    count at the next good run. A clean run on the day after ``through`` adds
+    one, a rerun on ``through`` keeps the count (at least 1), any other clean
+    run starts at 1, and a run that is not clean resets to 0.
+    """
+    today = now.astimezone(timezone.utc).date()
+    prev_count = 0
+    prev_through = None
+    if isinstance(previous, dict):
+        count = previous.get("consecutive_clean_readings")
+        if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            prev_count = count
+        try:
+            prev_through = datetime.fromisoformat(str(previous.get("through"))).date()
+        except ValueError:
+            prev_through = None
+
+    def doc(count: int, clean: bool | None, through: Any) -> dict[str, Any]:
+        return {
+            "needed": FINISH_NEEDED,
+            "consecutive_clean_readings": count,
+            "clean_today": clean,
+            "through": through,
+            "met": count >= FINISH_NEEDED,
+        }
+
+    if numbers is None:
+        return doc(prev_count, None, prev_through.isoformat() if prev_through else None)
+    if not is_clean(numbers, failed_checks or []):
+        return doc(0, False, today.isoformat())
+    if prev_through == today:
+        count = max(prev_count, 1)
+    elif prev_through == today - timedelta(days=1):
+        count = prev_count + 1
+    else:
+        count = 1
+    return doc(count, True, today.isoformat())
+
+
+def load_previous_finish_test(path: Path) -> dict[str, Any] | None:
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    value = doc.get("finish_test") if isinstance(doc, dict) else None
+    return value if isinstance(value, dict) else None
+
+
 def compute_reading(
     placements: list[dq.Placement],
     *,
     now: datetime,
     previous_first_seen: dict[str, datetime] | None = None,
     limit_hours: float = WAIT_LIMIT_HOURS,
+    raised: dict[str, Any],
 ) -> dict[str, Any]:
     summary = dq.summarize(placements, wait_limit_hours=limit_hours)
     new = [
@@ -313,6 +534,8 @@ def compute_reading(
         "new_holds_24h_real": len(new_real),
         "new_holds_24h_not_real": len(new) - len(new_real),
         "real_decision_list": listing,
+        **raised,
+        "open_fly_holds": open_fly_holds(placements),
     }
 
 
@@ -404,6 +627,29 @@ def build_metric_readings(
             },
             **common,
         ),
+        schemas.build_record(
+            "metric_reading",
+            reading_key=schemas.reading_key(
+                METRIC_OUTSIDE_FLY, ARTIFACT_REF, window_end
+            ),
+            metric_ref=METRIC_OUTSIDE_FLY,
+            value=numbers["outside_fly_holds_raised_24h"],
+            unit="holds",
+            detail={
+                "real": numbers["real_holds_raised_24h"],
+                "unknown": numbers["holds_raised_time_unknown_24h"],
+            },
+            **common,
+        ),
+        schemas.build_record(
+            "metric_reading",
+            reading_key=schemas.reading_key(METRIC_FLY_LANE, ARTIFACT_REF, window_end),
+            metric_ref=METRIC_FLY_LANE,
+            value=numbers["fly_lane_holds_raised_24h"],
+            unit="holds",
+            detail={},
+            **common,
+        ),
     ]
 
 
@@ -449,6 +695,7 @@ def build_document(
     failed_checks: list[dict[str, str]],
     instrument: dict[str, Any] | None,
     carry: dict[str, datetime] | None = None,
+    finish_test: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     doc: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -459,6 +706,8 @@ def build_document(
         "instrument": instrument,
         # The first-seen clock, carried through every run including invalid ones.
         "first_seen_carry": {k: _iso(v) for k, v in sorted((carry or {}).items())},
+        # Consecutive clean readings, carried through every run like the clock.
+        "finish_test": finish_test,
     }
     if numbers is not None and status in ("ok", "partial"):
         doc.update({k: v for k, v in numbers.items() if k != "real_decision_list"})
@@ -495,6 +744,7 @@ def run(
     failed: list[dict[str, str]] = []
     instrument: dict[str, Any] | None = None
     previous, why_prev = load_previous_first_seen(path or default_path())
+    previous_finish = load_previous_finish_test(path or default_path())
 
     def finish(
         status: str, numbers: dict[str, Any] | None, code: int
@@ -521,6 +771,12 @@ def run(
             failed_checks=failed,
             instrument=instrument,
             carry=carry,
+            finish_test=next_finish_test(
+                previous_finish,
+                numbers=numbers if status in ("ok", "partial") else None,
+                now=now,
+                failed_checks=failed,
+            ),
         )
         if not dry_run:
             try:
@@ -566,8 +822,14 @@ def run(
     people = dq._person_owners() | names
     tasks_by_id = {r["entity_id"]: r for r in tasks if r.get("entity_id")}
     placements = dq.classify_queue(briefs, tasks_by_id, now=now, person_owners=people)
+    raised, raised_failed = measure_raised_holds(
+        briefs, tasks_by_id, placements, now=now, requester=requester, pause=pause
+    )
+    failed.extend(raised_failed)
     try:
-        numbers = compute_reading(placements, now=now, previous_first_seen=previous)
+        numbers = compute_reading(
+            placements, now=now, previous_first_seen=previous, raised=raised
+        )
     except ValueError:
         failed.append({"check": "classification", "reason": "list_summary_mismatch"})
         return finish("invalid", None, 1)
@@ -643,9 +905,17 @@ def main(
     else:
         over = doc.get("real_decisions_over_limit", "n/a")
         auto = doc.get("new_holds_24h_not_real", "n/a")
+        outside = doc.get("outside_fly_holds_raised_24h", "n/a")
+        lane = doc.get("fly_lane_holds_raised_24h", "n/a")
+        unknown = doc.get("holds_raised_time_unknown_24h", "n/a")
+        finish = (doc.get("finish_test") or {}).get("consecutive_clean_readings", "n/a")
         print(
             f"date={doc['generated_at'][:10]} status={doc['status']} "
             f"real_decisions_over_72h={over} automatic_holds_added_24h={auto} "
+            f"outside_fly_holds_raised_24h={outside} "
+            f"fly_lane_holds_raised_24h={lane} "
+            f"holds_raised_time_unknown_24h={unknown} "
+            f"finish_test_clean_readings={finish} "
             f"failed_checks={len(doc['failed_checks'])}"
         )
     return code

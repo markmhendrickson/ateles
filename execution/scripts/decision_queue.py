@@ -15,6 +15,14 @@ The labels on a hold are mechanical. The action type behind a "payment" hold is
 often a guess from the task's words, so ``live_effect`` means "says it might
 touch money, mail or publication", not "does". It is kept for the operator
 rather than sorted further here.
+
+One lane is counted apart, not hidden: the delivery lane, where a session
+coordinates a task and a builder delivers it. Its automatic holds are expected
+and are not a decision for the operator, so they take their own class
+(``fly_lane_hold``) and their own count. A hold that does not match every
+condition of the lane is outside it, which is the safe direction: noise stays
+visible. :func:`bucket_raised_hold` sorts a hold raised in a window, open or
+already closed, into real, lane or outside the lane.
 """
 
 from __future__ import annotations
@@ -35,7 +43,11 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.daemon_runtime.task_lifecycle import is_terminal, normalize  # noqa: E402
-from lib.daemon_runtime.task_ownership import session_owned  # noqa: E402
+from lib.daemon_runtime.task_ownership import (  # noqa: E402
+    canonical_assignee,
+    names_a_session,
+    session_owned,
+)
 
 # ── Classes ──────────────────────────────────────────────────────────────────
 RAISED_BY_PERSON_OR_SESSION = "raised_by_person_or_session"
@@ -50,6 +62,7 @@ TASK_MOVED_ON = "task_moved_on"
 LIVE_SESSION_OWNED = "live_session_owned"
 LIVE_EFFECT = "live_effect"
 LIVE_ASKS_FOR_DECISION = "live_asks_for_decision"
+FLY_LANE_HOLD = "fly_lane_hold"
 LIVE_CODE = "live_code"
 LIVE_LOW = "live_low"
 UNRECOGNISED = "unrecognised"
@@ -71,6 +84,18 @@ REAL_DECISION_CLASSES = frozenset(
         UNRECOGNISED,
     }
 )
+
+# ── The delivery lane ────────────────────────────────────────────────────────
+#: Copies of ``DELIVERY_ACTION_TYPE`` and ``BUILDER_SKILLS`` in
+#: ``execution/daemons/apis/build_delivery.py``. Not imported, so this module
+#: stays light; ``test_decision_queue.py`` asserts they are equal.
+FLY_LANE_ACTION_TYPE = "open_or_merge_pr"
+FLY_LANE_BUILDERS = frozenset({"cicada"})
+
+#: Buckets of :func:`bucket_raised_hold`.
+BUCKET_REAL = "real"
+BUCKET_FLY_LANE = "fly_lane"
+BUCKET_OUTSIDE_FLY = "outside_fly"
 
 # ── What the gate writes ─────────────────────────────────────────────────────
 GATE_HANDLER = "apis"
@@ -211,6 +236,56 @@ def approval_could_release(brief: dict, task_record: dict | None) -> bool:
     )
 
 
+def in_fly_lane(brief: dict, task: dict | None) -> bool:
+    """True when a session coordinates the task and a builder delivers it.
+
+    All three must hold: the action type the gate judged is the delivery type,
+    the canonical assignee is a builder skill, and the task's owner names a
+    session. A missing task is never in the lane.
+    """
+    if not task:
+        return False
+    return (
+        resolved_action_type(brief, task) == FLY_LANE_ACTION_TYPE
+        and canonical_assignee(task.get("assigned_to")) in FLY_LANE_BUILDERS
+        and names_a_session(task.get("owner"))
+    )
+
+
+def _asks_for_decision(task: dict | None) -> bool:
+    return bool(_ASKS_FOR_DECISION.search(str((task or {}).get("title") or "")))
+
+
+def bucket_raised_hold(
+    brief: dict, task: dict | None, klass: str | None = None
+) -> str | None:
+    """Sort one hold that was raised in a window, open or closed.
+
+    Returns None when a person or session wrote the hold: that is not an
+    automatic hold. ``"real"`` when an operator-only label is on the brief or
+    the task, the action type reaches outside, the title asks for a decision,
+    or (for an open hold, whose class is passed in) its class is a real
+    decision class. ``"fly_lane"`` when it is in the lane, otherwise
+    ``"outside_fly"``; a hold whose task is missing is outside the lane.
+    """
+    reason = str(brief.get("reason") or "").strip()
+    if not is_gate_written(brief) or not is_automatic_reason(reason):
+        return None
+    if reason.startswith(OPERATOR_ONLY_PREFIX):
+        return BUCKET_REAL
+    if klass is not None and klass in REAL_DECISION_CLASSES:
+        return BUCKET_REAL
+    if task is None:
+        return BUCKET_OUTSIDE_FLY
+    if str(task.get("blocked_reason") or "").strip().startswith(OPERATOR_ONLY_PREFIX):
+        return BUCKET_REAL
+    if resolved_action_type(brief, task) in EFFECT_ACTION_TYPES:
+        return BUCKET_REAL
+    if _asks_for_decision(task):
+        return BUCKET_REAL
+    return BUCKET_FLY_LANE if in_fly_lane(brief, task) else BUCKET_OUTSIDE_FLY
+
+
 def classify_one(
     brief: dict,
     task: dict | None,
@@ -271,8 +346,10 @@ def classify_one(
         return LIVE_SESSION_OWNED
     if action_type in EFFECT_ACTION_TYPES:
         return LIVE_EFFECT
-    if _ASKS_FOR_DECISION.search(str(task.get("title") or "")):
+    if _asks_for_decision(task):
         return LIVE_ASKS_FOR_DECISION
+    if in_fly_lane(brief, task):
+        return FLY_LANE_HOLD
     if str(brief.get("blast_radius") or "").strip().lower() == "high":
         return LIVE_CODE
     return LIVE_LOW

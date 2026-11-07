@@ -315,6 +315,32 @@ SPECS: list[dict[str, Any]] = [
                         "touched again inside the window counts as new.",
           collector=_QUEUE, pooling=POOLING_ENOUGH, cadence="daily",
           probe={"expect": "client-side awaiting_operator count equals the server's filtered total within drift"}),
+    _spec("Q3", "automatic_holds_outside_fly_raised_24h",
+          "Automatic holds raised in the last 24 hours, open or already closed, that are not a real decision and "
+          "are not on the delivery lane (a session coordinates, a builder delivers). Detail carries the real "
+          "count raised in the same window and the count whose raised time could not be established.",
+          "swarm_ops", "checkpoint_queue",
+          {"read": "checkpoint_brief and task snapshots, unfiltered, cursor-paged; observations of each hold touched in the window",
+           "derive": "gate-written automatic holds with earliest observation <= 24h, bucket_raised_hold == outside_fly"},
+          "holds", "down_good", ["decision_queue"],
+          baseline_status="capture",
+          baseline_note="Forward-only daily reading. The time comes from the hold's earliest observation, not its "
+                        "last, so approving or retiring an old hold does not make it new. A hold whose time cannot "
+                        "be read is counted as unknown in detail, never as zero.",
+          collector=_QUEUE, pooling=POOLING_ENOUGH, cadence="daily",
+          probe={"expect": "client-side awaiting_operator count equals the server's filtered total within drift"}),
+    _spec("Q4", "fly_lane_holds_raised_24h",
+          "Automatic holds raised in the last 24 hours, open or already closed, on delivery-lane tasks. Counted "
+          "apart from Q3: they are expected and are not a decision for the operator.",
+          "swarm_ops", "checkpoint_queue",
+          {"read": "checkpoint_brief and task snapshots, unfiltered, cursor-paged; observations of each hold touched in the window",
+           "derive": "gate-written automatic holds with earliest observation <= 24h, bucket_raised_hold == fly_lane"},
+          "holds", "down_good", ["decision_queue"],
+          baseline_status="capture",
+          baseline_note="Forward-only daily reading. The time comes from the hold's earliest observation, not its "
+                        "last. Holds whose time cannot be read are not in this count; Q3 detail carries that number.",
+          collector=_QUEUE, pooling=POOLING_ENOUGH, cadence="daily",
+          probe={"expect": "client-side awaiting_operator count equals the server's filtered total within drift"}),
 ]
 
 
