@@ -912,7 +912,10 @@ def fly_delivery_instructions(plan: FlyDeliveryPlan) -> str:
             "Correct only this scoped task. Preserve prior WIP, findings and review/attempt history. "
             "Do not change branch/remote, push, open another PR or merge. Commit before finishing; "
             "the runner conditionally updates only this existing PR. No changes is a held outcome, not completion. "
-            f"Write the change summary to {fly_runner.PR_FILE_PLACEHOLDER}; it does not replace the PR body."
+            f"Write the change summary to {fly_runner.PR_FILE_PLACEHOLDER}; it does not replace the PR body. "
+            "If this correction makes the current PR description untrue, also write the complete "
+            "replacement description to `pull_request_body.md` in the same folder as that summary file; "
+            "otherwise do not write it, and the description stays as it is."
         )
     closes = (f" Reference the issue in the body with `Closes #{plan.issue_number}`."
               if plan.issue_number else "")  # fmt: skip
@@ -1428,7 +1431,9 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
             "run_id": result.remote_run_id, "commit": result.fly_delivery_commit,
             "reason": result.fly_delivery_reason, "pr_number": result.fly_pr_number,
             "pr_url": result.fly_pr_url, "readback": result.fly_delivery_readback,
-            "readback_reason": result.fly_delivery_readback_reason})  # fmt: skip
+            "readback_reason": result.fly_delivery_readback_reason,
+            **({"pr_description": result.fly_pr_description}
+               if isinstance(result.fly_pr_description, str) and result.fly_pr_description else {})})  # fmt: skip
     except (OSError, ValueError):
         settled = True  # unreadable: the reservation stays as it was written
     if not settled:

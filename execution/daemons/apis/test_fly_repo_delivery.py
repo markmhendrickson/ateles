@@ -1590,3 +1590,76 @@ def test_existing_correction_cannot_rewind_even_with_an_exact_remote_lease(world
                        default_branch="main", head=world["old"], token=TOKEN,
                        expected_head=world["base"])
     assert git(remote, "rev-parse", f"refs/heads/{BRANCH}", home=world["home"]) == world["base"]
+
+
+@pytest.mark.parametrize("content,expected", [
+    (b"# Whole\n\nbody.\n", "# Whole\n\nbody."),
+    (b"   \n", ""),
+    (b"\xff\xfe not text", ""),
+    (b"x" * (64 * 1024 + 1), ""),
+    (None, ""),
+])
+def test_the_replacement_description_is_read_safely(world, content, expected):
+    path = world["work"].export / rd.PR_BODY_NAME
+    if content is not None:
+        path.write_bytes(content)
+    assert rd.read_pr_body(world["work"]) == expected
+
+
+def test_a_replacement_description_link_is_not_followed(world, tmp_path):
+    secret = tmp_path / "elsewhere.md"
+    secret.write_text("Not the agent's\n")
+    (world["work"].export / rd.PR_BODY_NAME).symlink_to(secret)
+    assert rd.read_pr_body(world["work"]) == ""
+
+
+def _pr_api(calls, get_answer):
+    """A fake ``_api`` that takes the PATCH and answers the read-back GET."""
+    def api(method, path, token, body=None):
+        calls.append((method, path, token, body))
+        return (200, None) if method == "PATCH" else get_answer
+    return api
+
+
+def test_update_pr_body_sends_only_the_body_and_reads_it_back(monkeypatch):
+    calls = []
+    monkeypatch.setattr(rd, "_api", _pr_api(calls, (200, {"body": "New."})))
+    rd.update_pr_body(repository="owner/repo", number=5, token="tok", body="New.")
+    assert calls == [("PATCH", "/repos/owner/repo/pulls/5", "tok", {"body": "New."}),
+                     ("GET", "/repos/owner/repo/pulls/5", "tok", None)]
+
+
+def test_a_description_differing_only_in_line_endings_is_confirmed(monkeypatch):
+    calls = []
+    monkeypatch.setattr(rd, "_api", _pr_api(calls, (200, {"body": "# A\r\n\r\nB.\r\n"})))
+    rd.update_pr_body(repository="owner/repo", number=5, token="tok", body="# A\n\nB.")
+    assert [c[0] for c in calls] == ["PATCH", "GET"]
+
+
+def test_a_read_back_description_that_differs_raises_pr_failed(monkeypatch, capsys):
+    # Before the fix this did not raise: pytest reported
+    # "Failed: DID NOT RAISE RepoWorkError", because
+    # the PATCH's 200 alone counted as success and no GET was sent.
+    calls = []
+    monkeypatch.setattr(rd, "_api", _pr_api(calls, (200, {"body": "Old text."})))
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.update_pr_body(repository="owner/repo", number=5, token="tok", body="New.")
+    assert exc.value.category == rd.PR_FAILED
+    assert "Old text." not in str(exc.value) and "New." not in str(exc.value)
+    out = capsys.readouterr()
+    assert "Old text." not in out.out + out.err and "New." not in out.out + out.err
+
+
+@pytest.mark.parametrize("answer", [(404, None), (0, None), (200, None), (200, {"body": 5})])
+def test_an_unreadable_description_read_back_raises_pr_failed(monkeypatch, answer):
+    monkeypatch.setattr(rd, "_api", _pr_api([], answer))
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.update_pr_body(repository="owner/repo", number=5, token="tok", body="New.")
+    assert exc.value.category == rd.PR_FAILED
+
+
+def test_a_refused_description_update_raises_pr_failed(monkeypatch):
+    monkeypatch.setattr(rd, "_api", lambda *a, **k: (403, None))
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.update_pr_body(repository="owner/repo", number=5, token="tok", body="New.")
+    assert exc.value.category == rd.PR_FAILED
