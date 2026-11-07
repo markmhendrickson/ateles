@@ -69,6 +69,9 @@ What it will never delete:
 - a `node_modules` whose real path leaves the worktree. Containment is checked against the real path for each
   directory right before it is deleted, so a directory swapped for a symlink after planning is refused too.
 - a `node_modules` that contains files tracked by git, or one inside a nested git repository.
+- a `node_modules` with a `.git` entry (file, directory or link) anywhere beneath it: a repository kept
+  inside a dependency tree may hold commits that exist nowhere else. It is refused and reported as
+  `node_modules:contains-git`; if the tree cannot be read to check, it is refused too.
 - a `node_modules` that is a mount point, or has any directory beneath it on a different device from the
   worktree: refused and reported as `node_modules:mount-point`, so a separately mounted volume is never
   emptied. This is checked at planning time and again immediately before each directory is deleted.
@@ -111,6 +114,22 @@ without the tier it expects.
 - With `--yield-to-file`, `--apply` skips the run while that file changed in the last 30 minutes (a manual
   cleanup is in progress).
 - Notes `LOW-DISK(<5GB)` in the log when free space on the home volume is low, and still runs.
+- Git configuration cannot hide a change. Every git command the module runs is built in one place with
+  `-c status.showUntrackedFiles=all -c status.ignoreSubmodules=none -c core.fsmonitor=false
+  -c core.untrackedCache=false` on the command line, which outranks global, system and repository config.
+  That covers every cleanliness check and the `git worktree remove` call, whose own re-check of the tree
+  therefore sees untracked files too. (Only the `--protect-ignored` listing of ignored files uses
+  `status.showUntrackedFiles=normal`, so ignored directories stay collapsed.)
+- The state directory is created mode 0700 and `runs.jsonl`, `lock` and the logs mode 0600 (an existing
+  looser directory or file is tightened); the process runs with umask 077 and restores it on exit. A symbolic
+  link where a state or log file belongs is refused, not followed. Log rotation never follows, deletes or
+  truncates a symbolic link.
+- Every name and path written to the day log has control characters (newlines included) replaced by
+  `\xNN` escapes, so a worktree name cannot add or split log lines.
+- The node_modules tier assumes no other process running with the same user rights is modifying the
+  worktree while the job runs (creating links, mounting volumes). The containment and mount checks are
+  repeated immediately before each directory is deleted, but a change made inside that very short window
+  by such a process is not defended against.
 
 ## Configuration
 
@@ -129,6 +148,12 @@ default.
 
 The hold fails closed: prefixes with no date, or a date that is not `YYYY-MM-DD`, hold indefinitely (an
 unreadable date is logged as a warning). With no prefixes nothing is held.
+
+Relative paths are refused. A never-touch or repos-dir entry (flag or environment variable) that is not
+absolute, or does not start with `~`, stops the run with an error and exit code 2 before anything is read,
+written or deleted: a scheduled job starts in `/`, so a relative entry would silently protect or scan
+nothing. A hold prefix must be a directory-name prefix; one containing a path separator is refused the same
+way.
 
 ## Running it
 
@@ -188,7 +213,7 @@ alone. The node_modules tier has its own map, `strip_kept`.
 | `find-error`, `status-error`, `recheck-list-error`, `recheck-lsof-error` | a check could not be completed, so the worktree was kept |
 | `git-refused` | `git worktree remove` refused (logged with git's message) |
 | `over-cap-deferred` | the `--max` cap was reached; next run |
-| `no-node-modules`, `refused-node-modules`, `strip-failed` | node_modules tier: nothing to do, every candidate refused (`strip_refused` in the log names each with `symlink`, `not-contained`, `mount-point`, `tracked-files`, `nested-repo`), or a delete failed part-way |
+| `no-node-modules`, `refused-node-modules`, `strip-failed` | node_modules tier: nothing to do, every candidate refused (`strip_refused` in the log names each with `symlink`, `not-contained`, `mount-point`, `tracked-files`, `nested-repo`, `contains-git`), or a delete failed part-way |
 | `aborted-error-ratio` | the error-abort ratio was reached |
 
 ## Installing the launchd job (operator, per host)
