@@ -1313,6 +1313,91 @@ def test_an_archive_this_tool_really_wrote_is_removed_when_old(repo, archive_on)
     assert not os.path.exists(old_day)
 
 
+def test_prune_archives_refuses_a_symlinked_or_redirected_archive_root(repo):
+    real_root = repo.home + "/real-archive"
+    old = _write_archive(real_root, "2020-01-01")
+    link = repo.home + "/archive-link"
+    os.symlink(real_root, link)
+    wp.ARCH["root"] = link
+    res = wp.prune_archives(True, 30)
+    assert res["refused"] == "archive-root-not-real" and res["deleted"] is False
+    assert "symlink" in res["detail"] and res["old_day_dirs"] == []
+    assert os.path.isdir(old)  # nothing deleted through the link
+    # a real root reached through a symlinked ancestor is refused too
+    os.symlink(repo.home, repo.home + "/home-link")
+    wp.ARCH["root"] = repo.home + "/home-link/real-archive"
+    assert wp.prune_archives(True, 30)["refused"] == "archive-root-not-real"
+    assert os.path.isdir(old)
+    # the control: the configured, real path is accepted
+    wp.ARCH["root"] = real_root
+    assert wp.prune_archives(False, 30)["old_day_dirs"] == ["2020-01-01"]
+
+
+def test_main_prune_archives_reports_a_refused_root_and_exits_nonzero(repo):
+    real_root = repo.home + "/real-archive2"
+    old = _write_archive(real_root, "2020-01-01")
+    os.symlink(real_root, repo.home + "/archive-link2")
+    code, summ = run_main(
+        repo,
+        "--prune-archives",
+        "--apply",
+        "--archive-root",
+        repo.home + "/archive-link2",
+    )
+    assert code == 2 and summ["status"] == "refused-archive-root"
+    assert os.path.isdir(old)
+
+
+@pytest.mark.parametrize("swap", ["foreign-content", "symlink"])
+def test_prune_archives_rechecks_after_the_listing_and_before_deleting(
+    repo, monkeypatch, swap
+):
+    root = repo.home + "/archive-swap"
+    wp.ARCH["root"] = root
+    day = root + "/2020-01-01"
+    _write_archive(root, "2020-01-01")
+    target = repo.home + "/swap-target"
+    _write_archive(target, "2020-01-01")  # a perfectly valid-looking archive elsewhere
+    real_check = wp.archive_day_dir_matches
+    calls = []
+
+    def check_then_swap(path):
+        result = real_check(path)
+        if (
+            not calls and result
+        ):  # the listing's check: it passes, then the directory is swapped
+            if swap == "foreign-content":
+                open(path + "/notes.txt", "w").write("not an archive member")
+            else:
+                shutil.rmtree(path)
+                os.symlink(target + "/2020-01-01", path)
+        calls.append(path)
+        return result
+
+    monkeypatch.setattr(wp, "archive_day_dir_matches", check_then_swap)
+    res = wp.prune_archives(True, 30)
+    assert len(calls) >= 2, "the layout was not re-checked before deleting"
+    assert res["deleted_day_dirs"] == [] and res["skipped_foreign_dirs"] == [
+        "2020-01-01"
+    ]
+    assert os.path.lexists(day)  # put back where it was found
+    assert os.path.isfile(target + "/2020-01-01/r/x-1234abcd/meta.json")
+    if swap == "foreign-content":
+        assert open(day + "/notes.txt").read() == "not an archive member"
+    else:
+        assert os.path.islink(day)
+    assert [n for n in os.listdir(root) if n.startswith(".prune-")] == []
+
+
+def test_prune_archives_apply_deletes_a_verified_directory_via_the_aside_name(repo):
+    root = repo.home + "/archive-aside"
+    wp.ARCH["root"] = root
+    _write_archive(root, "2020-01-01")
+    res = wp.prune_archives(True, 30)
+    assert res["deleted_day_dirs"] == ["2020-01-01"]
+    assert os.listdir(root) == []
+
+
 def test_prune_archives_skips_are_logged_and_numeric_dates_are_not_dates(repo):
     root = repo.home + "/archive-log"
     wp.ARCH["root"] = root
