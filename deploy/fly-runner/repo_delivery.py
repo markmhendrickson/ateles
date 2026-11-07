@@ -1117,8 +1117,19 @@ def read_pr_body(work: Work) -> str:
 
 
 @_boundary(PR_FAILED)
+def _same_description(sent: str, got: object) -> bool:
+    """Whether GitHub's *got* is the description that was *sent*, ignoring
+    only line endings and surrounding whitespace."""
+    if not isinstance(got, str):
+        return False
+    norm = lambda text: text.replace("\r\n", "\n").replace("\r", "\n").strip()  # noqa: E731
+    return norm(got) == norm(sent)
+
+
 def update_pr_body(*, repository: str, number: int, token: str, body: str) -> None:
-    """Replace only the description of PR *number*; its title is untouched."""
+    """Replace only the description of PR *number*; its title is untouched.
+    The PR is then read back: a 200 that did not leave *body* on GitHub, or an
+    unreadable answer, raises. Neither text is ever printed or raised."""
     check_repository(repository)
     if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
         raise RepoWorkError(PR_FAILED, "the existing PR number is invalid")
@@ -1127,3 +1138,9 @@ def update_pr_body(*, repository: str, number: int, token: str, body: str) -> No
     if status != 200:
         raise RepoWorkError(PR_FAILED, "the pull request description could not be updated",
                             _status_word(status))  # fmt: skip
+    status, payload = _api("GET", f"/repos/{repository}/pulls/{number}", token)
+    if status != 200 or not isinstance(payload, dict):
+        raise RepoWorkError(PR_FAILED, "the updated pull request description could not be read back",
+                            _status_word(status))  # fmt: skip
+    if not _same_description(body, payload.get("body")):
+        raise RepoWorkError(PR_FAILED, "the pull request description read back differs from the one sent")

@@ -901,25 +901,39 @@ def _with_body(world, body, **kw):
     return runner
 
 
-def _allow_patch(monkeypatch, status=200):
-    """Let the correction fixture's API also take a PATCH, recording it."""
+def _allow_patch(monkeypatch, status=200, readback=None, calls=None):
+    """Let the correction fixture's API also take a PATCH, recording it. Every
+    later GET of the PR answers with the patched body, unless *readback* gives
+    ``(status, body)`` for that read-back instead. *calls* collects the
+    methods of PATCH and of every GET after it."""
     gets, patches = rd._api, []
 
     def api(method, path, token, body=None):
+        if patches and calls is not None:
+            calls.append(method)
         if method == "PATCH":
             patches.append((path, token, body))
+            if calls is not None:
+                calls.append(method)
             return status, None
-        return gets(method, path, token, body)
+        got_status, payload = gets(method, path, token, body)
+        if patches and path == f"/repos/{REPO}/pulls/12":
+            if readback is not None:
+                return readback[0], ({**payload, "body": readback[1]} if readback[0] == 200 else None)
+            return got_status, {**payload, "body": patches[-1][2]["body"]}
+        return got_status, payload
     monkeypatch.setattr(rd, "_api", api)
     return patches
 
 
 def test_existing_correction_replaces_the_description_scrubbed(world, existing_correction, monkeypatch):
     spec, _, _ = existing_correction
-    patches = _allow_patch(monkeypatch)
+    calls = []
+    patches = _allow_patch(monkeypatch, calls=calls)
     rc, record = _run(_job(world["tmp"], delivery=spec),
                       _with_body(world, f"# New description\n\nNow true. {TOKEN}\n"))
     assert rc == 0 and record["delivery_status"] == "updated" and record["pr_number"] == 12
+    assert calls == ["PATCH", "GET"] and record["pr_description"] == "updated"
     assert len(patches) == 1
     path, token, body = patches[0]
     assert path == f"/repos/{REPO}/pulls/12" and token == TOKEN
@@ -932,6 +946,28 @@ def test_existing_correction_without_a_body_file_sends_no_patch(world, existing_
     patches = _allow_patch(monkeypatch)
     _, record = _run(_job(world["tmp"], delivery=spec), _agent(world))
     assert record["delivery_status"] == "updated" and patches == []
+    assert "pr_description" not in record
+
+
+@pytest.mark.parametrize("readback", [(200, "Some other text."), (404, None)])
+def test_an_unconfirmed_description_keeps_the_delivery_updated(world, existing_correction,
+                                                               monkeypatch, readback):
+    spec, _, _ = existing_correction
+    calls = []
+    patches = _allow_patch(monkeypatch, readback=readback, calls=calls)
+    rc, record = _run(_job(world["tmp"], delivery=spec), _with_body(world, "Replacement.\n"))
+    assert len(patches) == 1 and calls == ["PATCH", "GET"]
+    assert rc == 0 and record["delivery_status"] == "updated" and record["pr_number"] == 12
+    assert record["pr_description"] == "not_confirmed"
+    assert "Replacement." not in record["stdout"] and "Some other text." not in record["stdout"]
+
+
+def test_a_description_differing_only_in_line_endings_is_confirmed(world, existing_correction, monkeypatch):
+    spec, _, _ = existing_correction
+    _allow_patch(monkeypatch, readback=(200, "# Title\r\n\r\nReplacement.\r\n"))
+    rc, record = _run(_job(world["tmp"], delivery=spec), _with_body(world, "# Title\n\nReplacement.\n"))
+    assert rc == 0 and record["delivery_status"] == "updated"
+    assert record["pr_description"] == "updated"
 
 
 def test_a_failed_description_update_keeps_the_delivery_updated(world, existing_correction, monkeypatch):
@@ -941,6 +977,7 @@ def test_a_failed_description_update_keeps_the_delivery_updated(world, existing_
     assert len(patches) == 1
     assert rc == 0 and record["delivery_status"] == "updated" and record["pr_number"] == 12
     assert record["pr_url"] == f"https://github.com/{REPO}/pull/12"
+    assert record["pr_description"] == "not_confirmed"
     assert "Replacement." not in record["stdout"]
 
 

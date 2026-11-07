@@ -1869,6 +1869,9 @@ class SkillResult:
     fly_delivery_commit: str = ""
     fly_pr_number: int | None = None
     fly_pr_url: str = ""
+    # A correction's replacement description, as the runner's record said:
+    # ``updated``, ``not_confirmed``, or empty when none was supplied.
+    fly_pr_description: str = ""
     # The delivered pull request read back from GitHub (build_delivery.
     # run_fly_delivery): ``passed``, ``failed`` (the reason says which field
     # differed or why it could not be read) or ``not_applicable`` (no pull
@@ -1962,6 +1965,7 @@ def _fly_delivery_fields(job, *, unknown: bool) -> dict:
         "fly_delivery_commit": got.get("delivery_commit") or "",
         "fly_pr_number": got.get("pr_number"),
         "fly_pr_url": got.get("pr_url") or "",
+        "fly_pr_description": got["pr_description"] if isinstance(got.get("pr_description"), str) else "",
         "fly_existing_pr_number": int(job.delivery["pr_number"]) if "pr_number" in job.delivery else None,
     }
 

@@ -235,6 +235,10 @@ class DeliveryRun:
     commit: str = ""
     pr_number: int | None = None
     pr_url: str = ""
+    # A correction's replacement description: ``updated`` (read back and
+    # confirmed) or ``not_confirmed`` (attempted, not confirmed); empty when
+    # the correction supplied none. The delivery's status never depends on it.
+    pr_description: str = ""
     work: Any = None
     base: str = ""
 
@@ -1007,6 +1011,8 @@ def build_record(
         })  # fmt: skip
         if delivery.pr_number is not None:
             record["pr_number"] = delivery.pr_number
+        if delivery.pr_description:
+            record["pr_description"] = delivery.pr_description
     return record
 
 
@@ -1390,7 +1396,7 @@ def _deliver(job: Job, delivery: DeliveryRun, rc: int, timed_out: bool,
                                            branch=spec.branch, base_branch=spec.base_branch,
                                            head=imported.head, token=token,
                                            wait_for_head=True)
-                _update_pr_body(rd, work, job, pr, token)
+                delivery.pr_description = _update_pr_body(rd, work, job, pr, token)
             else:
                 title, body = _pr_text(rd, work, job.secrets)
                 pr = rd.open_or_update_pr(repository=job.repository, branch=spec.branch,
@@ -1432,16 +1438,24 @@ def _pr_text(rd, work, secrets: dict[str, str]) -> tuple[str, str]:
     return scrub(title, secrets), scrub(body, secrets)
 
 
-def _update_pr_body(rd, work, job, pr, token: str) -> None:
-    """Apply a correction's replacement description, when it wrote one. The
-    code has already landed, so a failure here never changes the delivery's
-    outcome: it is reported in one line and the description stays as it was."""
+def _update_pr_body(rd, work, job, pr, token: str) -> str:
+    """Apply a correction's replacement description, when it wrote one, and
+    say what happened: ``updated`` (read back and confirmed), ``not_confirmed``
+    (attempted, not confirmed) or ``""`` (none supplied). The code has already
+    landed, so a failure here never changes the delivery's outcome: it is
+    reported in one line and on the record."""
     try:
         body = scrub(rd.read_pr_body(work), job.secrets)
-        if body:
-            rd.update_pr_body(repository=job.repository, number=pr.number, token=token, body=body)
     except rd.RepoWorkError:
-        print("fly-runner: the pull request description could not be updated", flush=True)
+        body = ""
+    if not body:
+        return ""
+    try:
+        rd.update_pr_body(repository=job.repository, number=pr.number, token=token, body=body)
+    except rd.RepoWorkError:
+        print("fly-runner: the pull request description update could not be confirmed", flush=True)
+        return "not_confirmed"
+    return "updated"
 
 
 def _end_delivery() -> None:

@@ -2672,3 +2672,48 @@ def test_correction_instructions_name_the_replacement_description_file():
     new = build_delivery.fly_delivery_instructions(
         build_delivery.FlyDeliveryPlan("owner/repo", "codex/fix", "main", "owner/repo#1", 1))
     assert "pull_request_body.md" not in new
+
+
+# --- A correction's replacement description is recorded on the receipt ---
+
+
+@pytest.mark.parametrize("description", ["updated", "not_confirmed", ""])
+def test_the_receipt_stores_the_pr_description_outcome(monkeypatch, tmp_path, description):
+    from skill_runner import SkillResult
+
+    monkeypatch.setenv(build_delivery.FLY_DELIVERY_REGISTRY_ENV, str(tmp_path / "receipts.json"))
+    repo, key = "owner/repo", "owner/repo#123"
+
+    async def verify(res, plan):
+        return None
+
+    async def launch():
+        return SkillResult("cicada", True, 0, "", "", fly_delivery_status="updated",
+                           remote_run_id="run-1", fly_delivery_branch="cicada/x",
+                           fly_delivery_commit="a" * 40, fly_pr_number=12,
+                           fly_pr_url=f"https://github.com/{repo}/pull/12",
+                           fly_pr_description=description)
+
+    monkeypatch.setattr(build_delivery, "verify_fly_delivery", verify)
+    plan = build_delivery.FlyDeliveryPlan(repo, "cicada/x", "main", key, 123)
+    asyncio.run(build_delivery.run_fly_delivery(plan, launch, lambda r: r))
+    receipt = build_delivery._delivery_ledger().delivery_receipts()[key]
+    assert receipt["status"] == "updated" and receipt["pr_url"].endswith("/pull/12")
+    if description:
+        assert receipt["pr_description"] == description
+    else:
+        assert "pr_description" not in receipt
+
+
+@pytest.mark.parametrize("recorded,expected", [("updated", "updated"), ("not_confirmed", "not_confirmed"),
+                                               (None, ""), (5, "")])
+def test_the_runner_records_pr_description_reaches_the_result(recorded, expected):
+    import types
+
+    from skill_runner import _fly_delivery_fields
+
+    got = {"delivery_status": "updated", "pr_url": "https://github.com/owner/repo/pull/12"}
+    if recorded is not None:
+        got["pr_description"] = recorded
+    job = types.SimpleNamespace(delivery={"branch": "cicada/x", "pr_number": "12"}, delivery_result=got)
+    assert _fly_delivery_fields(job, unknown=False)["fly_pr_description"] == expected

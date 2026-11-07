@@ -1431,7 +1431,9 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
             "run_id": result.remote_run_id, "commit": result.fly_delivery_commit,
             "reason": result.fly_delivery_reason, "pr_number": result.fly_pr_number,
             "pr_url": result.fly_pr_url, "readback": result.fly_delivery_readback,
-            "readback_reason": result.fly_delivery_readback_reason})  # fmt: skip
+            "readback_reason": result.fly_delivery_readback_reason,
+            **({"pr_description": result.fly_pr_description}
+               if isinstance(result.fly_pr_description, str) and result.fly_pr_description else {})})  # fmt: skip
     except (OSError, ValueError):
         settled = True  # unreadable: the reservation stays as it was written
     if not settled:
