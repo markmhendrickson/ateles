@@ -761,7 +761,7 @@ def test_deferred_sweep_skips_a_head_whose_panel_is_running(monkeypatch):
     monkeypatch.setattr(SwarmDispatcher, "_prs_with_matured_deferral", due)
     monkeypatch.setattr(SwarmDispatcher, "_label_gate_allows", lambda self, t, source: tsd._async_return(True))
     monkeypatch.setattr(SwarmDispatcher, "_handle_pr", fake_handle)
-    d.__dict__["_panels_running"] = {("owner/repo", 87, HEAD)}
+    d.__dict__["_panel_heads_running"] = {("owner/repo", 87, HEAD)}
     summary = asyncio.run(d.resume_deferred_reviews(["owner/repo"]))
     assert handled == []
     assert summary["already_running"] == 1
