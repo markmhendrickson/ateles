@@ -4900,6 +4900,17 @@ async def deferred_review_sweep_pass(dispatcher: SwarmDispatcher) -> None:
             f"[{DAEMON_NAME}] review-supersession sweep failed: {exc}",
             exc_info=True,
         )
+    # Labelled PRs the startup panel sweep could not read (a GitHub limit
+    # during a burst of restarts) stay due; retry them here, once reads
+    # work, rather than waiting for the next restart. With nothing due
+    # this makes no GitHub request.
+    try:
+        await dispatcher.retry_due_labelled_panels()
+    except Exception as exc:
+        log.error(
+            f"[{DAEMON_NAME}] labelled panel retry failed: {exc}",
+            exc_info=True,
+        )
     try:
         await dispatcher.resume_deferred_reviews(
             list(dispatcher.config.resume_repositories)
