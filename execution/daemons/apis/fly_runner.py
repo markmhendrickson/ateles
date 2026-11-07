@@ -1000,8 +1000,12 @@ class FlyLedger:
             if key not in receipts or receipts[key].get("token") != token:
                 return False
             current = receipts[key]
+            # Keep the task id the reservation recorded: the in-flight check
+            # finds a run by it after the task's repository changes.
             kept = {**entry, **({"associated_keys": current["associated_keys"]}
-                               if "associated_keys" in current else {})}
+                               if "associated_keys" in current else {}),
+                    **({"task_id": current["task_id"]}
+                       if "task_id" in current and "task_id" not in entry else {})}
             receipts[key] = ({**kept, "notified_at": current["notified_at"]}
                              if "notified_at" in current else kept)
             return True

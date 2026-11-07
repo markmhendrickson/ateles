@@ -966,6 +966,81 @@ def _fly_receipt_key(snapshot: dict, entity_id: str) -> str:
     return build_delivery.fly_delivery_key(repository, issue[1] if issue else None, entity_id)
 
 
+def _fly_run_in_flight(snapshot: dict, entity_id: str) -> bool | None:
+    """Whether the Fly ledger shows a delivery run in flight for this task.
+
+    True: the task's delivery receipt is still ``launching`` (held for the
+    whole run) or names a run whose reservation is still in flight. False: no
+    such run, or the task has no delivery key. None: the ledger could not be
+    read, so whether a run is in flight is unknown. Reads the ledger once,
+    through ``FlyLedger.snapshot``; never settles or writes anything."""
+    import fly_runner
+
+    key = _fly_receipt_key(snapshot, entity_id)
+    if not key:
+        return False
+    try:
+        doc = build_delivery._delivery_ledger().snapshot()
+    except (OSError, fly_runner.FlyLedgerError):
+        return None
+    receipts = doc.get("deliveries", {})
+
+    def _live(entry: dict) -> bool:
+        run_id = entry.get("run_id")
+        return entry.get("status") == "launching" or bool(run_id and run_id in doc["in_flight"])
+
+    entry = build_delivery._receipt_for(build_delivery.canonical_key(key), receipts)
+    if entry is not None and _live(entry):
+        return True
+    # The key is derived from the task as it is now, so a task whose repository
+    # changed mid-run misses its own receipt above. A receipt reserved for a
+    # task records that task's id (``task_id``), and a task-keyed receipt
+    # ("owner/name#task:<id>") names it in its key, so any live receipt naming
+    # this task's id is this task's run whatever repository it was launched
+    # against. Known gap: an issue- or PR-keyed receipt written before the id
+    # was recorded carries no task id, so for such a receipt only the key match
+    # above applies and a repository change during that run is not caught.
+    task_id = str(entity_id).strip()
+    task_suffix = f"#task:{task_id}"
+
+    def _names_task(stored: object, other: dict) -> bool:
+        return (str(other.get("task_id") or "").strip() == task_id
+                or str(stored).strip().endswith(task_suffix))
+
+    return bool(task_id) and any(_names_task(stored, other) and _live(other)
+                                 for stored, other in receipts.items() if isinstance(other, dict))
+
+
+def _fly_run_held_by_other_task(snapshot: dict, entity_id: str) -> "build_delivery.BuildClaim | None":
+    """The in-process build claim on this task's issue when ANOTHER task holds it.
+
+    Distinguishes a Fly run in flight for a different task sharing this task's
+    delivery key (a correction holding the source issue as an alias) from this
+    task's own run. Uses the same key and registry as the deferral path below,
+    whose holder names its task as ``task:<id>``. None when no claim is held, or
+    the claim is this task's own: either way the caller cannot defer and refuses."""
+    key = build_delivery.issue_key(snapshot, _dispatch_repo_from_snapshot(snapshot))
+    holder = build_delivery.active_build(*key) if key else None
+    if holder is None or holder.holder == f"task:{entity_id}":
+        return None
+    return holder
+
+
+def _fly_run_refuses_dispatch(snapshot: dict, entity_id: str, trigger: str) -> bool:
+    """True when a task must not be dispatched because a Fly run is in flight
+    for it, or the ledger could not be read so that is unknown. Logs why."""
+    in_flight = _fly_run_in_flight(snapshot, entity_id)
+    if in_flight is False:
+        return False
+    log.warning(
+        f"[{DAEMON_NAME}] {trigger} for {entity_id}: "
+        + ("the Fly ledger could not be read, so whether a run is in flight is unknown"
+           if in_flight is None else "a Fly run is in flight for this task")
+        + " — not routing"
+    )
+    return True
+
+
 def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *, lifecycle_version=None,
                               lifecycle_provenance=None):
     """Bind the explicit owner policy read to this current exclusive invocation.
@@ -1087,6 +1162,7 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
         plan = build_delivery.plan_fly_delivery(
             repository, f"task-{entity_id[-8:]}", key=receipt_key,
             issue_number=key[1] if key else None, target=target, source_key=source_key,
+            task_id=entity_id,
         )
     except build_delivery.BuildWorktreeError as exc:
         if target:
@@ -2216,6 +2292,26 @@ async def dispatch_task(
         )
         return
 
+    # A task whose Fly run is still in flight is not dispatched again, from ANY
+    # entrance: SSE events, checkpoint release, deferred recovery, the watchdog
+    # and the reconciler all reach here. Before every state write, so a
+    # re-dispatch can never move such a task to ROUTED (seen 2026-11-06: a
+    # replay after an Apis restart moved a running task back to routed). An
+    # unreadable ledger leaves the same doubt and refuses the same way.
+    #
+    # One exception: the in-flight run belongs to a DIFFERENT task that holds
+    # this task's issue in the build registry (a correction holding its source
+    # issue). Then this task is independent work that must resume when that run
+    # ends, so it falls through to the deferral path below, which records the
+    # deferral and returns without spawning. `fly_defer_holder` makes sure it
+    # never gets further than that path.
+    fly_defer_holder = None
+    if not gate_override and _fly_run_in_flight(snapshot, entity_id) is True:
+        fly_defer_holder = _fly_run_held_by_other_task(snapshot, entity_id)
+    if fly_defer_holder is None and _fly_run_refuses_dispatch(
+            snapshot, entity_id, f"dispatch (trigger={trigger})"):
+        return
+
     # A task the deferral mechanism marked is owned by its recovery sweep: nothing
     # else may dispatch it (an SSE redelivery, the reconciler, the watchdog), or it
     # would run twice. Only the sweep's own re-dispatch (`build_released`) and an
@@ -2500,6 +2596,17 @@ async def dispatch_task(
                 # operator was told Apis WILL act on) both need this catch-up.
                 schedule_deferred_recovery()
             return
+
+    # Let through the in-flight guard only to be deferred, and not deferred
+    # above (not a builder, or the claim ended meanwhile): the Fly run is still
+    # in flight, so refuse rather than spawn a second run on its key.
+    if fly_defer_holder is not None:
+        log.warning(
+            f"[{DAEMON_NAME}] dispatch (trigger={trigger}) for {entity_id}: a Fly run "
+            f"held by {fly_defer_holder.holder!r} is in flight on this task's key "
+            "and the task was not deferred — not routing"
+        )
+        return
 
     job = _activity.started(f"routing task {entity_id} → {skill}: {title[:60]}")
 
@@ -4816,6 +4923,12 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
 
     title = snapshot.get("title", "(untitled)")
     status = snapshot.get("status", "")
+
+    # dispatch_task itself refuses a task whose Fly run is in flight. This
+    # earlier check stays for task.created only, because it also keeps a replay
+    # from announcing "Task created" again and from claiming the created dedupe.
+    if action == "created" and _fly_run_refuses_dispatch(snapshot, entity_id, "task.created"):
+        return
 
     if action == "created":
         # Neotoma redelivers `task.created` for the same entity — measured
