@@ -14075,7 +14075,7 @@ class TestRerunWhateverTheApprovalToolWillNotCarry:
         outcomes = asyncio.run(tool.carry_earlier_signoffs(
             client, repo="owner/repo", base_ref="main", head_sha=_CARRY_NEW,
             comments=comments, lens_outcomes=pending,
-            authors=frozenset({"ateles-agent"}), scope=load.scope,
+            authors=frozenset({"ateles-agent"}), load=load,
         ))
         tool_carried = {o.lens for o in outcomes if o.passed}
         assert set(sel.carried) == tool_carried

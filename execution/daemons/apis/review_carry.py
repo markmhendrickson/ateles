@@ -306,13 +306,12 @@ def select_rerun_for_load(
 ) -> RerunSelection:
     """``select_rerun`` with the scope the approval gate reads, as Apis applies it.
 
-    The approval gate (``approve_pr_as_app.carry_earlier_signoffs``) calls
-    ``select_rerun(..., scope=load.scope)`` with the same ``review_scope.fetch_scope``
-    load, so for a readable or absent scope file this returns exactly its
-    decision. When the file exists but is unreadable, the gate falls back to the
-    allowlist rule, which can carry a lens the file would have re-run; Apis
-    cannot know which, so it carries nothing and re-runs every lens (fail
-    closed). That only adds reviews: it never accepts a carry the gate refuses.
+    The approval gate (``approve_pr_as_app.carry_earlier_signoffs``) calls this
+    same function with the same ``review_scope.fetch_scope`` load, so Apis and
+    the gate agree. For a readable or absent scope file this is ``select_rerun``
+    with ``scope=load.scope``. When the file exists but is unreadable, the
+    allowlist rule could carry a lens the file would have re-run, and which is
+    unknown, so this carries nothing and re-runs every lens (fail closed).
     """
     names = list(panel)
     if not scope_unreadable(load):
