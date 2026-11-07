@@ -156,205 +156,95 @@ def escalation(released, monkeypatch):
                 state=state, notifier=notifier)
 
 
-def _assert_rounds_exhausted(esc):
-    task = _task(esc)
-    assert task["status"] == "awaiting_approval"
-    assert task["blocked_reason"].startswith("rounds_exhausted")
-    assert len(esc["briefs"]) == 1
-    assert esc["briefs"][0]["gate_reason"] == "rounds_exhausted"
-    assert esc["briefs"][0]["context_label"] == "rounds_exhausted"
-    assert esc["retired"] == [esc["brief_id"]]
-    assert "failed" not in esc["statuses"]
-
-
-@pytest.mark.asyncio
-async def test_three_temporary_refusals_escalate_rounds_exhausted(escalation):
-    escalation["script"].extend(_refusal("timeout") for _ in range(4))
-    await _release(escalation)
-    # The first dispatch plus three retries, then ONE rounds_exhausted
-    # checkpoint. Red before the change: status 'failed', no checkpoint.
-    assert len(escalation["spawned"]) == 4
-    _assert_rounds_exhausted(escalation)
-    reason = _task(escalation)["blocked_reason"]
-    assert "Retried 3 time(s)" in reason
-    assert "agent_policy unavailable" in reason
-
-
-def _prior_checkpoint_untouched(esc):
-    """The prior approval is still approved, not retired, and the only one."""
+def _assert_announced(esc, status):
+    """Nothing written after the first refused launch, no checkpoint filed or
+    retired, and the COMPLETE notice list from the first launch on is ONE
+    BLOCKER naming the task, its current status, the approved checkpoint and
+    the recovery. (Before the launch the release itself sends one INFO
+    "Checkpoint approved" notice and no BLOCKER.)"""
     records, prior = esc["records"], esc["brief_id"]
+    assert esc["statuses"] == esc["at_first_launch"]["statuses"]
+    assert records[esc["task_id"]] == esc["at_first_launch"]["task"]
+    assert esc["briefs"] == []
     assert esc["retired"] == []
     assert records[prior]["snapshot"]["status"] == "approved"
-    checkpoints = [k for k, r in records.items()
-                   if k != "_observations"
-                   and r.get("entity_type") == records[prior]["entity_type"]]
-    assert checkpoints == [prior]
+    before = esc["notifier"].sent[:esc["at_first_launch"]["notices"]]
+    assert [m for m, p in before if p == apis.Priority.BLOCKER] == []
+    sent = esc["notifier"].sent[esc["at_first_launch"]["notices"]:]
+    assert len(sent) == 1, sent
+    message, priority = sent[0]
+    assert priority == apis.Priority.BLOCKER
+    assert esc["task_id"] in message
+    assert f"current status is '{status}'" in message
+    assert prior in message
+    assert "Nothing was started" in message
+    assert "cannot be released again" in message
+    assert "file the task again" in message
+    return message
 
 
-def _naming_prior(esc):
-    return [m for m in esc["notifier"].blockers() if esc["brief_id"] in m]
+def _record_first_launch(esc, monkeypatch):
+    """Keep the task record and status writes as they stood at the first
+    launch: anything written after it is a write on the exhaustion path."""
+    esc["at_first_launch"] = {}
+    spawn = apis._spawn_harness_skill
 
+    async def recording_spawn(*args, **kwargs):
+        if not esc["at_first_launch"]:
+            esc["at_first_launch"].update(
+                notices=len(esc["notifier"].sent),
+                statuses=list(esc["statuses"]),
+                task=copy.deepcopy(esc["records"][esc["task_id"]]))
+        return await spawn(*args, **kwargs)
 
-def _assert_rolled_back(esc):
-    task = _task(esc)
-    assert task["status"] == "executing"
-    assert task["blocked_reason"] == ""
-    assert "failed" not in esc["statuses"]
-    _prior_checkpoint_untouched(esc)
-    named = _naming_prior(esc)
-    assert len(named) == 1
-    assert "returned to its prior state" in named[0]
-    assert "released again" in named[0]
+    monkeypatch.setattr(apis, "_spawn_harness_skill", recording_spawn)
 
 
 @pytest.mark.asyncio
-async def test_exhausted_retry_checkpoint_unwritable_is_not_failed(escalation):
-    # Red before the roll-back (observed, with the roll-back call removed):
-    # the task stayed awaiting_approval with a rounds_exhausted reason and no
-    # checkpoint to approve ('awaiting_approval' == 'executing' failed).
-    escalation["state"]["brief_id"] = None
+async def test_three_temporary_refusals_announce_and_write_nothing(escalation, monkeypatch):
+    # Red before this change (observed against c9e536b): the exhaustion wrote
+    # awaiting_approval, so statuses == ['routed', 'executing',
+    # 'awaiting_approval'] != ['routed', 'executing']. That it also filed a
+    # replacement checkpoint and retired the approved one is inferred (the
+    # first assertion stopped the run).
     escalation["script"].extend(_refusal("timeout") for _ in range(4))
+    _record_first_launch(escalation, monkeypatch)
+    await _release(escalation)
+    # The first dispatch plus three retries, then the one notice.
+    assert len(escalation["spawned"]) == 4
+    message = _assert_announced(escalation, "executing")
+    assert "Retried 3 time(s) over a temporary Neotoma failure" in message
+    assert "attempts exhausted" in message
+    assert "failed" not in escalation["statuses"]
+
+
+@pytest.mark.asyncio
+async def test_exhausted_status_read_failure_reports_unknown(escalation, monkeypatch):
+    # Red before this change (observed against c9e536b): AttributeError, no
+    # _announce_released_retry_exhausted existed. Inferred, not run: the old
+    # escalation, on a failed read, sent "rounds_exhausted could not be
+    # recorded" with no status and no "file the task again".
+    escalation["script"].extend(_refusal("timeout") for _ in range(4))
+    _record_first_launch(escalation, monkeypatch)
+    real_announce = apis._announce_released_retry_exhausted
+    real_fetch = apis.fetch_task_record
+
+    def announce(**kwargs):
+        def broken(task_id, *args, **kw):
+            if task_id == escalation["task_id"]:
+                raise httpx.ReadTimeout("slow")
+            return real_fetch(task_id, *args, **kw)
+
+        monkeypatch.setattr(apis, "fetch_task_record", broken)
+        try:
+            return real_announce(**kwargs)
+        finally:
+            monkeypatch.setattr(apis, "fetch_task_record", real_fetch)
+
+    monkeypatch.setattr(apis, "_announce_released_retry_exhausted", announce)
     await _release(escalation)
     assert len(escalation["spawned"]) == 4
-    _assert_rolled_back(escalation)
-
-
-@pytest.mark.asyncio
-async def test_exhausted_retry_checkpoint_same_id_rolls_back(escalation):
-    # Red before the roll-back (observed, with the roll-back call removed):
-    # the replacement resolved to the prior checkpoint and the task was left
-    # awaiting_approval with nothing to approve ('awaiting_approval' ==
-    # 'executing' failed).
-    escalation["state"]["brief_id"] = escalation["brief_id"]
-    escalation["script"].extend(_refusal("timeout") for _ in range(4))
-    await _release(escalation)
-    assert len(escalation["spawned"]) == 4
-    _assert_rolled_back(escalation)
-
-
-@pytest.mark.asyncio
-async def test_exhausted_retry_rollback_failure_names_the_state(
-        escalation, monkeypatch):
-    # Red before the roll-back (observed, with the roll-back call removed):
-    # the reason stayed "rounds_exhausted: ... attempts exhausted." rather
-    # than naming the unwritten checkpoint; that no notice named the prior
-    # checkpoint is inferred (the run stopped at the first assertion).
-    escalation["state"]["brief_id"] = None
-    escalation["script"].extend(_refusal("timeout") for _ in range(4))
-    records, task_id = escalation["records"], escalation["task_id"]
-    held = apis.set_task_status
-
-    def refuse_rollback(entity_id, status, **kwargs):
-        if "rollback" in kwargs.get("key_suffix", ""):
-            return False
-        return held(entity_id, status, **kwargs)
-
-    def write_field(entity_id, field, value, **kwargs):
-        records[entity_id]["snapshot"][field] = value
-        return SimpleNamespace(committed=True, version="v-next")
-
-    monkeypatch.setattr(apis, "set_task_status", refuse_rollback)
-    monkeypatch.setattr(apis, "set_task_field_if_version", write_field)
-    await _release(escalation)
-    task = _task(escalation)
-    assert task["status"] == "awaiting_approval"
-    assert task["blocked_reason"] == apis.ROUNDS_EXHAUSTED_UNRECONCILED
-    assert "failed" not in escalation["statuses"]
-    _prior_checkpoint_untouched(escalation)
-    named = _naming_prior(escalation)
-    assert len(named) == 1
-    assert "'awaiting_approval'" in named[0]
-    assert "reconcile by hand" in named[0]
-    assert task_id in named[0]
-
-
-@pytest.mark.asyncio
-async def test_second_approved_release_exhaustion_creates_second_checkpoint(
-        escalation, monkeypatch):
-    # Red before the fix (key_suffix was the bare "rounds_exhausted"): the
-    # second exhaustion replayed the first cycle's taskstatus/taskreason keys,
-    # Neotoma (modelled below) deduped both writes, the read-back found the
-    # task still executing, and no second checkpoint was filed: one
-    # rounds_exhausted key per field, one brief, the second approval never
-    # retired.
-    from lib.daemon_runtime import gating as gating_module
-    from lib.daemon_runtime import task_lifecycle
-
-    records, task_id = escalation["records"], escalation["task_id"]
-    original = records[escalation["brief_id"]]
-    keys: list[str] = []
-    revisions: dict[str, str] = {}
-    authority = apis.read_authenticated_checkpoint_authorization
-
-    def correct(entity_id, field, value, idempotency_key):
-        # Neotoma dedupes a replayed idempotency key: success, nothing written.
-        if idempotency_key in keys:
-            return True
-        keys.append(idempotency_key)
-        records[entity_id]["snapshot"][field] = value
-        return True
-
-    def set_status(entity_id, status, **kwargs):
-        escalation["statuses"].append(
-            status.value if hasattr(status, "value") else str(status))
-        return task_lifecycle.set_task_status(entity_id, status, **kwargs)
-
-    def file_fresh(**kwargs):
-        # A real replacement checkpoint: its own id, awaiting the operator,
-        # bound to the task revision it was filed against.
-        escalation["briefs"].append(kwargs)
-        new_id = f"ent_cp_exhausted_{len(escalation['briefs'])}"
-        record = copy.deepcopy(original)
-        record["entity_id"] = new_id
-        record["entity_version"] = "v1"
-        record["snapshot"].update(status="awaiting_operator",
-                                  resolved_dispatched=False)
-        records[new_id] = record
-        records["_observations"][new_id] = list(
-            records["_observations"][escalation["brief_id"]])
-        revisions[new_id] = entity_record_digest(records[task_id])
-        return new_id
-
-    def read_authority(checkpoint_id, record):
-        found = authority(checkpoint_id, record)
-        if found is None or checkpoint_id not in revisions:
-            return found
-        return {**found, "task_revision": revisions[checkpoint_id]}
-
-    def read_approval(checkpoint_id, record, **kwargs):
-        return {"principal_sub": "ateles@ateles-swarm",
-                "observation_id": f"obs-approval-{checkpoint_id}"}
-
-    monkeypatch.setattr(task_lifecycle, "_correct", correct)
-    monkeypatch.setattr(apis, "set_task_status", set_status)
-    monkeypatch.setattr(apis, "_file_fresh_checkpoint", file_fresh)
-    monkeypatch.setattr(apis, "read_authenticated_checkpoint_authorization",
-                        read_authority)
-    monkeypatch.setattr(gating_module, "read_authenticated_checkpoint_resolution",
-                        read_approval)
-    monkeypatch.setattr(apis, "read_authenticated_checkpoint_resolution",
-                        read_approval, raising=False)
-
-    escalation["script"].extend(_refusal("timeout") for _ in range(4))
-    await _release(escalation)
-    assert _task(escalation)["status"] == "awaiting_approval"
-    assert [b["context_label"] for b in escalation["briefs"]] == ["rounds_exhausted"]
-
-    escalation["script"].extend(_refusal("timeout") for _ in range(4))
-    result = await _resolve("ent_cp_exhausted_1", "approve")
-    await _drain()
-    assert result
-
-    exhausted = [k for k in keys if "rounds_exhausted" in k]
-    status_keys = [k for k in exhausted if k.startswith("taskstatus-")]
-    reason_keys = [k for k in exhausted if k.startswith("taskreason-")]
-    assert len(status_keys) == 2 and len(set(status_keys)) == 2
-    assert len(reason_keys) == 2 and len(set(reason_keys)) == 2
-    assert len(escalation["briefs"]) == 2
-    assert escalation["retired"].count("ent_cp_exhausted_1") == 1
-    assert escalation["retired"] == [escalation["brief_id"], "ent_cp_exhausted_1"]
-    assert _task(escalation)["status"] == "awaiting_approval"
-    assert "failed" not in escalation["statuses"]
+    _assert_announced(escalation, "unknown")
 
 
 def _assert_left_as_found(esc, status, reason):
@@ -914,21 +804,35 @@ async def test_policy_slowdown_spanning_prelaunch_and_agent_read_retries_automat
 
 
 @pytest.mark.asyncio
-async def test_policy_unavailable_through_every_attempt_escalates_once(
+async def test_policy_unavailable_through_every_attempt_announces_once(
         slowdown, monkeypatch):
-    # Red before this fix (observed against the previous head, bbd2bc8):
+    # Red before the retry existed (observed against bbd2bc8):
     #   AssertionError: assert 'executing' == 'awaiting_approval'
-    # No baseline was read, so nothing was scheduled or escalated. (Inferred,
-    # not run: with a baseline but no authorization check in the wait, each
-    # retry would have resumed into the runner.)
+    # No baseline was read, so nothing was scheduled. Red before this change
+    # (inferred from the code, not run): the exhaustion wrote
+    # awaiting_approval, so the statuses differed from those at the first
+    # launch, and it filed a checkpoint.
     _policy_slowdown(slowdown, monkeypatch, recover_after_first_spawn=False)
+    statuses = []
+    spawn = apis._spawn_harness_skill
+
+    async def recording_spawn(*args, **kwargs):
+        if not statuses:
+            statuses.append(list(slowdown["statuses"]))
+            slowdown["at_first_launch"] = dict(
+                notices=len(slowdown["notifier"].sent),
+                statuses=statuses[0],
+                task=copy.deepcopy(slowdown["records"][slowdown["task_id"]]))
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", recording_spawn)
     await _release(slowdown)
     # Only the first launch ran (and the runner refused it); every retry
     # found the policy unavailable and started nothing.
     assert slowdown["launches"] == [False]
     assert True not in slowdown["launches"]
-    _assert_rounds_exhausted(slowdown)
-    assert "Retried 3 time(s)" in _task(slowdown)["blocked_reason"]
+    message = _assert_announced(slowdown, "executing")
+    assert "Retried 3 time(s)" in message
 
 
 @pytest.mark.asyncio
@@ -1103,24 +1007,57 @@ async def test_executing_write_4xx_is_not_retried(joined, no_wait, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_executing_write_exhausted_escalates_one_checkpoint(joined, no_wait, monkeypatch):
-    briefs = []
-    monkeypatch.setattr(apis, "_escalate_released_retry_exhausted",
-                        lambda **kwargs: briefs.append(kwargs) or True)
+async def test_executing_write_exhausted_announces_and_writes_nothing(
+        joined, no_wait, monkeypatch):
+    # Red before this change (observed against c9e536b): the exhaustion wrote
+    # status awaiting_approval and a blocked_reason, two writes past those at
+    # the first refusal. That it filed a replacement checkpoint is inferred
+    # (the first failing assertion stopped the run).
+    briefs, retired = [], []
+    monkeypatch.setattr(apis, "_file_fresh_checkpoint",
+                        lambda **kwargs: briefs.append(kwargs) or "ent_cp_new")
+    monkeypatch.setattr(apis, "require_fresh_checkpoint_approval",
+                        lambda checkpoint_id, **kwargs: retired.append(checkpoint_id))
+    attempts, writes_at_refusal = [], []
 
     def before(write):
         if write["field"] == "status" and write["value"] == "executing":
+            if not writes_at_refusal:
+                writes_at_refusal.append(list(joined["writes"]))
+                record_at_refusal.update(copy.deepcopy(joined["record"]))
+            attempts.append(True)
             raise httpx.ConnectTimeout("slow")
         return None
 
+    record_at_refusal: dict = {}
     joined["before_write"] = before
-    await _release_correction(joined)
-    # The first pass and three retries all timed out: one rounds_exhausted
-    # escalation, nothing spawned. Red before the change: briefs == [].
-    assert len(briefs) == 1
-    assert "Retried 3 time(s)" in briefs[0]["reason"]
+    notifier = _Recorder()
+    await apis.handle_checkpoint_brief(
+        joined["checkpoint_id"], copy.deepcopy(joined["checkpoint"]["snapshot"]), notifier)
+    await _drain()
+    # The first pass and three retries all timed out.
+    assert len(attempts) == 4
+    assert joined["writes"] == writes_at_refusal[0]  # no write of any field
+    assert joined["record"]["snapshot"] == record_at_refusal["snapshot"]
+    assert briefs == [] and retired == []
     assert joined["calls"] == []
     assert not delivery._delivery_ledger().delivery_receipts()
+    # The complete notice list: one "Apis will retry automatically" notice
+    # per scheduled retry (the retry itself, unchanged by this PR), then ONE
+    # notice for the exhaustion and nothing after it.
+    retries = notifier.sent[:3]
+    assert all("Apis will retry automatically" in m for m, _ in retries), notifier.sent
+    assert len(notifier.sent) == 4, notifier.sent
+    message, priority = notifier.sent[3]
+    assert priority == apis.Priority.BLOCKER
+    assert "attempts exhausted" in message
+    assert sum("file the task again" in m for m, _ in notifier.sent) == 1
+    assert joined["record"]["entity_id"] in message
+    status = record_at_refusal["snapshot"]["status"]
+    assert f"current status is '{status}'" in message
+    assert joined["checkpoint_id"] in message
+    assert "Retried 3 time(s)" in message
+    assert "file the task again" in message
 
 
 # ── The retry verifies the authenticated approver ─────────────────────────────
