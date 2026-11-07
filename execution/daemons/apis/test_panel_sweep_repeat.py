@@ -182,6 +182,28 @@ def test_a_pr_with_a_panel_running_now_is_left_alone(sweep, monkeypatch):
     assert d._panels_running == {}
 
 
+def test_a_failed_entrance_clears_the_running_mark(sweep, monkeypatch):
+    # Red with the `finally` block's `self._panels_running.pop(key, None)`
+    # replaced by `pass`, observed 2026-11-07:
+    #   AssertionError: a raise leaves no running mark behind
+    #   assert {('owner/repo', 87): 1} == {}
+    d, state = sweep
+
+    async def failing_entrance(self, trigger):
+        state["entered"].append((trigger.number, trigger.head_sha))
+        if len(state["entered"]) == 1:
+            raise RuntimeError("panel failed")
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_handle_pr_entrance", failing_entrance)
+    with pytest.raises(RuntimeError, match="panel failed"):
+        _run(d._handle_pr(d._pr_trigger_from_api(REPO, _pr(OLD_HEAD))))
+    assert d._panels_running == {}, "a raise leaves no running mark behind"
+    # The effect: a later sweep is not left skipping the PR as running.
+    summary = _run(d.repeat_labelled_panel_sweep([REPO]))
+    assert summary["running"] == 0 and summary["resumed"] == 1
+    assert state["entered"] == [(PR, OLD_HEAD), (PR, OLD_HEAD)]
+
+
 def test_the_same_head_is_not_re_entered_twice(sweep):
     d, state = sweep
     _run(d.repeat_labelled_panel_sweep([REPO]))
