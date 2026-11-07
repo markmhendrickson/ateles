@@ -2,6 +2,22 @@
 
 Repo-scoped Claude Code hooks, registered in `../settings.json`.
 
+## `reporting_contract.py` (SessionStart)
+
+Delivers the same compact operator-facing reporting contract to Claude Code
+and Codex at startup, resume, clear, and compaction. Progress is emitted only
+for material state changes and is shaped as change, parent-plan meaning, and
+next owner/action; the final answer repeats the durable outcome because Codex
+commentary may collapse.
+
+## `report_quality_gate.py` (Stop)
+
+Starts in BLOCK mode and catches three measurable violations of that contract:
+repeated per-tool narration, a final that points back to collapsed commentary,
+and mechanism/jargon-dense finals that omit impact or the next owner. It reads
+both Claude Code transcript rows and Codex rollout `response_item` rows, scopes
+classification to the current user turn, and fails open on unknown input.
+
 ## `ateles-session-start.sh` (SessionStart)
 
 Makes **Ateles** — the T2 resident "primary operator interface" / orchestrator

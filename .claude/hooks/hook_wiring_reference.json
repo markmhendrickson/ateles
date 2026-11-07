@@ -53,6 +53,11 @@
     ],
     [
       "SessionStart",
+      "reporting_contract.py",
+      "startup|resume|clear|compact"
+    ],
+    [
+      "SessionStart",
       "session_rule_index.py",
       "startup|resume|clear|compact"
     ],
@@ -64,6 +69,11 @@
     [
       "Stop",
       "decision_shape_gate.py",
+      ""
+    ],
+    [
+      "Stop",
+      "report_quality_gate.py",
       ""
     ],
     [

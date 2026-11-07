@@ -11,6 +11,13 @@
             "timeout": 30,
             "statusMessage": "Loading live Ateles rules",
             "additionalContextLimit": 4000
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/reporting_contract.py\"",
+            "timeout": 30,
+            "statusMessage": "Loading the operator reporting contract",
+            "additionalContextLimit": 2000
           }
         ]
       }
@@ -37,6 +44,18 @@
             "timeout": 30,
             "statusMessage": "Checking for updated Ateles rules",
             "additionalContextLimit": 4000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/report_quality_gate.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking operator-altitude reporting"
           }
         ]
       }
