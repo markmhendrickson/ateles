@@ -257,6 +257,49 @@ def test_a_filing_that_reads_back_wrong_is_no_filing(
                for m in d.notifier.sent)
 
 
+def test_a_correction_is_filed_and_read_back_with_its_admission_class(
+    monkeypatch, world, stored, rounds_recorded
+):
+    # Red before this fix (observed: the correction task carried no
+    # `admission_class`, so this assertion failed with a KeyError).
+    seed_fly_delivery()
+    _Recorder(monkeypatch)
+    ci_round(monkeypatch)
+    [task] = corrections(stored)
+    assert task["admission_class"] == "workflow_entering"
+    assert rounds_recorded == [1]
+
+
+@pytest.mark.parametrize("readback", ["missing", "other", "none"])
+def test_a_correction_reading_back_without_its_admission_class_holds(
+    monkeypatch, world, stored, rounds_recorded, readback
+):
+    # Red before this fix (observed: the read-back compared no
+    # `admission_class`, so each of these read back as filed, no hold notice
+    # was sent and the round was recorded).
+    seed_fly_delivery()
+    real_get = SwarmDispatcher._neotoma_get
+
+    async def get(self, path):
+        answer = await real_get(self, path)
+        if path == "entities/ent_synthetic_fix":
+            snapshot = dict(answer["snapshot"])
+            if readback == "missing":
+                snapshot.pop("admission_class", None)
+            else:
+                snapshot["admission_class"] = "operator_only" if readback == "other" else None
+            answer = {**answer, "snapshot": snapshot}
+        return answer
+
+    monkeypatch.setattr(SwarmDispatcher, "_neotoma_get", get)
+    rec = _Recorder(monkeypatch)
+    d = ci_round(monkeypatch)
+    assert rec.of("cicada") == []
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any("wrong admission class" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
 @pytest.mark.parametrize("dropped,text", [
     ("PART_OF", "missing its PART_OF edge to its plan"),
     ("REFERS_TO", "missing its REFERS_TO edge to its source task"),
@@ -912,10 +955,11 @@ def test_an_unrecognized_receipt_that_cannot_be_linked_to_this_pr_is_ignored(
 # (unsettled, unrecognized, empty, missing, non-string) is unknown whether or
 # not the receipt records a PR number, and unknown holds every entrance.
 #
-# Red before this fix (observed for the unrecognized, empty and missing rows
-# without a PR number, and inferred from the code for the non-string row): the
-# receipt matched neither the "names this PR" check nor the three-status
-# unsettled check, so `fly_delivered_pr` returned `FlyDeliveredPR(False)`
+# Red before this fix (observed: 28 of these cases failed against the unfixed
+# `fly_delivered_pr`): an unrecognized, empty, missing or non-string status
+# with no PR number matched neither the "names this PR" check nor the
+# three-status unsettled check, and an unsettled status WITH a PR number was
+# skipped by the unsettled check, so each returned `FlyDeliveredPR(False)`
 # ("not Fly") and the review, CI and resumed rounds ran the local builder.
 
 _MISSING = object()
