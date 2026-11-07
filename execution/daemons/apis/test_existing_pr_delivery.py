@@ -382,6 +382,43 @@ def test_correction_refused_with_no_other_fly_provider_holds(monkeypatch, admitt
     assert delivery._delivery_ledger().delivery_receipts() == {}
 
 
+def test_correction_refused_by_every_fly_provider_holds(monkeypatch, admitted_reader):
+    # A new test of the retry loop added in this PR, driving it past more than
+    # one refusal. It passed at once (observed): no defect was found and no
+    # code changed. Checked red (observed): with the loop replacing rather than
+    # accumulating its exclusions, the run alternated codex and claude and
+    # never ended. It also guards against a loop that stops after one retry or
+    # skips the per-attempt re-verification (inferred, not run).
+    verified = []
+    async def qualified():
+        verified.append(1)
+        return None
+    async def current():
+        return None
+    monkeypatch.setattr(apis, "_correction_policy_reader", lambda *a, **kw: (qualified, current))
+    fly_providers = ("codex", "claude", "cursor")
+    seen = []
+    async def run(skill, *a, exclude_providers=(), **kw):
+        left = [p for p in fly_providers if p not in exclude_providers]
+        selected = left[0]
+        seen.append((selected, tuple(exclude_providers)))
+        return SkillResult(
+            skill, False, None, "", "", provider=selected,
+            error=f"fly runner refused: not eligible for Fly: {selected} cannot run this job",
+            fly_ineligible_before_launch=True, fly_provider_ineligible=True,
+            fly_next_providers=tuple(left[1:]), attempted_providers=(selected,))
+    monkeypatch.setattr(apis, "run_skill", run)
+    got = spawn(snapshot())
+    assert [s[0] for s in seen] == ["codex", "claude", "cursor"]
+    assert [s[1] for s in seen] == [(), ("codex",), ("codex", "claude")]
+    # The task, its owner policy and the PR target are read before every attempt.
+    assert verified == [1, 1, 1]
+    assert got.fly_delivery_not_launched and got.fly_delivery_cleanup == "released"
+    assert "Existing PR correction not launched; its own prelaunch receipt was removed" in (
+        delivery.fly_prelaunch_failure_summary(got))
+    assert delivery._delivery_ledger().delivery_receipts() == {}
+
+
 @pytest.mark.parametrize("release", ["not_owned", "raises"])
 def test_correction_refusal_without_proven_receipt_removal_holds(monkeypatch, admitted_reader, release):
     # Guards the new retry's precondition. Red before this fix only because the
