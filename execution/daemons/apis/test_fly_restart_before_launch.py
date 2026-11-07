@@ -30,6 +30,25 @@ Taking any consumed approval instead of the newest checkpoint made
 read the older approval for release (``Failed: a non-releasing checkpoint was
 read for release``).
 
+Correction round (PR #1684 review). How the added tests looked red:
+
+* ``test_unreadable_ledger_is_named_not_left_silent``, on 649910f: the ledger
+  read raised and the sweep counted the task "recorded" with no notice
+  (``assert len(notifier.sent) == 1`` saw ``0``).
+* ``test_cleared_receipt_notice_does_not_claim_it_never_launched``, on 649910f:
+  the notice read "its Fly run never launched".
+* ``test_task_with_only_the_executing_handoff_since_approval_is_recovered``, on
+  649910f: the old check resolved the policy through the unfaked lookup and
+  never released (``assert launches == [TASK]`` saw ``[]``).
+* ``test_task_changed_after_approval_is_named_not_released`` and
+  ``test_mismatched_authorization_binding_is_not_recovered`` pass on 649910f
+  only because its unfaked policy lookup refuses everything, so they were
+  checked by mutation instead: with the later-observation refusal removed,
+  all four changed-task cases dispatched (``assert launches == []`` failed);
+  with the ``user_id``, ``gate_action`` and ``blast_radius`` comparisons
+  removed from ``_approval_binding_holds``, those three cases returned the
+  checkpoint (``assert checkpoint is None`` failed).
+
 Run: timeout 300 python3 -m pytest -q execution/daemons/apis/test_fly_restart_before_launch.py
 """
 
@@ -241,3 +260,157 @@ def test_consumed_approval_refuses_an_unconsumed_approval(monkeypatch):
                         lambda cid: pytest.fail("an unconsumed checkpoint was read for release"))
     checkpoint, why = apis._consumed_approval(TASK, _task())
     assert checkpoint is None and why
+
+
+# ── Correction round: unknown receipts and the full approval binding ─────────
+
+USER = "user-tenant-1"
+_REAL_CONSUMED_APPROVAL = apis._consumed_approval
+
+
+class _Policy:
+    loaded = True
+    entity_id = "ent_policy"
+
+
+def _approval_records(monkeypatch, *, authorization: dict | None = None,
+                      later: list[dict] | None = None, brief: dict | None = None):
+    """Fixture records for the REAL ``_consumed_approval``: one consumed,
+    authenticated approval of the task at observation count 3, then the task's
+    observations since (newest first). Only Neotoma reads and the policy lookup
+    are faked."""
+    later = list(later or [])
+    brief = {"status": "approved", "resolved_dispatched": True,
+             "gate_action": apis.GateAction.CHECKPOINT.value, "blast_radius": "high",
+             **(brief or {})}
+    auth = {"task_entity_id": TASK, "user_id": USER, "action_type": "open_or_merge_pr",
+            "policy_entity_id": "ent_policy", "policy_revision": "rev-1",
+            "gate_action": apis.GateAction.CHECKPOINT.value, "blast_radius": "high",
+            "task_observation_count": 3, "task_revision": "approved-digest",
+            "task_last_observation_at": "2026-11-06T10:00:00Z",
+            "required_approver_sub": "op@x", "required_approver_jkt": "j" * 43,
+            **(authorization or {})}
+    task_record = {"entity_id": TASK, "observation_count": 3 + len(later),
+                   "last_observation_at": "2026-11-06T10:05:00Z", "snapshot": _task()}
+    original = [{"id": f"obs-{i}", "fields": {"title": "Build the thing"}} for i in range(3)]
+    decision = apis.GateDecision(action=apis.GateAction.CHECKPOINT,
+                                 blast_radius=apis.BlastRadius.HIGH, confidence=0.5,
+                                 threshold=0.85, policy_id="ent_policy", reason="")
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda task_id: [
+        {"entity_id": CHECKPOINT, "snapshot": brief}])
+    monkeypatch.setattr(apis, "_checkpoint_denial_persisted", lambda cid: False)
+    monkeypatch.setattr(apis, "fetch_checkpoint_record", lambda cid: {"entity_id": cid})
+    monkeypatch.setattr(apis, "read_authenticated_checkpoint_authorization",
+                        lambda cid, record, **k: dict(auth))
+    monkeypatch.setattr(apis, "read_verified_entity_owner", lambda eid, record, **k: USER)
+    monkeypatch.setattr(apis, "read_authenticated_checkpoint_resolution",
+                        lambda *a, **k: {"principal_sub": "op@x"})
+    monkeypatch.setattr(apis, "fetch_task_record", lambda task_id: dict(task_record))
+    monkeypatch.setattr(apis, "_task_gate_context", lambda snap, **k: (
+        "cicada", "open_or_merge_pr", _Policy(), decision))
+    monkeypatch.setattr(apis, "execution_policy_revision", lambda policy: "rev-1")
+    monkeypatch.setattr(apis, "fetch_entity_observations_strict",
+                        lambda eid, **k: later + original)
+
+
+def _handoff(status: str) -> dict:
+    return {"id": f"handoff-{status}", "fields": {"status": status},
+            "idempotency_key": f"taskstatus-apis-{TASK}-{status}-approved"}
+
+
+_CLEAR_HOLD = {"id": "handoff-reason", "fields": {"blocked_reason": ""},
+               "idempotency_key": f"taskreason-apis-{TASK}-routed-approved"}
+
+
+def test_unreadable_ledger_is_named_not_left_silent(env, monkeypatch):
+    _, _, launches, dispatched, _ = env
+
+    def _broken():
+        raise fly_runner.FlyLedgerError("ledger unreadable")
+
+    monkeypatch.setattr(build_delivery, "_delivery_ledger", _broken)
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert launches == [] and dispatched == []
+    assert len(notifier.sent) == 1, notifier.sent
+    assert TASK in notifier.sent[0]
+    assert "Fly receipt state is unknown" in notifier.sent[0]
+    assert "ledger could not be read" in notifier.sent[0]
+    assert "never launched" not in notifier.sent[0]
+    assert counts["unrecovered"] == 1 and counts["recorded"] == 0
+
+
+def test_task_with_only_the_executing_handoff_since_approval_is_recovered(env, monkeypatch):
+    """The real approval check over fixture records: the only writes since the
+    approval are Apis's own routed and executing handoff, so it is released."""
+    _, _, launches, dispatched, _ = env
+    monkeypatch.setattr(apis, "_consumed_approval", _REAL_CONSUMED_APPROVAL)
+    _approval_records(monkeypatch, later=[_handoff("executing"), _handoff("routed"),
+                                          _CLEAR_HOLD])
+    notifier = _Notifier()
+    asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert launches == [TASK] and len(dispatched) == 1, notifier.sent
+    assert dispatched[0]["release_key"].startswith(CHECKPOINT)
+    assert notifier.sent == []
+
+
+@pytest.mark.parametrize("change", [
+    {"id": "edit", "fields": {"description": "do something else"},
+     "idempotency_key": "operator-edit"},
+    {"id": "notes", "fields": {"notes": "x"}, "idempotency_key": f"taskstatus-apis-{TASK}-x"},
+    {"id": "other-writer", "fields": {"status": "executing"},
+     "idempotency_key": f"taskstatus-sylvia-{TASK}-executing"},
+    {"id": "mixed", "fields": {"status": "executing", "repo": "other/repo"},
+     "idempotency_key": f"taskstatus-apis-{TASK}-executing"},
+], ids=["description", "notes", "other_writer", "mixed_fields"])
+def test_task_changed_after_approval_is_named_not_released(env, monkeypatch, change):
+    _, _, launches, dispatched, _ = env
+    monkeypatch.setattr(apis, "_consumed_approval", _REAL_CONSUMED_APPROVAL)
+    _approval_records(monkeypatch, later=[_handoff("executing"), change, _handoff("routed")])
+    notifier = _Notifier()
+    asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert launches == [] and dispatched == []
+    assert len(notifier.sent) == 1 and TASK in notifier.sent[0]
+    assert "changed after checkpoint" in notifier.sent[0]
+
+
+def test_unreadable_task_observations_are_named_not_released(env, monkeypatch):
+    _, _, launches, dispatched, _ = env
+    monkeypatch.setattr(apis, "_consumed_approval", _REAL_CONSUMED_APPROVAL)
+    _approval_records(monkeypatch, later=[_handoff("executing")])
+    monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda eid, **k: None)
+    notifier = _Notifier()
+    asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert launches == [] and dispatched == []
+    assert len(notifier.sent) == 1 and TASK in notifier.sent[0]
+
+
+@pytest.mark.parametrize("override", [
+    {"authorization": {"user_id": "another-tenant"}},
+    {"authorization": {"gate_action": apis.GateAction.CHECKPOINT_WITH_ALTERNATIVES.value}},
+    {"authorization": {"blast_radius": "low"}},
+    {"brief": {"blast_radius": "low"}, "authorization": {"blast_radius": "low"}},
+], ids=["user_id", "gate_action", "blast_radius", "decision_inconsistent"])
+def test_mismatched_authorization_binding_is_not_recovered(monkeypatch, override):
+    """Each of user_id, gate_action and blast_radius must match as the normal
+    release requires; the last case binds a blast radius the current gate
+    decision (high) is not consistent with."""
+    _approval_records(monkeypatch, later=[_handoff("executing")], **override)
+    checkpoint, why = apis._consumed_approval(TASK, _task())
+    assert checkpoint is None and "changed after checkpoint" in why
+
+
+def test_cleared_receipt_notice_does_not_claim_it_never_launched(env):
+    import fly_delivery_receipt
+
+    ledger, _, launches, dispatched, _ = env
+    fly_delivery_receipt._append_audit(fly_runner.FlyLedger(ledger), {
+        "by": "operator", "action": "clear_delivery_receipt", "stage": "removed",
+        "key": build_delivery.fly_delivery_key(REPO, None, TASK), "status": "unknown",
+        "run_id": "run-old", "branch": "b", "source_task": TASK})
+    notifier = _Notifier()
+    asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert launches == [] and dispatched == []
+    assert len(notifier.sent) == 1
+    assert "never launched" not in notifier.sent[0]
+    assert "whether its Fly run launched is unknown" in notifier.sent[0]

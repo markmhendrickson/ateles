@@ -2263,23 +2263,122 @@ def _consumed_approval(task_id: str, task_snapshot: dict) -> tuple[str | None, s
                 required_approver_jkt=str(authorization.get("required_approver_jkt") or "").strip(),
                 expected_user_id=owner) is None):
         return None, f"the approval on checkpoint {checkpoint_id} could not be verified"
-    skill = _gate_skill(task_snapshot)
-    policy = resolve_policy_for_agent(skill)
-    action_type = _resolve_gate_action_type(skill or "", task_snapshot, policy).value
+    task_record = fetch_task_record(task_id)
+    task_user_id = (read_verified_entity_owner(task_id, task_record)
+                    if task_record is not None else None)
+    if not task_user_id:
+        return None, f"the task's tenant could not be verified against checkpoint {checkpoint_id}"
+    changed = (f"the task or its execution policy changed after checkpoint "
+               f"{checkpoint_id} approved it")
+    # Judge the task as it was approved: the release's own lifecycle handoff is
+    # the only write allowed since, and it changes nothing the gate reads.
+    task_snapshot = _record_snapshot(task_record) or task_snapshot
+    _skill, action_type, policy, decision = _task_gate_context(
+        task_snapshot, bound_confidence=_bound_hold_confidence(authorization))
     if (not policy.loaded or action_type == "operator_only"
-            or str(authorization.get("action_type") or "").strip().lower() != action_type
-            or authorization.get("policy_entity_id") != policy.entity_id
-            or authorization.get("policy_revision") != execution_policy_revision(policy)):
-        return None, (f"the task or its execution policy changed after checkpoint "
-                      f"{checkpoint_id} approved it")
+            or not _approval_binding_holds(
+                authorization, task_id=task_id, brief_user_id=owner,
+                task_user_id=task_user_id, action_type=action_type, policy=policy,
+                decision=decision,
+                gate_action=str(brief.get("gate_action", "")).strip().lower(),
+                blast_radius=str(brief.get("blast_radius", "")).strip().lower())):
+        return None, changed
+    later = _later_observations_only_lifecycle_handoff(task_id, task_record, authorization)
+    if later is None:
+        return None, (f"the task's observations since checkpoint {checkpoint_id} approved "
+                      "it could not be read")
+    if not later:
+        return None, (f"the task changed after checkpoint {checkpoint_id} approved it "
+                      "(a write other than Apis's lifecycle handoff)")
     return checkpoint_id, ""
 
 
-def _unrecovered_notice(notifier: Notifier, entity_id: str, title: str, why: str) -> None:
+# The fields Apis's own release handoff writes on a task between approval and
+# launch (``dispatch_task``'s routed and executing ``set_task_status`` calls:
+# status, plus ``blocked_reason`` cleared on a gate-override release). Any other
+# field written since approval means the task changed after it was approved.
+_LIFECYCLE_HANDOFF_FIELDS = frozenset({"status", "blocked_reason"})
+_LIFECYCLE_HANDOFF_STATUSES = frozenset({TaskStatus.ROUTED.value, TaskStatus.EXECUTING.value})
+
+
+def _is_lifecycle_handoff(observation: dict, task_id: str) -> bool:
+    """Whether one task observation is Apis's own routed/executing handoff:
+    written under that handoff's idempotency key and changing only its fields."""
+    fields = observation.get("fields")
+    key = str(observation.get("idempotency_key") or "")
+    if not isinstance(fields, dict) or not fields or set(fields) - _LIFECYCLE_HANDOFF_FIELDS:
+        return False
+    if "status" in fields:
+        return (set(fields) == {"status"}
+                and normalize_status(fields["status"]) in _LIFECYCLE_HANDOFF_STATUSES
+                and key.startswith(f"taskstatus-{DAEMON_NAME}-{task_id}-"))
+    return (fields.get("blocked_reason") == ""
+            and key.startswith(f"taskreason-{DAEMON_NAME}-{task_id}-"))
+
+
+def _later_observations_only_lifecycle_handoff(task_id: str, task_record: dict,
+                                               authorization: dict) -> bool | None:
+    """Whether every task observation after the approved revision
+    (``task_observation_count``) is Apis's lifecycle handoff. None: the
+    observations could not be read completely, or the counts do not line up."""
+    approved = authorization.get("task_observation_count")
+    current = task_record.get("observation_count")
+    if (not isinstance(approved, int) or isinstance(approved, bool)
+            or not isinstance(current, int) or isinstance(current, bool)
+            or approved < 0 or current < approved):
+        return None
+    if current == approved:
+        # Nothing written since: the approval must bind this exact revision.
+        return (authorization.get("task_revision") == entity_record_digest(task_record)
+                and authorization.get("task_last_observation_at")
+                == task_record.get("last_observation_at"))
+    observations = fetch_entity_observations_strict(task_id)
+    if observations is None or len(observations) != current:
+        return None
+    # The observations endpoint lists newest first: the first ones are later.
+    return all(_is_lifecycle_handoff(obs, task_id)
+               for obs in observations[:current - approved])
+
+
+def _approval_binding_holds(authorization: dict, *, task_id: str, brief_user_id: str,
+                            task_user_id: str, action_type: str, policy: ExecutionPolicy,
+                            decision: GateDecision, gate_action: str,
+                            blast_radius: str) -> bool:
+    """The approval binding both the checkpoint release and restart recovery
+    require, apart from the task revision (which each judges its own way): the
+    task, tenant, action type, policy revision, gate action and blast radius
+    the operator approved, and a current gate decision compatible with it."""
+    return bool(
+        authorization.get("task_entity_id") == task_id
+        and brief_user_id
+        and authorization.get("user_id") == brief_user_id == task_user_id
+        and str(authorization.get("action_type") or "").strip().lower() == action_type
+        and authorization.get("policy_entity_id") == policy.entity_id
+        and authorization.get("policy_revision") == execution_policy_revision(policy)
+        and authorization.get("gate_action") == gate_action
+        and authorization.get("blast_radius") == blast_radius
+        and _decision_consistent_with_approval(
+            decision, gate_action=gate_action, blast_radius=blast_radius)
+    )
+
+
+_RECEIPT_UNKNOWN = ("its Fly receipt state is unknown because the Fly ledger could not be "
+                    "read (or a live run that records no task id may be its own), so it "
+                    "needs checking or refiling")
+
+
+def _unrecovered_notice(notifier: Notifier, entity_id: str, title: str, why: str, *,
+                        launch_unknown: bool = False) -> None:
+    """Name one task the restart sweep left executing. ``launch_unknown``: its
+    Fly run may have launched (unreadable ledger or audit, or a cleared or
+    superseded receipt), so the notice must not say it never launched."""
+    launched = ("whether its Fly run launched is unknown" if launch_unknown
+                else "its Fly run never launched")
     notifier.send(
         f"Fly delivery task was not recovered after an Apis restart: {title[:70]}\n"
-        f"  task={entity_id} is executing, but its Fly run never launched and "
-        f"{why}. Nothing was dispatched; re-release it through a fresh checkpoint.",
+        f"  task={entity_id} is executing, but {launched} and "
+        f"{why}. Nothing was dispatched; check it, then re-release it through a "
+        "fresh checkpoint.",
         priority=Priority.WARN, handler=DAEMON_NAME,
     )
 
@@ -2325,7 +2424,7 @@ async def recover_unlaunched_fly_tasks(notifier: Notifier) -> dict:
             log.exception(f"[{DAEMON_NAME}] recovering task {entity_id} crashed")
             counts["unrecovered"] += 1
             _unrecovered_notice(notifier, entity_id, "(untitled)",
-                                "examining it for recovery failed")
+                                "examining it for recovery failed", launch_unknown=True)
     if counts["examined"]:
         log.info(f"[{DAEMON_NAME}] unlaunched Fly task recovery: {counts}")
     return counts
@@ -2337,10 +2436,20 @@ async def _recover_unlaunched_fly_task(entity_id: str, listed: dict, notifier: N
     if not _fly_routed_delivery(listed):
         counts["not_fly"] += 1
         return
-    if (entity_id in _tasks_in_dispatch or entity_id in _detached_runs_in_progress
-            or _fly_delivery_recorded(listed, entity_id) is not False):
-        # Launched, outcome unknown, in flight, or being dispatched right now:
-        # the existing paths own it.
+    if entity_id in _tasks_in_dispatch or entity_id in _detached_runs_in_progress:
+        # Being dispatched right now: that dispatch owns it.
+        counts["recorded"] += 1
+        return
+    recorded = _fly_delivery_recorded(listed, entity_id)
+    if recorded is None:
+        # Unknown is neither: not a recorded delivery (nothing would ever retry
+        # it) and not an absent one (dispatching could launch a second run).
+        counts["unrecovered"] += 1
+        _unrecovered_notice(notifier, entity_id, str(listed.get("title") or "(untitled)"),
+                            _RECEIPT_UNKNOWN, launch_unknown=True)
+        return
+    if recorded:
+        # Launched, outcome unknown, or in flight: the existing paths own it.
         counts["recorded"] += 1
         return
     fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
@@ -2351,8 +2460,15 @@ async def _recover_unlaunched_fly_task(entity_id: str, listed: dict, notifier: N
         return
     if (normalize_status(fresh.get("status")) != TaskStatus.EXECUTING.value
             or not _fly_routed_delivery(fresh)
-            or entity_id in _tasks_in_dispatch or entity_id in _detached_runs_in_progress
-            or _fly_delivery_recorded(fresh, entity_id) is not False):
+            or entity_id in _tasks_in_dispatch or entity_id in _detached_runs_in_progress):
+        counts["recorded"] += 1
+        return
+    recorded = _fly_delivery_recorded(fresh, entity_id)
+    if recorded is None:
+        counts["unrecovered"] += 1
+        _unrecovered_notice(notifier, entity_id, title, _RECEIPT_UNKNOWN, launch_unknown=True)
+        return
+    if recorded:
         counts["recorded"] += 1
         return
     removed = await asyncio.to_thread(_fly_receipt_removed, fresh, entity_id)
@@ -2360,8 +2476,8 @@ async def _recover_unlaunched_fly_task(entity_id: str, listed: dict, notifier: N
         counts["unrecovered"] += 1
         _unrecovered_notice(notifier, entity_id, title,
                             "the Fly ledger's audit could not be read" if removed is None else
-                            "a receipt for it was cleared or superseded, so whether it "
-                            "launched is unknown")
+                            "a receipt for it was cleared or superseded",
+                            launch_unknown=True)
         return
     if fresh.get("task_type") == "existing_pr_correction":
         counts["unrecovered"] += 1
@@ -5118,7 +5234,6 @@ async def handle_checkpoint_brief(
             )
             return False
 
-        auth_action_type = str(authorization.get("action_type") or "").strip().lower()
         if not current_policy.loaded:
             _require_fresh_release_authority(
                 entity_id,
@@ -5149,21 +5264,21 @@ async def handle_checkpoint_brief(
             confidence_unscored=release_unscored,
         )
         exact_authority = (
-            authorization.get("task_entity_id") == task_id
-            and authorization.get("user_id") == brief_user_id == task_user_id
-            and authorization.get("task_revision") == entity_record_digest(task_record)
+            authorization.get("task_revision") == entity_record_digest(task_record)
             and authorization.get("task_observation_count")
             == task_record.get("observation_count")
             and authorization.get("task_last_observation_at")
             == task_record.get("last_observation_at")
-            and auth_action_type == current_action_type
-            and authorization.get("policy_entity_id") == current_policy.entity_id
-            and authorization.get("policy_revision")
-            == execution_policy_revision(current_policy)
-            and authorization.get("gate_action") == gate_action
-            and authorization.get("blast_radius") == blast_radius
-            and _decision_consistent_with_approval(
-                current_decision, gate_action=gate_action, blast_radius=blast_radius
+            and _approval_binding_holds(
+                authorization,
+                task_id=task_id,
+                brief_user_id=brief_user_id,
+                task_user_id=task_user_id,
+                action_type=current_action_type,
+                policy=current_policy,
+                decision=current_decision,
+                gate_action=gate_action,
+                blast_radius=blast_radius,
             )
         )
         if not exact_authority:
