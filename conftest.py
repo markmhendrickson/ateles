@@ -77,3 +77,17 @@ def _scrub_credential_environment(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     for name, value in updates.items():
         monkeypatch.setenv(name, value)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_notifier_state(monkeypatch, tmp_path_factory):
+    """Point every Notifier at a private held queue and dedupe journal.
+
+    Both default to files in the system temp dir that every daemon on the host
+    shares. A test that sends a held notice (or drains one) without repointing
+    them writes fake notices into, or delivers real notices out of, the live
+    queue. A test that sets its own paths afterwards is unaffected.
+    """
+    root = tmp_path_factory.mktemp("notify-state")
+    monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(root / "digest.json"))
+    monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(root / "dedupe.json"))
