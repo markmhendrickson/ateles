@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import datetime
 import inspect
+import io
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -1283,3 +1285,166 @@ def test_the_module_stays_free_of_operator_specifics():
     # the strip tier must reach deletion only through the guarded helper
     code = inspect.getsource(wp.strip_flow)
     assert code.count("shutil.rmtree") == 1 and "node_modules_contained" in code
+
+
+# ======================================================================================
+# relative path settings, log hygiene, private files
+# ======================================================================================
+@pytest.mark.parametrize(
+    "flag,env_name",
+    [("--never-touch", "NEVER_TOUCH"), ("--repos-dir", "REPOS_DIRS")],
+)
+@pytest.mark.parametrize("how", ["flag", "env"])
+def test_a_relative_path_setting_is_refused_before_anything_runs(
+    repo, monkeypatch, capsys, flag, env_name, how
+):
+    state = repo.home + "/state-relative"
+    argv = ["--state-dir", state, "--strip-only"]
+    if how == "flag":
+        argv += [flag, "relative/dir"]
+    else:
+        monkeypatch.setenv(
+            wp.ENV_PREFIX + env_name, repo.home + "/ok" + os.pathsep + "rel"
+        )
+    with pytest.raises(SystemExit) as raised:
+        wp.main(argv)
+    assert raised.value.code == 2
+    err = capsys.readouterr().err
+    assert "relative path" in err and "absolute" in err
+    assert not os.path.exists(state)  # refused before the state directory was created
+
+
+def test_relative_hold_prefixes_are_refused_but_names_and_tilde_paths_are_fine(repo):
+    with pytest.raises(wp.ConfigError):
+        wp.configure(env={}, cli={"hold_prefix": ["some/dir-"]})
+    with pytest.raises(wp.ConfigError):
+        wp.configure(env={wp.ENV_PREFIX + "HOLD_PREFIXES": "ok-,a/b"}, cli={})
+    with pytest.raises(wp.ConfigError):
+        wp.configure(env={}, cli={"never_touch": ["x" + os.pathsep + "/abs"]})
+    wp.configure(
+        env={}, cli={"hold_prefix": ["wt-"], "never_touch": ["~/kept", "/abs/kept"]}
+    )
+    assert wp.HOLD_PREFIXES == ("wt-",)
+    assert repo.home + "/kept" in wp.NEVER and "/abs/kept" in wp.NEVER
+    wp.configure(env={}, cli={"repos_dir": ["~/clones"]})
+    assert wp.REPOS_DIRS == [repo.home + "/clones"]
+
+
+def test_the_log_escapes_control_characters_in_one_place():
+    out = io.StringIO()
+    saved, wp.LOGF = wp.LOGF, out
+    try:
+        wp.log("KEEP", "/h/wt-evil\nFAKE 12:00:00 REMOVED /x\x1b[2J\r\x00", "ok")
+    finally:
+        wp.LOGF = saved
+    text = out.getvalue()
+    assert text.count("\n") == 1 and text.endswith("\n")
+    assert "\\x0a" in text and "\\x1b" in text and "\\x0d" in text and "\\x00" in text
+    assert "\x1b" not in text and "\r" not in text
+    assert "\u2028" not in wp.escape_text("a\u2028b")
+
+
+def test_a_worktree_name_with_control_characters_cannot_forge_a_log_line(
+    repo, monkeypatch
+):
+    evil = repo.home + "/wt-evil\nFAKE 12:00:00 REMOVED " + repo.home + "/victim"
+    entry = {
+        "main": repo.main,
+        "wt": evil,
+        "flags": [],
+        "branch": None,
+        "head": "0" * 40,
+    }
+    monkeypatch.setattr(wp, "list_worktrees", lambda main, mainset: [dict(entry)])
+    run_main(repo)  # a plain dry run logs the KEEP line for the missing path
+    log_dir = os.path.join(repo.home, "state", "logs")
+    text = "".join(open(os.path.join(log_dir, n)).read() for n in os.listdir(log_dir))
+    lines = text.splitlines()
+    assert any(
+        "wt-evil\\x0aFAKE" in line for line in lines
+    )  # the name is there, on one line
+    assert all(re.match(r"^\d\d:\d\d:\d\d ", line) for line in lines)
+    assert not any(line.startswith("FAKE") for line in lines)
+
+
+def _mode(path):
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+def test_state_and_log_files_are_private_whatever_the_umask(repo):
+    old = os.umask(0o022)
+    try:
+        run_main(repo, "--strip-only")
+        assert os.umask(0o022) == 0o022  # main restored the umask it found
+    finally:
+        os.umask(old)
+    state = repo.home + "/state"
+    assert _mode(state) == 0o700 and _mode(state + "/logs") == 0o700
+    assert _mode(state + "/runs.jsonl") == 0o600 and _mode(state + "/lock") == 0o600
+    day_logs = os.listdir(state + "/logs")
+    assert day_logs and all(_mode(state + "/logs/" + n) == 0o600 for n in day_logs)
+
+
+def test_existing_loose_state_is_tightened(repo):
+    state = repo.home + "/state"
+    os.makedirs(state + "/logs", mode=0o755)
+    os.chmod(state, 0o755)
+    os.chmod(state + "/logs", 0o755)
+    for name in ("runs.jsonl", "lock"):
+        open(state + "/" + name, "w").close()
+        os.chmod(state + "/" + name, 0o644)
+    run_main(repo, "--strip-only")
+    assert _mode(state) == 0o700 and _mode(state + "/logs") == 0o700
+    assert _mode(state + "/runs.jsonl") == 0o600 and _mode(state + "/lock") == 0o600
+
+
+def test_rotate_logs_never_follows_a_symlink(repo):
+    logs = repo.home + "/rotate-logs"
+    outside = repo.home + "/outside-logs"
+    os.makedirs(logs)
+    os.makedirs(outside)
+    big = b"x" * (1048576 + 10)
+    old = time.time() - 40 * 86400
+    for name in ("victim-big.bin", "victim-old.log"):
+        open(outside + "/" + name, "wb").write(big)
+    os.utime(outside + "/victim-old.log", (old, old))
+    os.symlink(outside + "/victim-big.bin", logs + "/launchd.out.log")
+    os.symlink(outside + "/victim-old.log", logs + "/2020-01-01.log")
+    os.utime(logs + "/2020-01-01.log", (old, old), follow_symlinks=False)
+    for name, size in (("launchd.err.log", len(big)), ("2020-01-02.log", 5)):
+        open(logs + "/" + name, "wb").write(b"y" * size)  # the controls: real files
+    os.utime(logs + "/2020-01-02.log", (old, old))
+    wp.LOGDIR = logs
+    wp.rotate_logs()
+    assert os.path.getsize(outside + "/victim-big.bin") == len(
+        big
+    )  # not truncated via the link
+    assert os.path.getsize(outside + "/victim-old.log") == len(big)
+    assert os.path.islink(logs + "/launchd.out.log")
+    assert os.path.islink(logs + "/2020-01-01.log")
+    assert (
+        os.path.getsize(logs + "/launchd.err.log") == 0
+    )  # a real oversized log is emptied
+    assert not os.path.exists(logs + "/2020-01-02.log")  # a real old day log is removed
+
+
+def test_a_symlink_where_a_state_file_belongs_is_refused_not_followed(repo):
+    outside = repo.home + "/outside-state-file"
+    open(outside, "w").write("precious")
+    state = repo.home + "/state"
+    argv = ["--state-dir", state, "--strip-only", "--repos-dir", repo.home + "/repos"]
+    os.makedirs(state + "/logs")
+    os.symlink(outside, state + "/runs.jsonl")
+    with pytest.raises(OSError):
+        wp.main(argv)
+    assert open(outside).read() == "precious"
+    os.remove(state + "/runs.jsonl")
+    day_log = state + "/logs/%s.log" % datetime.date.today().isoformat()
+    if os.path.lexists(day_log):
+        os.remove(day_log)  # the first run created it; plant the link in its place
+    os.symlink(outside, day_log)
+    with pytest.raises(OSError):
+        wp.main(argv)
+    assert open(outside).read() == "precious"
+    with pytest.raises(OSError):
+        wp.open_private(day_log)
