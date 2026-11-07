@@ -94,6 +94,38 @@ def test_codex_refused_by_fly_launches_once_on_claude_with_no_local_run(loop):
     assert seen["cooled"] == []  # codex is healthy; Fly just cannot run it here
 
 
+
+def test_cursor_with_no_login_machine_fails_over_to_claude(loop):
+    # Red, seen with provider_specific=True temporarily removed from the
+    # "no ... login machine configured" refusal in fly_runner.build_job:
+    # the loop stopped after the first attempt, claude never ran, and
+    # `assert result.ok` failed with "fly runner refused: not eligible for
+    # Fly: no cursor login machine configured (APIS_FLY_CURSOR_MACHINE_ID)".
+    run, seen = loop
+    result = run(["cursor", "claude"])
+    assert result.ok, result.error
+    assert result.provider == "claude"
+    assert seen["attempts"] == ["cursor", "claude"]
+    assert result.attempted_providers == ("cursor", "claude")
+    assert seen["minted"] == ["owner/repo"]  # exactly one Fly launch, for claude
+    assert seen["spawned"] == []  # nothing ran on the Mac
+    assert seen["cooled"] == []  # cursor is healthy; Fly just has no login machine for it
+
+
+def test_refusal_not_specific_to_the_provider_stops_with_no_failover(loop, monkeypatch):
+    # A non-https NEOTOMA_BASE_URL refuses every provider alike, so trying
+    # the next one would only repeat the refusal.
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "http://neotoma.example.test")
+    run, seen = loop
+    result = run(["claude", "cursor"])
+    assert not result.ok
+    assert result.error.startswith("fly runner refused: not eligible for Fly")
+    assert "NEOTOMA_BASE_URL must be an https URL" in result.error
+    assert not result.fly_provider_ineligible
+    assert seen["attempts"] == ["claude"]
+    assert seen["minted"] == [] and seen["spawned"] == [] and seen["cooled"] == []
+
+
 @pytest.mark.parametrize("pin", ["provider", "preferred_provider"])
 def test_pinned_codex_is_refused_with_no_failover(loop, pin):
     run, seen = loop
