@@ -3594,6 +3594,50 @@ _SELF_CLEARING_FAILURE_CLASSES = _CAPACITY_FAILURE_CLASSES | {
 }
 
 
+# GitHub answered a PR read with a rate-limit 403/429 (one carrying
+# `Retry-After`, or a body naming a secondary rate limit) and the short in-place
+# retries below did not clear it. Self-clearing like a Neotoma read failure, so
+# the panel is deferred with a resume marker instead of stopping for attention.
+GITHUB_TEMPORARILY_RATE_LIMITED = "GitHub temporarily rate limited"
+# In-place retry bounds for a rate-limited PR read: how many reads in total,
+# and the longest single wait, whatever `Retry-After` asks for.
+_GITHUB_RATE_LIMIT_ATTEMPTS = 3
+_GITHUB_RATE_LIMIT_MAX_WAIT_SECONDS = 120
+# Resume delay for a panel deferred on a GitHub rate limit; the 600s deferred
+# sweep picks it up.
+_GITHUB_RATE_LIMIT_DEFER_SECONDS = 300
+# The tests' seam for the in-place wait.
+_rate_limit_sleep = asyncio.sleep
+
+
+def github_rate_limit_wait(resp) -> int | None:
+    """Seconds to wait when *resp* is a temporary GitHub rate-limit answer.
+
+    A 403 or 429 counts as temporary only when it carries a `Retry-After`
+    header or its body names a secondary rate limit; the wait is the header's
+    value (60s when the body is the only sign), capped at
+    `_GITHUB_RATE_LIMIT_MAX_WAIT_SECONDS`. None for every other response,
+    including a plain 403, which stays a permanent failure.
+    """
+    if getattr(resp, "status_code", None) not in (403, 429):
+        return None
+    headers = getattr(resp, "headers", None) or {}
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if raw is not None:
+        try:
+            wait = int(str(raw).strip())
+        except ValueError:
+            wait = 60
+        return max(0, min(wait, _GITHUB_RATE_LIMIT_MAX_WAIT_SECONDS))
+    try:
+        body = (getattr(resp, "text", "") or "").lower()
+    except Exception:  # noqa: BLE001 — an unreadable body is no signal
+        body = ""
+    if "secondary rate limit" in body:
+        return 60
+    return None
+
+
 def _neotoma_retry_limit() -> int:
     """Consecutive Neotoma deferrals allowed at one head before an operator is asked.
 
@@ -8810,7 +8854,11 @@ class SwarmDispatcher:
                 "panel",
                 "",
                 "",
-                reason="PR head could not be verified before review",
+                reason=(
+                    GITHUB_TEMPORARILY_RATE_LIMITED
+                    if self._pr_read_rate_limited(trigger.repository, trigger.number)
+                    else "PR head could not be verified before review"
+                ),
             )
             return
 
@@ -9275,9 +9323,18 @@ class SwarmDispatcher:
             (await self._pr_head_sha(trigger)) or ""
         )
         if not review_head or aggregation_head != review_head:
+            # Only an unread head may be a rate limit; a head that was read and
+            # differs really changed, and still stops the panel.
+            rate_limited = not aggregation_head and self._pr_read_rate_limited(
+                trigger.repository, trigger.number
+            )
             await self._handle_panel_session_limit(
                 trigger, parent, "panel", "", "",
-                reason="PR head changed during review or could not be verified",
+                reason=(
+                    GITHUB_TEMPORARILY_RATE_LIMITED
+                    if rate_limited
+                    else "PR head changed during review or could not be verified"
+                ),
             )
             return
         vanellus_result = await run_skill(
@@ -12000,6 +12057,43 @@ class SwarmDispatcher:
             )
             return False
 
+    async def _github_pr_get(self, client, url: str, repository: str, pr_number: int):
+        """GET a PR, waiting out a short GitHub rate-limit burst in place.
+
+        A 403/429 that `github_rate_limit_wait` calls temporary is retried after
+        the wait it names, at most `_GITHUB_RATE_LIMIT_ATTEMPTS` reads in all.
+        Each such answer logs its `Retry-After` and `X-RateLimit-Remaining`
+        values (never a credential), so a burst shows which limit it was. When
+        the last read is still rate-limited the PR is remembered as such, so
+        the panel defers instead of stopping (`_pr_read_rate_limited`); any
+        other outcome clears that. Returns the last response either way.
+        """
+        key = (repository.casefold(), pr_number)
+        limited = self.__dict__.setdefault("_rate_limited_pr_reads", set())
+        limited.discard(key)
+        for attempt in range(1, _GITHUB_RATE_LIMIT_ATTEMPTS + 1):
+            resp = await client.get(url, headers=self._github_headers(repository))
+            wait = github_rate_limit_wait(resp)
+            if wait is None:
+                return resp
+            headers = getattr(resp, "headers", None) or {}
+            log.warning(
+                f"[{DAEMON_NAME}] {repository}#{pr_number}: GitHub PR read "
+                f"answered {resp.status_code} rate-limited (attempt {attempt} of "
+                f"{_GITHUB_RATE_LIMIT_ATTEMPTS}; Retry-After="
+                f"{headers.get('Retry-After', 'absent')}, X-RateLimit-Remaining="
+                f"{headers.get('X-RateLimit-Remaining', 'absent')})"
+            )
+            if attempt < _GITHUB_RATE_LIMIT_ATTEMPTS:
+                await _rate_limit_sleep(wait)
+        limited.add(key)
+        return resp
+
+    def _pr_read_rate_limited(self, repository: str, pr_number: int) -> bool:
+        """True when this PR's last read ended on a temporary GitHub rate limit."""
+        limited = self.__dict__.get("_rate_limited_pr_reads") or set()
+        return (repository.casefold(), pr_number) in limited
+
     async def _pr_head_sha_for(self, repository: str, pr_number: int) -> str | None:
         """Current head SHA for an arbitrary (repository, pr_number) pair.
 
@@ -12011,7 +12105,7 @@ class SwarmDispatcher:
         url = f"https://api.github.com/repos/{repository}/pulls/{pr_number}"
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(url, headers=self._github_headers(repository))
+                resp = await self._github_pr_get(client, url, repository, pr_number)
                 resp.raise_for_status()
                 return (resp.json().get("head") or {}).get("sha")
         except Exception as exc:  # noqa: BLE001 — advisory only
@@ -12560,9 +12654,7 @@ class SwarmDispatcher:
         url = f"https://api.github.com/repos/{repository}/pulls/{pr_number}"
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    url, headers=self._github_headers(repository)
-                )
+                resp = await self._github_pr_get(client, url, repository, pr_number)
                 resp.raise_for_status()
                 return resp.json()
         except Exception as exc:
@@ -17318,14 +17410,16 @@ class SwarmDispatcher:
             "usage limit",
             "provider capacity exhausted",
             NEOTOMA_TEMPORARILY_UNAVAILABLE,
+            GITHUB_TEMPORARILY_RATE_LIMITED,
         }
         iso = ""
         if auto_resume:
-            delay = (
-                _neotoma_retry_delay_seconds(neotoma_attempt)
-                if neotoma_attempt
-                else parse_limit_reset_delay(stdout, stderr)
-            )
+            if neotoma_attempt:
+                delay = _neotoma_retry_delay_seconds(neotoma_attempt)
+            elif reason == GITHUB_TEMPORARILY_RATE_LIMITED:
+                delay = _GITHUB_RATE_LIMIT_DEFER_SECONDS
+            else:
+                delay = parse_limit_reset_delay(stdout, stderr)
             resume_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
             iso = resume_at.strftime("%Y-%m-%dT%H:%M:%SZ")
             log.warning(
