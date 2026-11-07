@@ -8,7 +8,7 @@ seen in the transcript, not on a turn count. The counter is kept only as a
 cheap liveness signal.
 
 It also prints ONE line to stdout (which the harness adds to model context)
-when daemons hold operator notices that nothing can deliver, and only when the
+when daemons hold operator notices that are waiting undelivered, and only when the
 held total is non-zero and differs from the last total shown in this session.
 The line is built from integers and regex-validated handler names returned by
 lib/notify/held_view.py, never from notice text: notice text can embed
@@ -43,7 +43,7 @@ def held_notice_line(state: dict) -> str:
     ranked = sorted(info["by_handler"].items(), key=lambda kv: (-kv[1], kv[0]))
     parts = ", ".join(f"{name}: {int(n)}" for name, n in ranked[:6])
     return (
-        f"[held-notices] {total} operator notices held with no delivery channel "
+        f"[held-notices] {total} operator notices are waiting undelivered "
         f"({parts}). Show them with: python3 lib/notify/held_view.py. Tell the "
         "operator what needs them, then clear with --clear."
     )

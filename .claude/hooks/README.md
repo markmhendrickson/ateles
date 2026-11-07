@@ -208,7 +208,7 @@ reads exit 2 as a block. A Stop gate that demands a report (#1374) must not be a
 ## `user_prompt_submit.py` (UserPromptSubmit)
 
 Counts turns, and prints one `[held-notices] ...` line to model context when
-daemons hold operator notices with no delivery channel (queue totals come from
+daemons hold operator notices that are waiting undelivered (queue totals come from
 `lib/notify/held_view.py`, loaded by file path). It prints only when the total
 is non-zero and differs from the last total shown in the session, and the line
 carries integers and regex-validated handler names only — never notice text,

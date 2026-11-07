@@ -39,7 +39,7 @@ def test_prints_once_per_changed_total(tmp_path):
     _hold(tmp_path, [f"⚠️ [apis] PR {i}" for i in range(55)])
     out = _run(tmp_path)
     assert out.count("\n") == 1
-    assert out.startswith("[held-notices] 55 operator notices held with no delivery channel (apis: 55).")
+    assert out.startswith("[held-notices] 55 operator notices are waiting undelivered (apis: 55).")
     assert "python3 lib/notify/held_view.py" in out and "--clear" in out
     assert _run(tmp_path) == ""  # same total: silent
     _hold(tmp_path, [f"⚠️ [apis] PR {i}" for i in range(56)])
