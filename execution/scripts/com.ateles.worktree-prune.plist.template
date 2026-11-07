@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.ateles.worktree-prune: nightly prune of stale linked git worktrees.
+  Runs execution/scripts/worktree_prune.py at 03:30 local time; see
+  docs/runbooks/worktree-prune.md for the tiers, the safeties and the install steps.
+
+  This file is a TEMPLATE. Nothing installs it automatically.
+    {{HOME}}      the user's home directory
+    {{CHECKOUT}}  absolute path of the Ateles checkout that holds worktree_prune.py.
+                  The job runs whatever is in that working tree, so point it at a
+                  checkout that is kept clean and up to date (not a development clone).
+
+  Remove --strip-node-modules to switch the node_modules-only tier off,
+  --archive-remove to switch the archive-then-remove tier off. Without --apply the
+  job only reports (dry run). Optional configuration is read from ATELES_WORKTREE_PRUNE_*
+  environment variables (add them to EnvironmentVariables below); see the runbook.
+
+  launchd does not create the log directory: mkdir -p {{HOME}}/.ateles-work/worktree-prune/logs
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ateles.worktree-prune</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>{{CHECKOUT}}/execution/scripts/worktree_prune.py</string>
+    <string>--apply</string>
+    <string>--protect-ignored</string>
+    <string>--strip-node-modules</string>
+    <string>--archive-remove</string>
+    <string>--idle-hours</string>
+    <string>24</string>
+    <string>--max</string>
+    <string>200</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>{{HOME}}</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>{{HOME}}/.ateles-work/worktree-prune/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{HOME}}/.ateles-work/worktree-prune/logs/launchd.err.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+</dict>
+</plist>
