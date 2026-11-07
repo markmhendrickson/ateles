@@ -855,13 +855,17 @@ async def carry_earlier_signoffs(
     comments: list[dict],
     lens_outcomes: list[LensOutcome],
     authors: frozenset[str],
-    scope: review_scope.ReviewScope | None = None,
+    load: review_scope.ScopeLoad,
 ) -> list[LensOutcome]:
     """Replace a failing lens outcome with a carried sign-off where that is safe.
 
-    `scope` is the repo's declared review scope (base branch): a lens it
-    declares `lens_scopes` for is carried iff no delta file matches those
-    globs (operator ruling 2026-10-27); any other lens follows the rule below.
+    `load` is the read of the repo's declared review scope (base branch), the
+    same `ScopeLoad` Apis's panel judges by (`review_carry.select_rerun_for_load`).
+    A lens the scope declares `lens_scopes` for is carried iff no delta file
+    matches those globs (operator ruling 2026-10-27); any other lens follows the
+    rule below. A missing scope file declares no scope, so the default rule
+    applies. A scope file that exists but cannot be read or used carries nothing
+    (fail closed): every pending lens keeps its failing outcome.
 
     Operator ruling `rereview_only_blockers_and_touched_areas` (2026-09-29). A
     lens with no verdict on the current head clears on an EARLIER head's verdict
@@ -889,8 +893,8 @@ async def carry_earlier_signoffs(
         )
         for old in heads
     }
-    selection = review_carry.select_rerun(
-        [o.lens for o in pending], records, head_sha, deltas, scope=scope
+    selection = review_carry.select_rerun_for_load(
+        [o.lens for o in pending], records, head_sha, deltas, load=load
     )
     out: list[LensOutcome] = []
     for outcome in lens_outcomes:
@@ -2473,7 +2477,7 @@ async def run(
                 comments=comments,
                 lens_outcomes=lens_outcomes,
                 authors=authors,
-                scope=scope_load.scope,
+                load=scope_load,
             )
         check_outcomes, checks_green = await evaluate_checks(
             client, repo=repo, head_sha=head_sha, base_ref=base_ref

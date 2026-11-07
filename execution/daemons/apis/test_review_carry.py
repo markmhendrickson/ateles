@@ -542,8 +542,9 @@ class TestDispatcherSelectionReadsTheThread:
 
             async def get(self, url, headers=None, params=None):
                 class _R:
-                    def __init__(s, payload):
+                    def __init__(s, payload, status_code=200):
                         s._p = payload
+                        s.status_code = status_code
 
                     def raise_for_status(s):
                         pass
@@ -551,6 +552,9 @@ class TestDispatcherSelectionReadsTheThread:
                     def json(s):
                         return s._p
 
+                if "/contents/" in url:
+                    # No scope file on the base branch: the default area rule.
+                    return _R({}, 404)
                 if "/compare/" in url:
                     sha = url.rsplit("...", 1)[1]
                     files = [{"filename": "a.txt", "patch": "+x\n", "changes": 1}]

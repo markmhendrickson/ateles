@@ -13793,3 +13793,290 @@ def test_a_green_reading_from_an_earlier_panel_run_is_not_carried_forward():
     d._hold_panel_until_checks_green = held
     asyncio.run(d._handle_pr(t))
     assert d._checks_green_head(t, "a" * 40) == ""
+
+
+# ── Carry parity with the approval tool (re-run what the tool will not carry) ─
+#
+# Apis's re-run selection and the approval tool's `carry_earlier_signoffs` must
+# reach the same carry decision, with the repo's declared review scope read from
+# the same place (`review_scope.fetch_scope`). Before this, Apis judged a carry
+# by `review_carry.lenses_touched` alone: a test-only delta read as touching qa
+# only, so security was carried, while the tool read the same delta as inside
+# security's declared scope and refused, and no sweep noticed.
+
+import base64 as _carry_b64  # noqa: E402
+import sys as _carry_sys  # noqa: E402
+from pathlib import Path as _CarryPath  # noqa: E402
+
+_CARRY_SCRIPTS = str(_CarryPath(__file__).resolve().parents[2] / "scripts")
+if _CARRY_SCRIPTS not in _carry_sys.path:
+    _carry_sys.path.insert(0, _CARRY_SCRIPTS)
+
+import review_carry as _rc  # noqa: E402
+import review_scope as _rs  # noqa: E402
+
+_CARRY_OLD = "b" * 40
+_CARRY_NEW = "a" * 40  # `_trigger`'s default head
+_CARRY_FIVE = ("pm", "arch", "ux", "qa", "security")
+_CARRY_TEST_FILE = "execution/daemons/apis/test_swarm_dispatch.py"
+_CARRY_SCOPE_TEXT = (
+    _CarryPath(__file__).resolve().parents[3] / ".github" / "review_scope.json"
+).read_text(encoding="utf-8")
+
+
+def _carry_comment(lens, head, cid, verdict="**SIGNED_OFF**"):
+    agent = swarm_dispatch.lens_by_name(lens).agent
+    body = (
+        f"{swarm_dispatch.compose_lens_review_marker(lens, head)}\n"
+        f"{swarm_dispatch.attribution_header(agent, f'{lens} lens panelist')}\n"
+        f"{verdict}\n\nNo blocking findings."
+    )
+    return {"id": cid, "created_at": f"2026-11-06T00:00:{cid:02d}Z",
+            "user": {"login": "ateles-agent"}, "body": body,
+            "html_url": f"https://github.com/owner/repo/pull/87#issuecomment-{cid}"}
+
+
+def _carry_aggregation(head):
+    return {"id": 99, "created_at": "2026-11-06T00:00:59Z",
+            "user": {"login": "ateles-agent"},
+            "body": (f"<!-- vanellus-aggregation commit={head} -->\n"
+                     "**🤖 Vanellus — Ateles swarm, PR steward**\n**APPROVE**\n\n"
+                     "Blocking: 0")}
+
+
+def _stranded_thread():
+    """Every lens cleared OLD; after a test-only fix, qa and arch re-ran and
+    cleared NEW, pm and ux carried, security was carried by Apis's old rule
+    and so never re-ran, and Vanellus aggregated NEW clear."""
+    comments = [_carry_comment(lens, _CARRY_OLD, i + 1) for i, lens in enumerate(_CARRY_FIVE)]
+    comments += [_carry_comment("qa", _CARRY_NEW, 20), _carry_comment("arch", _CARRY_NEW, 21)]
+    return comments + [_carry_aggregation(_CARRY_NEW)]
+
+
+class _CarryResp:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                "err", request=httpx.Request("GET", "https://x"), response=None
+            )
+
+    def json(self):
+        return self._payload
+
+
+def _carry_client(delta_files, *, scope_status=200, prs=()):
+    """A GitHub stand-in: the scope file on the base branch, three-dot compares
+    whose interdiff is exactly *delta_files*, and an open-PR list."""
+
+    class _Client:
+        def __init__(self, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            if "/contents/" in url:
+                if scope_status != 200:
+                    return _CarryResp(scope_status, {"message": "boom"})
+                return _CarryResp(200, {
+                    "type": "file", "encoding": "base64",
+                    "content": _carry_b64.b64encode(_CARRY_SCOPE_TEXT.encode()).decode(),
+                })
+            if "/compare/" in url:
+                files = [{"filename": "a.txt", "patch": "+x\n", "changes": 1}]
+                if url.rsplit("...", 1)[1] == _CARRY_NEW:
+                    files += [{"filename": f, "patch": "+y\n", "changes": 1}
+                              for f in delta_files]
+                return _CarryResp(200, {"files": files})
+            if url.endswith("/pulls"):
+                return _CarryResp(200, list(prs))
+            return _CarryResp(200, {"base": {"ref": "main"}})
+
+    return _Client
+
+
+def _carry_pr():
+    return {"number": 87, "draft": False, "state": "open", "title": "t", "body": "",
+            "user": {"login": "x"}, "html_url": "https://github.com/owner/repo/pull/87",
+            "head": {"sha": _CARRY_NEW, "ref": "f"}, "base": {"ref": "main"}}
+
+
+def _carry_dispatcher(monkeypatch, comments, delta_files, *, scope_status=200, prs=()):
+    monkeypatch.setattr(
+        swarm_dispatch.httpx, "AsyncClient",
+        _carry_client(delta_files, scope_status=scope_status, prs=prs),
+    )
+
+    async def scoped(self, repository, number, client):
+        return comments
+
+    async def required(self, trigger):
+        return frozenset(_CARRY_FIVE)
+
+    monkeypatch.setattr(SwarmDispatcher, "_lens_scoped_comments", scoped)
+    monkeypatch.setattr(SwarmDispatcher, "_path_required_lenses", required)
+    return SwarmDispatcher(_StubNotifier(), _config())
+
+
+def _carry_selection(d):
+    panel = [swarm_dispatch.lens_by_name(x) for x in _CARRY_FIVE]
+    return asyncio.run(d._rereview_selection(
+        _trigger(base_ref="main"), panel, _CARRY_NEW, forced=set()
+    ))
+
+
+class TestRerunWhateverTheApprovalToolWillNotCarry:
+    def test_a_test_only_delta_re_runs_security_at_selection(self, monkeypatch):
+        # Red without the change: Apis judged by `lenses_touched` alone, read
+        # the test file as qa's only, and carried security.
+        comments = [_carry_comment(x, _CARRY_OLD, i + 1) for i, x in enumerate(_CARRY_FIVE)]
+        d = _carry_dispatcher(monkeypatch, comments, [_CARRY_TEST_FILE])
+        sel = _carry_selection(d)
+        assert sel is not None
+        assert "security" in sel.rerun
+        assert "security" not in sel.carried
+        assert "declared scope" in sel.reasons["security"]
+
+    def test_a_delta_outside_a_lens_scope_carries_and_does_not_re_run(self, monkeypatch):
+        comments = [_carry_comment(x, _CARRY_OLD, i + 1) for i, x in enumerate(_CARRY_FIVE)]
+        d = _carry_dispatcher(monkeypatch, comments, ["docs/guide.md"])
+        sel = _carry_selection(d)
+        assert sel is not None
+        assert "security" in sel.carried and "security" not in sel.rerun
+        assert sel.carried["security"].basis == "declared scope"
+        # And no sweep re-runs it: it is not stranded.
+        stranded = asyncio.run(d._stranded_carry_lenses(
+            _trigger(base_ref="main"), comments, _CARRY_NEW, frozenset(_CARRY_FIVE)
+        ))
+        assert "security" not in stranded
+
+    def test_an_unreadable_scope_re_runs_every_lens(self, monkeypatch):
+        # Red without the change: no scope was read, and the allowlist rule
+        # carried security over a docs-only delta whatever the scope file says.
+        comments = [_carry_comment(x, _CARRY_OLD, i + 1) for i, x in enumerate(_CARRY_FIVE)]
+        d = _carry_dispatcher(monkeypatch, comments, ["docs/guide.md"], scope_status=500)
+        sel = _carry_selection(d)
+        assert sel is not None
+        assert sel.rerun == frozenset(_CARRY_FIVE) and not sel.carried
+        assert "unreadable" in sel.reasons["security"]
+
+    def test_an_absent_scope_file_is_not_unreadable(self):
+        absent = _rs.ScopeLoad(None, "s", _rs.SCOPE_FILE_ABSENT)
+        broken = _rs.ScopeLoad(None, "s", "read failed (HTTP 500)")
+        assert not _rc.scope_unreadable(absent)
+        assert _rc.scope_unreadable(broken)
+
+    def test_the_startup_sweep_re_runs_only_the_stranded_lens(self, monkeypatch):
+        # Red without the change: `unseated_required_lenses` counted security
+        # as seated (it has a comment at OLD), the aggregation at NEW read as a
+        # finished panel, and nothing re-ran it.
+        comments = _stranded_thread()
+        d = _carry_dispatcher(monkeypatch, comments, [_CARRY_TEST_FILE])
+        redispatched, handled = [], []
+
+        async def fetch_pr(self, repository, number):
+            return _carry_pr()
+
+        async def allow(self, trigger, source=""):
+            return True
+
+        async def redispatch(self, repository, pr, lens):
+            redispatched.append(lens)
+
+        async def handle(self, trigger):
+            handled.append(trigger)
+
+        monkeypatch.setattr(SwarmDispatcher, "_fetch_pr", fetch_pr)
+        monkeypatch.setattr(SwarmDispatcher, "_label_gate_allows", allow)
+        monkeypatch.setattr(SwarmDispatcher, "_redispatch_missing_lens", redispatch)
+        monkeypatch.setattr(SwarmDispatcher, "_handle_pr", handle)
+        assert asyncio.run(d._panel_finished_for_pr(_trigger(base_ref="main"))) is False
+        summary = {"unreadable": 0, "finished": 0, "resumed": 0}
+        asyncio.run(d._sweep_one_labelled_pr(
+            "owner/repo", _carry_pr(), summary, repeating=False, name="startup panel sweep"
+        ))
+        assert redispatched == ["security"]
+        assert handled == [], "the whole panel must not re-run"
+        assert summary["resumed"] == 1
+
+    def test_the_missing_lens_sweep_re_runs_only_the_stranded_lens_within_its_limit(
+        self, monkeypatch
+    ):
+        # Red without the change: the aggregation at NEW is clear and every
+        # lens has a comment somewhere, so `_prs_with_missing_lens` found none.
+        comments = _stranded_thread()
+        d = _carry_dispatcher(
+            monkeypatch, comments, [_CARRY_TEST_FILE], prs=[_carry_pr()]
+        )
+        out = asyncio.run(d._prs_with_missing_lens("owner/repo"))
+        assert [(p["number"], lenses) for p, lenses in out] == [(87, ["security"])]
+
+        redispatched = []
+
+        async def allow(self, trigger, source=""):
+            return True
+
+        async def no_hold(self, trigger, source=""):
+            return False
+
+        async def redispatch(self, repository, pr, lens):
+            redispatched.append(lens)
+
+        monkeypatch.setattr(SwarmDispatcher, "_label_gate_allows", allow)
+        monkeypatch.setattr(SwarmDispatcher, "_hold_panel_until_checks_green", no_hold)
+        monkeypatch.setattr(SwarmDispatcher, "_redispatch_missing_lens", redispatch)
+        monkeypatch.setenv("APIS_MISSING_LENS_MAX_RETRIES", "2")
+        for _ in range(4):
+            asyncio.run(d.resume_missing_lens_reviews(["owner/repo"]))
+        assert redispatched == ["security", "security"], "bounded by the retry limit"
+        assert any("security" in m for m in d.notifier.sent), "escalated once"
+
+    def test_a_carried_lens_is_not_re_run_on_restart(self, monkeypatch):
+        comments = [_carry_comment(x, _CARRY_OLD, i + 1) for i, x in enumerate(_CARRY_FIVE)]
+        comments += [_carry_comment("ux", _CARRY_NEW, 20), _carry_aggregation(_CARRY_NEW)]
+        d = _carry_dispatcher(monkeypatch, comments, ["docs/guide.md"])
+        stranded = asyncio.run(d._stranded_carry_lenses(
+            _trigger(base_ref="main"), comments, _CARRY_NEW, frozenset(_CARRY_FIVE)
+        ))
+        assert "security" not in stranded
+
+    @pytest.mark.parametrize("delta", [
+        [_CARRY_TEST_FILE],
+        ["docs/guide.md"],
+        ["execution/daemons/apis/swarm_dispatch.py"],
+        ["docs/guide.md", "execution/daemons/apis/test_review_carry.py"],
+    ])
+    def test_apis_carries_exactly_what_the_approval_tool_carries(self, monkeypatch, delta):
+        import approve_pr_as_app as tool
+
+        comments = [_carry_comment(x, _CARRY_OLD, i + 1) for i, x in enumerate(_CARRY_FIVE)]
+        d = _carry_dispatcher(monkeypatch, comments, delta)
+        sel = _carry_selection(d)
+        assert sel is not None
+
+        monkeypatch.setattr(tool, "_github_headers", lambda repo=None: {})
+        client = _carry_client(delta)()
+        load = asyncio.run(tool.fetch_review_scope(client, "owner/repo", "main"))
+        assert load.scope is not None
+        pending = [
+            tool.LensOutcome(x, agent=swarm_dispatch.lens_by_name(x).agent,
+                             head_matched=False, verdict=None, passed=False,
+                             reason="no verdict at this head")
+            for x in _CARRY_FIVE
+        ]
+        outcomes = asyncio.run(tool.carry_earlier_signoffs(
+            client, repo="owner/repo", base_ref="main", head_sha=_CARRY_NEW,
+            comments=comments, lens_outcomes=pending,
+            authors=frozenset({"ateles-agent"}), load=load,
+        ))
+        tool_carried = {o.lens for o in outcomes if o.passed}
+        assert set(sel.carried) == tool_carried
+        assert sel.rerun == frozenset(_CARRY_FIVE) - tool_carried

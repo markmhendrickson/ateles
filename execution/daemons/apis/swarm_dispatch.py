@@ -5739,6 +5739,10 @@ class SwarmDispatcher:
         if repeating and await self._unexpired_deferral(repository, int(number)):
             summary["deferred"] += 1
             return
+        if await self._resume_stranded_lenses(trigger, fresh, summary, name=name):
+            if head:
+                self._panel_sweep_entered.add((*key, head))
+            return
         finished = await self._panel_finished_for_pr(trigger)
         if finished is None:
             summary["unreadable"] += 1
@@ -5756,6 +5760,47 @@ class SwarmDispatcher:
             self._panel_sweep_entered.add((*key, head))
         await self._handle_pr(trigger)
         summary["resumed"] += 1
+
+    async def _resume_stranded_lenses(
+        self, trigger: SwarmTrigger, pr: dict, summary: dict, *, name: str
+    ) -> bool:
+        """Re-run ONLY the lenses stranded by a refused carry; True when it did.
+
+        Stranded (`review_carry.stranded_lenses`): a required lens seated at an
+        earlier head, with no verdict at this head and an earlier verdict the
+        approval gate will not carry. Taken here only when the rest of the
+        required panel is settled at this head (a verdict here, or a carry the
+        gate accepts), so a head nobody has reviewed yet still re-enters the
+        full panel through `_handle_pr`. Under the missing-lens sweep's retry
+        limit. Any unreadable input returns False and the normal path decides.
+        """
+        head = _normalise_full_sha(trigger.head_sha or "")
+        if not head:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                comments = await self._lens_scoped_comments(
+                    trigger.repository, trigger.number, client
+                )
+        except Exception:  # noqa: BLE001 — the normal path reports it
+            return False
+        required = await self._path_required_lenses(trigger)
+        if unseated_required_lenses(comments, head, required):
+            return False
+        stranded = await self._stranded_carry_lenses(trigger, comments, head, required)
+        if not stranded or set(stranded) >= {r.lower() for r in required}:
+            return False
+        log.info(
+            f"[{DAEMON_NAME}] {name}: {trigger.repository}#{trigger.number} head "
+            f"{head[:9]}: {stranded} cannot carry to this head — re-running "
+            "only those lenses"
+        )
+        await self._redispatch_lenses_bounded(
+            trigger.repository, pr, stranded, summary,
+            int(os.environ.get("APIS_MISSING_LENS_MAX_RETRIES", "3")),
+            sweep=name,
+        )
+        return True
 
     async def _unexpired_deferral(self, repository: str, number: int) -> bool:
         """True if the PR's latest live `review-deferred-until:` marker is in the future.
@@ -5856,6 +5901,15 @@ class SwarmDispatcher:
         # finished panel: the approval tool can never pass it.
         path_required = await self._path_required_lenses(trigger)
         if unseated_required_lenses(comments, head, path_required):
+            return False
+        # Nor is it finished while a required lens has no verdict at this head
+        # and an earlier verdict the approval gate will not carry here.
+        stranded = await self._stranded_carry_lenses(
+            trigger, comments, head, path_required
+        )
+        if stranded is None:
+            return None
+        if stranded:
             return False
         if panel_finished_at_head(comments, head, set()):
             return True
@@ -6546,6 +6600,66 @@ class SwarmDispatcher:
             remote_lenses=frozenset({lens.lens}) if return_only else frozenset(),
         )
 
+    async def _redispatch_lenses_bounded(
+        self,
+        repository: str,
+        pr: dict,
+        lenses: list[str],
+        summary: dict,
+        max_retries: int,
+        *,
+        sweep: str,
+    ) -> None:
+        """Re-dispatch each of *lenses* alone, under the per-PR, per-lens retry
+        limit the missing-lens sweep keeps (`APIS_MISSING_LENS_MAX_RETRIES`):
+        past the limit the lens is escalated once and never retried. Shared by
+        every sweep that re-runs single lenses, so one count bounds them all."""
+        ref = f"{repository}#{int(pr.get('number'))}"
+        escalated = self._missing_lens_escalated.setdefault(ref, set())
+        per_lens = self._missing_lens_retries.setdefault(ref, {})
+        for key in ("resumed", "escalated", "failed"):
+            summary.setdefault(key, 0)
+
+        for lens in lenses:
+            if lens in escalated:
+                continue
+            attempts = per_lens.get(lens, 0)
+
+            if attempts >= max_retries:
+                log.error(
+                    f"[{DAEMON_NAME}] {sweep}: {ref} lens "
+                    f"'{lens}' still produced no verdict after "
+                    f"{attempts} re-dispatches — not retrying."
+                )
+                self.notifier.send(
+                    f"🔴 {ref}: the '{lens}' lens has produced no verdict "
+                    f"after {attempts} automatic re-dispatches. The panel "
+                    "is otherwise clear (Blocking: 0), so merge is held "
+                    "only on this. A green CI gate is NOT a substitute — "
+                    "the lens verdict is still required.",
+                    priority=Priority.BLOCKER,
+                )
+                escalated.add(lens)
+                summary["escalated"] += 1
+                continue
+
+            log.warning(
+                f"[{DAEMON_NAME}] {sweep}: {ref} lens '{lens}' has no verdict "
+                "at the current head the approval gate will accept — "
+                f"re-dispatching it (attempt {attempts + 1}/{max_retries})"
+            )
+            per_lens[lens] = attempts + 1
+            try:
+                await self._redispatch_missing_lens(repository, pr, lens)
+                summary["resumed"] += 1
+            except Exception as exc:
+                summary["failed"] += 1
+                log.error(
+                    f"[{DAEMON_NAME}] {sweep}: {ref} lens "
+                    f"'{lens}' re-dispatch failed ({exc})",
+                    exc_info=True,
+                )
+
     async def resume_missing_lens_reviews(self, repositories: list[str]) -> dict:
         """Re-dispatch a lens that never answered on an otherwise-clear panel.
 
@@ -6613,48 +6727,10 @@ class SwarmDispatcher:
                     summary["held_for_checks"] = summary.get("held_for_checks", 0) + 1
                     continue
                 summary["scanned"] += len(lenses)
-                escalated = self._missing_lens_escalated.setdefault(ref, set())
-                per_lens = self._missing_lens_retries.setdefault(ref, {})
-
-                for lens in lenses:
-                    if lens in escalated:
-                        continue
-                    attempts = per_lens.get(lens, 0)
-
-                    if attempts >= max_retries:
-                        log.error(
-                            f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
-                            f"'{lens}' still produced no verdict after "
-                            f"{attempts} re-dispatches — not retrying."
-                        )
-                        self.notifier.send(
-                            f"🔴 {ref}: the '{lens}' lens has produced no verdict "
-                            f"after {attempts} automatic re-dispatches. The panel "
-                            "is otherwise clear (Blocking: 0), so merge is held "
-                            "only on this. A green CI gate is NOT a substitute — "
-                            "the lens verdict is still required.",
-                            priority=Priority.BLOCKER,
-                        )
-                        escalated.add(lens)
-                        summary["escalated"] += 1
-                        continue
-
-                    log.warning(
-                        f"[{DAEMON_NAME}] missing-lens sweep: {ref} is clear "
-                        f"(Blocking: 0) but lens '{lens}' never reported — "
-                        f"re-dispatching it (attempt {attempts + 1}/{max_retries})"
-                    )
-                    per_lens[lens] = attempts + 1
-                    try:
-                        await self._redispatch_missing_lens(repository, pr, lens)
-                        summary["resumed"] += 1
-                    except Exception as exc:
-                        summary["failed"] += 1
-                        log.error(
-                            f"[{DAEMON_NAME}] missing-lens sweep: {ref} lens "
-                            f"'{lens}' re-dispatch failed ({exc})",
-                            exc_info=True,
-                        )
+                await self._redispatch_lenses_bounded(
+                    repository, pr, lenses, summary, max_retries,
+                    sweep="missing-lens sweep",
+                )
         return summary
 
     async def _prs_with_missing_lens(
@@ -6714,6 +6790,16 @@ class SwarmDispatcher:
                         self._pr_trigger_from_api(repository, pr)
                     )
                     for lens in unseated_required_lenses(comments, head, required):
+                        if lens not in lenses:
+                            lenses.append(lens)
+                    # A lens seated at an earlier head whose verdict the
+                    # approval gate will not carry to this one is the same hold:
+                    # no verdict for it will arrive at this head on its own.
+                    stranded = await self._stranded_carry_lenses(
+                        self._pr_trigger_from_api(repository, pr),
+                        comments, head, required,
+                    )
+                    for lens in stranded or []:
                         if lens not in lenses:
                             lenses.append(lens)
                 if lenses:
@@ -14959,6 +15045,52 @@ class SwarmDispatcher:
             )
             return None
 
+    async def _carry_inputs(
+        self,
+        client: httpx.AsyncClient,
+        trigger: SwarmTrigger,
+        comments: list[dict],
+        names: list[str],
+        review_head: str,
+    ) -> tuple[
+        dict[str, list[review_carry.LensRecord]],
+        dict[str, review_delta.Delta | None],
+        review_scope.ScopeLoad,
+    ]:
+        """What the approval gate's carry decision reads, read the way it reads
+        it: lens records, the interdiff from each candidate head, and the repo's
+        review scope from the PR's BASE branch (`review_scope.fetch_scope`)."""
+        records = lens_records(comments)
+        heads = review_carry.candidate_heads(names, records, review_head)
+        base_ref = trigger.base_ref
+        if not base_ref:
+            resp = await client.get(
+                f"https://api.github.com/repos/{trigger.repository}/pulls/"
+                f"{trigger.number}",
+                headers=self._github_headers(trigger.repository),
+            )
+            resp.raise_for_status()
+            base_ref = str((resp.json().get("base") or {}).get("ref") or "")
+        deltas = {
+            head: await review_carry.fetch_interdiff(
+                client,
+                repo=trigger.repository,
+                base_ref=base_ref,
+                old_head=head,
+                new_head=review_head,
+                headers=self._github_headers(trigger.repository),
+            )
+            for head in heads
+        }
+        load = await review_scope.fetch_scope(
+            client,
+            api_base="https://api.github.com",
+            repo=trigger.repository,
+            base_ref=base_ref,
+            headers=self._github_headers(trigger.repository),
+        )
+        return records, deltas, load
+
     async def _rereview_selection(
         self,
         trigger: SwarmTrigger,
@@ -14970,40 +15102,26 @@ class SwarmDispatcher:
         """Which panel lenses this round must re-run, or None for the full panel.
 
         None on round 1 (no earlier verdict exists) and on ANY failure: the
-        narrowing only ever removes work when it can prove the removal.
+        narrowing only ever removes work when it can prove the removal. The
+        decision is the approval gate's own carry rule with the same scope
+        (`review_carry.select_rerun_for_load`), so a lens is never carried here
+        that the gate would refuse to carry; an unreadable scope re-runs it.
         """
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 comments = await self._lens_scoped_comments(
                     trigger.repository, trigger.number, client
                 )
-                records = lens_records(comments)
                 names = [item.lens for item in panel]
-                heads = review_carry.candidate_heads(names, records, review_head)
-                if not heads:
+                if not review_carry.candidate_heads(
+                    names, lens_records(comments), review_head
+                ):
                     return None
-                base_ref = trigger.base_ref
-                if not base_ref:
-                    resp = await client.get(
-                        f"https://api.github.com/repos/{trigger.repository}/pulls/"
-                        f"{trigger.number}",
-                        headers=self._github_headers(trigger.repository),
-                    )
-                    resp.raise_for_status()
-                    base_ref = str((resp.json().get("base") or {}).get("ref") or "")
-                deltas = {
-                    head: await review_carry.fetch_interdiff(
-                        client,
-                        repo=trigger.repository,
-                        base_ref=base_ref,
-                        old_head=head,
-                        new_head=review_head,
-                        headers=self._github_headers(trigger.repository),
-                    )
-                    for head in heads
-                }
-            return review_carry.select_rerun(
-                names, records, review_head, deltas, forced=forced
+                records, deltas, load = await self._carry_inputs(
+                    client, trigger, comments, names, review_head
+                )
+            return review_carry.select_rerun_for_load(
+                names, records, review_head, deltas, load=load, forced=forced
             )
         except Exception as exc:
             log.warning(
@@ -15011,6 +15129,33 @@ class SwarmDispatcher:
                 f"re-review selection failed ({exc}) — running the full panel"
             )
             return None
+
+    async def _stranded_carry_lenses(
+        self,
+        trigger: SwarmTrigger,
+        comments: list[dict],
+        head: str,
+        required: set[str] | frozenset[str],
+    ) -> list[str] | None:
+        """Required lenses with no verdict at *head* whose earlier verdict the
+        approval gate will not carry (`review_carry.stranded_lenses`), or None
+        when the inputs could not be read (the caller leaves the PR alone)."""
+        if not review_carry.awaiting_carry(required, lens_records(comments), head):
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                records, deltas, load = await self._carry_inputs(
+                    client, trigger, comments, sorted(required), head
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: carry "
+                f"check unreadable ({exc}) — leaving it alone"
+            )
+            return None
+        return review_carry.stranded_lenses(
+            required, records, head, deltas, load=load
+        )
 
     async def _post_carry_note(
         self,
