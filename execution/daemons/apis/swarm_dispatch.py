@@ -6213,11 +6213,31 @@ class SwarmDispatcher:
                         )
                         raise RuntimeError(f"fix round held: {route_facts}")
                     if route == "fly":
+                        # A Fly correction is a fix round like the review and
+                        # CI routes': bounded by the same limit, and recorded
+                        # only once its filing is confirmed.
+                        if prior_fix_rounds >= self.config.max_fix_rounds:
+                            head = _normalise_full_sha(head_sha) or head_sha
+                            self.notifier.send(
+                                f"PR {ref}: {self.config.max_fix_rounds} "
+                                "auto-fix rounds did not clear review. "
+                                "Escalating — needs your attention. "
+                                f"{trigger.html_url} Merge held.",
+                                priority=Priority.OPERATOR_DECISION,
+                                handler=DAEMON_NAME,
+                                dedupe_key=f"fix-exhausted:{ref}:{head}",
+                            )
+                            summary["fix_rounds_exhausted"] = (
+                                summary.get("fix_rounds_exhausted", 0) + 1
+                            )
+                            continue
+                        this_round = prior_fix_rounds + 1
                         if not await self._file_fly_correction(
-                            trigger, kind="resumed fix", round_n=attempts + 1,
+                            trigger, kind="resumed fix", round_n=this_round,
                             body=blocking_review, facts=route_facts,
                         ):
                             raise RuntimeError("Fly correction was not filed")
+                        await self._record_fix_round(trigger, this_round)
                         summary["resumed"] += 1
                         continue
                     result = await run_skill(

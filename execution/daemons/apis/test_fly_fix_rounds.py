@@ -475,27 +475,88 @@ def test_a_readable_ledger_with_no_receipt_keeps_the_local_round(
     assert corrections(stored) == [] and rounds_recorded == [1]
 
 
-def test_resumed_fix_round_for_a_fly_pr_is_filed_as_a_fly_correction(monkeypatch, world, stored):
+def test_resumed_fix_round_for_a_fly_pr_is_filed_as_a_fly_correction(
+    monkeypatch, world, stored, rounds_recorded
+):
     seed_fly_delivery()
     d = _dispatcher()
     rec = _Recorder(monkeypatch)
-
-    async def scan(repo, now, stale):
-        return [{
-            "number": PR, "title": "t", "body": "Closes #80.",
-            "html_url": f"https://github.com/{REPO}/pull/{PR}",
-            "user": {"login": "someone"},
-            "head": {"ref": BRANCH, "sha": HEAD}, "base": {"ref": "main"},
-            "labels": [], "_blocking_review_at": "x", "_revision_pushed_at": "y",
-            "_blocking_review_body": UX_FINDING,
-        }]
-
-    monkeypatch.setattr(d, "_prs_with_unactioned_revisions", scan)
+    _resume_scan(monkeypatch, d)
     summary = asyncio.run(d.resume_unactioned_revisions([REPO]))
     assert rec.of("cicada") == []
     [task] = corrections(stored)
     assert UX_FINDING.splitlines()[0] in task["description"]
     assert summary["resumed"] == 1
+    # The round is recorded once, with the marker and count the review route
+    # records for the same PR (round 1 from none). Red before the fix
+    # (observed, with the fix reverted): the resumed branch continued without
+    # recording, so `rounds_recorded` was [].
+    assert rounds_recorded == [1]
+    review_rounds = []
+
+    async def record(self, t, n):
+        review_rounds.append(n)
+
+    world.fix_rounds = 0
+    monkeypatch.setattr(SwarmDispatcher, "_record_fix_round", record)
+    _Recorder(monkeypatch, stdout={"accipiter": GUIDANCE})
+    review_round()
+    assert review_rounds == rounds_recorded
+
+
+def test_resumed_fly_correction_counts_toward_the_round_limit(
+    monkeypatch, world, stored, rounds_recorded
+):
+    seed_fly_delivery()
+    d = _dispatcher()
+    world.fix_rounds = d.config.max_fix_rounds - 1  # one round below the limit
+    rec = _Recorder(monkeypatch)
+    _resume_scan(monkeypatch, d)
+    first = asyncio.run(d.resume_unactioned_revisions([REPO]))
+    assert first["resumed"] == 1
+    assert len(corrections(stored)) == 1
+    assert rounds_recorded == [d.config.max_fix_rounds]
+    # A second resumed revision (a new head) now meets the limit: nothing filed.
+    async def scan_again(repo, now, stale):
+        return [{
+            "number": PR, "title": "t", "body": "Closes #80.",
+            "html_url": f"https://github.com/{REPO}/pull/{PR}",
+            "user": {"login": "someone"},
+            "head": {"ref": BRANCH, "sha": "c" * 40}, "base": {"ref": "main"},
+            "labels": [], "_blocking_review_at": "x", "_revision_pushed_at": "z",
+            "_blocking_review_body": UX_FINDING,
+        }]
+
+    monkeypatch.setattr(d, "_prs_with_unactioned_revisions", scan_again)
+    second = asyncio.run(d.resume_unactioned_revisions([REPO]))
+    assert second["resumed"] == 0
+    assert len(corrections(stored)) == 1
+    assert rounds_recorded == [d.config.max_fix_rounds]
+    assert rec.of("cicada") == []
+    assert any("auto-fix rounds did not clear review" in m for m in d.notifier.sent)
+    # Red before the fix (observed failing with the fix reverted; the exact
+    # failing assertion was not captured): no round was recorded, so
+    # `rounds_recorded` was [] after the first sweep, and the resumed branch had
+    # no limit check, so the second sweep would file a second correction.
+
+
+def test_resumed_fly_correction_not_confirmed_records_no_round(
+    monkeypatch, world, stored, rounds_recorded
+):
+    seed_fly_delivery()
+    stored["read_fails"] = True  # the filing cannot be read back
+    d = _dispatcher()
+    rec = _Recorder(monkeypatch)
+    _resume_scan(monkeypatch, d)
+    summary = asyncio.run(d.resume_unactioned_revisions([REPO]))
+    assert rec.of("cicada") == []
+    assert summary["resumed"] == 0 and summary["failed"] == 1
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any("could not be read back" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+    # Not red before the fix (observed passing with the fix reverted): that
+    # branch never recorded a round at all. It guards that the fix records
+    # only after a confirmed filing.
 
 
 # --- A cleared or superseded receipt still means the PR came from Fly -------
