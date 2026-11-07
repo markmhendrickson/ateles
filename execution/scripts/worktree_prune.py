@@ -3,8 +3,8 @@
 
 Default is DRY RUN. `--apply` actually removes or deletes. stdlib only.
 
-Three tiers, cheapest first. Every tier works on LINKED worktrees only (never a
-main clone) and re-checks every condition immediately before it acts.
+Two tiers. Every tier works on LINKED worktrees only (never a main clone) and
+re-checks every condition immediately before it acts.
 
 1. Plain tier (always on). A linked worktree is removed ONLY if every one of
    these holds, each re-checked immediately before removal:
@@ -18,7 +18,9 @@ main clone) and re-checks every condition immediately before it acts.
      e) not locked
      f) not detached on a HEAD that is unreachable from origin
    Removal is `git worktree remove <wt>` WITHOUT --force; if git refuses the worktree is kept.
-   This script never stashes, deletes branches, pushes, or commits.
+   This script never forces a removal, stashes, deletes branches, pushes, or commits.
+   `--protect-ignored` additionally keeps worktrees holding git-ignored files that are not
+   obvious regenerable output.
 
 2. node_modules-only tier (`--strip-node-modules`, off by default). For a linked worktree
    idle for `--idle-hours` (default 24) or more, delete ONLY directories literally named
@@ -34,22 +36,13 @@ main clone) and re-checks every condition immediately before it acts.
      f) not detached on a HEAD unreachable from origin
      g) not on the never-touch list and not under the configurable hold
    The worktree itself stays. Bytes freed are reported per worktree and in total in the
-   runs log. `--strip-only` runs this tier alone (no whole-worktree removal, no archive).
+   runs log. `--strip-only` runs this tier alone (no whole-worktree removal).
 
-3. Archive-then-remove tier (`--archive-remove`, off by default). Worktrees that the plain
-   tier KEEPS as dirty / unpushed / detached (or that hold non-regenerable ignored files
-   under --protect-ignored) and are idle >= --idle-hours (default 72 for this tier when the
-   flag is not given) get a verified recovery archive (bundle of local-only commits,
-   patch.diff, untracked/ignored-file tarball, meta.json) under the archive root (0700,
-   <= 25 MB, otherwise SKIPPED); then, only if the worktree is unchanged since,
-   `git worktree remove --force`. `--force` is used ONLY there; the plain tier never uses
-   it. `--prune-archives` lists (or with --apply deletes) archives older than 30 days, and
-   only those laid out the way this tool writes them.
+A tier that archives work before removing it is deliberately not part of this module.
 
 Operator-specific values are configuration, never code. Each can be set by environment
 variable or CLI flag (flag wins); the defaults are relative to the user's home directory:
   ATELES_WORKTREE_PRUNE_STATE_DIR      lock, runs.jsonl, logs   (--state-dir)
-  ATELES_WORKTREE_PRUNE_ARCHIVE_ROOT   archive root             (--archive-root)
   ATELES_WORKTREE_PRUNE_REPOS_DIRS     clone parents, os.pathsep-separated (--repos-dir, repeatable)
   ATELES_WORKTREE_PRUNE_NEVER_TOUCH    extra never-touch dirs, os.pathsep-separated (--never-touch)
   ATELES_WORKTREE_PRUNE_HOLD_PREFIXES  comma-separated worktree directory-name prefixes to hold (--hold-prefix)
@@ -58,10 +51,8 @@ variable or CLI flag (flag wins); the defaults are relative to the user's home d
 """
 
 import argparse
-import atexit
 import datetime
 import fcntl
-import importlib.util
 import json
 import os
 import re
@@ -69,8 +60,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tarfile
-import tempfile
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -78,11 +67,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 ENV_PREFIX = "ATELES_WORKTREE_PRUNE_"
 DEFAULT_FRESH_HOURS = 24
 DEFAULT_STRIP_IDLE_HOURS = 24
-DEFAULT_ARCHIVE_IDLE_HOURS = 72
 ERR_ABORT_RATIO = 0.20
 ERR_MIN_CALLS = 20
-ARCHIVE_CAP_MB = 25
-ARCHIVE_RETENTION_DAYS = 30
 # Deployment checkouts the swarm's daemons run from (documented in the repo's CLAUDE.md). Never touched,
 # whatever the configuration says; ATELES_WORKTREE_PRUNE_NEVER_TOUCH adds to this list.
 DEFAULT_NEVER_TOUCH = ("~/ateles-rc-src", "~/neotoma-rc-src")
@@ -98,22 +84,12 @@ MANUAL_PROGRESS = None
 NEVER = []
 HOLD_PREFIXES = ()
 HOLD_UNTIL = None  # (y, m, d) or None. None with prefixes set means "hold indefinitely" (fails closed).
-ARCHIVE_ROOT = ""
 FRESH_HOURS = DEFAULT_FRESH_HOURS
-# Settings of the optional archive-then-remove tier. Off unless --archive-remove is passed.
-ARCH = {
-    "enabled": False,
-    "idle_hours": DEFAULT_ARCHIVE_IDLE_HOURS,
-    "cap": ARCHIVE_CAP_MB * 1024 * 1024,
-    "root": "",
-    "dry_tmp": None,
-}
-ARCHIVE_KINDS = ("dirty", "unpushed", "detached-unreachable")
 # Settings of the optional node_modules-only tier. Off unless --strip-node-modules / --strip-only is passed.
 STRIP = {"enabled": False, "only": False, "idle_hours": DEFAULT_STRIP_IDLE_HOURS}
 STRIP_DIR_NAME = "node_modules"
 
-# Regenerable = never worth protecting (used by --protect-ignored, and to keep generated output out of archives).
+# Regenerable = never worth protecting (used by --protect-ignored).
 REGEN_ANY_DEPTH = {
     "node_modules",
     "dist",
@@ -139,7 +115,7 @@ REGEN_ANY_DEPTH = {
 }
 REGEN_TOP_LEVEL = ("tmp", "public", "site_pages", ".husky", "docs/site/generated")
 REGEN_SUFFIXES = (".pyc", ".tsbuildinfo", ".log", ".eslintcache")
-ENV_COPY_PREFIX = ".env.development"  # also catches renamed copies (.notloaded, .bak): operator secrets, never archived
+ENV_COPY_PREFIX = ".env.development"  # also catches renamed copies (.notloaded, .bak): regenerable by name
 REGEN_NAMES = (
     ".env.development",
 )  # husky-copied by scripts/copy-env-to-worktree.js; name only, never read
@@ -219,8 +195,7 @@ def configure(env=None, cli=None):
         MANUAL_PROGRESS, \
         NEVER, \
         HOLD_PREFIXES, \
-        HOLD_UNTIL, \
-        ARCHIVE_ROOT
+        HOLD_UNTIL
     env = os.environ if env is None else env
     cli = cli or {}
     warnings = []
@@ -238,13 +213,6 @@ def configure(env=None, cli=None):
     LOGDIR = os.path.join(BASE, "logs")
     RUNS = os.path.join(BASE, "runs.jsonl")
     LOCK = os.path.join(BASE, "lock")
-    ARCHIVE_ROOT = os.path.abspath(
-        os.path.expanduser(
-            pick("ARCHIVE_ROOT", "archive_root")
-            or os.path.join(H, ".ateles-work", "worktree-archive")
-        )
-    )
-    ARCH["root"] = ARCHIVE_ROOT
     repos = _path_list(os.pathsep.join(cli.get("repos_dir") or [])) or _path_list(
         env.get(ENV_PREFIX + "REPOS_DIRS")
     )
@@ -321,190 +289,6 @@ def ignored_is_regen(wt, entry):
         except OSError:
             return False
     return False
-
-
-def tar_exclude(rel):
-    """Untracked (non-ignored) files left OUT of an archive: generated / build output only."""
-    parts = rel.split("/")
-    if any(p in REGEN_ANY_DEPTH for p in parts):
-        return True
-    for t in REGEN_TOP_LEVEL:
-        if t in (".husky",):
-            continue
-        if rel == t or rel.startswith(t + "/"):
-            return True
-    if parts[-1].startswith(ENV_COPY_PREFIX):
-        return True
-    return rel.endswith((".pyc", ".tsbuildinfo"))
-
-
-# Secret-looking names. The archive tier never copies such a path anywhere, so a worktree that touches
-# one (an untracked or ignored file, a path in the working-tree diff, a path in a local-only commit) is
-# kept whole instead of being archived and removed. Decided on names alone, for every component of the
-# path; file contents are never read. The ENV_COPY_PREFIX family is handled separately above (left out
-# of archives, as before) and is not part of this list. The list errs toward keeping.
-SECRET_EXACT = (
-    ".env",
-    ".envrc",
-    ".netrc",
-    ".npmrc",
-    ".pgpass",
-    ".pypirc",
-    ".git-credentials",
-    ".htpasswd",
-    ".aws",
-    ".ssh",
-    ".gnupg",
-)
-SECRET_SUFFIXES = (
-    ".pem",
-    ".key",
-    ".p12",
-    ".pfx",
-    ".p8",
-    ".jks",
-    ".keystore",
-    ".kdbx",
-    ".gpg",
-    ".asc",
-    ".tfvars",
-    ".tfstate",
-)
-SECRET_PREFIXES = ("credentials", "id_rsa", "id_ed25519", "id_ecdsa")
-SECRET_SUBSTRINGS = (
-    "secret",
-    "credential",
-    "token",
-    "password",
-    "passwd",
-    "apikey",
-    "api_key",
-    "private_key",
-    ".tfvars.",
-    ".tfstate.",
-)
-SECRET_SCAN_SKIP = ("node_modules", ".venv", "venv", "__pycache__", ".mcp-venv")
-
-
-def _load_template_rule():
-    """(rule, loaded): the repo's single definition of a placeholder-template name
-    (lib/credential_templates.py), and whether it could be loaded.
-
-    Loaded by path, as the credential hook does. If it cannot be loaded, no name counts as a template,
-    so more files look secret and more worktrees are kept: it fails closed and never uses a copy.
-    """
-    path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "lib",
-        "credential_templates.py",
-    )
-    try:
-        spec = importlib.util.spec_from_file_location("credential_templates", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod.is_placeholder_template, True
-    except Exception:
-        return (lambda name: False), False
-
-
-is_placeholder_template, TEMPLATE_RULE_LOADED = _load_template_rule()
-
-
-def secret_name(name, is_link=False):
-    """True if one path component looks like it names a secret (name only; the content is never read).
-
-    A placeholder-template name is exempt, unless it is a symbolic link: a link can point anywhere, so a
-    template-looking name does not launder it. The .env.development family keeps its own exemption.
-    """
-    n = name.lower()
-    if n.startswith(ENV_COPY_PREFIX):
-        return False
-    if not is_link and is_placeholder_template(n):
-        return False
-    return (
-        n in SECRET_EXACT
-        or n.startswith(".env.")
-        or n.endswith(SECRET_SUFFIXES)
-        or n.startswith(SECRET_PREFIXES)
-        or (
-            n.startswith(("service-account", "service_account")) and n.endswith(".json")
-        )
-        or any(s in n for s in SECRET_SUBSTRINGS)
-    )
-
-
-def secret_path(rel, is_link=False):
-    """True if ANY component of the relative path (directories included) looks secret."""
-    parts = [p for p in rel.split("/") if p]
-    for i, part in enumerate(parts):
-        if secret_name(part, is_link and i == len(parts) - 1):
-            return True
-    return False
-
-
-_RAW_META = re.compile(r"^:\d{6} \d{6} [0-9a-f]+ [0-9a-f]+ [A-Z]\d*$")
-
-
-def _raw_diff_paths(args, wt):
-    """Paths named by a `git ... --raw -z --no-renames` command -> [(path, is_symlink)], or None on error.
-
-    --no-renames lists a rename as a delete of the source plus an add of the target, so both names appear.
-    """
-    rc, o, _ = run(["git", "-C", wt] + args, count=False, timeout=600)
-    if rc != 0:
-        return None
-    toks = o.split("\0")
-    out, i = [], 0
-    while i < len(toks):
-        if _RAW_META.match(toks[i]) and i + 1 < len(toks):
-            modes = toks[i][1:].split(" ")[:2]
-            out.append((toks[i + 1], "120000" in modes))
-            i += 2
-        else:
-            i += 1
-    return out
-
-
-def secret_files(wt, branch=None):
-    """Paths the archive would copy whose names look secret, in every channel the archive carries.
-
-    -> sorted list, or None if it could not be decided (callers keep the worktree on None). Channels:
-      * untracked or ignored files in the worktree (the tarball);
-      * every path in the working-tree and staged diff against HEAD (patch.diff), rename sources included;
-      * every path touched by a commit that exists only locally (the bundle).
-    Tracked, unmodified files that are already on a remote are not carried by any channel.
-    """
-    rc, o, _ = run(["git", "-C", wt, "ls-files", "-z"], count=False)
-    if rc != 0:
-        return None
-    tracked = set(o.split("\0"))
-    hits = []
-    try:
-        for dp, dn, fn in os.walk(wt, followlinks=False, onerror=_raise):
-            entries = [(d, os.path.islink(os.path.join(dp, d))) for d in dn]
-            dn[:] = [d for d in dn if d != ".git" and d not in SECRET_SCAN_SKIP]
-            # a symlink to a directory is listed with the directories but archived like a file
-            files = [(f, os.path.islink(os.path.join(dp, f))) for f in fn]
-            files += [(d, True) for d, link in entries if link and d != ".git"]
-            for f, link in files:
-                rel = os.path.relpath(os.path.join(dp, f), wt)
-                if rel not in tracked and secret_path(rel, link):
-                    hits.append(rel)
-    except OSError:
-        return None
-    channels = [
-        ["diff", "--raw", "-z", "--no-renames", "HEAD"],
-        ["diff", "--cached", "--raw", "-z", "--no-renames", "HEAD"],
-        ["log", "--raw", "-z", "--no-renames", "-m", "--format=", "HEAD"]
-        + ([("refs/heads/" + branch)] if branch else [])
-        + ["--not", "--remotes"],
-    ]
-    for args in channels:
-        paths = _raw_diff_paths(args, wt)
-        if paths is None:
-            return None
-        hits += [p for p, link in paths if secret_path(p, link)]
-    return sorted(set(hits))
 
 
 class Stats:
@@ -835,11 +619,11 @@ def analyze(e, want_size):
         return e
     if not c:
         e["status"] = "dirty"
-        return archive_gate(e)
+        return e
     pv = pushed_via(e, e["head"])
     if not pv:
         e["status"] = "unpushed" if e.get("branch") else "detached-unreachable"
-        return archive_gate(e)
+        return e
     e["pushed_via"] = pv
     e["status"] = "ELIGIBLE"
     if want_size:
@@ -1109,546 +893,12 @@ def strip_flow(e, apply_):
     return "STRIPPED" if done else "refused-node-modules"
 
 
-# ----------------------------------------------------------------------------------------------
-# Archive-then-remove tier (--archive-remove). A worktree that the plain tier would KEEP as dirty /
-# unpushed / detached-unreachable (or that holds non-regenerable ignored files) is first written to a
-# verified recovery archive outside every repo, re-checked unchanged, and only then force-removed.
-# `--force` appears nowhere else in this file; the plain tier never uses it.
-# ----------------------------------------------------------------------------------------------
-class ArchiveError(Exception):
-    def __init__(self, reason, detail=""):
-        Exception.__init__(self, reason + (": " + detail if detail else ""))
-        self.reason = reason
-        self.detail = detail
-
-
-def archive_gate(e):
-    """analyze() hook: with the archive tier on, a kept-for-work worktree becomes a candidate if long idle."""
-    if not (ARCH["enabled"] and e["status"] in ARCHIVE_KINDS):
-        return e
-    e["kind"] = e["status"]
-    r = recent_file(e["wt"], max(ARCH["idle_hours"], FRESH_HOURS))
-    if r == "error":
-        e["status"] = "find-error"
-    elif r:
-        e["status"] = "not-idle"
-    else:
-        e["status"] = "ARCHIVE-CANDIDATE"
-    return e
-
-
-def outside_every_repo(path):
-    """True if no ancestor of `path` is a git work tree / .git dir (so the archive is not inside any repo)."""
-    p = os.path.realpath(path)
-    while True:
-        if os.path.exists(os.path.join(p, ".git")):
-            return False
-        parent = os.path.dirname(p)
-        if parent == p:
-            return True
-        p = parent
-
-
-def run_bin(args, cwd=None, env=None, timeout=900):
-    try:
-        p = subprocess.run(
-            args, cwd=cwd, capture_output=True, timeout=timeout, env=env or GIT_ENV
-        )
-        return p.returncode, p.stdout, p.stderr
-    except Exception as ex:
-        return -1, b"", str(ex).encode()
-
-
-def _mk_private_dir(path):
-    """mkdir -p with every newly created component set to 0700 (umask-proof)."""
-    missing = []
-    p = path
-    while not os.path.isdir(p):
-        missing.append(p)
-        p = os.path.dirname(p)
-    for d in reversed(missing):
-        os.mkdir(d, 0o700)
-        os.chmod(d, 0o700)
-
-
-def archive_dir_for(e, root, day):
-    repo = os.path.basename(e["main"].rstrip("/"))
-    base = os.path.basename(e["wt"].rstrip("/"))
-    if (
-        base == repo
-    ):  # e.g. agent worktrees all named after the repo: add the parent for uniqueness
-        base = os.path.basename(os.path.dirname(e["wt"].rstrip("/"))) + "-" + base
-    name = "%s-%s" % (base, e["head"][:8])
-    d = os.path.join(root, day, repo, name)
-    n = 2
-    while os.path.exists(d):
-        d = os.path.join(root, day, repo, "%s-%d" % (name, n))
-        n += 1
-    return d
-
-
-def _status_text(wt):
-    rc, o, _ = run(["git", "-C", wt, "status", "--porcelain"], count=False)
-    return o if rc == 0 else None
-
-
-def _gather_files(e):
-    """-> (tar_files [rel], ignored_included [entries]). Raises ArchiveError for nested repos / odd entries."""
-    wt = e["wt"]
-    rc, o, _ = run_bin(["git", "-C", wt, "ls-files", "-z", "-o", "--exclude-standard"])
-    if rc != 0:
-        raise ArchiveError("git-ls-files-failed")
-    files = []
-    for rel in o.decode("utf8", "surrogateescape").split("\0"):
-        if not rel:
-            continue
-        if rel.endswith("/"):
-            raise ArchiveError("nested-repo", rel)
-        if not tar_exclude(rel):
-            files.append(rel)
-    rc, o, _ = run_bin(
-        [
-            "git",
-            "-C",
-            wt,
-            "ls-files",
-            "-z",
-            "-o",
-            "-i",
-            "--exclude-standard",
-            "--directory",
-        ]
-    )
-    if rc != 0:
-        raise ArchiveError("git-ls-files-failed")
-    ignored, raw_budget = [], ARCH["cap"] * 8
-    for ent in o.decode("utf8", "surrogateescape").split("\0"):
-        if not ent or ignored_is_regen(wt, ent):
-            continue
-        ignored.append(ent)
-        if ent.endswith("/"):
-            for dp, dn, fn in os.walk(os.path.join(wt, ent), followlinks=False):
-                reldp = os.path.relpath(dp, wt)
-                dn[:] = [d for d in dn if not regen_path(os.path.join(reldp, d))]
-                for f in fn:
-                    rel = os.path.join(reldp, f)
-                    if regen_path(rel):
-                        continue
-                    files.append(rel)
-                    raw_budget -= 1
-                    if raw_budget < 0:
-                        raise ArchiveError("archive-too-big", "too many files")
-        else:
-            files.append(ent)
-    if any(
-        secret_path(f, os.path.islink(os.path.join(wt, f))) for f in files
-    ):  # defence in depth: the walk above found none
-        raise ArchiveError("secrets-present")
-    return sorted(set(files)), ignored
-
-
-def build_archive(e, dest):
-    """Write + verify the archive into directory `dest` (created 0700). Raises ArchiveError. Never truncates."""
-    wt, head, cap = e["wt"], e["head"], ARCH["cap"]
-    _mk_private_dir(dest)
-    info = {"members": [], "bundle_commits": 0}
-    # (a) bundle of local-only commits (HEAD + branch tip, minus anything on any remote)
-    rc, o, _ = run(
-        ["git", "-C", wt, "rev-list", "--count", "HEAD", "--not", "--remotes"],
-        count=False,
-    )
-    if rc != 0 or not o.strip().isdigit():
-        raise ArchiveError("rev-list-failed")
-    info["bundle_commits"] = int(o.strip())
-    if info["bundle_commits"] > 0:
-        refs = ["HEAD"] + (["refs/heads/" + e["branch"]] if e.get("branch") else [])
-        bpath = os.path.join(dest, "local-commits.bundle")
-        rc, _, err = run(
-            ["git", "-C", wt, "bundle", "create", bpath]
-            + refs
-            + ["--not", "--remotes"],
-            count=False,
-        )
-        if rc != 0:
-            raise ArchiveError("bundle-create-failed", err.strip()[:120])
-        rc, _, err = run(["git", "-C", wt, "bundle", "verify", bpath], count=False)
-        if rc != 0:
-            raise ArchiveError("bundle-verify-failed", err.strip()[:120])
-        rc, o, _ = run(["git", "-C", wt, "bundle", "list-heads", bpath], count=False)
-        if head not in o:
-            raise ArchiveError("bundle-missing-head")
-        info["members"].append("local-commits.bundle")
-    # (b) tracked changes (staged + unstaged) as a binary patch against HEAD
-    rc, patch, err = run_bin(["git", "-C", wt, "diff", "--binary", "HEAD"])
-    if rc != 0:
-        raise ArchiveError("diff-failed", err.decode("utf8", "replace")[:120])
-    ppath = os.path.join(dest, "patch.diff")
-    with open(ppath, "wb") as f:
-        f.write(patch)
-    info["patch_bytes"] = len(patch)
-    info["members"].append("patch.diff")
-    if patch:
-        # cheap exact check: does the patch apply to HEAD's tree? (private temp index; no checkout, worktree untouched)
-        idx = os.path.join(dest, ".verify-index")
-        env = dict(GIT_ENV, GIT_INDEX_FILE=idx)
-        rc, _, err = run_bin(["git", "-C", wt, "read-tree", "HEAD"], env=env)
-        if rc == 0:
-            rc, _, err = run_bin(
-                ["git", "-C", wt, "apply", "--cached", "--check", ppath], env=env
-            )
-        if os.path.exists(idx):
-            os.remove(idx)
-        if rc != 0:
-            raise ArchiveError(
-                "patch-apply-check-failed", err.decode("utf8", "replace")[:120]
-            )
-    # (c)+(d) untracked files and small non-regenerable ignored files
-    files, ignored = _gather_files(e)
-    info["ignored_included"] = ignored[:20]
-    tpath = os.path.join(dest, "untracked.tar.gz")
-    raw = 0
-    with tarfile.open(tpath, "w:gz", compresslevel=6) as tf:
-        for rel in files:
-            full = os.path.join(wt, rel)
-            try:
-                st = os.lstat(full)
-            except OSError as ex:
-                raise ArchiveError("file-vanished", str(ex)[:80])
-            if stat.S_ISREG(st.st_mode):
-                raw += st.st_size
-            elif not stat.S_ISLNK(st.st_mode):
-                raise ArchiveError("special-file", rel[:80])
-            if raw > cap * 8:
-                raise ArchiveError("archive-too-big", "raw bytes")
-            try:
-                tf.add(full, arcname=rel, recursive=False)
-            except Exception as ex:
-                raise ArchiveError("tar-add-failed", str(ex)[:80])
-            if os.path.getsize(tpath) > cap:
-                raise ArchiveError("archive-too-big", "tar.gz over cap")
-    rc, o, err = run(["tar", "-tzf", tpath], count=False)
-    if rc != 0 or len([line for line in o.split("\n") if line]) != len(files):
-        raise ArchiveError("tar-verify-failed", err.strip()[:80])
-    info["members"].append("untracked.tar.gz")
-    info["tar_members"] = len(files)
-    info["tar_names"] = files[:200]
-    # meta.json
-    porcelain = (_status_text(wt) or "").splitlines()
-    meta = {
-        "format": 1,
-        "tool": "worktree-prune",
-        "repo": os.path.basename(e["main"].rstrip("/")),
-        "main_clone": e["main"],
-        "original_path": wt,
-        "branch": e.get("branch"),
-        "head": head,
-        "kind": e.get("kind"),
-        "local_only_commits": info["bundle_commits"],
-        "status_porcelain": porcelain[:2000],
-        "status_porcelain_lines": len(porcelain),
-        "patch_bytes": info["patch_bytes"],
-        "tar_members": len(files),
-        "ignored_included": ignored[:50],
-        "created": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-        "restore": "in the main clone: git worktree add --detach <dir> <head>; [git fetch local-commits.bundle if present]; "
-        "git -C <dir> apply patch.diff; tar -xzf untracked.tar.gz -C <dir>",
-    }
-    with open(os.path.join(dest, "meta.json"), "w") as f:
-        json.dump(meta, f, indent=1)
-    info["members"].append("meta.json")
-    total = 0
-    for n in os.listdir(dest):
-        os.chmod(os.path.join(dest, n), 0o600)
-        total += os.path.getsize(os.path.join(dest, n))
-    if total > cap:
-        raise ArchiveError("archive-too-big", "%d bytes" % total)
-    info["bytes"] = total
-    return info
-
-
-def _has_initialized_submodules(wt):
-    """True if a submodule is checked out here (`git submodule status` line not starting with '-'), or on any doubt.
-    Uninitialized gitlinks (the common case: .gitmodules is tracked but nothing was ever cloned) are fine."""
-    if not os.path.exists(wt + "/.gitmodules"):
-        return False
-    rc, o, _ = run(["git", "-C", wt, "submodule", "status"], count=False, timeout=120)
-    if rc != 0:
-        return True
-    return any(line and line[0] != "-" for line in o.splitlines())
-
-
-def _still_unchanged(e, status_before, hours):
-    """Fresh re-check used before and after archiving. Returns '' if fine, else a keep-reason."""
-    wt = e["wt"]
-    if never_touch(wt) or not os.path.isdir(wt) or not is_linked_worktree(e):
-        return "recheck-never-touch"
-    if _has_initialized_submodules(wt):
-        return "has-submodules"
-    rc, cw = cwdset()
-    if rc != 0 and not cw:
-        return "recheck-lsof-error"
-    if in_use(wt, cw):
-        return "in-use"
-    lk = is_locked(e)
-    if lk is None:
-        return "recheck-list-error"
-    if lk:
-        return "locked"
-    rc, o, _ = run(["git", "-C", wt, "rev-parse", "HEAD"])
-    if rc != 0 or o.strip() != e["head"]:
-        return "head-moved"
-    r = recent_file(wt, hours)
-    if r:
-        return "not-idle" if r == "recent" else "find-error"
-    if status_before is not None and _status_text(wt) != status_before:
-        return "changed-during-archive"
-    return ""
-
-
-def _secrets_block(e):
-    """'' if the worktree holds no secret-named untracked/ignored file, else the keep reason.
-
-    The archive tier never copies such a file and never removes the worktree that holds one.
-    """
-    hits = secret_files(e["wt"], e.get("branch"))
-    if hits is None:
-        return "secrets-check-error"
-    if hits:
-        e["secrets"] = hits[:6]
-        return "secrets-present"
-    return ""
-
-
-def archive_flow(e, apply_):
-    """Archive, verify, re-check, then (apply) `git worktree remove --force`. Any failure keeps the worktree."""
-    wt = e["wt"]
-    hours = max(ARCH["idle_hours"], FRESH_HOURS)
-    if not outside_every_repo(ARCH["root"]):
-        return "archive-root-inside-repo"
-    why = _still_unchanged(e, None, hours)
-    if why:
-        return why
-    why = _secrets_block(e)
-    if why:
-        return why
-    before = _status_text(wt)
-    if before is None:
-        return "status-error"
-    if apply_:
-        dest_final = archive_dir_for(e, ARCH["root"], datetime.date.today().isoformat())
-        dest = dest_final + ".partial"
-        _mk_private_dir(os.path.dirname(dest))
-    else:
-        if not ARCH.get("dry_tmp"):
-            return "archive-no-dry-tmp"
-        dest_final = None
-        dest = os.path.join(
-            ARCH["dry_tmp"], "%s-%s" % (os.path.basename(wt.rstrip("/")), e["head"][:8])
-        )
-    try:
-        info = build_archive(e, dest)
-    except ArchiveError as ex:
-        shutil.rmtree(dest, ignore_errors=True)
-        e["detail"] = str(ex)[:160]
-        return (
-            ex.reason
-            if ex.reason in ("archive-too-big", "nested-repo", "secrets-present")
-            else "archive-failed"
-        )
-    except Exception as ex:
-        shutil.rmtree(dest, ignore_errors=True)
-        e["detail"] = ("unexpected: " + str(ex))[:160]
-        return "archive-failed"
-    e["archive_bytes"] = info["bytes"]
-    e["archive_members"] = info["members"]
-    e["archive_tar_names"] = info.get("tar_names", [])
-    e["archive_bundle_commits"] = info["bundle_commits"]
-    e["archive_ignored"] = info.get("ignored_included", [])
-    why = _still_unchanged(e, before, hours) or _secrets_block(e)
-    if why:
-        shutil.rmtree(dest, ignore_errors=True)
-        return why
-    e["kb"] = e.get("kb") or du_kb(wt)
-    if not apply_:
-        shutil.rmtree(dest, ignore_errors=True)
-        return "WOULD-ARCHIVE-REMOVE"
-    os.rename(dest, dest_final)
-    os.chmod(dest_final, 0o700)
-    e["archive_dir"] = dest_final
-    rc, o, err = run(
-        ["git", "-C", e["main"], "worktree", "remove", "--force", wt],
-        timeout=900,
-        count=False,
-    )
-    if rc == 0:
-        return "ARCHIVED-REMOVED"
-    e["detail"] = err.strip().replace("\n", " ")[
-        :160
-    ]  # archive is kept: the tree may be partly deleted
-    return "git-refused"
-
-
 def act(e, apply_, protect_ignored):
     """Decide + act on one analyzed entry. Returns the final status string."""
     st = e["status"]
-    if st == "ARCHIVE-CANDIDATE":
-        return archive_flow(e, apply_)
     if st != "ELIGIBLE":
         return st
-    res = final_check_and_remove(e, apply_, protect_ignored)
-    if res == "has-ignored-files" and ARCH["enabled"]:
-        e["kind"] = "has-ignored-files"
-        if recent_file(e["wt"], max(ARCH["idle_hours"], FRESH_HOURS)):
-            return "not-idle"
-        return archive_flow(e, apply_)
-    return res
-
-
-ARCHIVE_MEMBER_NAMES = (
-    "meta.json",
-    "patch.diff",
-    "untracked.tar.gz",
-    "local-commits.bundle",
-)
-ARCHIVE_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-
-def _real_subdirs(path):
-    """Entries of `path` if every one is a real (non-symlink) directory and there is at least one, else None."""
-    try:
-        with os.scandir(path) as it:
-            entries = list(it)
-    except OSError:
-        return None
-    if not entries or any(
-        x.is_symlink() or not x.is_dir(follow_symlinks=False) for x in entries
-    ):
-        return None
-    return [x.path for x in entries]
-
-
-def archive_day_dir_matches(day_dir):
-    """True only if `day_dir` has exactly the layout this tool writes:
-    <date dir>/<repo dir>/<archive dir>/{meta.json plus any of patch.diff, untracked.tar.gz, local-commits.bundle}.
-
-    Anything else (a file at the top level, a symlink, an unknown member, an archive without meta.json,
-    an unfinished `.partial` directory) is foreign, and --prune-archives --apply never deletes it.
-    """
-    if os.path.islink(day_dir):
-        return False
-    repo_dirs = _real_subdirs(day_dir)
-    if repo_dirs is None:
-        return False
-    for repo_dir in repo_dirs:
-        archive_dirs = _real_subdirs(repo_dir)
-        if archive_dirs is None:
-            return False
-        for archive_dir in archive_dirs:
-            if archive_dir.endswith(".partial"):
-                return False
-            try:
-                with os.scandir(archive_dir) as it:
-                    members = list(it)
-            except OSError:
-                return False
-            names = [m.name for m in members]
-            if "meta.json" not in names:
-                return False
-            for m in members:
-                if (
-                    m.name not in ARCHIVE_MEMBER_NAMES
-                    or m.is_symlink()
-                    or not m.is_file(follow_symlinks=False)
-                ):
-                    return False
-    return True
-
-
-def prune_archives(apply_, retention_days):
-    """List (dry run) or delete (--apply) archive day-directories older than the retention. Never touches repos.
-
-    Only a date-named directory whose layout matches what this tool writes is ever listed or deleted;
-    any other date-named directory is skipped and logged.
-    """
-    root = ARCH["root"]
-    if os.path.islink(root) or os.path.realpath(root) != os.path.abspath(root):
-        detail = (
-            "archive root %s is a symlink or resolves elsewhere (%s): nothing listed or deleted"
-            % (
-                root,
-                os.path.realpath(root),
-            )
-        )
-        log("REFUSE prune-archives: " + detail)
-        return {
-            "refused": "archive-root-not-real",
-            "detail": detail,
-            "old_day_dirs": [],
-            "skipped_foreign_dirs": [],
-            "deleted_day_dirs": [],
-            "kept_day_dirs": 0,
-            "mb": 0,
-            "deleted": False,
-        }
-    cutoff = datetime.date.today() - datetime.timedelta(days=retention_days)
-    old, keep, skipped, deleted = [], 0, [], []
-    if os.path.isdir(root):
-        for d in sorted(os.listdir(root)):
-            if not ARCHIVE_DAY_RE.match(d):
-                continue
-            try:
-                day = datetime.date.fromisoformat(d)
-            except ValueError:
-                continue
-            path = os.path.join(root, d)
-            if day >= cutoff:
-                keep += 1
-            elif archive_day_dir_matches(path):
-                old.append(path)
-            else:
-                skipped.append(d)
-                log(
-                    "SKIP prune-archives %s: layout is not what this tool writes" % path
-                )
-    total = 0
-    for d in old:
-        for dp, _, fn in os.walk(d):
-            for f in fn:
-                try:
-                    total += os.path.getsize(os.path.join(dp, f))
-                except OSError:
-                    pass
-        if apply_:
-            # Move the directory aside to a name no run treats as an archive, then verify THAT path again
-            # before deleting it: whatever stood at the original name when it was moved is what gets judged.
-            aside = os.path.join(
-                root, ".prune-%s-%s" % (os.path.basename(d), os.urandom(4).hex())
-            )
-            try:
-                os.rename(d, aside)
-            except OSError as ex:
-                skipped.append(os.path.basename(d))
-                log("SKIP prune-archives %s: could not move it aside (%s)" % (d, ex))
-                continue
-            if archive_day_dir_matches(aside):
-                shutil.rmtree(aside, ignore_errors=True)
-                deleted.append(os.path.basename(d))
-            else:
-                skipped.append(os.path.basename(d))
-                log(
-                    "SKIP prune-archives %s: layout changed after it was listed; put back"
-                    % d
-                )
-                if not os.path.lexists(d):
-                    os.rename(aside, d)
-    return {
-        "old_day_dirs": [os.path.basename(d) for d in old],
-        "deleted_day_dirs": deleted,
-        "skipped_foreign_dirs": skipped,
-        "kept_day_dirs": keep,
-        "mb": round(total / 1048576, 2),
-        "deleted": bool(apply_),
-    }
+    return final_check_and_remove(e, apply_, protect_ignored)
 
 
 def rotate_logs():
@@ -1672,12 +922,7 @@ def write_summary(d):
         f.write(json.dumps(d, sort_keys=True) + "\n")
 
 
-REMOVAL_RESULTS = (
-    "REMOVED",
-    "WOULD-REMOVE",
-    "ARCHIVED-REMOVED",
-    "WOULD-ARCHIVE-REMOVE",
-)
+REMOVAL_RESULTS = ("REMOVED", "WOULD-REMOVE")
 # Statuses that put a worktree out of reach of every tier: do not even attempt the node_modules tier on them.
 STRIP_SKIP_STATUS = (
     "never-touch",
@@ -1737,49 +982,18 @@ def build_parser():
     ap.add_argument(
         "--strip-only",
         action="store_true",
-        help="run only the node_modules-only tier: no whole-worktree removal, no archive tier (implies --strip-node-modules)",
-    )
-    ap.add_argument(
-        "--archive-remove",
-        action="store_true",
-        help="archive-then-remove tier: worktrees idle >= --idle-hours that would be kept as dirty/unpushed/"
-        "detached (or hold non-regenerable ignored files) get a verified recovery archive under the "
-        "archive root, then `git worktree remove --force` (off by default)",
+        help="run only the node_modules-only tier: no whole-worktree removal (implies --strip-node-modules)",
     )
     ap.add_argument(
         "--idle-hours",
         type=int,
         default=None,
-        help="idle window, hours: no file modified (outside node_modules/.git/dist/build) in this long. "
-        "Default %d for the node_modules tier, %d for the archive tier; a value given here applies to both"
-        % (DEFAULT_STRIP_IDLE_HOURS, DEFAULT_ARCHIVE_IDLE_HOURS),
-    )
-    ap.add_argument(
-        "--archive-cap-mb",
-        type=int,
-        default=ARCHIVE_CAP_MB,
-        help="archive tier: skip (never truncate) a worktree whose archive would exceed this many MB (default 25)",
-    )
-    ap.add_argument(
-        "--prune-archives",
-        action="store_true",
-        help="list archive day-directories older than --archive-retention-days (with --apply: delete them) and exit",
-    )
-    ap.add_argument(
-        "--archive-retention-days",
-        type=int,
-        default=ARCHIVE_RETENTION_DAYS,
-        help="--prune-archives: archives older than this many days are listed or deleted (default %d)"
-        % ARCHIVE_RETENTION_DAYS,
+        help="node_modules tier idle window, hours: no file modified (outside node_modules/.git/dist/build) "
+        "in this long (default %d)" % DEFAULT_STRIP_IDLE_HOURS,
     )
     ap.add_argument(
         "--state-dir",
         help="lock, runs.jsonl and logs (env %sSTATE_DIR; default ~/.ateles-work/worktree-prune)"
-        % ENV_PREFIX,
-    )
-    ap.add_argument(
-        "--archive-root",
-        help="archive root (env %sARCHIVE_ROOT; default ~/.ateles-work/worktree-archive)"
         % ENV_PREFIX,
     )
     ap.add_argument(
@@ -1814,24 +1028,44 @@ def build_parser():
 
 
 def idle_windows(idle_hours_arg):
-    """(node_modules tier hours, archive tier hours) for the `--idle-hours` value (None = flag not given).
-
-    The flag is shared: left unset each tier keeps its own default, given explicitly it sets both.
-    """
+    """The node_modules tier's idle window in hours for the `--idle-hours` value (None = flag not given)."""
     if idle_hours_arg is None:
-        return DEFAULT_STRIP_IDLE_HOURS, DEFAULT_ARCHIVE_IDLE_HOURS
-    n = max(1, idle_hours_arg)
-    return n, n
+        return DEFAULT_STRIP_IDLE_HOURS
+    return max(1, idle_hours_arg)
+
+
+# Options of the archive-then-remove tier this module no longer has. They are refused by name, with
+# a message, so a stale copy of an old command line or template cannot silently run without the tier
+# it expects.
+REMOVED_OPTIONS = (
+    "--archive-remove",
+    "--archive-cap-mb",
+    "--prune-archives",
+    "--archive-retention-days",
+    "--archive-root",
+)
+
+
+def reject_removed_options(parser, argv):
+    for tok in argv:
+        name = tok.split("=", 1)[0]
+        if name in REMOVED_OPTIONS:
+            parser.error(
+                "%s is no longer supported: the archive-then-remove tier is not part of this module, "
+                "and a command line or template that passes it would run without the tier it expects"
+                % name
+            )
 
 
 def main(argv=None):
     global FRESH_HOURS, LOGF
-    a = build_parser().parse_args(argv)
+    parser = build_parser()
+    reject_removed_options(parser, sys.argv[1:] if argv is None else list(argv))
+    a = parser.parse_args(argv)
     warnings = configure(
         os.environ,
         {
             "state_dir": a.state_dir,
-            "archive_root": a.archive_root,
             "repos_dir": a.repos_dir,
             "never_touch": a.never_touch,
             "hold_prefix": a.hold_prefix,
@@ -1842,9 +1076,7 @@ def main(argv=None):
     FRESH_HOURS = max(1, a.fresh_hours)
     STRIP["only"] = bool(a.strip_only)
     STRIP["enabled"] = bool(a.strip_node_modules or a.strip_only)
-    ARCH["enabled"] = bool(a.archive_remove) and not a.strip_only
-    STRIP["idle_hours"], ARCH["idle_hours"] = idle_windows(a.idle_hours)
-    ARCH["cap"] = max(1, a.archive_cap_mb) * 1024 * 1024
+    STRIP["idle_hours"] = idle_windows(a.idle_hours)
 
     os.makedirs(LOGDIR, exist_ok=True)
     t0 = time.time()
@@ -1874,32 +1106,7 @@ def main(argv=None):
     )
     for w in warnings:
         log("WARN " + w)
-    if not TEMPLATE_RULE_LOADED:
-        log(
-            "WARN credential template definition (lib/credential_templates.py) unavailable: "
-            "no name is treated as a placeholder template, so the stricter secret-name matching applies"
-        )
     rotate_logs()
-    if a.prune_archives:
-        res = prune_archives(a.apply, a.archive_retention_days)
-        log("prune-archives " + json.dumps(res, sort_keys=True))
-        refused = bool(res.get("refused"))
-        write_summary(
-            dict(
-                res,
-                ts=ts,
-                mode=mode,
-                status="refused-archive-root" if refused else "ok",
-                action="prune-archives",
-            )
-        )
-        print(json.dumps(res, sort_keys=True))
-        return 2 if refused else 0
-    if (
-        ARCH["enabled"] and not a.apply
-    ):  # dry run: build + verify archives in a throwaway dir, then discard them
-        ARCH["dry_tmp"] = tempfile.mkdtemp(prefix="dryrun-archive-", dir=BASE)
-        atexit.register(shutil.rmtree, ARCH["dry_tmp"], True)
     free0 = dfree_gb()
     log(
         "=== start mode=%s max=%d free=%.1fGB%s%s"
@@ -1928,9 +1135,6 @@ def main(argv=None):
     reasons = Counter()
     strip_reasons = Counter()
     removed = 0
-    archived = 0
-    would_archive = 0
-    arch_bytes = 0
     kb_total = 0
     stripped = []  # applied: worktrees whose node_modules were deleted
     would_strip = []  # dry run: worktrees whose node_modules would be deleted
@@ -1945,7 +1149,7 @@ def main(argv=None):
             st = e["status"]
             res = st
             if not STRIP["only"]:
-                if st in ("ELIGIBLE", "ARCHIVE-CANDIDATE"):
+                if st == "ELIGIBLE":
                     if a.apply and removed + len(stripped) >= a.max:
                         reasons["over-cap-deferred"] += 1
                         log("DEFER over-cap %s" % e["wt"])
@@ -1953,63 +1157,30 @@ def main(argv=None):
                     res = act(e, a.apply, a.protect_ignored)
                     if res in REMOVAL_RESULTS:
                         kb_total += e.get("kb", 0)
-                        arch_tier = (
-                            res.endswith("ARCHIVE-REMOVE") or res == "ARCHIVED-REMOVED"
+                        tag = (
+                            " IGNORED=" + ",".join(e["ignored_nonregen"])
+                            if e.get("ignored_nonregen")
+                            else ""
                         )
-                        if arch_tier:
-                            arch_bytes += e.get("archive_bytes", 0)
-                            log(
-                                "%s %s (%s) %.2fGB kind=%s archive=%.2fMB commits=%d dir=%s"
-                                % (
-                                    res,
-                                    e["wt"],
-                                    e.get("branch") or "detached",
-                                    e.get("kb", 0) / 1048576,
-                                    e.get("kind"),
-                                    e.get("archive_bytes", 0) / 1048576,
-                                    e.get("archive_bundle_commits", 0),
-                                    e.get("archive_dir", "(dry)"),
-                                )
-                            )
-                        else:
-                            tag = (
-                                " IGNORED=" + ",".join(e["ignored_nonregen"])
-                                if e.get("ignored_nonregen")
-                                else ""
-                            )
-                            log(
-                                "%s %s (%s) %.2fGB via=%s%s"
-                                % (
-                                    res,
-                                    e["wt"],
-                                    e.get("branch") or "detached",
-                                    e.get("kb", 0) / 1048576,
-                                    e["pushed_via"],
-                                    tag,
-                                )
-                            )
-                        if res in ("REMOVED", "ARCHIVED-REMOVED"):
-                            removed += 1
-                            if arch_tier:
-                                archived += 1
-                        else:
-                            e["tier"] = "archive" if arch_tier else "plain"
-                            eligible.append(e)
-                            if arch_tier:
-                                would_archive += 1
-                    else:
-                        reasons[res] += 1
                         log(
-                            "KEEP %-18s %s %s%s"
+                            "%s %s (%s) %.2fGB via=%s%s"
                             % (
                                 res,
                                 e["wt"],
-                                e.get("detail", ""),
-                                " secret-named=" + ",".join(e["secrets"])
-                                if e.get("secrets")
-                                else "",
+                                e.get("branch") or "detached",
+                                e.get("kb", 0) / 1048576,
+                                e["pushed_via"],
+                                tag,
                             )
                         )
+                        if res == "REMOVED":
+                            removed += 1
+                        else:
+                            e["tier"] = "plain"
+                            eligible.append(e)
+                    else:
+                        reasons[res] += 1
+                        log("KEEP %-18s %s %s" % (res, e["wt"], e.get("detail", "")))
                 else:
                     reasons[st] += 1
                     if st != "never-touch":
@@ -2103,14 +1274,9 @@ def main(argv=None):
         "discovered": len(entries),
         "removed": removed,
         "would_remove": len(eligible),
-        "archive_tier": ARCH["enabled"],
-        "archived_removed": archived,
-        "would_archive_remove": would_archive,
-        "archive_mb": round(arch_bytes / 1048576, 2),
         "would_remove_over_cap": max(0, len(eligible) - a.max) if not a.apply else 0,
         "gb": round(kb_total / 1048576, 2),
         "kept": dict(reasons),
-        "secrets_present": reasons.get("secrets-present", 0),
         "prunable_entries": pruned,
         "git_gh_calls": STATS.calls,
         "git_gh_errors": STATS.errors,
@@ -2147,12 +1313,6 @@ def main(argv=None):
             "kb",
             "ignored_nonregen",
             "tier",
-            "kind",
-            "archive_bytes",
-            "archive_members",
-            "archive_bundle_commits",
-            "archive_ignored",
-            "archive_tar_names",
             "strip_bytes",
             "strip_dirs",
         )
@@ -2166,7 +1326,7 @@ def main(argv=None):
         for e in eligible:
             print(
                 "%s\t%.2fGB\t%s"
-                % (e["wt"], e.get("kb", 0) / 1048576, e.get("pushed_via") or "archive")
+                % (e["wt"], e.get("kb", 0) / 1048576, e.get("pushed_via"))
             )
         for e in strip_done:
             print(
