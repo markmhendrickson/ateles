@@ -2128,13 +2128,15 @@ async def _redispatch_deferred(
 # never launched.
 #
 # The startup sweep below re-dispatches exactly those tasks, once per process,
-# through ``dispatch_task``. It cannot run a delivery twice: a launch only ever
-# follows a durable ``launching`` receipt, so a task with no receipt for its key
-# or naming its id has not launched, and ``run_fly_delivery``'s reservation
+# through ``dispatch_task``. It does not run a delivery twice: a launch only
+# ever follows a durable ``launching`` receipt, so a task with no receipt for
+# its key or naming its id, and no cleared or superseded receipt in the
+# ledger's audit file, has not launched; ``run_fly_delivery``'s reservation
 # still refuses a second launch if anything races it. It touches only tasks
-# ``dispatch_task`` would send to Fly; it releases only a task whose approved
-# checkpoint this dispatcher already consumed (the release that was cut off);
-# and anything it cannot recover is named to the operator.
+# ``dispatch_task`` would send to Fly; it releases only under the task's newest
+# checkpoint, an approval this dispatcher already consumed (the release that
+# was cut off) whose action type and policy revision still hold; and anything
+# it cannot recover is named to the operator.
 
 # Task ids inside ``dispatch_task`` in this process: the sweep leaves them to
 # the dispatch already running (an event can arrive while the sweep runs).
@@ -2188,37 +2190,89 @@ def _fly_delivery_recorded(snapshot: dict, entity_id: str) -> bool | None:
     )
 
 
-def _consumed_approval(task_id: str) -> tuple[str | None, str]:
-    """``(checkpoint_id, "")`` for an approved checkpoint of this task that the
-    dispatcher already consumed (stamped dispatched, no durable denial) and
-    whose approval is authenticated against its own authorization; else
-    ``(None, why)``. Reads only; writes nothing."""
+def _fly_receipt_removed(snapshot: dict, entity_id: str) -> bool | None:
+    """Whether the ledger's audit file records a cleared or superseded receipt
+    on this task's delivery key or naming it. A removal leaves no receipt, so
+    without this a launched run whose receipt was cleared would read as never
+    launched. None: the audit file could not be read."""
+    import fly_runner
+
+    try:
+        removals = build_delivery._removal_audit_lines(build_delivery._delivery_ledger())
+    except (OSError, fly_runner.FlyLedgerError):
+        return None
+    if removals is None:
+        return None
+    key = _fly_receipt_key(snapshot, entity_id)
+    wanted = build_delivery.canonical_key(key) if key else ""
+    task_id = str(entity_id).strip()
+    return any(
+        (wanted and build_delivery.canonical_key(line["key"]) == wanted)
+        or str(line.get("source_task") or "").strip() == task_id
+        or line["key"].strip().endswith(f"{build_delivery._TASK_KEY_MARK}{task_id}")
+        for line in removals
+    )
+
+
+def _created_at(item: dict) -> float | None:
+    """A checkpoint's creation time from its record, or None if unreadable."""
+    for value in (item.get("created_at"), (_record_snapshot(item) or {}).get("created_at")):
+        if isinstance(value, str) and value.strip():
+            try:
+                return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+    return None
+
+
+def _consumed_approval(task_id: str, task_snapshot: dict) -> tuple[str | None, str]:
+    """``(checkpoint_id, "")`` when the task's NEWEST checkpoint is an approval
+    this dispatcher already consumed (approved, stamped dispatched, no durable
+    denial): the release that started the attempt a restart cut off. Its
+    approval must read back authenticated, and its authorization must still
+    name this task, the task's current action type and the current revision of
+    the execution policy it was held under. Otherwise ``(None, why)``. A newer
+    pending or rejected checkpoint, or checkpoints whose order cannot be told,
+    refuse: an older approval never releases a later attempt. Reads only."""
     items = checkpoints_for_task(task_id)
     if items is None:
         return None, "its checkpoints could not be read"
-    for item in reversed(items):
-        checkpoint_id = str(item.get("entity_id") or "")
-        brief = _record_snapshot(item) or {}
-        if (not checkpoint_id or read_checkpoint_resolution(brief) != "approved"
-                or not checkpoint_already_dispatched(brief)
-                or _checkpoint_denial_persisted(checkpoint_id)):
-            continue
-        record = fetch_checkpoint_record(checkpoint_id)
-        if record is None:
-            continue
-        authorization = read_authenticated_checkpoint_authorization(checkpoint_id, record)
-        owner = read_verified_entity_owner(checkpoint_id, record)
-        if not authorization or not owner or authorization.get("task_entity_id") != task_id:
-            continue
-        if read_authenticated_checkpoint_resolution(
-            checkpoint_id, record,
-            required_approver_sub=str(authorization.get("required_approver_sub") or "").strip(),
-            required_approver_jkt=str(authorization.get("required_approver_jkt") or "").strip(),
-            expected_user_id=owner,
-        ) is None:
-            continue
-        return checkpoint_id, ""
-    return None, "no approved checkpoint that released it could be verified"
+    items = [i for i in items if isinstance(i, dict) and i.get("entity_id")]
+    if not items:
+        return None, "it has no checkpoint that released it"
+    if len(items) > 1:
+        stamped = [(_created_at(i), i) for i in items]
+        if any(when is None for when, _ in stamped):
+            return None, "which checkpoint released it cannot be told"
+        items = [max(stamped, key=lambda pair: pair[0])[1]]
+    item = items[0]
+    checkpoint_id = str(item["entity_id"])
+    brief = _record_snapshot(item) or {}
+    if (read_checkpoint_resolution(brief) != "approved"
+            or not checkpoint_already_dispatched(brief)
+            or _checkpoint_denial_persisted(checkpoint_id)):
+        return None, f"its latest checkpoint {checkpoint_id} is not a consumed approval"
+    record = fetch_checkpoint_record(checkpoint_id)
+    authorization = (read_authenticated_checkpoint_authorization(checkpoint_id, record)
+                     if record is not None else None)
+    owner = read_verified_entity_owner(checkpoint_id, record) if record is not None else None
+    if (not authorization or not owner or authorization.get("task_entity_id") != task_id
+            or read_authenticated_checkpoint_resolution(
+                checkpoint_id, record,
+                required_approver_sub=str(authorization.get("required_approver_sub") or "").strip(),
+                required_approver_jkt=str(authorization.get("required_approver_jkt") or "").strip(),
+                expected_user_id=owner) is None):
+        return None, f"the approval on checkpoint {checkpoint_id} could not be verified"
+    skill = _gate_skill(task_snapshot)
+    policy = resolve_policy_for_agent(skill)
+    action_type = _resolve_gate_action_type(skill or "", task_snapshot, policy).value
+    if (not policy.loaded or action_type == "operator_only"
+            or str(authorization.get("action_type") or "").strip().lower() != action_type
+            or authorization.get("policy_entity_id") != policy.entity_id
+            or authorization.get("policy_revision") != execution_policy_revision(policy)):
+        return None, (f"the task or its execution policy changed after checkpoint "
+                      f"{checkpoint_id} approved it")
+    return checkpoint_id, ""
 
 
 def _unrecovered_notice(notifier: Notifier, entity_id: str, title: str, why: str) -> None:
@@ -2301,13 +2355,21 @@ async def _recover_unlaunched_fly_task(entity_id: str, listed: dict, notifier: N
             or _fly_delivery_recorded(fresh, entity_id) is not False):
         counts["recorded"] += 1
         return
+    removed = await asyncio.to_thread(_fly_receipt_removed, fresh, entity_id)
+    if removed is not False:
+        counts["unrecovered"] += 1
+        _unrecovered_notice(notifier, entity_id, title,
+                            "the Fly ledger's audit could not be read" if removed is None else
+                            "a receipt for it was cleared or superseded, so whether it "
+                            "launched is unknown")
+        return
     if fresh.get("task_type") == "existing_pr_correction":
         counts["unrecovered"] += 1
         _unrecovered_notice(notifier, entity_id, title,
                             "a correction's release is bound to its checkpoint and "
                             "cannot be resumed from here")
         return
-    checkpoint_id, why = await asyncio.to_thread(_consumed_approval, entity_id)
+    checkpoint_id, why = await asyncio.to_thread(_consumed_approval, entity_id, fresh)
     if checkpoint_id is None:
         counts["unrecovered"] += 1
         _unrecovered_notice(notifier, entity_id, title, why)

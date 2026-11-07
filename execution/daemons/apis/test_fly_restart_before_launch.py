@@ -23,6 +23,13 @@ recorded (``assert launches == [] and dispatched == []``), which would move a
 running task back to routed. The existing reservation still refused the second
 launch itself, which is why the concurrent case passes either way.
 
+Without the audit-file check, ``test_cleared_receipt_is_named_not_redispatched``
+launched the task again (``assert (['ent_task_restart_before_launch'] == []``).
+Taking any consumed approval instead of the newest checkpoint made
+``test_consumed_approval_refuses_an_older_approval_behind_a_newer_checkpoint``
+read the older approval for release (``Failed: a non-releasing checkpoint was
+read for release``).
+
 Run: timeout 300 python3 -m pytest -q execution/daemons/apis/test_fly_restart_before_launch.py
 """
 
@@ -84,7 +91,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(apis, "query_all_entities",
                         lambda *a, **k: [{"entity_id": TASK, "snapshot": dict(state["task"])}])
     monkeypatch.setattr(apis, "fetch_task_snapshot", lambda entity_id: dict(state["task"]))
-    monkeypatch.setattr(apis, "_consumed_approval", lambda task_id: state["approval"])
+    monkeypatch.setattr(apis, "_consumed_approval", lambda *a: state["approval"])
     monkeypatch.setattr(apis, "set_task_status", lambda *a, **k: writes.append((a, k)) or True)
 
     async def _run_skill(skill, prompt, **kwargs):
@@ -196,13 +203,41 @@ def test_task_being_dispatched_in_this_process_is_left_alone(env, monkeypatch):
     assert launches == [] and dispatched == []
 
 
-def test_consumed_approval_requires_an_approved_dispatched_checkpoint(monkeypatch):
-    """Only an approved checkpoint the dispatcher already consumed releases it."""
+def test_cleared_receipt_is_named_not_redispatched(env):
+    """A receipt the operator cleared leaves no receipt behind; its audit line
+    still says a delivery may have launched, so the task is not re-run."""
+    import fly_delivery_receipt
+
+    ledger, _, launches, dispatched, _ = env
+    fly_delivery_receipt._append_audit(fly_runner.FlyLedger(ledger), {
+        "by": "operator", "action": "clear_delivery_receipt", "stage": "removed",
+        "key": build_delivery.fly_delivery_key(REPO, None, TASK), "status": "unknown",
+        "run_id": "run-old", "branch": "b", "source_task": TASK})
+    notifier = _Notifier()
+    asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert launches == [] and dispatched == []
+    assert len(notifier.sent) == 1 and TASK in notifier.sent[0]
+
+
+def test_consumed_approval_refuses_an_older_approval_behind_a_newer_checkpoint(monkeypatch):
+    """Only the newest checkpoint can be the release a restart cut off; an older
+    consumed approval never releases a later attempt."""
     monkeypatch.setattr(apis, "checkpoints_for_task", lambda task_id: [
-        {"entity_id": "ent_pending", "snapshot": {"status": "awaiting_operator"}},
-        {"entity_id": "ent_unconsumed", "snapshot": {"status": "approved"}},
+        {"entity_id": "ent_old_approved", "created_at": "2026-11-01T10:00:00Z",
+         "snapshot": {"status": "approved", "resolved_dispatched": True}},
+        {"entity_id": "ent_new_pending", "created_at": "2026-11-06T10:00:00Z",
+         "snapshot": {"status": "awaiting_operator"}},
     ])
     monkeypatch.setattr(apis, "fetch_checkpoint_record",
-                        lambda cid: pytest.fail("an unapproved checkpoint was read for release"))
-    checkpoint, why = apis._consumed_approval(TASK)
+                        lambda cid: pytest.fail("a non-releasing checkpoint was read for release"))
+    checkpoint, why = apis._consumed_approval(TASK, _task())
+    assert checkpoint is None and "ent_new_pending" in why
+
+
+def test_consumed_approval_refuses_an_unconsumed_approval(monkeypatch):
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda task_id: [
+        {"entity_id": "ent_unconsumed", "snapshot": {"status": "approved"}}])
+    monkeypatch.setattr(apis, "fetch_checkpoint_record",
+                        lambda cid: pytest.fail("an unconsumed checkpoint was read for release"))
+    checkpoint, why = apis._consumed_approval(TASK, _task())
     assert checkpoint is None and why
