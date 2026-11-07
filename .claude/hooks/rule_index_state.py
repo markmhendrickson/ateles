@@ -11,8 +11,8 @@ produces elsewhere in this repo, per `agent_loader.policy_binds_agent`'s own
 docstring).
 
 Identity for change-detection is a content hash of the fields that actually
-reach a rendered rule (`rule`, `title`, `applies_when`, `scope`, `agent_sub`,
-`rule_kind`, `domain`), keyed by entity id — NOT a server-side
+reach a rendered rule (`rule`, `title`, `index_line`, `applies_when`, `scope`,
+`agent_sub`, `rule_kind`, `domain`), keyed by entity id — NOT a server-side
 `last_observation_at` timestamp. `policy_skill_renderer.fetch_active_policy_rows`
 returns rows already run through `agent_loader.unwrap_policy_entities`, which
 flattens the entity envelope down to the bare snapshot dict (stamping only
@@ -30,6 +30,7 @@ proxy for it.
 Stdlib-only (hashlib, json). No Neotoma access here — callers already have
 the rows from `fetch_active_policy_rows`.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -41,7 +42,14 @@ STATE_KEY = "rule_index_delivered"  # shared per-session state key
 # outside this set (status, rationale, canonical_name, ...) does not affect
 # what a session is told, so a change to it must not trigger a re-delivery.
 _CONTENT_FIELDS = (
-    "rule", "title", "applies_when", "scope", "agent_sub", "rule_kind", "domain",
+    "rule",
+    "title",
+    "index_line",
+    "applies_when",
+    "scope",
+    "agent_sub",
+    "rule_kind",
+    "domain",
 )
 
 
@@ -50,7 +58,12 @@ def _entity_id(row: dict) -> str:
 
 
 def _content_fingerprint(row: dict) -> str:
-    values = [str(row.get(f) or "") for f in _CONTENT_FIELDS]
+    # Presence is part of the delivered contract, independently of value.
+    # In particular, the renderer treats an absent `index_line` as a legacy
+    # row that falls back to `title`, while an explicitly blank `index_line`
+    # suppresses that fallback. Collapsing both to "" would leave an active
+    # session on the stale title-shaped summary after a source correction.
+    values = [[field in row, str(row.get(field) or "")] for field in _CONTENT_FIELDS]
     blob = json.dumps(values, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
 

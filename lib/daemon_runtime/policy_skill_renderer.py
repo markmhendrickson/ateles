@@ -12,11 +12,16 @@ copies of CLAUDE.md drifted into 31 versions — see docs/foundation history).
 Canonical artifact, per the issue's settled design (imperative source
 revised after Falco's round-2 security review — see below):
   - `name`      — a stable slug derived from the rule's entity id.
-  - `description` — the row's `applies_when` trigger plus, when present, the
-                     row's own `title` field as a one-line imperative (what
-                     a model sees up front, before deciding whether to fetch
-                     the full rule). NEVER derived from `rule`/`body` text —
-                     a row with no `title` renders trigger + id only.
+  - `description` — the row's `applies_when` trigger plus, when present, a
+                     one-line imperative (what a model sees up front, before
+                     deciding whether to fetch the full rule): `index_line`
+                     when the row has one (schema 1.4.0, ateles#1295
+                     follow-up — a field authored specifically to state the
+                     rule's OPERATIVE CONSTRAINT, not just its topic). A
+                     legacy row with no `index_line` field falls back to its
+                     `title`; an explicit blank `index_line` means the source
+                     has no safe one-line summary and renders trigger + id
+                     only. NEVER derived from `rule`/`body` text.
   - `body`      — the sanitized rule text (`_sanitize_body`, multi-line
                    counterpart to `_sanitize_field`) plus its entity id;
                    never read back into the rendered SessionStart index
@@ -712,10 +717,17 @@ def to_skill(snap: dict) -> PolicySkill | None:
     Never reads `rule` (the full rule body) into any field that reaches the
     rendered index (Falco, ateles#1268 round 2: "stop deriving tier A's
     imperative from the first sentence of the rule text... never read `rule`
-    or `body` into the index at all"). The imperative comes ONLY from the
-    row's `title` field — short and authored for exactly this purpose — and
-    is omitted (renders tier-B style, trigger + id only) when no title is
-    present, rather than falling back to any rule-derived text.
+    or `body` into the index at all"). The imperative comes from `index_line`
+    when present — a field authored specifically to carry the one-liner's
+    OPERATIVE CONSTRAINT (the concrete URL shape, tool name, limit, or
+    forbidden action), so an agent acting on the summary alone still
+    complies (rule-delivery evals, ateles#1301/#1295: the link-ids rule and
+    the AskUserQuestion rule both failed when only a label-shaped `title`
+    reached the index). A row from before schema 1.4.0, with no
+    `index_line` key, falls back to `title`; once the source carries the
+    field, its value is authoritative even when blank. That lets an umbrella
+    rule explicitly decline a narrowing one-line summary and render the
+    trigger + id only. Never falls back to any rule-derived text.
 
     `applies_when` is sanitized before use, same as the imperative, and
     `entity_id` is cut to the id charset — every row-derived field is
@@ -749,8 +761,17 @@ def to_skill(snap: dict) -> PolicySkill | None:
     # safety meaning (principles.md #5; Falco, ateles#1268 round 3).
     is_preamble = raw_applies_when.strip().lower() == _ALWAYS
 
-    raw_title = str(snap.get("title") or "")
-    imperative = _sanitize_field(raw_title, max_len=_IMPERATIVE_MAX)
+    # `index_line` (schema 1.4.0) is a dedicated short-form field for the
+    # one-liner's operative constraint and is authoritative by PRESENCE, not
+    # truthiness.  An explicit blank is a source-level refusal to narrow an
+    # umbrella rule to one clause; falling back to its label-shaped `title`
+    # would undo that correction.  Only legacy rows that lack the field
+    # altogether retain the title fallback (ateles#1295/#1311).
+    if "index_line" in snap:
+        raw_imperative = str(snap.get("index_line") or "")
+    else:
+        raw_imperative = str(snap.get("title") or "")
+    imperative = _sanitize_field(raw_imperative, max_len=_IMPERATIVE_MAX)
 
     if not applies_when and not is_preamble:
         # No usable trigger and not the literal "always" — nothing safe to
