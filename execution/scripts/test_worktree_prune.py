@@ -796,6 +796,196 @@ def test_archive_tier_archives_verifies_and_keeps_unsafe_worktrees(repo):
 
 
 # ======================================================================================
+# archive tier: secret-named files, archive retention
+# ======================================================================================
+SECRET_NAMES = [
+    ".env",
+    ".env.local",
+    ".env.production",
+    "credentials.json",
+    "credentials",
+    "deploy.pem",
+    "tls.key",
+    "bundle.p12",
+    "bundle.pfx",
+    "my_secret_notes.txt",
+    "CLIENT-SECRET.txt",
+    ".netrc",
+    "id_rsa",
+    "id_rsa.bak",
+    "id_ed25519",
+    ".npmrc",
+]
+NOT_SECRET_NAMES = [
+    ".env.example",
+    ".env.sample",
+    ".env.template",
+    ".env.local.example",
+    "credentials.json.sample",
+    "secret.template",
+    ".env.development",
+    ".env.development.bak",
+    ".env.development.local",
+    "notes.md",
+    "app.js",
+    "monkey.txt",
+]
+
+
+@pytest.mark.parametrize("name", SECRET_NAMES)
+def test_secret_names_are_recognised(name):
+    assert wp.secret_name(name)
+
+
+@pytest.mark.parametrize("name", NOT_SECRET_NAMES)
+def test_example_and_ordinary_names_are_not_secret(name):
+    assert not wp.secret_name(name)
+
+
+@pytest.fixture
+def archive_on(repo):
+    aroot = repo.home + "/archive"
+    dry = repo.home + "/dry"
+    os.mkdir(dry)
+    wp.ARCH.update(
+        enabled=True, idle_hours=72, cap=25 * 1024 * 1024, root=aroot, dry_tmp=dry
+    )
+    return aroot
+
+
+def _dirty_archive_candidate(repo, name):
+    w = repo.add_wt(name, node_modules=False)
+    open(w + "/a.txt", "a").write("edit\n")
+    age(w)
+    e = repo.entry(w)
+    assert wp.analyze(e, False)["status"] == "ARCHIVE-CANDIDATE"
+    return w, e
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [".env", ".env.local", "credentials.json", "deploy.pem", "my_secret_notes.txt"],
+)
+def test_a_worktree_with_an_untracked_secret_named_file_is_kept_whole(
+    repo, archive_on, secret
+):
+    w, e = _dirty_archive_candidate(repo, "sec")
+    open(w + "/" + secret, "w").write("NOT-READ-BY-TEST-OR-TOOL")
+    age(w)
+    for apply_ in (
+        False,
+        True,
+    ):  # a dry run reports the same, and the real run changes nothing
+        res = wp.archive_flow(e, apply_)
+        assert res == "secrets-present", (res, e.get("detail"))
+    assert e["secrets"] == [secret]
+    assert (
+        os.path.isdir(w) and open(w + "/" + secret).read() == "NOT-READ-BY-TEST-OR-TOOL"
+    )
+    assert open(w + "/a.txt").read().endswith("edit\n")
+    assert not os.path.exists(archive_on)  # nothing archived anywhere
+    assert os.listdir(repo.home + "/dry") == []
+
+
+def test_an_ignored_secret_named_file_keeps_the_worktree_too(repo, archive_on):
+    w, e = _dirty_archive_candidate(repo, "sec-ignored")
+    os.makedirs(w + "/data_backups/inner")  # ignored by the repo's .gitignore
+    open(w + "/data_backups/inner/id_ed25519", "w").write("NOT-READ-BY-TEST-OR-TOOL")
+    age(w)
+    res = wp.act(wp.analyze(repo.entry(w), False), True, False)
+    assert res == "secrets-present"
+    assert os.path.isfile(w + "/data_backups/inner/id_ed25519")
+    assert not os.path.exists(archive_on)
+
+
+def test_a_secret_found_through_protect_ignored_is_kept_not_archived(repo, archive_on):
+    w = repo.add_wt(
+        "sec-protect", node_modules=False
+    )  # clean and pushed: plain-tier eligible
+    os.makedirs(w + "/data_backups")
+    open(w + "/data_backups/.env", "w").write("NOT-READ-BY-TEST-OR-TOOL")
+    age(w)
+    e = wp.analyze(repo.entry(w), False)
+    assert e["status"] == "ELIGIBLE"
+    res = wp.act(e, True, True)
+    assert res == "secrets-present"
+    assert os.path.isfile(w + "/data_backups/.env")
+    assert not os.path.exists(archive_on)
+
+
+def test_a_secret_appearing_while_archiving_discards_the_archive(
+    repo, archive_on, monkeypatch
+):
+    w, e = _dirty_archive_candidate(repo, "sec-late")
+    real_build = wp.build_archive
+
+    def build_then_drop_a_secret(entry, dest):
+        info = real_build(entry, dest)
+        # ignored and old, so the unchanged-during-archive checks stay quiet: only the name check can catch it
+        os.makedirs(w + "/data_backups", exist_ok=True)
+        open(w + "/data_backups/.netrc", "w").write("NOT-READ-BY-TEST-OR-TOOL")
+        age(w)
+        return info
+
+    monkeypatch.setattr(wp, "build_archive", build_then_drop_a_secret)
+    res = wp.archive_flow(e, True)
+    assert res == "secrets-present", (res, e.get("detail"))
+    assert os.path.isdir(w) and os.path.isfile(w + "/data_backups/.netrc")
+    leftovers = [
+        p
+        for p in Path(archive_on).rglob("*")
+        if p.is_dir() and p.name.startswith("wt-sec-late")
+    ]
+    assert leftovers == []  # the finished archive is not left behind either
+
+
+def test_example_names_and_the_dev_env_family_do_not_block_archiving(repo, archive_on):
+    w, e = _dirty_archive_candidate(repo, "sec-ok")
+    for n in (
+        ".env.example",
+        "credentials.json.sample",
+        ".env.development",
+        ".env.development.bak",
+    ):
+        open(w + "/" + n, "w").write("NOT-READ-BY-TEST-OR-TOOL")
+    age(w)
+    e = wp.analyze(repo.entry(w), False)
+    res = wp.act(e, True, False)
+    assert res == "ARCHIVED-REMOVED", (res, e.get("detail"))
+    members = sh("tar", "-tzf", e["archive_dir"] + "/untracked.tar.gz").split("\n")
+    assert ".env.example" in members and "credentials.json.sample" in members
+    assert not any(m.startswith(".env.development") for m in members)  # as before
+    assert not os.path.exists(w)
+
+
+def test_a_tracked_secret_named_file_is_not_an_untracked_secret(repo, archive_on):
+    w = repo.add_wt("sec-tracked", node_modules=False)
+    open(w + "/credentials.txt", "w").write("committed on purpose")
+    sh("git", "add", "credentials.txt", cwd=w)
+    sh("git", "commit", "-qm", "tracked", cwd=w)
+    age(w)
+    e = wp.analyze(repo.entry(w), False)
+    assert e["status"] == "ARCHIVE-CANDIDATE"  # unpushed commit
+    assert wp.secret_files(w) == []
+    assert wp.act(e, True, False) == "ARCHIVED-REMOVED"
+
+
+def test_the_run_summary_counts_worktrees_kept_for_secrets(repo):
+    w = repo.add_wt("sec-main", node_modules=False)
+    open(w + "/a.txt", "a").write("edit\n")
+    open(w + "/.env.local", "w").write("NOT-READ-BY-TEST-OR-TOOL")
+    age(w)
+    plain = repo.add_wt("sec-main-ok", node_modules=False)
+    open(plain + "/a.txt", "a").write("edit\n")
+    age(plain)
+    code, summ = run_main(repo, "--archive-remove", "--apply")
+    assert code == 0
+    assert summ["secrets_present"] == 1 and summ["kept"]["secrets-present"] == 1
+    assert summ["archived_removed"] == 1
+    assert os.path.isfile(w + "/.env.local") and not os.path.exists(plain)
+
+
+# ======================================================================================
 # node_modules-only tier
 # ======================================================================================
 def test_strip_removes_only_node_modules_from_an_eligible_worktree(repo, monkeypatch):

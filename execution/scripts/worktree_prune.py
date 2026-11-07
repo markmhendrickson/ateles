@@ -314,6 +314,56 @@ def tar_exclude(rel):
     return rel.endswith((".pyc", ".tsbuildinfo"))
 
 
+# Secret-looking file names. The archive tier never copies such a file anywhere, so a worktree that
+# holds one (untracked or ignored) is kept whole instead of being archived and removed. Decided on the
+# name alone; file contents are never read. The ENV_COPY_PREFIX family is handled separately above
+# (left out of archives, as before) and is not part of this list.
+SECRET_EXACT = (".env", ".netrc", ".npmrc")
+SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+SECRET_PREFIXES = ("credentials", "id_rsa", "id_ed25519")
+SECRET_SUBSTRINGS = ("secret",)
+SECRET_EXAMPLE_SUFFIXES = (".example", ".sample", ".template")
+SECRET_SCAN_SKIP = ("node_modules", ".venv", "venv", "__pycache__", ".mcp-venv")
+
+
+def secret_name(name):
+    """True if a file's base name looks like it holds a secret (name only; the content is never read)."""
+    n = name.lower()
+    if n.startswith(ENV_COPY_PREFIX) or n.endswith(SECRET_EXAMPLE_SUFFIXES):
+        return False
+    return (
+        n in SECRET_EXACT
+        or n.startswith(".env.")
+        or n.endswith(SECRET_SUFFIXES)
+        or n.startswith(SECRET_PREFIXES)
+        or any(s in n for s in SECRET_SUBSTRINGS)
+    )
+
+
+def secret_files(wt):
+    """Relative paths of untracked or ignored files in the worktree whose names look secret.
+
+    -> list, or None if it could not be decided (callers keep the worktree on None).
+    Tracked files are not listed here: they live in git, not in the untracked archive.
+    """
+    rc, o, _ = run(["git", "-C", wt, "ls-files", "-z"], count=False)
+    if rc != 0:
+        return None
+    tracked = set(o.split("\0"))
+    hits = []
+    try:
+        for dp, dn, fn in os.walk(wt, followlinks=False, onerror=_raise):
+            dn[:] = [d for d in dn if d != ".git" and d not in SECRET_SCAN_SKIP]
+            for f in fn:
+                if secret_name(f):
+                    rel = os.path.relpath(os.path.join(dp, f), wt)
+                    if rel not in tracked:
+                        hits.append(rel)
+    except OSError:
+        return None
+    return sorted(hits)
+
+
 class Stats:
     def __init__(self):
         self.calls = 0
@@ -1047,6 +1097,10 @@ def _gather_files(e):
                         raise ArchiveError("archive-too-big", "too many files")
         else:
             files.append(ent)
+    if any(
+        secret_name(os.path.basename(f)) for f in files
+    ):  # defence in depth: the walk above found none
+        raise ArchiveError("secrets-present")
     return sorted(set(files)), ignored
 
 
@@ -1208,6 +1262,20 @@ def _still_unchanged(e, status_before, hours):
     return ""
 
 
+def _secrets_block(e):
+    """'' if the worktree holds no secret-named untracked/ignored file, else the keep reason.
+
+    The archive tier never copies such a file and never removes the worktree that holds one.
+    """
+    hits = secret_files(e["wt"])
+    if hits is None:
+        return "secrets-check-error"
+    if hits:
+        e["secrets"] = hits[:6]
+        return "secrets-present"
+    return ""
+
+
 def archive_flow(e, apply_):
     """Archive, verify, re-check, then (apply) `git worktree remove --force`. Any failure keeps the worktree."""
     wt = e["wt"]
@@ -1215,6 +1283,9 @@ def archive_flow(e, apply_):
     if not outside_every_repo(ARCH["root"]):
         return "archive-root-inside-repo"
     why = _still_unchanged(e, None, hours)
+    if why:
+        return why
+    why = _secrets_block(e)
     if why:
         return why
     before = _status_text(wt)
@@ -1238,7 +1309,7 @@ def archive_flow(e, apply_):
         e["detail"] = str(ex)[:160]
         return (
             ex.reason
-            if ex.reason in ("archive-too-big", "nested-repo")
+            if ex.reason in ("archive-too-big", "nested-repo", "secrets-present")
             else "archive-failed"
         )
     except Exception as ex:
@@ -1250,7 +1321,7 @@ def archive_flow(e, apply_):
     e["archive_tar_names"] = info.get("tar_names", [])
     e["archive_bundle_commits"] = info["bundle_commits"]
     e["archive_ignored"] = info.get("ignored_included", [])
-    why = _still_unchanged(e, before, hours)
+    why = _still_unchanged(e, before, hours) or _secrets_block(e)
     if why:
         shutil.rmtree(dest, ignore_errors=True)
         return why
@@ -1648,7 +1719,17 @@ def main(argv=None):
                                 would_archive += 1
                     else:
                         reasons[res] += 1
-                        log("KEEP %-18s %s %s" % (res, e["wt"], e.get("detail", "")))
+                        log(
+                            "KEEP %-18s %s %s%s"
+                            % (
+                                res,
+                                e["wt"],
+                                e.get("detail", ""),
+                                " secret-named=" + ",".join(e["secrets"])
+                                if e.get("secrets")
+                                else "",
+                            )
+                        )
                 else:
                     reasons[st] += 1
                     if st != "never-touch":
@@ -1749,6 +1830,7 @@ def main(argv=None):
         "would_remove_over_cap": max(0, len(eligible) - a.max) if not a.apply else 0,
         "gb": round(kb_total / 1048576, 2),
         "kept": dict(reasons),
+        "secrets_present": reasons.get("secrets-present", 0),
         "prunable_entries": pruned,
         "git_gh_calls": STATS.calls,
         "git_gh_errors": STATS.errors,
