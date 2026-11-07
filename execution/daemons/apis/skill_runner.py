@@ -1886,6 +1886,12 @@ class SkillResult:
     # alone (fly_runner.FlyIneligible.provider_specific): the provider loop
     # may try the next provider that runs on Fly in the same dispatch.
     fly_provider_ineligible: bool = False
+    # A Fly-bound run deferred before launch because Neotoma did not answer
+    # the role-key admission check (fly_runner.FlyIneligible.neotoma_unavailable).
+    # Nothing ran; not a refusal, not a provider failure: every provider would
+    # hit the same outage, so it ends the dispatch with no failover or
+    # cooldown, and the task is retried by the existing FAILED-task retry.
+    fly_neotoma_unavailable: bool = False
     # A single-provider dispatch (an existing-PR correction) refused that way:
     # the other Fly candidates its caller may try next, each in a fresh
     # dispatch under its own prelaunch receipt. Empty for every other result.
@@ -3966,6 +3972,7 @@ async def _run_skill_once(
     # refusal, never a local fallback (ateles#1456).
     _fly_disabled = False
     _fly_provider_specific = False
+    _fly_neotoma_unavailable = False
     if fly_runner.wants_fly(runner, action_class):
         try:
             if (
@@ -4007,18 +4014,28 @@ async def _run_skill_once(
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
             _fly_provider_specific = exc.provider_specific
+            _fly_neotoma_unavailable = exc.neotoma_unavailable
         except fly_runner.FlyConfigInvalid as exc:
             _fly_reason = str(exc)
             _fly_disabled = True
 
     def _fly_refusal_or_fallback(
-        reason: str, provider_specific: bool = False
+        reason: str, provider_specific: bool = False, neotoma_unavailable: bool = False,
     ) -> SkillResult | None:
         """A refusal to return, or None to run locally (logged and counted)."""
         fallback_ok = not _fly_forced and not _fly_disabled and (
             reason.startswith("not eligible")
             or fly_runner.get_executor().config.local_fallback
         )
+        if not fallback_ok and neotoma_unavailable and not _fly_disabled:
+            # Neotoma did not answer the admission check: temporary, so the
+            # dispatch is deferred, not refused. Not "before launch" either:
+            # a builder must not take this as leave to run its delivery
+            # locally beside an outage the Fly path would have waited out.
+            msg = f"fly runner deferred: Neotoma did not answer ({reason})"
+            log.warning(f"[apis] {skill} dispatch deferred — {msg}")
+            return SkillResult(skill, False, None, "", "", error=msg, provider=provider,
+                               fly_neotoma_unavailable=True)  # fmt: skip
         if not fallback_ok:
             # Deliberately NOT the "<provider> launch failed:" shape: a Fly
             # infrastructure failure says nothing about the provider, so it
@@ -4051,7 +4068,8 @@ async def _run_skill_once(
         return None
 
     if _fly_reason:
-        _refusal = _fly_refusal_or_fallback(_fly_reason, _fly_provider_specific)
+        _refusal = _fly_refusal_or_fallback(
+            _fly_reason, _fly_provider_specific, _fly_neotoma_unavailable)
         if _refusal is not None:
             _cleanup_launch_artifacts()
             return _refusal
@@ -4184,7 +4202,8 @@ async def _run_skill_once(
                         else f"Fly launch failed: {exc}"
                     )
                     _refusal = _fly_refusal_or_fallback(
-                        reason, getattr(exc, "provider_specific", False))
+                        reason, getattr(exc, "provider_specific", False),
+                        getattr(exc, "neotoma_unavailable", False))
                     if _refusal is not None:
                         return _refusal
                     if _fly_job.neotoma_tools_unavailable:
@@ -5341,7 +5360,8 @@ async def _run_provider_attempts(
         # provider would hit the same failure. Ends the dispatch BEFORE any
         # classification of its text, so it is never read as provider capacity and
         # never cools a provider down.
-        if result.definition_unavailable or result.policy_unavailable:
+        if (result.definition_unavailable or result.policy_unavailable
+                or getattr(result, "fly_neotoma_unavailable", False)):
             return result
         # A launched Fly delivery may have pushed: whatever its status, it
         # ends the dispatch here too. Never failed over to another provider.

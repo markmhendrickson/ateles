@@ -125,11 +125,18 @@ class FlyIneligible(Exception):
 
     ``provider_specific``: the reason is this job's provider and nothing
     else about the job, so the same job on another provider may still be
-    eligible (skill_runner then tries that provider in the same dispatch)."""
+    eligible (skill_runner then tries that provider in the same dispatch).
 
-    def __init__(self, *args, provider_specific: bool = False):
+    ``neotoma_unavailable``: Neotoma did not answer the role-key admission
+    check (unreachable, a timeout, a 5xx or a 429). Not a refusal: the same
+    job may be admitted minutes later, so the dispatch is deferred, not
+    ended (failure_posture.md, the rules)."""
+
+    def __init__(self, *args, provider_specific: bool = False,
+                 neotoma_unavailable: bool = False):  # fmt: skip
         super().__init__(*args)
         self.provider_specific = provider_specific
+        self.neotoma_unavailable = neotoma_unavailable
 
 
 def _command_too_large(provider: str, size: int) -> "FlyConfigInvalid":
@@ -2166,6 +2173,19 @@ _ADMISSION_CACHE: dict[tuple[str, str, str], tuple[float, bool, str]] = {}
 _ADMISSION_LOCK = threading.Lock()
 
 
+ADMISSION_UNREACHABLE_REASON = "Neotoma unreachable"
+# The reasons `role_admission` gives when Neotoma did not answer: a passing
+# outage, never cached, and never a final refusal.
+_ADMISSION_NO_ANSWER = re.compile(r"Neotoma /session answered (5\d\d|429)")
+
+
+def admission_reason_is_temporary(reason: str) -> bool:
+    """True when *reason* means Neotoma did not answer the admission check
+    (unreachable, a timeout, a 5xx or a 429), not that it refused the key."""
+    return reason == ADMISSION_UNREACHABLE_REASON or bool(
+        _ADMISSION_NO_ANSWER.fullmatch(reason))
+
+
 def _admission_http_client() -> httpx.Client:
     """The client `role_admission` uses when none is given (tests replace it)."""
     return httpx.Client(timeout=ADMISSION_TIMEOUT_SECONDS, follow_redirects=False)
@@ -2217,8 +2237,8 @@ def role_admission(role: str, jwk: dict, base_url: str, *, client: httpx.Client 
     http = client if client is not None else _admission_http_client()
     try:
         resp = http.request("GET", url, headers={"accept": "application/json", **headers})
-    except httpx.HTTPError:
-        return False, "Neotoma unreachable"
+    except httpx.HTTPError:  # includes a timeout
+        return False, ADMISSION_UNREACHABLE_REASON
     finally:
         if client is None:
             http.close()
@@ -2413,8 +2433,11 @@ def build_job(
                     provider_specific=True)
             admitted, reason = role_admission(role, jwk, base_url)
             if not admitted:
+                # Neotoma not answering is temporary: the caller defers the
+                # dispatch. A real answer (e.g. no_match) stays a refusal.
                 raise FlyIneligible(
-                    f"role {role!r}'s AAuth key is not admitted by Neotoma ({reason})")
+                    f"role {role!r}'s AAuth key is not admitted by Neotoma ({reason})",
+                    neotoma_unavailable=admission_reason_is_temporary(reason))
         elif not (own_token and provider == "claude"):
             raise FlyIneligible(
                 f"role {role!r} is granted Neotoma tools but has no AAuth key or own "

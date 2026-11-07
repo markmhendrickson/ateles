@@ -557,3 +557,38 @@ def test_normal_checkpoint_private_git_receipt_and_daemon_readback(
     assert delivery.active_build('owner/repo', 34) is None
     assert release(joined) is False
     assert len(records) == 1 and joined['calls'] == ['owner', 'private-git-runner']
+
+
+class _RecordingNotifier:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, message, priority=None, handler=None, **kwargs):
+        self.sent.append((message, priority))
+
+
+def test_executing_version_conflict_sends_one_blocker_and_writes_nothing(joined):
+    # Another writer moves the task's version just before the executing write
+    # (e.g. a note lands at that moment): the versioned write is refused.
+    def before(write):
+        if write['field'] == 'status' and write['value'] == 'executing':
+            mutate(joined, 'notes', 'a note written at that moment')
+    joined['before_write'] = before
+    notifier = _RecordingNotifier()
+    released = asyncio.run(apis.handle_checkpoint_brief(
+        joined['checkpoint_id'], copy.deepcopy(joined['checkpoint']['snapshot']), notifier))
+    assert released is False
+    assert joined['calls'] == []
+    assert_no_delivery(joined)
+    # Only the routed and reason-clear writes happened; the conflict branch
+    # wrote nothing, and the task is left routed.
+    assert [(w['field'], w['value']) for w in joined['writes']] == [
+        ('status', 'routed'), ('blocked_reason', '')]
+    assert joined['record']['snapshot']['status'] == 'routed'
+    blockers = [m for m, p in notifier.sent if p == apis.Priority.BLOCKER]
+    assert len(blockers) == 1, notifier.sent
+    (notice,) = blockers
+    assert joined['task_id'] in notice
+    assert 'stays routed' in notice
+    assert 'Nothing was started' in notice
+    assert 'cannot be released again' in notice and 'refile' in notice
