@@ -1361,21 +1361,93 @@ def act(e, apply_, protect_ignored):
     return res
 
 
+ARCHIVE_MEMBER_NAMES = (
+    "meta.json",
+    "patch.diff",
+    "untracked.tar.gz",
+    "local-commits.bundle",
+)
+ARCHIVE_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _real_subdirs(path):
+    """Entries of `path` if every one is a real (non-symlink) directory and there is at least one, else None."""
+    try:
+        with os.scandir(path) as it:
+            entries = list(it)
+    except OSError:
+        return None
+    if not entries or any(
+        x.is_symlink() or not x.is_dir(follow_symlinks=False) for x in entries
+    ):
+        return None
+    return [x.path for x in entries]
+
+
+def archive_day_dir_matches(day_dir):
+    """True only if `day_dir` has exactly the layout this tool writes:
+    <date dir>/<repo dir>/<archive dir>/{meta.json plus any of patch.diff, untracked.tar.gz, local-commits.bundle}.
+
+    Anything else (a file at the top level, a symlink, an unknown member, an archive without meta.json,
+    an unfinished `.partial` directory) is foreign, and --prune-archives --apply never deletes it.
+    """
+    if os.path.islink(day_dir):
+        return False
+    repo_dirs = _real_subdirs(day_dir)
+    if repo_dirs is None:
+        return False
+    for repo_dir in repo_dirs:
+        archive_dirs = _real_subdirs(repo_dir)
+        if archive_dirs is None:
+            return False
+        for archive_dir in archive_dirs:
+            if archive_dir.endswith(".partial"):
+                return False
+            try:
+                with os.scandir(archive_dir) as it:
+                    members = list(it)
+            except OSError:
+                return False
+            names = [m.name for m in members]
+            if "meta.json" not in names:
+                return False
+            for m in members:
+                if (
+                    m.name not in ARCHIVE_MEMBER_NAMES
+                    or m.is_symlink()
+                    or not m.is_file(follow_symlinks=False)
+                ):
+                    return False
+    return True
+
+
 def prune_archives(apply_, retention_days):
-    """List (dry run) or delete (--apply) archive day-directories older than the retention. Never touches repos."""
+    """List (dry run) or delete (--apply) archive day-directories older than the retention. Never touches repos.
+
+    Only a date-named directory whose layout matches what this tool writes is ever listed or deleted;
+    any other date-named directory is skipped and logged.
+    """
     root = ARCH["root"]
     cutoff = datetime.date.today() - datetime.timedelta(days=retention_days)
-    old, keep = [], 0
+    old, keep, skipped = [], 0, []
     if os.path.isdir(root):
         for d in sorted(os.listdir(root)):
+            if not ARCHIVE_DAY_RE.match(d):
+                continue
             try:
                 day = datetime.date.fromisoformat(d)
             except ValueError:
                 continue
-            if day < cutoff:
-                old.append(os.path.join(root, d))
-            else:
+            path = os.path.join(root, d)
+            if day >= cutoff:
                 keep += 1
+            elif archive_day_dir_matches(path):
+                old.append(path)
+            else:
+                skipped.append(d)
+                log(
+                    "SKIP prune-archives %s: layout is not what this tool writes" % path
+                )
     total = 0
     for d in old:
         for dp, _, fn in os.walk(d):
@@ -1388,6 +1460,7 @@ def prune_archives(apply_, retention_days):
             shutil.rmtree(d, ignore_errors=True)
     return {
         "old_day_dirs": [os.path.basename(d) for d in old],
+        "skipped_foreign_dirs": skipped,
         "kept_day_dirs": keep,
         "mb": round(total / 1048576, 2),
         "deleted": bool(apply_),

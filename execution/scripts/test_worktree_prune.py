@@ -777,7 +777,8 @@ def test_archive_tier_archives_verifies_and_keeps_unsafe_worktrees(repo):
     pr_root = tmp + "/prune-archives"
     for d in ("2020-01-01", "2020-02-02", today):
         os.makedirs(pr_root + "/" + d + "/r/x")
-        open(pr_root + "/" + d + "/r/x/f", "w").write("x" * 100)
+        open(pr_root + "/" + d + "/r/x/meta.json", "w").write("{}")
+        open(pr_root + "/" + d + "/r/x/patch.diff", "w").write("x" * 100)
     wp.ARCH["root"] = pr_root
     lst_ = wp.prune_archives(False, 30)
     check(
@@ -968,6 +969,100 @@ def test_a_tracked_secret_named_file_is_not_an_untracked_secret(repo, archive_on
     assert e["status"] == "ARCHIVE-CANDIDATE"  # unpushed commit
     assert wp.secret_files(w) == []
     assert wp.act(e, True, False) == "ARCHIVED-REMOVED"
+
+
+def _write_archive(root, day, repo_name="r", name="x-1234abcd", members=("meta.json",)):
+    d = os.path.join(root, day, repo_name, name)
+    os.makedirs(d)
+    for m in members:
+        open(os.path.join(d, m), "w").write("{}" if m == "meta.json" else "data")
+    return d
+
+
+def test_prune_archives_apply_only_deletes_what_this_tool_wrote(repo):
+    root = repo.home + "/archive-root"
+    outside = repo.home + "/outside-target"
+    os.makedirs(outside)
+    open(outside + "/precious.txt", "w").write("keep")
+    wp.ARCH["root"] = root
+    real_old = _write_archive(
+        root,
+        "2020-01-01",
+        members=("meta.json", "patch.diff", "untracked.tar.gz", "local-commits.bundle"),
+    )
+    foreign = {  # date-named directories holding something else
+        "2020-02-01": lambda d: (
+            os.makedirs(d + "/notes"),
+            open(d + "/notes/todo.txt", "w").write("mine"),
+        ),
+        "2020-02-02": lambda d: open(d + "/stray.txt", "w").write(
+            "a file at the top level"
+        ),
+        "2020-02-03": lambda d: _write_archive(
+            root, "2020-02-03", members=("meta.json", "extra.sh")
+        ),
+        "2020-02-04": lambda d: _write_archive(
+            root, "2020-02-04", members=("patch.diff",)
+        ),
+        "2020-02-05": lambda d: os.symlink(outside, d + "/linked-repo"),
+        "2020-02-06": lambda d: _write_archive(
+            root, "2020-02-06", name="x-1234abcd.partial"
+        ),
+        "2020-02-07": lambda d: None,  # empty
+    }
+    for day, make in foreign.items():
+        os.makedirs(root + "/" + day, exist_ok=True)
+        make(root + "/" + day)
+    os.symlink(
+        outside, root + "/2020-02-08"
+    )  # a date-named symlink to somewhere else entirely
+    listing = wp.prune_archives(False, 30)
+    assert listing["old_day_dirs"] == ["2020-01-01"]
+    assert listing["skipped_foreign_dirs"] == sorted(list(foreign) + ["2020-02-08"])
+    result = wp.prune_archives(True, 30)
+    assert result["deleted"] and result["old_day_dirs"] == ["2020-01-01"]
+    assert not os.path.exists(real_old) and not os.path.exists(root + "/2020-01-01")
+    for day in foreign:
+        assert os.path.lexists(root + "/" + day), day  # foreign content left untouched
+    assert open(root + "/2020-02-01/notes/todo.txt").read() == "mine"
+    assert open(root + "/2020-02-02/stray.txt").read() == "a file at the top level"
+    assert open(outside + "/precious.txt").read() == "keep"
+    assert os.path.islink(root + "/2020-02-08")
+
+
+def test_an_archive_this_tool_really_wrote_is_removed_when_old(repo, archive_on):
+    w, e = _dirty_archive_candidate(repo, "real-old")
+    open(w + "/new-note.txt", "w").write("untracked")
+    age(w)
+    e = wp.analyze(repo.entry(w), False)
+    assert wp.act(e, True, False) == "ARCHIVED-REMOVED"
+    day_dir = os.path.dirname(os.path.dirname(e["archive_dir"]))
+    assert wp.archive_day_dir_matches(day_dir)
+    old_day = os.path.join(archive_on, "2020-01-01")
+    os.rename(day_dir, old_day)
+    assert wp.prune_archives(True, 30)["old_day_dirs"] == ["2020-01-01"]
+    assert not os.path.exists(old_day)
+
+
+def test_prune_archives_skips_are_logged_and_numeric_dates_are_not_dates(repo):
+    root = repo.home + "/archive-log"
+    wp.ARCH["root"] = root
+    os.makedirs(root + "/2020-03-01/stray")  # empty repo dir: not an archive
+    os.makedirs(
+        root + "/20200301/r/x"
+    )  # a compact date is not the name this tool writes
+    open(root + "/20200301/r/x/meta.json", "w").write("{}")
+    logfile = repo.home + "/prune.log"
+    wp.LOGF = open(logfile, "w", buffering=1)
+    try:
+        res = wp.prune_archives(True, 30)
+    finally:
+        wp.LOGF.close()
+    assert res["skipped_foreign_dirs"] == ["2020-03-01"]
+    assert os.path.isdir(root + "/2020-03-01/stray") and os.path.isdir(
+        root + "/20200301/r/x"
+    )
+    assert "SKIP prune-archives" in open(logfile).read()
 
 
 def test_the_run_summary_counts_worktrees_kept_for_secrets(repo):
