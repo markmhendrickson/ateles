@@ -3573,11 +3573,20 @@ _SELF_CLEARING_FAILURE_CLASSES = _CAPACITY_FAILURE_CLASSES | {
 
 
 def _neotoma_retry_limit() -> int:
-    """Consecutive Neotoma deferrals allowed at one head before an operator is asked."""
+    """Consecutive Neotoma deferrals allowed at one head before an operator is asked.
+
+    Unset means the default of 3. A malformed value fails closed to 0, so an
+    unreadable safety limit allows no automatic retry and the panel stops for
+    attention instead.
+    """
     try:
         return max(0, int(os.environ.get("APIS_NEOTOMA_RETRY_LIMIT", "3")))
     except ValueError:
-        return 3
+        log.warning(
+            f"[{DAEMON_NAME}] APIS_NEOTOMA_RETRY_LIMIT is not an integer; "
+            "allowing no automatic Neotoma retry"
+        )
+        return 0
 
 
 # Ceiling for the Neotoma retry backoff below: however many consecutive

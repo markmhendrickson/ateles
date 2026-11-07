@@ -371,6 +371,37 @@ def test_repeated_neotoma_failure_past_limit_stops_and_names_neotoma(monkeypatch
     assert SwarmDispatcher._REVIEW_DEFERRED_RE.search(last) is None
 
 
+def test_malformed_retry_limit_allows_no_automatic_retry(monkeypatch, caplog):
+    """Red before: a malformed limit fell back to 3, so this posted a resume marker."""
+    monkeypatch.setenv("APIS_NEOTOMA_RETRY_LIMIT", "three")
+    comments = _Comments()
+    _wire_github(monkeypatch, comments)
+    notifier = tsd._StubNotifier()
+    with caplog.at_level("WARNING", logger="apis.swarm_dispatch"):
+        asyncio.run(
+            _dispatcher(notifier)._handle_panel_session_limit(
+                tsd._trigger(), None, "pm", "", "",
+                reason=swarm_dispatch.NEOTOMA_TEMPORARILY_UNAVAILABLE,
+            )
+        )
+    assert notifier.priorities == [swarm_dispatch.Priority.BLOCKER]
+    last = comments.posted[-1]
+    assert SwarmDispatcher._REVIEW_DEFERRED_RE.search(last) is None
+    assert SwarmDispatcher._NEOTOMA_DEFERRAL_RE.search(last) is None
+    assert "operator attention is required" in last.lower()
+    warnings = [r.getMessage() for r in caplog.records if "APIS_NEOTOMA_RETRY_LIMIT" in r.getMessage()]
+    assert warnings and all("three" not in w for w in warnings)
+
+
+def test_unset_retry_limit_defaults_to_three(monkeypatch):
+    monkeypatch.delenv("APIS_NEOTOMA_RETRY_LIMIT", raising=False)
+    assert swarm_dispatch._neotoma_retry_limit() == 3
+    monkeypatch.setenv("APIS_NEOTOMA_RETRY_LIMIT", "5")
+    assert swarm_dispatch._neotoma_retry_limit() == 5
+    monkeypatch.setenv("APIS_NEOTOMA_RETRY_LIMIT", "x")
+    assert swarm_dispatch._neotoma_retry_limit() == 0
+
+
 def test_neotoma_retry_count_resets_after_a_verdict(monkeypatch):
     comments = _Comments(
         [
