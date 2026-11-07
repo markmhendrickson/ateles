@@ -441,3 +441,125 @@ def test_effect_action_types_match_the_gates_own_high_blast_set():
         "external_api_write",
     }
     assert outward <= owned and outward <= dq.EFFECT_ACTION_TYPES
+
+
+# ── The delivery lane ────────────────────────────────────────────────────────
+
+DELIVERY_SUMMARY = "Assigned to cicada. Action: open_or_merge_pr. Trigger: created."
+
+
+def lane_brief(**over):
+    return brief(plan_summary=DELIVERY_SUMMARY, **over)
+
+
+def lane_task(**over):
+    base = {"assigned_to": "cicada", "owner": "Coordinator session"}
+    base.update(over)
+    return task(**base)
+
+
+def test_a_delivery_hold_coordinated_by_a_session_is_a_lane_hold():
+    assert klass(lane_brief(), lane_task()) == dq.FLY_LANE_HOLD
+    assert dq.in_fly_lane(lane_brief(), lane_task())
+
+
+def test_the_lane_matches_the_assignee_in_any_stored_spelling():
+    for spelling in ("Cicada", " cicada ", "cicada@ateles-swarm"):
+        assert klass(lane_brief(), lane_task(assigned_to=spelling)) == dq.FLY_LANE_HOLD
+
+
+def test_the_lane_class_is_not_a_real_decision():
+    assert dq.FLY_LANE_HOLD not in dq.REAL_DECISION_CLASSES
+
+
+@pytest.mark.parametrize(
+    "b,t",
+    [
+        # action type is not the delivery type
+        (brief(), lane_task()),
+        # assignee is not a builder
+        (lane_brief(), lane_task(assigned_to="vanellus")),
+        (lane_brief(), lane_task(assigned_to=None)),
+        # owner does not name a session
+        (lane_brief(), lane_task(owner="builder")),
+        (lane_brief(), lane_task(owner=None)),
+    ],
+)
+def test_each_lane_condition_failing_alone_is_not_the_lane(b, t):
+    assert not dq.in_fly_lane(b, t)
+    assert klass(b, t) != dq.FLY_LANE_HOLD
+    assert dq.bucket_raised_hold(b, t) == dq.BUCKET_OUTSIDE_FLY
+
+
+def test_no_task_is_never_the_lane():
+    assert not dq.in_fly_lane(lane_brief(), None)
+    assert dq.bucket_raised_hold(lane_brief(), None) == dq.BUCKET_OUTSIDE_FLY
+
+
+def test_a_high_blast_lane_hold_is_still_the_lane():
+    # the lane comes before the high-blast check: delivery holds are high blast
+    b = lane_brief(reason=UNSCORED_HIGH, blast_radius="high")
+    assert klass(b, lane_task(blocked_reason=UNSCORED_HIGH)) == dq.FLY_LANE_HOLD
+
+
+def test_a_title_asking_for_a_decision_beats_the_lane():
+    t = lane_task(title="Decide which route to take")
+    assert klass(lane_brief(), t) == dq.LIVE_ASKS_FOR_DECISION
+    assert dq.bucket_raised_hold(lane_brief(), t) == dq.BUCKET_REAL
+
+
+def test_an_effect_type_beats_the_lane():
+    b = brief(plan_summary="Assigned to cicada. Action: payment.")
+    assert klass(b, lane_task()) == dq.LIVE_EFFECT
+    assert dq.bucket_raised_hold(b, lane_task()) == dq.BUCKET_REAL
+
+
+def test_an_operator_only_label_beats_the_lane_on_either_record():
+    on_task = lane_task(blocked_reason=OP_ONLY)
+    assert klass(lane_brief(), on_task) in (
+        dq.OPERATOR_ONLY,
+        dq.OPERATOR_ONLY_LABEL,
+    )
+    assert dq.bucket_raised_hold(lane_brief(), on_task) == dq.BUCKET_REAL
+    on_brief = lane_brief(reason=OP_ONLY)
+    assert dq.bucket_raised_hold(on_brief, lane_task()) == dq.BUCKET_REAL
+
+
+def test_earlier_steps_stay_ahead_of_the_lane():
+    assert klass(lane_brief(checkpoint_name="DESIGN"), lane_task()) == (
+        dq.RAISED_BY_PERSON_OR_SESSION
+    )
+    assert klass(lane_brief(), lane_task(owner="alex")) != dq.FLY_LANE_HOLD
+    assert klass(lane_brief(), lane_task(blocked_reason="waiting on a reply")) == (
+        dq.SESSION_WROTE_HOLD
+    )
+    assert klass(lane_brief(), lane_task(status="done")) == dq.TASK_FINISHED
+    assert klass(lane_brief(), lane_task(), newer=True) == dq.OLDER_DUPLICATE
+
+
+def test_a_hold_a_person_wrote_has_no_bucket():
+    assert dq.bucket_raised_hold(lane_brief(handler="human"), lane_task()) is None
+    assert dq.bucket_raised_hold(lane_brief(reason="please look"), lane_task()) is None
+    assert dq.bucket_raised_hold(lane_brief(gate_action="x"), lane_task()) is None
+
+
+def test_an_open_hold_in_a_real_class_is_real_whatever_else_is_true():
+    for k in dq.REAL_DECISION_CLASSES:
+        assert dq.bucket_raised_hold(brief(), task(), k) == dq.BUCKET_REAL
+    assert dq.bucket_raised_hold(brief(), task(), dq.LIVE_LOW) == dq.BUCKET_OUTSIDE_FLY
+    # a closed hold has no class, and falls through to the lane test
+    assert dq.bucket_raised_hold(lane_brief(), lane_task()) == dq.BUCKET_FLY_LANE
+    assert (
+        dq.bucket_raised_hold(lane_brief(), lane_task(), dq.FLY_LANE_HOLD)
+        == dq.BUCKET_FLY_LANE
+    )
+
+
+def test_lane_constants_equal_the_delivery_modules():
+    apis = str(_REPO / "execution" / "daemons" / "apis")
+    if apis not in _sys.path:
+        _sys.path.insert(0, apis)
+    import build_delivery
+
+    assert dq.FLY_LANE_ACTION_TYPE == build_delivery.DELIVERY_ACTION_TYPE
+    assert dq.FLY_LANE_BUILDERS == build_delivery.BUILDER_SKILLS
