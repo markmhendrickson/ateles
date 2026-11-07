@@ -2609,8 +2609,8 @@ def test_an_undelivered_correction_of_another_target_is_not_superseded(monkeypat
     assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
 
 
-@pytest.mark.parametrize("status", ["unknown", "push_failed", "no_changes", "no_time",
-                                    "launching", "unreported", "Not_Delivered"])
+@pytest.mark.parametrize("status", ["unknown", "push_failed", "no_time", "launching",
+                                    "unreported", "Not_Delivered", "No_Changes"])
 def test_no_other_status_gets_the_undelivered_exception(monkeypatch, status):
     entry = _undelivered_receipt(status=status)
     _use_ledger(monkeypatch, entry)
@@ -2659,6 +2659,60 @@ def test_an_undelivered_receipt_naming_no_run_is_not_superseded(monkeypatch, run
 def test_an_unreadable_ledger_keeps_the_undelivered_refusal(monkeypatch):
     entry = _undelivered_receipt()
     _use_ledger(monkeypatch, entry, fail=True)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+# --- A further correction may supersede a settled ``no_changes`` receipt ---
+#
+# Red before the second repair: ``supersedable_correction`` sent only
+# ``not_delivered`` to ``_undelivered_correction_settled``, so
+# test_a_settled_no_changes_correction_is_superseded failed with
+# ``assert False`` and the entrance returned "refused". The four refusal tests
+# below passed then too (everything ``no_changes`` was refused); each is the
+# guard that stays red if its one condition stops being enforced. The runner
+# returns before any import on a ``no_changes`` run, so its receipt records an
+# empty ``commit``.
+
+
+def _no_changes_receipt(**over):
+    return _undelivered_receipt(status="no_changes", commit="", **over)
+
+
+def test_a_settled_no_changes_correction_is_superseded(monkeypatch):
+    entry = _no_changes_receipt()
+    _use_ledger(monkeypatch, entry)
+    assert build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+    monkeypatch.setattr(build_delivery, "fly_delivery_blocker", lambda key: "refused")
+    assert build_delivery.fly_delivery_entrance_blocker(
+        _PR_KEY, receipt_key=_PR_KEY, target=_undelivered_target()) == ""
+
+
+def test_a_no_changes_receipt_admitted_against_another_head_is_not_superseded(monkeypatch):
+    entry = _no_changes_receipt()
+    _use_ledger(monkeypatch, entry)
+    plan = _undelivered_plan(_undelivered_target(head_sha="c" * 40))
+    assert not build_delivery.supersedable_correction(plan, _PR_KEY, entry)
+
+
+def test_a_no_changes_run_still_in_flight_is_not_superseded(monkeypatch):
+    entry = _no_changes_receipt()
+    _use_ledger(monkeypatch, entry, in_flight={_RUN})
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+    monkeypatch.setattr(build_delivery, "fly_delivery_blocker", lambda key: "refused")
+    assert build_delivery.fly_delivery_entrance_blocker(
+        _PR_KEY, receipt_key=_PR_KEY, target=_undelivered_target()) == "refused"
+
+
+def test_an_unreadable_ledger_keeps_the_no_changes_refusal(monkeypatch):
+    entry = _no_changes_receipt()
+    _use_ledger(monkeypatch, entry, fail=True)
+    assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_a_first_delivery_no_changes_receipt_is_not_superseded(monkeypatch):
+    entry = _no_changes_receipt()
+    entry.pop("existing_pr")
+    _use_ledger(monkeypatch, entry)
     assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
 
 

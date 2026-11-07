@@ -814,9 +814,9 @@ def worktree_instructions(wt: BuildWorktree) -> str:
 # correction's admitted (live) head is replaced by that correction's reservation
 # (``supersedable_correction``). That is a new round on the run's own result,
 # not a retry of it; the round limit stays with the PR's coordinator. So is a
-# settled ``not_delivered`` correction that recorded no commit and was admitted
-# against the very head the next correction declares: nothing landed, and its
-# run holds no reservation still in flight.
+# settled ``not_delivered`` or ``no_changes`` correction that recorded no commit
+# and was admitted against the very head the next correction declares: nothing
+# landed, and its run holds no reservation still in flight.
 
 FLY_DELIVERY_BASE_BRANCH = "main"
 FLY_DELIVERY_AUTHOR = ("cicada (ateles swarm)", "cicada@ateles-swarm.invalid")
@@ -1004,16 +1004,18 @@ FLY_RECEIPT_COMMAND = "python3 execution/daemons/apis/fly_delivery_receipt.py"
 
 # Existing-PR correction outcomes whose recorded commit is a push the runner
 # confirmed (``delivery_push_state``). Every other status (``launching``,
-# ``unknown``, ``unreported``, ``no_changes``, ``push_failed``, ``no_time``, and
-# any unrecognised one such as an ``exhausted`` or ``noop`` record) keeps the
-# receipt until the operator clears it: an unknown outcome, or a run that
-# changed nothing, is never renewed here.
+# ``unknown``, ``unreported``, ``push_failed``, ``no_time``, and any
+# unrecognised one such as an ``exhausted`` or ``noop`` record) keeps the
+# receipt until the operator clears it: an unknown outcome is never renewed
+# here.
 SUPERSEDABLE_CORRECTION_STATUSES = frozenset({"updated", "pr_failed"})
-# The one further exception: a ``not_delivered`` correction that recorded no
-# commit, admitted against the very head the next correction declares, whose
-# run has settled (``_undelivered_correction_settled``). Nothing landed, so the
-# next correction starts from the same head; no other status shares this.
-NOT_DELIVERED_CORRECTION_STATUS = "not_delivered"
+# The one further exception: a ``not_delivered`` or ``no_changes`` correction
+# that recorded no commit, admitted against the very head the next correction
+# declares, whose run has settled (``_undelivered_correction_settled``). Nothing
+# landed, so the next correction starts from the same head; no other status
+# shares this. The runner leaves ``commit`` empty on a ``no_changes`` run (it
+# returns before any import), so the same recorded-no-commit check applies.
+UNDELIVERED_CORRECTION_STATUSES = frozenset({"not_delivered", "no_changes"})
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
@@ -1044,8 +1046,8 @@ def supersedable_correction(plan: "FlyDeliveryPlan", stored: str, entry: dict) -
     match proves the earlier run's commit landed and is the PR's current head:
     the new correction was written against that run's result.
 
-    One narrower case also qualifies: a settled ``not_delivered`` correction
-    that recorded no commit and was admitted against the same head the new
+    One narrower case also qualifies: a settled ``not_delivered`` or
+    ``no_changes`` correction that recorded no commit and was admitted against the same head the new
     correction declares (``_undelivered_correction_settled``)."""
     target = plan.target
     if target is None or canonical_key(stored) != canonical_key(plan.key):
@@ -1055,7 +1057,7 @@ def supersedable_correction(plan: "FlyDeliveryPlan", stored: str, entry: dict) -
     admitted = entry.get("existing_pr")
     if not isinstance(admitted, dict):
         return False  # a first delivery's receipt
-    if entry.get("status") == NOT_DELIVERED_CORRECTION_STATUS:
+    if entry.get("status") in UNDELIVERED_CORRECTION_STATUSES:
         return _undelivered_correction_settled(target, entry, admitted)
     if entry.get("status") not in SUPERSEDABLE_CORRECTION_STATUSES:
         return False
@@ -1069,7 +1071,7 @@ def supersedable_correction(plan: "FlyDeliveryPlan", stored: str, entry: dict) -
 
 
 def _undelivered_correction_settled(target: "ExistingPRTarget", entry: dict, admitted: dict) -> bool:
-    """True only when a ``not_delivered`` correction of the same PR recorded
+    """True only when a ``not_delivered`` or ``no_changes`` correction of the same PR recorded
     no commit, was admitted against exactly the head the new correction
     declares, and its run holds no reservation still in flight.
 
