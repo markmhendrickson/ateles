@@ -1139,12 +1139,13 @@ def test_removed_archive_options_are_refused_with_a_clear_message(option, capsys
     )  # refused before anything ran
 
 
-def test_the_four_named_options_are_among_the_refused_ones():
+def test_every_removed_archive_option_is_pinned_in_the_refused_set():
     assert {
         "--archive-remove",
         "--archive-cap-mb",
         "--prune-archives",
         "--archive-retention-days",
+        "--archive-root",
     } <= set(wp.REMOVED_OPTIONS)
 
 
