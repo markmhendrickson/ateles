@@ -4900,3 +4900,96 @@ class TestRoundCap:
         comments += _cap_round_comments(ROUND_HEADS[1:2], start=600) + _all_clear_comments(ALL_FOUR)
         code, client = await self._run(monkeypatch, comments)
         assert code == 0
+
+
+# ── Approval tool fails closed on an unreadable review scope (ateles#1674) ──
+#
+# `carry_earlier_signoffs` judges by the same load-aware rule as Apis's panel
+# (`review_carry.select_rerun_for_load`): a scope file that exists but cannot be
+# read carries nothing; a missing file uses the default allowlist rule.
+
+
+def _security_carry_inputs():
+    # Every lens signed off at OLD_HEAD; only qa re-ran at HEAD. The fix adds a
+    # test file the default rule maps to qa alone, so it would carry security.
+    comments = _fix_round_comments(blocked=(), reran=("qa",))
+    pending = [
+        target.LensOutcome(
+            "security", agent="falco", head_matched=False, verdict=None,
+            passed=False, reason="no verdict at this head.",
+        )
+    ]
+    return comments, pending
+
+
+async def _carry_with_load(monkeypatch, load):
+    comments, pending = _security_carry_inputs()
+    client = _CompareClient(
+        comments=comments, check_runs=_green_checks(),
+        sides=_fix_sides(SECURITY_FIX_FILE),
+        changed_files=[SECURITY_FIX_FILE, "a_random_file.txt"],
+    )
+    monkeypatch.setattr(target, "_github_headers", lambda repo=None: {})
+    return await target.carry_earlier_signoffs(
+        client, repo=REPO, base_ref=BASE_REF, head_sha=HEAD, comments=comments,
+        lens_outcomes=pending, authors=frozenset({SWARM_LOGIN}), load=load,
+    )
+
+
+@pytest.mark.asyncio
+class TestCarryFailsClosedOnUnreadableScope:
+    async def test_unreadable_scope_carries_no_signoff(self, monkeypatch):
+        # Red before this fix: against the old code this call fails with a
+        # TypeError (no `load=` parameter), observed. That the old `scope=None`
+        # path carried security here is inferred from the code; the end-to-end
+        # test below observed it.
+        load = target.review_scope.ScopeLoad(
+            None, ".github/review_scope.json@main", "HTTP 500"
+        )
+        (outcome,) = await _carry_with_load(monkeypatch, load)
+        assert outcome.lens == "security"
+        assert not outcome.passed
+        assert not outcome.carried_from
+        assert "review scope is unreadable" in outcome.reason
+        assert "HTTP 500" in outcome.reason
+
+    async def test_unreadable_scope_refuses_approval_end_to_end(self, monkeypatch):
+        # Red before this fix, observed: `main` passed `scope_load.scope` (None
+        # after the HTTP 500) to the carry, which fell back to the default rule,
+        # carried security, and `run` returned 0 with an approval posted.
+        comments, _ = _security_carry_inputs()
+        client = _CompareClient(
+            comments=comments, check_runs=_green_checks(),
+            sides=_fix_sides(SECURITY_FIX_FILE),
+            changed_files=[SECURITY_FIX_FILE, "a_random_file.txt"],
+            scope_by_ref={BASE_REF: 500},
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, [], apply=True, panel_all=True) == 1
+        assert client.posted == []
+
+    async def test_absent_scope_file_uses_default_carry_rule(self, monkeypatch):
+        # Control for the test above: a missing file declares no scope, so the
+        # default rule still carries security. Against the old code this call
+        # fails with a TypeError (no `load=` parameter), observed; its behaviour
+        # was green before (see the end-to-end twin below, which passes on both).
+        # It goes red if the fix treats "absent" as "unreadable".
+        load = target.review_scope.ScopeLoad(
+            None, ".github/review_scope.json@main", target.review_scope.SCOPE_FILE_ABSENT
+        )
+        (outcome,) = await _carry_with_load(monkeypatch, load)
+        assert outcome.passed
+        assert outcome.carried_from == OLD_HEAD
+
+    async def test_absent_scope_file_still_approves_end_to_end(self, monkeypatch):
+        comments, _ = _security_carry_inputs()
+        client = _CompareClient(
+            comments=comments, check_runs=_green_checks(),
+            sides=_fix_sides(SECURITY_FIX_FILE),
+            changed_files=[SECURITY_FIX_FILE, "a_random_file.txt"],
+        )
+        _install_client(monkeypatch, client)
+        _install_app_mint(monkeypatch)
+        assert await target.run(REPO, PR, [], apply=True, panel_all=True) == 0
+        assert "CARRIED FORWARD" in client.posted[0]["json"]["body"]

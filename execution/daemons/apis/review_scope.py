@@ -272,6 +272,11 @@ def parse_scope(text: str) -> ReviewScope:
     return ReviewScope(full, reduced, ux, lens_scopes)
 
 
+# The one `ScopeLoad.error` that means "the repo declares no scope" rather than
+# "the scope could not be read" (`fetch_scope`, `review_carry.scope_unreadable`).
+SCOPE_FILE_ABSENT = "no scope file on the base branch"
+
+
 @dataclass(frozen=True)
 class ScopeLoad:
     """A scope file read, or why none could be used."""
@@ -455,7 +460,7 @@ async def fetch_scope(
     except Exception as exc:  # noqa: BLE001 — unreadable: no declaration
         return ScopeLoad(None, source, f"read failed ({exc.__class__.__name__})")
     if resp.status_code == 404:
-        return ScopeLoad(None, source, "no scope file on the base branch")
+        return ScopeLoad(None, source, SCOPE_FILE_ABSENT)
     if resp.status_code >= 400:
         return ScopeLoad(None, source, f"read failed (HTTP {resp.status_code})")
     try:

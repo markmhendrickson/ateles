@@ -373,8 +373,9 @@ class TestDispatcherReadersIgnoreNonSwarmAuthors:
 
             async def get(self, url, headers=None, params=None):
                 class _R:
-                    def __init__(s, payload):
+                    def __init__(s, payload, status_code=200):
                         s._p = payload
+                        s.status_code = status_code
 
                     def raise_for_status(s):
                         pass
@@ -382,6 +383,9 @@ class TestDispatcherReadersIgnoreNonSwarmAuthors:
                     def json(s):
                         return s._p
 
+                if "/contents/" in url:
+                    # No scope file on the base branch: the default area rule.
+                    return _R({}, 404)
                 if "/compare/" in url:
                     files = [{"filename": "a.txt", "patch": "+x\n", "changes": 1}]
                     if url.rsplit("...", 1)[1] == NEW:
