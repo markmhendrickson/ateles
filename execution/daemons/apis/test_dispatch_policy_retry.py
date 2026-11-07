@@ -4,7 +4,8 @@ Two cases left a released task needing a person: the agent_policy read timed
 out (the refusal is right; only the task's fate changes), and the executing
 status write timed out after it had in fact landed. A temporary failure is
 retried with the same approved checkpoint after a delay, off the event stream;
-anything else ends as before.
+anything else ends as before. A write with an unknown outcome always ends the
+current pass with nothing further written; only the retry reads it back.
 """
 from __future__ import annotations
 
@@ -124,12 +125,12 @@ async def test_state_changed_during_wait_stops_retry_without_spawn(released, mon
     real = apis._released_retry_fingerprint
     calls = []
 
-    def fingerprint(task_id, checkpoint_id):
+    def fingerprint(task_id, checkpoint_id, **kwargs):
         calls.append(task_id)
         if len(calls) == 2:  # the read after the wait
             _task(released)["status"] = "blocked"
             _task(released)["blocked_reason"] = "held by a person"
-        return real(task_id, checkpoint_id)
+        return real(task_id, checkpoint_id, **kwargs)
 
     monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
     await _release(released)
@@ -166,8 +167,22 @@ def _executing_writes(state):
     return [w for w in state["writes"] if w["field"] == "status" and w["value"] == "executing"]
 
 
+def _watch_retry_start(state, monkeypatch):
+    """Record what the first pass left behind, at the moment the retry starts."""
+    seen = []
+    real = apis._correction_write_landed
+
+    def landed(binding, status):
+        seen.append(dict(calls=list(state["calls"]), writes=list(state["writes"])))
+        return real(binding, status)
+
+    monkeypatch.setattr(apis, "_correction_write_landed", landed)
+    return seen
+
+
 @pytest.mark.asyncio
-async def test_timed_out_executing_write_that_landed_continues_to_one_spawn(joined, no_wait):
+async def test_timed_out_executing_write_that_landed_continues_to_one_spawn(
+        joined, no_wait, monkeypatch):
     timed_out = []
 
     def reply(write, version):
@@ -177,17 +192,27 @@ async def test_timed_out_executing_write_that_landed_continues_to_one_spawn(join
         return None
 
     joined["reply"] = reply
+    seen = _watch_retry_start(joined, monkeypatch)
     await _release_correction(joined)
-    # Red without the change: "executing lifecycle handoff could not be
-    # verified" and calls == [] with the task stranded in executing.
     assert timed_out
+    # The first pass stopped at the unknown write: nothing spawned, and the
+    # executing write is the last thing it wrote.
+    assert len(seen) == 1
+    assert seen[0]["calls"] == []
+    assert seen[0]["writes"][-1]["field"] == "status"
+    assert seen[0]["writes"][-1]["value"] == "executing"
+    # Red with the inline read-back: seen == [] (no retry ran) because the
+    # first pass itself continued to ["owner", "job"]. Red with no retry at
+    # all: calls == [] with the task stranded in executing.
+    # The retry found its own write landed, did not write it again, and
+    # spawned exactly once.
     assert len(_executing_writes(joined)) == 1
     assert joined["calls"] == ["owner", "job"]
     assert list(delivery._delivery_ledger().delivery_receipts()) == ["owner/repo#12"]
 
 
 @pytest.mark.asyncio
-async def test_timed_out_executing_write_that_did_not_land_is_retried(joined, no_wait):
+async def test_timed_out_executing_write_that_did_not_land_is_retried(joined, no_wait, monkeypatch):
     refused = []
 
     def before(write):
@@ -197,9 +222,12 @@ async def test_timed_out_executing_write_that_did_not_land_is_retried(joined, no
         return None
 
     joined["before_write"] = before
+    seen = _watch_retry_start(joined, monkeypatch)
     await _release_correction(joined)
     # Red without the change: one refused write, no retry, calls == [].
     assert refused
+    assert len(seen) == 1 and seen[0]["calls"] == []
+    # The refused write never reached the record; the retry wrote it again.
     assert len(_executing_writes(joined)) == 1
     assert joined["calls"] == ["owner", "job"]
 

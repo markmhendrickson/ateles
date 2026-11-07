@@ -1980,11 +1980,10 @@ def _advance_correction_lifecycle(binding, status, *, clear_reason=False, outcom
     token is never fetched to resume after failure, and no new hold is erased.
 
     A write that did not answer (a timeout, connection failure or 5xx) has an
-    unknown outcome, so the record is read back. When it shows exactly the
-    value written and nothing else changed, the sequence continues as if the
-    write had answered. When it still shows the unchanged previous state the
-    write did not land: ``outcome["transient"]`` is set so the caller may retry
-    the same write later. Any other state ends the sequence as before.
+    unknown outcome. It ends the sequence like any other failure, with no
+    read-back here; ``outcome["transient"]`` is set so the caller may schedule
+    a later retry, which reads the record back first
+    (``_correction_write_landed``).
     """
     import json
 
@@ -2003,30 +2002,51 @@ def _advance_correction_lifecycle(binding, status, *, clear_reason=False, outcom
                 handler=DAEMON_NAME,
                 key_suffix=f"{status.value}-approved-{binding.release_key}",
             )
-            previous_shape = _correction_lifecycle_shape(expected)
-            expected[field] = value
-            expected_shape = _correction_lifecycle_shape(expected)
             if not committed or not committed.version:
-                if not getattr(committed, "transient", False):
-                    return None
-                # Outcome unknown: the record says whether it landed.
-                fresh, fresh_version = _read_correction_lifecycle_record(binding)
-                if not isinstance(fresh, dict) or not fresh_version:
-                    return None
-                fresh_shape = _correction_lifecycle_shape(fresh)
-                if fresh_version != version and fresh_shape == expected_shape:
-                    version = fresh_version
-                    continue
-                if (fresh_version == version and fresh_shape == previous_shape
-                        and outcome is not None):
+                if outcome is not None and getattr(committed, "transient", False):
                     outcome["transient"] = True
                 return None
+            expected[field] = value
+            expected_shape = _correction_lifecycle_shape(expected)
             fresh, version = _read_correction_lifecycle_record(binding)
             if (not isinstance(fresh, dict) or version != committed.version
                     or _correction_lifecycle_shape(fresh) != expected_shape):
                 return None
         return dataclasses.replace(binding, snapshot_json=expected_shape, version=version)
     except Exception:
+        return None
+
+
+_CORRECTION_WRITE_NOT_LANDED = object()
+
+
+def _correction_write_landed(binding, status):
+    """Read back a lifecycle status write whose outcome was unknown, at the
+    start of the retry that made it.
+
+    Returns ``_CORRECTION_WRITE_NOT_LANDED`` when the record is exactly the
+    pre-write state (same version and shape), the advanced binding when the
+    ONLY change is the status this run tried to write, and None for anything
+    else (unreadable, unverified owner/provenance, or any other change). Only
+    the retry that made the write may call this: it is what says the status
+    was ours, never a task someone else moved.
+    """
+    import json
+
+    try:
+        fresh, version = _read_correction_lifecycle_record(binding)
+        if not isinstance(fresh, dict) or not version:
+            return None
+        shape = _correction_lifecycle_shape(fresh)
+        if version == binding.version and shape == binding.snapshot_json:
+            return _CORRECTION_WRITE_NOT_LANDED
+        expected = json.loads(binding.snapshot_json)
+        expected["status"] = status.value
+        expected_shape = _correction_lifecycle_shape(expected)
+        if version != binding.version and shape == expected_shape:
+            return dataclasses.replace(binding, snapshot_json=expected_shape, version=version)
+        return None
+    except Exception:  # noqa: BLE001 — unreadable is never landed
         return None
 
 
@@ -2152,10 +2172,13 @@ def _released_retry_eligible(skill: str, trigger: str, gate_override: bool,
     )
 
 
-def _released_retry_fingerprint(task_id: str, checkpoint_id: str):
+def _released_retry_fingerprint(task_id: str, checkpoint_id: str, *,
+                                checkpoint_only: bool = False):
     """What a retry must find unchanged: the task's version, status and hold,
     and the checkpoint's version and resolution. None when either cannot be
-    read, which never counts as unchanged."""
+    read, which never counts as unchanged. ``checkpoint_only`` leaves the task
+    part to the resume (a write whose outcome is unknown may still land during
+    the wait, so the resume reads the task back itself)."""
     try:
         task = fetch_task_record(task_id)
         checkpoint = fetch_checkpoint_record(checkpoint_id)
@@ -2165,13 +2188,17 @@ def _released_retry_fingerprint(task_id: str, checkpoint_id: str):
         checkpoint_snapshot = _record_snapshot(checkpoint)
         if task_snapshot is None or checkpoint_snapshot is None:
             return None
+        checkpoint_part = (
+            checkpoint.get("entity_version"),
+            read_checkpoint_resolution(checkpoint_snapshot),
+        )
+        if checkpoint_only:
+            return checkpoint_part
         return (
             task.get("entity_version"),
             normalize_status(task_snapshot.get("status")),
             task_snapshot.get("blocked_reason"),
-            checkpoint.get("entity_version"),
-            read_checkpoint_resolution(checkpoint_snapshot),
-        )
+        ) + checkpoint_part
     except Exception:  # noqa: BLE001 — unreadable is never unchanged
         return None
 
@@ -2184,13 +2211,15 @@ def _released_retry_note(retries_used: int, why: str) -> str:
 
 
 def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int,
-                             why: str, notifier: Notifier, resume) -> bool:
+                             why: str, notifier: Notifier, resume,
+                             checkpoint_only: bool = False) -> bool:
     """Schedule ``resume(attempt + 1)`` after the next delay, off the event
     stream. False when the attempts are spent or the state to compare against
     cannot be read, so the caller ends as it did before retries existed."""
     if attempt >= len(_RELEASED_RETRY_DELAYS):
         return False
-    baseline = _released_retry_fingerprint(entity_id, checkpoint_id)
+    baseline = _released_retry_fingerprint(entity_id, checkpoint_id,
+                                           checkpoint_only=checkpoint_only)
     if baseline is None:
         return False
     delay = _RELEASED_RETRY_DELAYS[attempt]
@@ -2202,7 +2231,8 @@ def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int
 
     async def _wait_then_resume() -> None:
         await asyncio.sleep(delay)
-        current = _released_retry_fingerprint(entity_id, checkpoint_id)
+        current = _released_retry_fingerprint(entity_id, checkpoint_id,
+                                              checkpoint_only=checkpoint_only)
         if current is None:
             log.warning("[%s] released task %s: state unreadable before retry %d — "
                         "not retrying, left as found", DAEMON_NAME, entity_id, attempt + 1)
@@ -3692,26 +3722,30 @@ async def dispatch_task(
             correction_lifecycle = _advance_correction_lifecycle(
                 routed_binding, TaskStatus.EXECUTING, outcome=outcome)
             if correction_lifecycle is None:
-                why = "executing status write timed out and did not land"
+                # This pass ends here whatever the write's outcome: nothing
+                # further is written and nothing spawns. A temporary failure
+                # only changes the task's fate: retried, not failed. The retry
+                # reads the record back before doing anything.
+                why = "executing status write did not answer"
+                retrying = False
                 if retry_ok and outcome.get("transient"):
                     async def _resume(attempt: int) -> None:
-                        nonlocal correction_lifecycle
-                        correction_lifecycle = routed_binding
-                        if await _enter_executing(attempt):
-                            await _finish_dispatch(attempt)
+                        await _resume_executing(attempt, routed_binding)
 
-                    if _schedule_released_retry(
+                    retrying = _schedule_released_retry(
                         entity_id=entity_id, checkpoint_id=release_key,
-                        attempt=retries_used, why=why, notifier=notifier, resume=_resume,
-                    ):
-                        return False
+                        attempt=retries_used, why=why, notifier=notifier,
+                        resume=_resume, checkpoint_only=True,
+                    )
                 log.warning("[%s] correction %s executing lifecycle handoff could not be verified — not spawning",
                             DAEMON_NAME, entity_id)
                 notifier.send(f"Approved correction {entity_id} lifecycle handoff could not be verified; "
                               "this attempt was not started. Reconcile current task/admission state."
-                              + _released_retry_note(retries_used, why),
+                              + (" A retry is scheduled." if retrying
+                                 else _released_retry_note(retries_used, why)),
                               priority=Priority.BLOCKER, handler=DAEMON_NAME)
-                job.failed(f"task {entity_id} executing handoff was not qualified")
+                if not retrying:
+                    job.failed(f"task {entity_id} executing handoff was not qualified")
                 return False
         else:
             set_task_status(
@@ -3730,6 +3764,37 @@ async def dispatch_task(
             )
             return False
         return True
+
+    async def _resume_executing(attempt: int, routed_binding) -> None:
+        """Start of a retry after an executing write with an unknown outcome.
+        The checkpoint was already found unchanged; the task is read back
+        through the same verified lifecycle reader as the first dispatch."""
+        nonlocal correction_lifecycle
+        landed = _correction_write_landed(routed_binding, TaskStatus.EXECUTING)
+        if landed is None:
+            log.warning("[%s] released task %s changed or could not be verified before "
+                        "retry %d — not retrying, left as found", DAEMON_NAME, entity_id, attempt)
+            notifier.send(
+                f"Released task {entity_id} was waiting to retry its executing handoff but "
+                "its state no longer matches this run's write; nothing was started. "
+                "Reconcile current task/admission state.",
+                priority=Priority.BLOCKER, handler=DAEMON_NAME)
+            return
+        if landed is _CORRECTION_WRITE_NOT_LANDED:
+            correction_lifecycle = routed_binding
+            if await _enter_executing(attempt):
+                await _finish_dispatch(attempt)
+            return
+        # This retry's own earlier write landed: continue from it as one run.
+        correction_lifecycle = landed
+        if not _release_lifecycle_proven(entity_id, TaskStatus.EXECUTING):
+            log.warning("[%s] approved task %s did not read back as executing — not spawning",
+                        DAEMON_NAME, entity_id)
+            notifier.send(
+                f"Approved task {entity_id} could not enter executing state — manual recovery needed",
+                priority=Priority.BLOCKER, handler=DAEMON_NAME)
+            return
+        await _finish_dispatch(attempt)
 
     if not await _enter_executing(0):
         return None
