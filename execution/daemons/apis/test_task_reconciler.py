@@ -607,7 +607,7 @@ def test_sweep_routes_through_apis_dispatch_task_so_the_gate_applies():
     assert "reconcile_dispatch" in wiring
     assert "TaskReconciler" in wiring
 
-    gate_src = inspect.getsource(apis.dispatch_task)
+    gate_src = inspect.getsource(apis._dispatch_task)
     assert "if not gate_override:" in gate_src
     assert "GateAction.AUTO_EXECUTE" in gate_src
 

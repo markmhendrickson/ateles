@@ -2117,6 +2117,390 @@ async def _redispatch_deferred(
         _recovering.discard(entity_id)
 
 
+# ── Restart before launch: a Fly delivery left executing with no record ──────
+#
+# A Fly delivery task becomes EXECUTING well before its delivery receipt is
+# reserved: the run session is opened, the build claim taken and (for a
+# correction) the PR re-read first. An Apis restart in that window (the
+# redeploy after a merge to main is the usual cause, and its wait reads only
+# the Fly ledger) leaves the task EXECUTING with no receipt, no run and nobody
+# awaiting it. Seen on 2026-11-06: approved, dispatched, restarted 12 s later,
+# and no run followed.
+#
+# The startup sweep below re-dispatches exactly those tasks, once per process,
+# through ``dispatch_task``. It does not run a delivery twice: a launch only
+# ever follows a durable ``launching`` receipt, so a task with no receipt for
+# its key or naming its id, and no cleared or superseded receipt in the
+# ledger's audit file, has not launched; ``run_fly_delivery``'s reservation
+# still refuses a second launch if anything races it. It touches only tasks
+# ``dispatch_task`` would send to Fly; it releases only under the task's newest
+# checkpoint, an approval this dispatcher already consumed (the release that
+# was cut off) whose action type and policy revision still hold; and anything
+# it cannot recover is named to the operator.
+
+# Task ids inside ``dispatch_task`` in this process: the sweep leaves them to
+# the dispatch already running (an event can arrive while the sweep runs).
+_tasks_in_dispatch: dict[str, int] = {}
+# Keys this process's recovery writes apart from the original release's, so
+# the routed/executing writes really land instead of replaying it.
+_PROCESS_STARTED = int(time.time())
+
+
+def _fly_routed_delivery(snapshot: dict) -> bool:
+    """Whether ``dispatch_task`` would send this task to Fly: a builder of the
+    delivery class, naming a repository, with deliveries opted onto Fly. Never
+    raises; anything undeterminable is not Fly-routed (and is not touched)."""
+    try:
+        import fly_runner
+
+        if not fly_runner.delivery_opted_in() or not _dispatch_repo_from_snapshot(snapshot):
+            return False
+        skill = _resolve_skill(_routing_tags(snapshot),
+                               assigned_to=_canonical_assignee(snapshot.get("assigned_to")),
+                               owner=snapshot.get("owner"))
+        if not isinstance(skill, str) or skill in (_HUMAN_OWNED, _SESSION_OWNED):
+            return False
+        return build_delivery.is_delivery_dispatch(skill, _dispatch_action_class(skill, snapshot))
+    except Exception:  # noqa: BLE001 — not known to be Fly-routed: leave it
+        return False
+
+
+def _fly_delivery_recorded(snapshot: dict, entity_id: str) -> bool | None:
+    """Whether the Fly ledger holds any receipt, of any status, for this task:
+    on its delivery key, or naming its id. None: the ledger could not be read,
+    or a live receipt with no task id could be this task's."""
+    import fly_runner
+
+    in_flight, _ = _fly_run_state(snapshot, entity_id)
+    if in_flight is not False:
+        return in_flight
+    try:
+        receipts = build_delivery._delivery_ledger().snapshot().get("deliveries", {})
+    except (OSError, fly_runner.FlyLedgerError):
+        return None
+    key = _fly_receipt_key(snapshot, entity_id)
+    if key and build_delivery._receipt_for(build_delivery.canonical_key(key), receipts) is not None:
+        return True
+    task_id = str(entity_id).strip()
+    return any(
+        isinstance(entry, dict)
+        and (str(entry.get("task_id") or "").strip() == task_id
+             or str(stored).strip().endswith(f"{build_delivery._TASK_KEY_MARK}{task_id}"))
+        for stored, entry in receipts.items()
+    )
+
+
+def _fly_receipt_removed(snapshot: dict, entity_id: str) -> bool | None:
+    """Whether the ledger's audit file records a cleared or superseded receipt
+    on this task's delivery key or naming it. A removal leaves no receipt, so
+    without this a launched run whose receipt was cleared would read as never
+    launched. None: the audit file could not be read."""
+    import fly_runner
+
+    try:
+        removals = build_delivery._removal_audit_lines(build_delivery._delivery_ledger())
+    except (OSError, fly_runner.FlyLedgerError):
+        return None
+    if removals is None:
+        return None
+    key = _fly_receipt_key(snapshot, entity_id)
+    wanted = build_delivery.canonical_key(key) if key else ""
+    task_id = str(entity_id).strip()
+    return any(
+        (wanted and build_delivery.canonical_key(line["key"]) == wanted)
+        or str(line.get("source_task") or "").strip() == task_id
+        or line["key"].strip().endswith(f"{build_delivery._TASK_KEY_MARK}{task_id}")
+        for line in removals
+    )
+
+
+def _created_at(item: dict) -> float | None:
+    """A checkpoint's creation time from its record, or None if unreadable."""
+    for value in (item.get("created_at"), (_record_snapshot(item) or {}).get("created_at")):
+        if isinstance(value, str) and value.strip():
+            try:
+                return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+    return None
+
+
+def _consumed_approval(task_id: str, task_snapshot: dict) -> tuple[str | None, str]:
+    """``(checkpoint_id, "")`` when the task's NEWEST checkpoint is an approval
+    this dispatcher already consumed (approved, stamped dispatched, no durable
+    denial): the release that started the attempt a restart cut off. Its
+    approval must read back authenticated, and its authorization must still
+    name this task, the task's current action type and the current revision of
+    the execution policy it was held under. Otherwise ``(None, why)``. A newer
+    pending or rejected checkpoint, or checkpoints whose order cannot be told,
+    refuse: an older approval never releases a later attempt. Reads only."""
+    items = checkpoints_for_task(task_id)
+    if items is None:
+        return None, "its checkpoints could not be read"
+    items = [i for i in items if isinstance(i, dict) and i.get("entity_id")]
+    if not items:
+        return None, "it has no checkpoint that released it"
+    if len(items) > 1:
+        stamped = [(_created_at(i), i) for i in items]
+        if any(when is None for when, _ in stamped):
+            return None, "which checkpoint released it cannot be told"
+        items = [max(stamped, key=lambda pair: pair[0])[1]]
+    item = items[0]
+    checkpoint_id = str(item["entity_id"])
+    brief = _record_snapshot(item) or {}
+    if (read_checkpoint_resolution(brief) != "approved"
+            or not checkpoint_already_dispatched(brief)
+            or _checkpoint_denial_persisted(checkpoint_id)):
+        return None, f"its latest checkpoint {checkpoint_id} is not a consumed approval"
+    record = fetch_checkpoint_record(checkpoint_id)
+    authorization = (read_authenticated_checkpoint_authorization(checkpoint_id, record)
+                     if record is not None else None)
+    owner = read_verified_entity_owner(checkpoint_id, record) if record is not None else None
+    if (not authorization or not owner or authorization.get("task_entity_id") != task_id
+            or read_authenticated_checkpoint_resolution(
+                checkpoint_id, record,
+                required_approver_sub=str(authorization.get("required_approver_sub") or "").strip(),
+                required_approver_jkt=str(authorization.get("required_approver_jkt") or "").strip(),
+                expected_user_id=owner) is None):
+        return None, f"the approval on checkpoint {checkpoint_id} could not be verified"
+    task_record = fetch_task_record(task_id)
+    task_user_id = (read_verified_entity_owner(task_id, task_record)
+                    if task_record is not None else None)
+    if not task_user_id:
+        return None, f"the task's tenant could not be verified against checkpoint {checkpoint_id}"
+    changed = (f"the task or its execution policy changed after checkpoint "
+               f"{checkpoint_id} approved it")
+    # Judge the task as it was approved: the release's own lifecycle handoff is
+    # the only write allowed since, and it changes nothing the gate reads.
+    task_snapshot = _record_snapshot(task_record) or task_snapshot
+    _skill, action_type, policy, decision = _task_gate_context(
+        task_snapshot, bound_confidence=_bound_hold_confidence(authorization))
+    if (not policy.loaded or action_type == "operator_only"
+            or not _approval_binding_holds(
+                authorization, task_id=task_id, brief_user_id=owner,
+                task_user_id=task_user_id, action_type=action_type, policy=policy,
+                decision=decision,
+                gate_action=str(brief.get("gate_action", "")).strip().lower(),
+                blast_radius=str(brief.get("blast_radius", "")).strip().lower())):
+        return None, changed
+    later = _later_observations_only_lifecycle_handoff(task_id, task_record, authorization)
+    if later is None:
+        return None, (f"the task's observations since checkpoint {checkpoint_id} approved "
+                      "it could not be read")
+    if not later:
+        return None, (f"the task changed after checkpoint {checkpoint_id} approved it "
+                      "(a write other than Apis's lifecycle handoff)")
+    return checkpoint_id, ""
+
+
+# The fields Apis's own release handoff writes on a task between approval and
+# launch (``dispatch_task``'s routed and executing ``set_task_status`` calls:
+# status, plus ``blocked_reason`` cleared on a gate-override release). Any other
+# field written since approval means the task changed after it was approved.
+_LIFECYCLE_HANDOFF_FIELDS = frozenset({"status", "blocked_reason"})
+_LIFECYCLE_HANDOFF_STATUSES = frozenset({TaskStatus.ROUTED.value, TaskStatus.EXECUTING.value})
+
+
+def _is_lifecycle_handoff(observation: dict, task_id: str) -> bool:
+    """Whether one task observation is Apis's own routed/executing handoff:
+    written under that handoff's idempotency key and changing only its fields."""
+    fields = observation.get("fields")
+    key = str(observation.get("idempotency_key") or "")
+    if not isinstance(fields, dict) or not fields or set(fields) - _LIFECYCLE_HANDOFF_FIELDS:
+        return False
+    if "status" in fields:
+        return (set(fields) == {"status"}
+                and normalize_status(fields["status"]) in _LIFECYCLE_HANDOFF_STATUSES
+                and key.startswith(f"taskstatus-{DAEMON_NAME}-{task_id}-"))
+    return (fields.get("blocked_reason") == ""
+            and key.startswith(f"taskreason-{DAEMON_NAME}-{task_id}-"))
+
+
+def _later_observations_only_lifecycle_handoff(task_id: str, task_record: dict,
+                                               authorization: dict) -> bool | None:
+    """Whether every task observation after the approved revision
+    (``task_observation_count``) is Apis's lifecycle handoff. None: the
+    observations could not be read completely, or the counts do not line up."""
+    approved = authorization.get("task_observation_count")
+    current = task_record.get("observation_count")
+    if (not isinstance(approved, int) or isinstance(approved, bool)
+            or not isinstance(current, int) or isinstance(current, bool)
+            or approved < 0 or current < approved):
+        return None
+    if current == approved:
+        # Nothing written since: the approval must bind this exact revision.
+        return (authorization.get("task_revision") == entity_record_digest(task_record)
+                and authorization.get("task_last_observation_at")
+                == task_record.get("last_observation_at"))
+    observations = fetch_entity_observations_strict(task_id)
+    if observations is None or len(observations) != current:
+        return None
+    # The observations endpoint lists newest first: the first ones are later.
+    return all(_is_lifecycle_handoff(obs, task_id)
+               for obs in observations[:current - approved])
+
+
+def _approval_binding_holds(authorization: dict, *, task_id: str, brief_user_id: str,
+                            task_user_id: str, action_type: str, policy: ExecutionPolicy,
+                            decision: GateDecision, gate_action: str,
+                            blast_radius: str) -> bool:
+    """The approval binding both the checkpoint release and restart recovery
+    require, apart from the task revision (which each judges its own way): the
+    task, tenant, action type, policy revision, gate action and blast radius
+    the operator approved, and a current gate decision compatible with it."""
+    return bool(
+        authorization.get("task_entity_id") == task_id
+        and brief_user_id
+        and authorization.get("user_id") == brief_user_id == task_user_id
+        and str(authorization.get("action_type") or "").strip().lower() == action_type
+        and authorization.get("policy_entity_id") == policy.entity_id
+        and authorization.get("policy_revision") == execution_policy_revision(policy)
+        and authorization.get("gate_action") == gate_action
+        and authorization.get("blast_radius") == blast_radius
+        and _decision_consistent_with_approval(
+            decision, gate_action=gate_action, blast_radius=blast_radius)
+    )
+
+
+_RECEIPT_UNKNOWN = ("its Fly receipt state is unknown because the Fly ledger could not be "
+                    "read (or a live run that records no task id may be its own), so it "
+                    "needs checking or refiling")
+
+
+def _unrecovered_notice(notifier: Notifier, entity_id: str, title: str, why: str) -> None:
+    """Name one task the restart sweep left executing and did not relaunch.
+
+    Every such notice says its launch is unknown: the sweep cannot always tell
+    (an unreadable ledger or audit, a cleared or superseded receipt, a task it
+    could not re-read), so no notice claims a run never launched, and each asks
+    the operator to look for an earlier run before refiling."""
+    notifier.send(
+        f"Fly delivery task was not recovered after an Apis restart: {title[:70]}\n"
+        f"  task={entity_id} is executing, and whether its Fly run launched is unknown. "
+        f"It was not relaunched because {why}. Nothing was dispatched; check for an "
+        "earlier Fly run of this task (its branch or pull request) before refiling it "
+        "through a fresh checkpoint.",
+        priority=Priority.WARN, handler=DAEMON_NAME,
+    )
+
+
+async def recover_unlaunched_fly_tasks(notifier: Notifier) -> dict:
+    """Re-dispatch Fly delivery tasks a restart left EXECUTING before launch.
+
+    Selects tasks that are EXECUTING, Fly-routed (``_fly_routed_delivery``),
+    not being dispatched in this process, and with no Fly receipt at all
+    (``_fly_delivery_recorded`` is False). Each is re-read, its consumed
+    approval verified, and dispatched with that release; one that cannot be
+    recovered is named to the operator. Never raises."""
+    counts = {"examined": 0, "not_fly": 0, "recorded": 0, "redispatched": 0,
+              "unrecovered": 0}
+    try:
+        import fly_runner
+
+        if not fly_runner.delivery_opted_in():
+            return counts
+        rows = await asyncio.to_thread(
+            query_all_entities, "task",
+            snapshot_filters={"status": {"op": "eq", "value": TaskStatus.EXECUTING.value}})
+    except Exception as exc:  # noqa: BLE001 — never raise out of the sweep
+        rows, reason = None, f"{type(exc).__name__}: {exc}"
+    else:
+        reason = "the task query failed"
+    if rows is None:
+        log.error(f"[{DAEMON_NAME}] unlaunched Fly task recovery: {reason}")
+        notifier.send(
+            "Apis could not list executing tasks after a restart, so a Fly delivery "
+            f"cut off before launch may be stranded ({reason}). Look for executing "
+            "builder tasks with no Fly receipt.",
+            priority=Priority.WARN, handler=DAEMON_NAME)
+        return counts
+    for row in rows:
+        entity_id = str(row.get("entity_id") or "")
+        if not entity_id:
+            continue
+        try:
+            await _recover_unlaunched_fly_task(entity_id, _record_snapshot(row) or row,
+                                               notifier, counts)
+        except Exception:  # noqa: BLE001 — one task must never stop the sweep
+            log.exception(f"[{DAEMON_NAME}] recovering task {entity_id} crashed")
+            counts["unrecovered"] += 1
+            _unrecovered_notice(notifier, entity_id, "(untitled)",
+                                "examining it for recovery failed")
+    if counts["examined"]:
+        log.info(f"[{DAEMON_NAME}] unlaunched Fly task recovery: {counts}")
+    return counts
+
+
+async def _recover_unlaunched_fly_task(entity_id: str, listed: dict, notifier: Notifier,
+                                       counts: dict) -> None:
+    counts["examined"] += 1
+    if not _fly_routed_delivery(listed):
+        counts["not_fly"] += 1
+        return
+    if entity_id in _tasks_in_dispatch or entity_id in _detached_runs_in_progress:
+        # Being dispatched right now: that dispatch owns it.
+        counts["recorded"] += 1
+        return
+    recorded = _fly_delivery_recorded(listed, entity_id)
+    if recorded is None:
+        # Unknown is neither: not a recorded delivery (nothing would ever retry
+        # it) and not an absent one (dispatching could launch a second run).
+        counts["unrecovered"] += 1
+        _unrecovered_notice(notifier, entity_id, str(listed.get("title") or "(untitled)"),
+                            _RECEIPT_UNKNOWN)
+        return
+    if recorded:
+        # Launched, outcome unknown, or in flight: the existing paths own it.
+        counts["recorded"] += 1
+        return
+    fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+    title = str((fresh or listed).get("title") or "(untitled)")
+    if fresh is None:
+        counts["unrecovered"] += 1
+        _unrecovered_notice(notifier, entity_id, title, "it could not be re-read")
+        return
+    if (normalize_status(fresh.get("status")) != TaskStatus.EXECUTING.value
+            or not _fly_routed_delivery(fresh)
+            or entity_id in _tasks_in_dispatch or entity_id in _detached_runs_in_progress):
+        counts["recorded"] += 1
+        return
+    recorded = _fly_delivery_recorded(fresh, entity_id)
+    if recorded is None:
+        counts["unrecovered"] += 1
+        _unrecovered_notice(notifier, entity_id, title, _RECEIPT_UNKNOWN)
+        return
+    if recorded:
+        counts["recorded"] += 1
+        return
+    removed = await asyncio.to_thread(_fly_receipt_removed, fresh, entity_id)
+    if removed is not False:
+        counts["unrecovered"] += 1
+        _unrecovered_notice(notifier, entity_id, title,
+                            "the Fly ledger's audit could not be read" if removed is None else
+                            "a receipt for it was cleared or superseded")
+        return
+    if fresh.get("task_type") == "existing_pr_correction":
+        counts["unrecovered"] += 1
+        _unrecovered_notice(notifier, entity_id, title,
+                            "a correction's release is bound to its checkpoint and "
+                            "cannot be resumed from here")
+        return
+    checkpoint_id, why = await asyncio.to_thread(_consumed_approval, entity_id, fresh)
+    if checkpoint_id is None:
+        counts["unrecovered"] += 1
+        _unrecovered_notice(notifier, entity_id, title, why)
+        return
+    log.warning(
+        f"[{DAEMON_NAME}] task {entity_id} was left executing with no Fly receipt "
+        f"(restart before launch) — re-dispatching under checkpoint {checkpoint_id}")
+    counts["redispatched"] += 1
+    await dispatch_task(
+        entity_id, fresh, trigger="restart_recovery", notifier=notifier,
+        gate_override=True, snapshot_hydrated=True,
+        release_key=f"{checkpoint_id}-restart-{_PROCESS_STARTED}",
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class _ApprovedCorrectionLifecycle:
     """Invocation-local input from the authenticated checkpoint consumer.
@@ -2304,7 +2688,22 @@ def _guessed_owner_is_low_stakes(skill: str, snapshot: dict) -> bool:
         return False
 
 
-async def dispatch_task(
+async def dispatch_task(entity_id: str, *args, **kwargs) -> bool | None:
+    """``_dispatch_task`` (its docstring has the contract), with the task held
+    in ``_tasks_in_dispatch`` until it returns, so the restart-recovery sweep
+    never re-dispatches a task this process is dispatching right now."""
+    _tasks_in_dispatch[entity_id] = _tasks_in_dispatch.get(entity_id, 0) + 1
+    try:
+        return await _dispatch_task(entity_id, *args, **kwargs)
+    finally:
+        left = _tasks_in_dispatch.get(entity_id, 1) - 1
+        if left > 0:
+            _tasks_in_dispatch[entity_id] = left
+        else:
+            _tasks_in_dispatch.pop(entity_id, None)
+
+
+async def _dispatch_task(
     entity_id: str,
     snapshot: dict,
     trigger: str,
@@ -4835,7 +5234,6 @@ async def handle_checkpoint_brief(
             )
             return False
 
-        auth_action_type = str(authorization.get("action_type") or "").strip().lower()
         if not current_policy.loaded:
             _require_fresh_release_authority(
                 entity_id,
@@ -4866,21 +5264,21 @@ async def handle_checkpoint_brief(
             confidence_unscored=release_unscored,
         )
         exact_authority = (
-            authorization.get("task_entity_id") == task_id
-            and authorization.get("user_id") == brief_user_id == task_user_id
-            and authorization.get("task_revision") == entity_record_digest(task_record)
+            authorization.get("task_revision") == entity_record_digest(task_record)
             and authorization.get("task_observation_count")
             == task_record.get("observation_count")
             and authorization.get("task_last_observation_at")
             == task_record.get("last_observation_at")
-            and auth_action_type == current_action_type
-            and authorization.get("policy_entity_id") == current_policy.entity_id
-            and authorization.get("policy_revision")
-            == execution_policy_revision(current_policy)
-            and authorization.get("gate_action") == gate_action
-            and authorization.get("blast_radius") == blast_radius
-            and _decision_consistent_with_approval(
-                current_decision, gate_action=gate_action, blast_radius=blast_radius
+            and _approval_binding_holds(
+                authorization,
+                task_id=task_id,
+                brief_user_id=brief_user_id,
+                task_user_id=task_user_id,
+                action_type=current_action_type,
+                policy=current_policy,
+                decision=current_decision,
+                gate_action=gate_action,
+                blast_radius=blast_radius,
             )
         )
         if not exact_authority:
@@ -5421,6 +5819,19 @@ async def main() -> None:
                 exc_info=True,
             )
 
+    # 6d. Fly deliveries cut off before launch: a task dispatched to Fly is
+    #     EXECUTING before its ledger receipt exists, so a restart in that
+    #     window strands it with nothing to resume it (2026-11-06). Re-dispatch
+    #     those once, at startup; see recover_unlaunched_fly_tasks.
+    async def unlaunched_fly_recovery_sweep() -> None:
+        try:
+            await recover_unlaunched_fly_tasks(notifier)
+        except Exception as exc:  # noqa: BLE001 — never let recovery kill startup
+            log.error(
+                f"[{DAEMON_NAME}] unlaunched Fly task recovery failed: {exc}",
+                exc_info=True,
+            )
+
     # 7. Issue-pipeline resume sweep: the task watchdog above resumes `task`
     #    work left mid-flight by a restart, but the GitHub issue pipeline
     #    creates no task entity, so it was invisible to that sweeper — a
@@ -5576,6 +5987,7 @@ async def main() -> None:
         watchdog.run(notifier, watchdog_dispatch),
         reconciler.run(reconcile_dispatch),
         deferred_recovery_sweep(),
+        unlaunched_fly_recovery_sweep(),
         resume_sweep(),
         labelled_panel_sweep(),
         clear_closed_issue_markers_sweep(),
