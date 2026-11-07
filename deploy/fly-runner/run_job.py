@@ -1108,8 +1108,26 @@ def auth_headers_for(job: Job):
     return _bearer
 
 
-def write_record(base_url: str, auth, record: dict, *, attempts: int = 3) -> bool:
-    """POST the record to Neotoma ``/store`` as the role's own principal."""
+# How long the record write keeps retrying a temporary failure (a timeout, a
+# connection failure or a 5xx), and its backoff. A lost record leaves Apis
+# unable to say what the run did, so a busy Neotoma is waited out for a while.
+RECORD_RETRY_SECONDS = 180.0
+RECORD_BACKOFF_FIRST_SECONDS = 2.0
+RECORD_BACKOFF_MAX_SECONDS = 30.0
+RECORD_ATTEMPT_TIMEOUT_SECONDS = 30.0
+# Kept back before the run's deadline so the last attempt ends before it.
+RECORD_DEADLINE_MARGIN_SECONDS = 5.0
+
+
+def write_record(base_url: str, auth, record: dict, *, deadline: float | None = None,
+                 clock=time.time, sleep=time.sleep, opener=None) -> bool:  # fmt: skip
+    """POST the record to Neotoma ``/store`` as the role's own principal.
+
+    A temporary failure (timeout, connection failure, 5xx) is retried with
+    backoff for up to ``RECORD_RETRY_SECONDS``, and never past *deadline*
+    (less a margin). A refused write (any other HTTP status) fails at once.
+    Each attempt logs only its status; never the record or a credential."""
+    opener = opener or urllib.request.urlopen
     payload = json.dumps(
         {
             "idempotency_key": f"fly-runner-result-{record['run_id']}",
@@ -1118,7 +1136,19 @@ def write_record(base_url: str, auth, record: dict, *, attempts: int = 3) -> boo
         }
     ).encode()
     url = f"{base_url}/store"
-    for attempt in range(attempts):
+    start = clock()
+    stop_by = start + RECORD_RETRY_SECONDS
+    if deadline is not None:
+        stop_by = min(stop_by, deadline - RECORD_DEADLINE_MARGIN_SECONDS)
+    backoff = RECORD_BACKOFF_FIRST_SECONDS
+    attempt = 0
+    while True:
+        attempt += 1
+        left = stop_by - clock()
+        if left <= 0:
+            print(f"fly-runner: record write gave up before attempt {attempt}: no time left",
+                  flush=True)
+            return False
         try:
             headers = {
                 "Content-Type": "application/json",
@@ -1131,13 +1161,31 @@ def write_record(base_url: str, auth, record: dict, *, attempts: int = 3) -> boo
             return False
         req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                if 200 <= resp.status < 300:
-                    return True
-        except (urllib.error.URLError, OSError):
-            pass
-        time.sleep(2 * (attempt + 1))
-    return False
+            with opener(req, timeout=min(RECORD_ATTEMPT_TIMEOUT_SECONDS, left)) as resp:
+                status = resp.status
+            if 200 <= status < 300:
+                print(f"fly-runner: record write attempt {attempt}: HTTP {status}", flush=True)
+                return True
+            print(f"fly-runner: record write attempt {attempt}: HTTP {status}; refused",
+                  flush=True)
+            return False
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500:
+                print(f"fly-runner: record write attempt {attempt}: HTTP {exc.code}; refused",
+                      flush=True)
+                return False
+            outcome = f"HTTP {exc.code}"
+        except (urllib.error.URLError, OSError) as exc:  # timeouts are OSErrors
+            outcome = type(exc).__name__
+        wait = min(backoff, stop_by - clock())
+        if wait <= 0:
+            print(f"fly-runner: record write attempt {attempt}: {outcome}; giving up",
+                  flush=True)
+            return False
+        print(f"fly-runner: record write attempt {attempt}: {outcome}; retrying in "
+              f"{wait:.0f}s", flush=True)
+        sleep(wait)
+        backoff = min(backoff * 2, RECORD_BACKOFF_MAX_SECONDS)
 
 
 def main(job_dir: Path = DEFAULT_JOB_DIR, *, writer=write_record, runner=run_cli,
@@ -1275,7 +1323,10 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
         except Exception as exc:  # noqa: BLE001 — never echo key material
             print(f"fly-runner: no usable role identity: {type(exc).__name__}", flush=True)
             return EXIT_RECORD_FAILED
-        stored = writer(job.neotoma_base_url, auth, record)
+        if writer is write_record:
+            stored = writer(job.neotoma_base_url, auth, record, deadline=deadline)
+        else:
+            stored = writer(job.neotoma_base_url, auth, record)
         print(
             f"fly-runner: run={job.run_id} role={job.role} provider={job.provider} "
             f"rc={rc} stdout={len(out)}B stderr={len(err)}B probe_ok={probe.get('ok')} "
