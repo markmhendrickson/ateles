@@ -31,8 +31,11 @@ shared with the launchd plist renderer; credential-named names
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -67,6 +70,15 @@ def scrub_credential_env(environ) -> list[str]:
 
 def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
     scrub_credential_env(os.environ)
+    # Daemons build a module-level Notifier at import, during collection and
+    # before any fixture runs; Notifier reads its queue path when constructed.
+    # Set the session-wide private paths here so those instances (and child
+    # processes) never resolve to the live queue in the system temp dir. Set
+    # after the scrub, which would otherwise be free to drop them.
+    state = tempfile.mkdtemp(prefix="ateles-test-notify-")
+    atexit.register(shutil.rmtree, state, ignore_errors=True)
+    os.environ["ATELES_DIGEST_QUEUE_PATH"] = str(Path(state) / "digest.json")
+    os.environ["ATELES_DEDUPE_JOURNAL_PATH"] = str(Path(state) / "dedupe.json")
 
 
 @pytest.fixture(autouse=True)
