@@ -1706,6 +1706,51 @@ def test_the_launchd_template_keeps_each_tier_at_its_own_idle_window():
     assert wp.idle_windows(24) == (24, 24)
 
 
+def test_inherited_git_context_does_not_reach_git_subprocesses(repo, tmp_path):
+    parent = dict(
+        PATH="/usr/bin",
+        HOME="/h",
+        **{name: "/somewhere/else" for name in wp.GIT_CONTEXT_VARS},
+    )
+    env = wp.build_git_env(parent)
+    assert not [name for name in wp.GIT_CONTEXT_VARS if name in env]
+    assert env["HOME"] == "/h" and env["GIT_OPTIONAL_LOCKS"] == "0"
+    assert env["PATH"].endswith(":/usr/bin")
+    for name in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+        "GIT_CEILING_DIRECTORIES",
+    ):
+        assert name in wp.GIT_CONTEXT_VARS
+    # effect: a GIT_DIR inherited from the parent must not redirect the pruner's git calls
+    w = repo.add_wt("ctx", node_modules=False)
+    other = tmp_path / "other"
+    sh("git", "init", "-q", str(other))
+    polluted = dict(os.environ, GIT_DIR=str(other / ".git"), GIT_WORK_TREE=str(other))
+    monkey_env = wp.build_git_env(polluted)
+    wp.GIT_ENV = dict(
+        monkey_env, **GIT_IDENTITY
+    )  # the fixture restores GIT_ENV afterwards
+    rc, out, _ = wp.run(["git", "-C", w, "rev-parse", "--show-toplevel"])
+    assert rc == 0 and os.path.realpath(out.strip()) == os.path.realpath(w)
+    # and the module applies it at import time, to whatever environment it is started in
+    probe = (
+        "import sys; sys.path.insert(0, %r); import worktree_prune as w; "
+        "print(sorted(k for k in w.GIT_ENV if k in w.GIT_CONTEXT_VARS))"
+    ) % str(Path(wp.__file__).parent)
+    child_env = dict(os.environ, GIT_DIR="/x", GIT_INDEX_FILE="/y", GIT_COMMON_DIR="/z")
+    r = subprocess.run(
+        [sys.executable, "-c", probe], env=child_env, capture_output=True, text=True
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "[]"
+
+
 def test_defaults_are_relative_to_home_with_an_empty_hold(repo):
     warnings = wp.configure(env={}, cli={})
     assert warnings == []

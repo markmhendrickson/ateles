@@ -145,14 +145,36 @@ DATA_REGEN_CHILDREN = ("logs", "sources", "tmp")
 
 # launchd starts jobs with a minimal PATH; add the usual Homebrew / system locations for git, gh and lsof.
 TOOL_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-# GIT_OPTIONAL_LOCKS=0: read-only `git status` must not take index locks in other sessions' worktrees
-GIT_ENV = dict(
-    os.environ,
-    GIT_OPTIONAL_LOCKS="0",
-    GIT_TERMINAL_PROMPT="0",
-    GH_PROMPT_DISABLED="1",
-    PATH=TOOL_PATH + ":" + os.environ.get("PATH", ""),
+# Git context variables a parent process (a git hook, another git command) may export. Passed on to the
+# git subprocesses below they would point every command at some other repository, so they are dropped.
+GIT_CONTEXT_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
 )
+
+
+def build_git_env(parent):
+    """The environment for git/gh/lsof subprocesses: the parent's minus inherited git context.
+
+    GIT_OPTIONAL_LOCKS=0: read-only `git status` must not take index locks in other sessions' worktrees.
+    """
+    env = {k: v for k, v in parent.items() if k not in GIT_CONTEXT_VARS}
+    env.update(
+        GIT_OPTIONAL_LOCKS="0",
+        GIT_TERMINAL_PROMPT="0",
+        GH_PROMPT_DISABLED="1",
+        PATH=TOOL_PATH + ":" + parent.get("PATH", ""),
+    )
+    return env
+
+
+GIT_ENV = build_git_env(os.environ)
 
 
 # ----------------------------------------------------------------------------------------------
