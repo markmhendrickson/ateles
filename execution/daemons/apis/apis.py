@@ -592,7 +592,9 @@ import model_tiering  # noqa: E402
 import producer_confidence  # noqa: E402
 from red_conditions import ApisNotifier  # noqa: E402
 from skill_runner import SkillResult, _redact_secrets, run_skill  # noqa: E402
-from swarm_dispatch import SwarmDispatcher, _token_for_agent_on_repo  # noqa: E402
+from swarm_dispatch import (  # noqa: E402
+    SwarmDispatcher, _token_for_agent_on_repo, neotoma_read_failure_is_transient,
+)
 from task_reconciler import TaskReconciler  # noqa: E402
 from unroutable_ledger import shared_ledger  # noqa: E402
 
@@ -1971,11 +1973,17 @@ def _read_correction_lifecycle_record(binding):
     return _snapshot_with_tenant(record), version
 
 
-def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
+def _advance_correction_lifecycle(binding, status, *, clear_reason=False, outcome=None):
     """Condition each controller write on the exact admitted/previous state.
 
     A conflict, ambiguous reply or missing next token ends the sequence. A fresh
     token is never fetched to resume after failure, and no new hold is erased.
+
+    A write that did not answer (a timeout, connection failure or 5xx) has an
+    unknown outcome. It ends the sequence like any other failure, with no
+    read-back here; ``outcome["transient"]`` is set so the caller may schedule
+    a later retry, which reads the record back first
+    (``_correction_write_landed``).
     """
     import json
 
@@ -1995,6 +2003,8 @@ def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
                 key_suffix=f"{status.value}-approved-{binding.release_key}",
             )
             if not committed or not committed.version:
+                if outcome is not None and getattr(committed, "transient", False):
+                    outcome["transient"] = True
                 return None
             expected[field] = value
             expected_shape = _correction_lifecycle_shape(expected)
@@ -2004,6 +2014,39 @@ def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
                 return None
         return dataclasses.replace(binding, snapshot_json=expected_shape, version=version)
     except Exception:
+        return None
+
+
+_CORRECTION_WRITE_NOT_LANDED = object()
+
+
+def _correction_write_landed(binding, status):
+    """Read back a lifecycle status write whose outcome was unknown, at the
+    start of the retry that made it.
+
+    Returns ``_CORRECTION_WRITE_NOT_LANDED`` when the record is exactly the
+    pre-write state (same version and shape), the advanced binding when the
+    ONLY change is the status this run tried to write, and None for anything
+    else (unreadable, unverified owner/provenance, or any other change). Only
+    the retry that made the write may call this: it is what says the status
+    was ours, never a task someone else moved.
+    """
+    import json
+
+    try:
+        fresh, version = _read_correction_lifecycle_record(binding)
+        if not isinstance(fresh, dict) or not version:
+            return None
+        shape = _correction_lifecycle_shape(fresh)
+        if version == binding.version and shape == binding.snapshot_json:
+            return _CORRECTION_WRITE_NOT_LANDED
+        expected = json.loads(binding.snapshot_json)
+        expected["status"] = status.value
+        expected_shape = _correction_lifecycle_shape(expected)
+        if version != binding.version and shape == expected_shape:
+            return dataclasses.replace(binding, snapshot_json=expected_shape, version=version)
+        return None
+    except Exception:  # noqa: BLE001 — unreadable is never landed
         return None
 
 
@@ -2110,6 +2153,167 @@ def _guessed_owner_is_low_stakes(skill: str, snapshot: dict) -> bool:
         )
     except Exception:  # noqa: BLE001 — undeterminable means keep today's hold
         return False
+
+
+# A released builder dispatch that failed only because Neotoma was briefly
+# slow (its agent_policy read, or its executing status write, timed out, hit a
+# connection failure or a 5xx) is retried with the same approved checkpoint
+# instead of failing the task. One delay per retry, roughly 15 minutes in all.
+# Never for a missing or bad record, or a state that was read and differs.
+_RELEASED_RETRY_DELAYS: tuple[float, ...] = (120.0, 300.0, 480.0)
+
+
+def _released_retry_eligible(skill: str, trigger: str, gate_override: bool,
+                             release_key: str) -> bool:
+    """Only a builder dispatch released by an approved checkpoint retries."""
+    return (
+        gate_override and trigger == "approved" and bool(release_key)
+        and (skill or "").strip().lower() in build_delivery.BUILDER_SKILLS
+    )
+
+
+def _released_retry_authorized(task_id: str, task: dict, checkpoint_id: str,
+                               checkpoint: dict, checkpoint_snapshot: dict) -> bool:
+    """The checks ``handle_checkpoint_brief`` makes before releasing an approved
+    checkpoint, made again for a retry: a versioned checkpoint, still approved,
+    naming this task, with the checkpoint and task owned by the same verified
+    tenant. Anything absent or different is not authorized."""
+    version = checkpoint.get("entity_version")
+    if not isinstance(version, str) or not version:
+        return False
+    if read_checkpoint_resolution(checkpoint_snapshot) != "approved":
+        return False
+    if checkpoint_snapshot.get("task_entity_id") != task_id:
+        return False
+    brief_user_id = read_verified_entity_owner(checkpoint_id, checkpoint)
+    task_user_id = read_verified_entity_owner(task_id, task)
+    return bool(brief_user_id) and bool(task_user_id) and brief_user_id == task_user_id
+
+
+def _released_retry_fingerprint(task_id: str, checkpoint_id: str, *,
+                                checkpoint_only: bool = False):
+    """What a retry must find unchanged: the task's version, status and hold,
+    and the checkpoint's version and resolution. None when either cannot be
+    read, or the approval no longer authorizes this task (see
+    ``_released_retry_authorized``); None never counts as unchanged.
+    ``checkpoint_only`` leaves the task part to the resume (a write whose
+    outcome is unknown may still land during the wait, so the resume reads the
+    task back itself); the checkpoint's version, approval and task link, and
+    the owners, are still checked."""
+    try:
+        task = fetch_task_record(task_id)
+        checkpoint = fetch_checkpoint_record(checkpoint_id)
+        if not isinstance(task, dict) or not isinstance(checkpoint, dict):
+            return None
+        task_snapshot = _record_snapshot(task)
+        checkpoint_snapshot = _record_snapshot(checkpoint)
+        if task_snapshot is None or checkpoint_snapshot is None:
+            return None
+        if not _released_retry_authorized(task_id, task, checkpoint_id,
+                                          checkpoint, checkpoint_snapshot):
+            return None
+        checkpoint_part = (
+            checkpoint.get("entity_version"),
+            read_checkpoint_resolution(checkpoint_snapshot),
+        )
+        if checkpoint_only:
+            return checkpoint_part
+        task_version = task.get("entity_version")
+        if not isinstance(task_version, str) or not task_version:
+            return None
+        return (
+            task_version,
+            normalize_status(task_snapshot.get("status")),
+            task_snapshot.get("blocked_reason"),
+        ) + checkpoint_part
+    except Exception:  # noqa: BLE001 — unreadable is never unchanged
+        return None
+
+
+def _released_retry_task_dispatchable(task_id: str) -> bool:
+    """False when the task now stands where ``dispatch_task``'s terminal guard
+    would refuse it (``is_terminal``, or VERIFIED), or is held (BLOCKED), or
+    cannot be read. A retry resumes past that guard, so it checks the same
+    states again just before resuming; the fingerprint comparison alone does
+    not reject a state the baseline itself already held."""
+    try:
+        snapshot = _record_snapshot(fetch_task_record(task_id))
+        if snapshot is None:
+            return False
+        status = snapshot.get("status")
+        return not (
+            is_terminal(status)
+            or normalize_status(status) in (TaskStatus.VERIFIED.value,
+                                            TaskStatus.BLOCKED.value)
+        )
+    except Exception:  # noqa: BLE001 — unreadable is never dispatchable
+        return False
+
+
+def _released_retry_note(retries_used: int, why: str) -> str:
+    if not retries_used:
+        return ""
+    return (f" Retried {retries_used} time(s) over the temporary Neotoma "
+            f"failure ({why}); attempts exhausted.")
+
+
+def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int,
+                             why: str, notifier: Notifier, resume,
+                             checkpoint_only: bool = False,
+                             baseline: tuple | None = None) -> bool:
+    """Schedule ``resume(attempt + 1)`` after the next delay, off the event
+    stream. False when the attempts are spent or the state to compare against
+    cannot be read, so the caller ends as it did before retries existed.
+
+    A full (task and checkpoint) retry needs ``baseline``: the fingerprint the
+    caller read BEFORE the attempt that failed, so a change made during that
+    attempt is a difference rather than the new baseline. Without one there
+    is no retry. ``checkpoint_only`` reads its baseline here, since its resume
+    reads the task back itself."""
+    if attempt >= len(_RELEASED_RETRY_DELAYS):
+        return False
+    if checkpoint_only and baseline is None:
+        baseline = _released_retry_fingerprint(entity_id, checkpoint_id,
+                                               checkpoint_only=True)
+    if baseline is None:
+        return False
+    delay = _RELEASED_RETRY_DELAYS[attempt]
+    log.warning(
+        "[%s] released task %s: %s — retry %d/%d with checkpoint %s in %ss",
+        DAEMON_NAME, entity_id, why, attempt + 1, len(_RELEASED_RETRY_DELAYS),
+        checkpoint_id, delay,
+    )
+
+    async def _wait_then_resume() -> None:
+        await asyncio.sleep(delay)
+        current = _released_retry_fingerprint(entity_id, checkpoint_id,
+                                              checkpoint_only=checkpoint_only)
+        if current is None:
+            log.warning("[%s] released task %s: state unreadable before retry %d — "
+                        "not retrying, left as found", DAEMON_NAME, entity_id, attempt + 1)
+            notifier.send(
+                f"Released task {entity_id} was waiting to retry ({why}) but its state "
+                "could not be read back; nothing was started. Reconcile it.",
+                priority=Priority.BLOCKER, handler=DAEMON_NAME)
+            return
+        if current != baseline:
+            log.info("[%s] released task %s changed during the retry wait — "
+                     "not retrying, left as found", DAEMON_NAME, entity_id)
+            return
+        if not _released_retry_task_dispatchable(entity_id):
+            log.info("[%s] released task %s is terminal, held or unreadable before "
+                     "retry %d — not retrying, left as found", DAEMON_NAME, entity_id,
+                     attempt + 1)
+            return
+        log.info("[%s] released task %s: retry %d/%d starting", DAEMON_NAME,
+                 entity_id, attempt + 1, len(_RELEASED_RETRY_DELAYS))
+        await resume(attempt + 1)
+
+    task = asyncio.create_task(
+        _wait_then_resume(), name=f"apis-dispatch-{entity_id}-retry-{attempt + 1}")
+    _background_dispatch_tasks.add(task)
+    task.add_done_callback(_background_dispatch_done)
+    return True
 
 
 async def dispatch_task(
@@ -2830,38 +3034,9 @@ async def dispatch_task(
         )
         return True if correction_lifecycle is not None else None
 
-    # Lifecycle: about to spawn the T4 agent.
-    if correction_lifecycle is not None:
-        correction_lifecycle = _advance_correction_lifecycle(
-            correction_lifecycle, TaskStatus.EXECUTING)
-        if correction_lifecycle is None:
-            log.warning("[%s] correction %s executing lifecycle handoff could not be verified — not spawning",
-                        DAEMON_NAME, entity_id)
-            notifier.send(f"Approved correction {entity_id} lifecycle handoff could not be verified; "
-                          "this attempt was not started. Reconcile current task/admission state.",
-                          priority=Priority.BLOCKER, handler=DAEMON_NAME)
-            job.failed(f"task {entity_id} executing handoff was not qualified")
-            return
-    else:
-        set_task_status(
-            entity_id, TaskStatus.EXECUTING, handler=DAEMON_NAME,
-            from_status=TaskStatus.ROUTED.value, key_suffix=lifecycle_key,
-        )
-    if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.EXECUTING):
-        log.warning(
-            f"[{DAEMON_NAME}] approved task {entity_id} did not read back as "
-            "executing — not spawning"
-        )
-        notifier.send(
-            f"Approved task {entity_id} could not enter executing state — manual recovery needed",
-            priority=Priority.BLOCKER,
-            handler=DAEMON_NAME,
-        )
-        return
-
     completed = False
 
-    async def _finish_dispatch() -> None:
+    async def _finish_dispatch(retries_used: int = 0) -> None:
         nonlocal completed
         # E1/E2: this run's thread. run_key keys it to the attempt so SSE
         # replays reuse it while a genuine retry opens a fresh run.
@@ -2949,6 +3124,11 @@ async def dispatch_task(
                 dispatch_snapshot = json.loads(correction_lifecycle.snapshot_json)
                 lifecycle_binding["_lifecycle_version"] = correction_lifecycle.version
                 lifecycle_binding["_lifecycle_provenance"] = correction_lifecycle
+            # What the approval authorized, read before the launch: a retry of
+            # a refusal compares against this, never against a state the
+            # launch itself left behind. None means no retry, not no launch.
+            prelaunch = (_released_retry_fingerprint(entity_id, release_key)
+                         if retry_ok else None)
             result = await _spawn_harness_skill(
                 skill,
                 entity_id,
@@ -3554,6 +3734,22 @@ async def dispatch_task(
             job.failed(f"task {entity_id} → {skill} outcome unknown: {result.remote_run_id}")
         else:
             reason = result.error or f"rc={result.returncode}"
+            if retry_ok and neotoma_read_failure_is_transient(result):
+                # The refusal was right (no agent runs without its policy);
+                # only the task's fate changes: retried, not failed.
+                why = "agent_policy/agent_definition read did not complete"
+                if _schedule_released_retry(
+                    entity_id=entity_id, checkpoint_id=release_key,
+                    attempt=retries_used, why=why, notifier=notifier,
+                    resume=_finish_dispatch, baseline=prelaunch,
+                ):
+                    _run_stage(
+                        "assistant",
+                        f"{skill} not started (trigger={trigger}): {reason} — retry scheduled",
+                        stage=f"retry-{retries_used + 1}",
+                    )
+                    return
+                reason += _released_retry_note(retries_used, why)
             _run_stage(
                 "assistant",
                 f"{skill} failed (trigger={trigger}): {reason}",
@@ -3577,6 +3773,100 @@ async def dispatch_task(
                 handler=DAEMON_NAME,
             )
             job.failed(f"task {entity_id} → {skill} failed: {reason[:60]}")
+
+    retry_ok = _released_retry_eligible(skill, trigger, gate_override, release_key)
+
+    async def _enter_executing(retries_used: int) -> bool:
+        """Lifecycle: about to spawn the T4 agent. True once the task durably
+        entered EXECUTING; False when this attempt ended (or a retry of it was
+        scheduled)."""
+        nonlocal correction_lifecycle
+        if correction_lifecycle is not None:
+            routed_binding = correction_lifecycle
+            outcome: dict = {}
+            correction_lifecycle = _advance_correction_lifecycle(
+                routed_binding, TaskStatus.EXECUTING, outcome=outcome)
+            if correction_lifecycle is None:
+                # This pass ends here whatever the write's outcome: nothing
+                # further is written and nothing spawns. A temporary failure
+                # only changes the task's fate: retried, not failed. The retry
+                # reads the record back before doing anything.
+                why = "executing status write did not answer"
+                retrying = False
+                if retry_ok and outcome.get("transient"):
+                    async def _resume(attempt: int) -> None:
+                        await _resume_executing(attempt, routed_binding)
+
+                    retrying = _schedule_released_retry(
+                        entity_id=entity_id, checkpoint_id=release_key,
+                        attempt=retries_used, why=why, notifier=notifier,
+                        resume=_resume, checkpoint_only=True,
+                    )
+                log.warning("[%s] correction %s executing lifecycle handoff could not be verified — not spawning",
+                            DAEMON_NAME, entity_id)
+                if retrying:
+                    notice = (f"Approved correction {entity_id} lifecycle handoff could not be "
+                              "verified; this attempt was not started. Apis will retry "
+                              "automatically.")
+                else:
+                    notice = (f"Approved correction {entity_id} lifecycle handoff could not be "
+                              "verified; this attempt was not started. Reconcile current "
+                              "task/admission state." + _released_retry_note(retries_used, why))
+                notifier.send(notice, priority=Priority.BLOCKER, handler=DAEMON_NAME)
+                if not retrying:
+                    job.failed(f"task {entity_id} executing handoff was not qualified")
+                return False
+        else:
+            set_task_status(
+                entity_id, TaskStatus.EXECUTING, handler=DAEMON_NAME,
+                from_status=TaskStatus.ROUTED.value, key_suffix=lifecycle_key,
+            )
+        if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.EXECUTING):
+            log.warning(
+                f"[{DAEMON_NAME}] approved task {entity_id} did not read back as "
+                "executing — not spawning"
+            )
+            notifier.send(
+                f"Approved task {entity_id} could not enter executing state — manual recovery needed",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+            return False
+        return True
+
+    async def _resume_executing(attempt: int, routed_binding) -> None:
+        """Start of a retry after an executing write with an unknown outcome.
+        The checkpoint was already found unchanged; the task is read back
+        through the same verified lifecycle reader as the first dispatch."""
+        nonlocal correction_lifecycle
+        landed = _correction_write_landed(routed_binding, TaskStatus.EXECUTING)
+        if landed is None:
+            log.warning("[%s] released task %s changed or could not be verified before "
+                        "retry %d — not retrying, left as found", DAEMON_NAME, entity_id, attempt)
+            notifier.send(
+                f"Released task {entity_id} was waiting to retry its executing handoff but "
+                "its state no longer matches this run's write; nothing was started. "
+                "Reconcile current task/admission state.",
+                priority=Priority.BLOCKER, handler=DAEMON_NAME)
+            return
+        if landed is _CORRECTION_WRITE_NOT_LANDED:
+            correction_lifecycle = routed_binding
+            if await _enter_executing(attempt):
+                await _finish_dispatch(attempt)
+            return
+        # This retry's own earlier write landed: continue from it as one run.
+        correction_lifecycle = landed
+        if not _release_lifecycle_proven(entity_id, TaskStatus.EXECUTING):
+            log.warning("[%s] approved task %s did not read back as executing — not spawning",
+                        DAEMON_NAME, entity_id)
+            notifier.send(
+                f"Approved task {entity_id} could not enter executing state — manual recovery needed",
+                priority=Priority.BLOCKER, handler=DAEMON_NAME)
+            return
+        await _finish_dispatch(attempt)
+
+    if not await _enter_executing(0):
+        return None
 
     if detach_after_accept:
         # Re-checked here with no await since the create_task below, so two
