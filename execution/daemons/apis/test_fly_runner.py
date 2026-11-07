@@ -5135,6 +5135,9 @@ def _panel_lens_dispatch(provider, monkeypatch, **kw):
     None), and the result."""
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "lens_review:arch")
     monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
+    # Pinned like ``seam`` pins CLAUDE_BIN: without it a host with no codex
+    # install skips the dispatch before the Fly seam is ever reached.
+    monkeypatch.setattr(skill_runner, "CODEX_BIN", "/usr/bin/codex-test")
     seen: dict = {}
     real = fly_runner.build_job
 
