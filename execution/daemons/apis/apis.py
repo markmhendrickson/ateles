@@ -2299,16 +2299,20 @@ def _released_retry_status_allowed(status) -> bool:
 
 def _released_retry_task_dispatchable(task_id: str) -> bool:
     """True only when the task still stands in a status a released task holds
-    between its release and its launch (``_RELEASED_RETRY_STATUSES``). A retry
-    resumes past ``dispatch_task``'s guards and gate, so every other status,
-    including a new hold, an unknown or a non-string one, or an unreadable
-    record, is refused. The fingerprint comparison alone does not reject a
-    state the baseline itself already held."""
+    between its release and its launch (``_RELEASED_RETRY_STATUSES``) AND
+    carries an empty ``blocked_reason``, judged as ``_release_lifecycle_proven``
+    judges the first released launch (exactly ``""``). A retry resumes past
+    ``dispatch_task``'s guards and gate, so every other status (a new hold, an
+    unknown or a non-string one), any hold reason, including one on a routed
+    or executing task, or an unreadable record, is refused and the task is
+    left as found. The fingerprint comparison alone does not reject a state
+    the baseline itself already held."""
     try:
         snapshot = _record_snapshot(fetch_task_record(task_id))
         if snapshot is None:
             return False
-        return _released_retry_status_allowed(snapshot.get("status"))
+        return (_released_retry_status_allowed(snapshot.get("status"))
+                and snapshot.get("blocked_reason") == "")
     except Exception:  # noqa: BLE001 — unreadable is never dispatchable
         return False
 
@@ -2328,6 +2332,9 @@ def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int
     stream. False when the attempts are spent or the state to compare against
     cannot be read; the caller then escalates with one ``rounds_exhausted``
     checkpoint (``_escalate_released_retry_exhausted``) rather than failing.
+    That escalation writes only while the task and checkpoint still match this
+    attempt's baseline: with no baseline, or a state that has changed, nothing
+    is written, the task stays as found and the exhaustion is announced.
 
     A full (task and checkpoint) retry needs ``baseline``: the fingerprint the
     caller read BEFORE the attempt that failed, so a change made during that
@@ -2382,21 +2389,38 @@ def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int
 
 
 def _escalate_released_retry_exhausted(*, entity_id: str, checkpoint_id: str,
-                                       reason: str, notifier: Notifier) -> bool:
+                                       reason: str, notifier: Notifier,
+                                       baseline: tuple | None,
+                                       checkpoint_only: bool = False) -> bool:
     """A released retry whose temporary Neotoma failure outlasted its attempts
-    (or had no baseline to retry against) escalates with ONE checkpoint,
-    reason ``rounds_exhausted`` (failure_posture.md rules 5 and 8): the task
-    goes to AWAITING_APPROVAL and a replacement checkpoint retires the prior
-    approval. Nothing was started, so FAILED would be false. True only when
-    the replacement checkpoint was written; any unreadable record, failed
-    write or exception returns False and writes nothing further (never
+    escalates with ONE checkpoint, reason ``rounds_exhausted``
+    (failure_posture.md rules 5 and 8): the task goes to AWAITING_APPROVAL and
+    a replacement checkpoint retires the prior approval. Nothing was started,
+    so FAILED would be false.
+
+    It escalates only while the task and checkpoint still match this released
+    attempt: ``baseline`` (the fingerprint read for this attempt, with
+    ``checkpoint_only`` as it was read) must equal a fresh fingerprint and the
+    task must still be dispatchable (``_released_retry_task_dispatchable``),
+    checked immediately before the status write. With no baseline, or a state
+    that has changed (a person's hold, a terminal status, a changed
+    checkpoint), nothing is written and the task stays as found. True only
+    when the replacement checkpoint was written; any of those refusals, an
+    unreadable record, a failed write or an exception returns False (never
     FAILED); the caller then announces the exhaustion on the notifier."""
+    if baseline is None:
+        return False
     try:
         snapshot = _record_snapshot(fetch_task_record(entity_id))
         if snapshot is None:
             return False
         from_status = snapshot.get("status")
         held_reason = f"rounds_exhausted: {reason}"
+        if _released_retry_fingerprint(
+                entity_id, checkpoint_id, checkpoint_only=checkpoint_only) != baseline:
+            return False
+        if not _released_retry_task_dispatchable(entity_id):
+            return False
         if not set_task_status(
             entity_id, TaskStatus.AWAITING_APPROVAL, handler=DAEMON_NAME,
             from_status=from_status, reason=held_reason,
@@ -3883,7 +3907,7 @@ async def dispatch_task(
                 reason += _released_retry_note(retries_used, why)
                 escalated = _escalate_released_retry_exhausted(
                     entity_id=entity_id, checkpoint_id=release_key,
-                    reason=reason, notifier=notifier,
+                    reason=reason, notifier=notifier, baseline=prelaunch,
                 )
                 _run_stage(
                     "assistant",
@@ -3895,7 +3919,8 @@ async def dispatch_task(
                 if not escalated:
                     notifier.send(
                         f"{skill} on {entity_id}: rounds_exhausted could not be recorded "
-                        f"for this task; nothing was started. {reason}",
+                        f"for this task; nothing was started and the task was left "
+                        f"as found. {reason}",
                         priority=Priority.BLOCKER,
                         handler=DAEMON_NAME,
                     )
@@ -3963,6 +3988,9 @@ async def dispatch_task(
                         entity_id=entity_id, checkpoint_id=release_key,
                         reason=why + _released_retry_note(retries_used, why),
                         notifier=notifier,
+                        baseline=_released_retry_fingerprint(
+                            entity_id, release_key, checkpoint_only=True),
+                        checkpoint_only=True,
                     ):
                         job.escalated(
                             f"task {entity_id} executing handoff rounds_exhausted")
@@ -3973,8 +4001,9 @@ async def dispatch_task(
                               "automatically.")
                 else:
                     notice = (f"Approved correction {entity_id} lifecycle handoff could not be "
-                              "verified; this attempt was not started. Reconcile current "
-                              "task/admission state." + _released_retry_note(retries_used, why))
+                              "verified; this attempt was not started and the task was "
+                              "left as found. Reconcile current task/admission state."
+                              + _released_retry_note(retries_used, why))
                 notifier.send(notice, priority=Priority.BLOCKER, handler=DAEMON_NAME)
                 if not retrying:
                     job.failed(f"task {entity_id} executing handoff was not qualified")

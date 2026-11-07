@@ -192,14 +192,84 @@ async def test_exhausted_retry_checkpoint_unwritable_is_not_failed(escalation):
     assert any("rounds_exhausted" in m for m in escalation["notifier"].blockers())
 
 
+def _assert_left_as_found(esc, status, reason):
+    """No rounds_exhausted write, no checkpoint, and a BLOCKER notice."""
+    task = _task(esc)
+    assert task["status"] == status
+    assert task.get("blocked_reason") == reason
+    assert "awaiting_approval" not in esc["statuses"]
+    assert "failed" not in esc["statuses"]
+    assert esc["briefs"] == []
+    assert esc["retired"] == []
+    assert any("left as found" in m for m in esc["notifier"].blockers())
+
+
 @pytest.mark.asyncio
-async def test_no_baseline_escalates_rounds_exhausted(escalation, monkeypatch):
+async def test_no_baseline_writes_nothing_and_announces(escalation, monkeypatch):
+    # Red before this fix (observed in the previous round's test, which pinned
+    # it): with no baseline the escalation wrote awaiting_approval and filed a
+    # rounds_exhausted checkpoint, so `"awaiting_approval" not in statuses`
+    # failed.
     escalation["script"].append(_refusal("timeout"))
     monkeypatch.setattr(apis, "_released_retry_fingerprint",
                         lambda task_id, checkpoint_id, **kwargs: None)
     await _release(escalation)
     assert len(escalation["spawned"]) == 1
-    _assert_rounds_exhausted(escalation)
+    _assert_left_as_found(escalation, "executing", "")
+
+
+def _change_at_last_attempt(esc, monkeypatch, change):
+    """Run four temporary refusals; apply ``change`` while the last attempt's
+    launch runs, after its baseline was read."""
+    esc["script"].extend(_refusal("timeout") for _ in range(4))
+    spawn = apis._spawn_harness_skill
+
+    async def changing_spawn(*args, **kwargs):
+        if len(esc["spawned"]) == 3:
+            change()
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(apis, "_spawn_harness_skill", changing_spawn)
+
+
+@pytest.mark.asyncio
+async def test_hold_written_during_last_attempt_is_kept(escalation, monkeypatch):
+    # Red before this fix (observed; cause inferred): the escalation took the
+    # hold's status as from_status and overwrote it with awaiting_approval and
+    # a rounds_exhausted reason, plus a new checkpoint.
+    def hold():
+        _task(escalation)["status"] = "blocked"
+        _task(escalation)["blocked_reason"] = "held by a person"
+
+    _change_at_last_attempt(escalation, monkeypatch, hold)
+    await _release(escalation)
+    assert len(escalation["spawned"]) == 4
+    _assert_left_as_found(escalation, "blocked", "held by a person")
+
+
+@pytest.mark.asyncio
+async def test_terminal_task_at_exhaustion_stays_terminal(escalation, monkeypatch):
+    # Red before this fix (observed; cause inferred): the escalation reopened
+    # the done task as awaiting_approval.
+    _change_at_last_attempt(
+        escalation, monkeypatch, lambda: _task(escalation).update(status="done"))
+    await _release(escalation)
+    assert len(escalation["spawned"]) == 4
+    _assert_left_as_found(escalation, "done", "")
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_changed_at_exhaustion_writes_nothing(escalation, monkeypatch):
+    # Red before this fix (observed; cause inferred): the escalation never
+    # compared the checkpoint, so it wrote awaiting_approval and filed a
+    # replacement checkpoint against the changed one.
+    def bump():
+        escalation["records"][escalation["brief_id"]]["entity_version"] = "cp-changed"
+
+    _change_at_last_attempt(escalation, monkeypatch, bump)
+    await _release(escalation)
+    assert len(escalation["spawned"]) == 4
+    _assert_left_as_found(escalation, "executing", "")
 
 
 def _change_during_wait(esc, monkeypatch, change):
@@ -409,8 +479,48 @@ async def test_task_held_in_baseline_and_during_wait_is_not_retried(
 ])
 def test_released_retry_dispatchable_is_an_allow_list(monkeypatch, status, allowed):
     monkeypatch.setattr(apis, "fetch_task_record",
-                        lambda task_id: {"snapshot": {"status": status}})
+                        lambda task_id: {"snapshot": {"status": status,
+                                                      "blocked_reason": ""}})
     assert apis._released_retry_task_dispatchable("t") is allowed
+
+
+@pytest.mark.parametrize("reason", ["held by a person", None, " "])
+def test_released_retry_dispatchable_requires_empty_hold_reason(monkeypatch, reason):
+    # Judged as _release_lifecycle_proven judges it: exactly "". Red before
+    # this fix (observed): the status alone was checked, so True was returned.
+    snapshot = {"status": "executing"}
+    if reason is not None:
+        snapshot["blocked_reason"] = reason
+    monkeypatch.setattr(apis, "fetch_task_record", lambda task_id: {"snapshot": snapshot})
+    assert apis._released_retry_task_dispatchable("t") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["routed", "executing"])
+async def test_hold_reason_at_retry_entry_is_not_retried(released, monkeypatch, status):
+    # Red before this fix (observed; cause inferred): the retry checked only the
+    # status, so a routed or executing task carrying a hold reason resumed and
+    # the agent was spawned a second time.
+    released["script"].append(_refusal("timeout"))
+    real = apis._released_retry_fingerprint
+    calls = []
+
+    def fingerprint(task_id, checkpoint_id, **kwargs):
+        result = real(task_id, checkpoint_id, **kwargs)
+        calls.append(result)
+        if len(calls) == 2:
+            # After the read that follows the wait, so the fingerprints agree;
+            # only the retry-entry guard can see the hold reason.
+            _task(released)["status"] = status
+            _task(released)["blocked_reason"] = "held by a person"
+        return result
+
+    monkeypatch.setattr(apis, "_released_retry_fingerprint", fingerprint)
+    await _release(released)
+    assert len(calls) == 2 and calls[0] == calls[1] and calls[0] is not None
+    assert len(released["spawned"]) == 1
+    assert _task(released)["status"] == status
+    assert _task(released)["blocked_reason"] == "held by a person"
 
 
 @pytest.mark.asyncio
@@ -427,10 +537,10 @@ async def test_unreadable_prelaunch_state_launches_but_refusal_is_not_retried(
     await _release(released)
     assert len(calls) == 1  # the pre-launch read only; no retry was scheduled
     assert len(released["spawned"]) == 1
-    # No baseline: escalated with rounds_exhausted, never FAILED.
-    assert _task(released)["status"] == "awaiting_approval"
-    assert _task(released)["blocked_reason"].startswith("rounds_exhausted")
-    assert "Retried" not in _task(released)["blocked_reason"]
+    # No baseline: nothing is written (never FAILED, never awaiting_approval);
+    # the task stays as found.
+    assert _task(released)["status"] == "executing"
+    assert _task(released)["blocked_reason"] == ""
 
 
 def _change_checkpoint_during_wait(released, monkeypatch, change):
@@ -527,10 +637,10 @@ async def test_unauthorized_checkpoint_gets_no_retry_and_no_spawn(
     # Unreadable: no retry was scheduled, so the fingerprint ran once.
     assert results == [None]
     assert len(released["spawned"]) == 1
-    # No baseline: escalated with rounds_exhausted, never FAILED.
-    assert _task(released)["status"] == "awaiting_approval"
-    assert _task(released)["blocked_reason"].startswith("rounds_exhausted")
-    assert "Retried" not in _task(released)["blocked_reason"]
+    # No baseline: nothing is written (never FAILED, never awaiting_approval);
+    # the task stays as found.
+    assert _task(released)["status"] == "executing"
+    assert _task(released)["blocked_reason"] == ""
 
 
 def test_owner_mismatch_is_not_authorized(released, monkeypatch):
