@@ -53,7 +53,7 @@ from urllib.parse import quote
 import model_tiering
 import review_delta
 from review_panel import LENSES
-from review_scope import ReviewScope
+from review_scope import SCOPE_FILE_ABSENT, ReviewScope, ScopeLoad
 
 log = logging.getLogger("apis.review_carry")
 
@@ -284,6 +284,84 @@ def select_rerun(
         carried[lens] = Carried(lens, cand.head, cand.verdict, cand.url)
         reasons[lens] = f"carried from {cand.head[:7]}: the fix touched none of its areas"
     return RerunSelection(frozenset(rerun), carried, reasons)
+
+
+def scope_unreadable(load: ScopeLoad) -> bool:
+    """True when the repo's scope file exists but could not be read or used.
+
+    A missing file (``SCOPE_FILE_ABSENT``) is a repo that declares no scope:
+    the default allowlist rule applies. Anything else with no scope (an HTTP
+    error, a malformed file, an unknown base branch) is unknown."""
+    return load.scope is None and load.error != SCOPE_FILE_ABSENT
+
+
+def select_rerun_for_load(
+    panel: Iterable[str],
+    records: Mapping[str, Sequence[LensRecord]],
+    current_head: str,
+    deltas: Mapping[str, review_delta.Delta | None],
+    *,
+    load: ScopeLoad,
+    forced: Iterable[str] = (),
+) -> RerunSelection:
+    """``select_rerun`` with the scope the approval gate reads, as Apis applies it.
+
+    The approval gate (``approve_pr_as_app.carry_earlier_signoffs``) calls
+    ``select_rerun(..., scope=load.scope)`` with the same ``review_scope.fetch_scope``
+    load, so for a readable or absent scope file this returns exactly its
+    decision. When the file exists but is unreadable, the gate falls back to the
+    allowlist rule, which can carry a lens the file would have re-run; Apis
+    cannot know which, so it carries nothing and re-runs every lens (fail
+    closed). That only adds reviews: it never accepts a carry the gate refuses.
+    """
+    names = list(panel)
+    if not scope_unreadable(load):
+        return select_rerun(
+            names, records, current_head, deltas, forced=forced, scope=load.scope
+        )
+    reason = (
+        f"the repo's review scope is unreadable ({load.error or 'unknown'}), so "
+        "whether the approval gate would carry it is unknown; re-run this lens"
+    )
+    return RerunSelection(frozenset(names), {}, {lens: reason for lens in names})
+
+
+def awaiting_carry(
+    required: Iterable[str],
+    records: Mapping[str, Sequence[LensRecord]],
+    current_head: str,
+) -> list[str]:
+    """Required lenses seated at an earlier head with no verdict at
+    *current_head*, sorted: the ones only a carry can clear."""
+    current = (current_head or "").lower()
+    return sorted(
+        lens
+        for lens in {str(r).lower() for r in required}
+        if records.get(lens)
+        and not any(r.head == current for r in records.get(lens, ()))
+    )
+
+
+def stranded_lenses(
+    required: Iterable[str],
+    records: Mapping[str, Sequence[LensRecord]],
+    current_head: str,
+    deltas: Mapping[str, review_delta.Delta | None],
+    *,
+    load: ScopeLoad,
+) -> list[str]:
+    """Required lenses with no verdict at *current_head* and no carry the shared
+    rule accepts, sorted: the approval gate must refuse each, and no verdict for
+    it will arrive on its own. Only a lens seated at some earlier head counts: a
+    lens never seated is `unseated_required_lenses`'s case. A lens with any
+    comment at the current head is not stranded (its verdict, whatever it says,
+    is the panel's to act on)."""
+    current = (current_head or "").lower()
+    pending = awaiting_carry(required, records, current)
+    if not pending:
+        return []
+    selection = select_rerun_for_load(pending, records, current, deltas, load=load)
+    return sorted(selection.rerun)
 
 
 async def fetch_interdiff(
