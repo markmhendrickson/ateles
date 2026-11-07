@@ -1026,6 +1026,20 @@ def _fly_run_held_by_other_task(snapshot: dict, entity_id: str) -> "build_delive
     return holder
 
 
+def _fly_defer_holder(snapshot: dict, entity_id: str) -> "build_delivery.BuildClaim | None":
+    """The other task's claim this task must be deferred behind, or None.
+
+    Set only when the Fly ledger shows a run in flight on this task's key AND
+    a DIFFERENT task holds this task's issue in the build registry. The one
+    test both entrances (``handle_event``'s early task.created check and
+    ``dispatch_task``) use to let such a task through to the deferral path, so
+    they cannot disagree. An unreadable ledger (None) or this task's own run
+    gives None, and the caller refuses as before."""
+    if _fly_run_in_flight(snapshot, entity_id) is not True:
+        return None
+    return _fly_run_held_by_other_task(snapshot, entity_id)
+
+
 def _fly_run_refuses_dispatch(snapshot: dict, entity_id: str, trigger: str) -> bool:
     """True when a task must not be dispatched because a Fly run is in flight
     for it, or the ledger could not be read so that is unknown. Logs why."""
@@ -2305,9 +2319,7 @@ async def dispatch_task(
     # ends, so it falls through to the deferral path below, which records the
     # deferral and returns without spawning. `fly_defer_holder` makes sure it
     # never gets further than that path.
-    fly_defer_holder = None
-    if not gate_override and _fly_run_in_flight(snapshot, entity_id) is True:
-        fly_defer_holder = _fly_run_held_by_other_task(snapshot, entity_id)
+    fly_defer_holder = None if gate_override else _fly_defer_holder(snapshot, entity_id)
     if fly_defer_holder is None and _fly_run_refuses_dispatch(
             snapshot, entity_id, f"dispatch (trigger={trigger})"):
         return
@@ -4927,7 +4939,11 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     # dispatch_task itself refuses a task whose Fly run is in flight. This
     # earlier check stays for task.created only, because it also keeps a replay
     # from announcing "Task created" again and from claiming the created dedupe.
-    if action == "created" and _fly_run_refuses_dispatch(snapshot, entity_id, "task.created"):
+    # A task whose in-flight run is held by a DIFFERENT task carries on, so it
+    # reaches dispatch_task's deferral path and resumes when that run ends; the
+    # test is the one dispatch_task uses (`_fly_defer_holder`).
+    if (action == "created" and _fly_defer_holder(snapshot, entity_id) is None
+            and _fly_run_refuses_dispatch(snapshot, entity_id, "task.created")):
         return
 
     if action == "created":

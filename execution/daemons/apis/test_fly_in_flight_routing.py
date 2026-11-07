@@ -333,3 +333,57 @@ def test_other_tasks_run_defers_and_own_run_writes_nothing(real_dispatch, monkey
     with build_delivery.claim_build(REPO, 42, f"task:{TASK}"):
         asyncio.run(apis.dispatch_task(TASK, task, "created", _Notifier()))
     assert deferred == [] and writes == [] and spawns == []
+
+
+# ── The same two cases, entering through handle_event ───────────────────────
+# A repeated task.created is the usual way such a task comes in, and
+# handle_event's early check runs before dispatch_task. It shares the
+# deferral test with dispatch_task (`_fly_defer_holder`).
+
+def _created_through_handle_event(monkeypatch, task):
+    monkeypatch.setattr(apis, "_seen_created", lambda entity_id: False)
+    monkeypatch.setattr(apis, "_should_announce", lambda entity_id, hydrated: True)
+    event = _event("created")
+    event.snapshot = task
+    notifier = _Notifier()
+    asyncio.run(apis.handle_event(event, notifier))
+    return notifier
+
+
+def _deferral_setup(real_dispatch, monkeypatch):
+    ledger, writes, spawns, _ = real_dispatch
+    monkeypatch.setattr(apis, "_stored_tags", lambda snapshot: [])
+    deferred: list = []
+
+    async def _record(entity_id, snapshot, claim, notifier):
+        deferred.append((entity_id, claim.holder))
+        return type("Outcome", (), {"sweep_owns_it": False})()
+
+    monkeypatch.setattr(apis, "_record_deferral", _record)
+    key = build_delivery.fly_delivery_key(REPO, 42, TASK)
+    assert fly_runner.FlyLedger(ledger).reserve_delivery(
+        key, {"status": "launching", "branch": "b", "run_id": "", "token": "x"})
+    task = _snapshot(status="pending", issue_number=42, assigned_to="cicada",
+                     action_type="open_or_merge_pr", confidence=0.95)
+    assert apis._fly_run_in_flight(task, TASK) is True
+    return task, writes, spawns, deferred
+
+
+def test_created_event_for_other_tasks_run_reaches_the_deferral(real_dispatch, monkeypatch):
+    # Red before handle_event shared the deferral test: its early check saw the
+    # in-flight receipt and returned, so dispatch_task never ran and
+    #   AssertionError: assert [] == [('ent_task_inflight', 'task:ent_other_task')]
+    # (no deferral was recorded, so the task would never resume).
+    task, writes, spawns, deferred = _deferral_setup(real_dispatch, monkeypatch)
+    with build_delivery.claim_build(REPO, 42, "task:ent_other_task"):
+        _created_through_handle_event(monkeypatch, task)
+    assert deferred == [(TASK, "task:ent_other_task")]
+    assert writes == [] and spawns == []
+
+
+def test_created_replay_for_own_run_returns_early(real_dispatch, monkeypatch):
+    task, writes, spawns, deferred = _deferral_setup(real_dispatch, monkeypatch)
+    with build_delivery.claim_build(REPO, 42, f"task:{TASK}"):
+        notifier = _created_through_handle_event(monkeypatch, task)
+    assert deferred == [] and writes == [] and spawns == []
+    assert notifier.sent == [], "a replay for the task's own run announced it again"
