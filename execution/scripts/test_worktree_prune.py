@@ -1069,6 +1069,23 @@ def test_a_staged_new_secret_named_path_keeps_the_worktree_whole(
     _assert_kept_whole(repo, archive_on, w, e, name, w + "/" + name)
 
 
+def test_a_staged_secret_named_path_is_caught_even_if_gone_from_the_worktree(
+    repo, archive_on
+):
+    w, e = _dirty_archive_candidate(repo, "sec-staged-gone")
+    open(w + "/deploy.key", "w").write("NOT-READ-BY-TEST-OR-TOOL")
+    sh("git", "add", "-f", "deploy.key", cwd=w)
+    os.remove(
+        w + "/deploy.key"
+    )  # the index still holds it; the working-tree diff no longer lists it
+    age(w)
+    working_tree_only = wp._raw_diff_paths(
+        ["diff", "--raw", "-z", "--no-renames", "HEAD"], w
+    )
+    assert "deploy.key" in wp.secret_files(w, e.get("branch")), working_tree_only
+    _assert_kept_whole(repo, archive_on, w, e, "deploy.key", w + "/a.txt")
+
+
 def _push_tracked(repo, w, name, branch):
     os.makedirs(os.path.dirname(w + "/" + name), exist_ok=True)
     open(w + "/" + name, "w").write("v1")
