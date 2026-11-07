@@ -2660,3 +2660,15 @@ def test_an_unreadable_ledger_keeps_the_undelivered_refusal(monkeypatch):
     entry = _undelivered_receipt()
     _use_ledger(monkeypatch, entry, fail=True)
     assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
+
+
+def test_correction_instructions_name_the_replacement_description_file():
+    target = build_delivery.ExistingPRTarget(12, "codex/fix", "main", "a" * 40)
+    plan = build_delivery.FlyDeliveryPlan("owner/repo", "codex/fix", "main", "owner/repo#1", 1,
+                                          target=target)
+    text = build_delivery.fly_delivery_instructions(plan)
+    assert "it does not replace the PR body" in text
+    assert "`pull_request_body.md` in the same folder" in text
+    new = build_delivery.fly_delivery_instructions(
+        build_delivery.FlyDeliveryPlan("owner/repo", "codex/fix", "main", "owner/repo#1", 1))
+    assert "pull_request_body.md" not in new

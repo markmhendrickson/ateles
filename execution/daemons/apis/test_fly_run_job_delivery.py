@@ -883,3 +883,69 @@ def test_optional_exact_head_is_only_absent_for_legacy_new_delivery(target):
     spec = run_job._load_delivery(raw, REPO, secrets, ())
     assert spec.pr_number == (12 if target else None)
     assert spec.head_sha == ("a" * 40 if target else "")
+
+
+# ── A correction's replacement PR description ────────────────────────────────
+
+
+def _with_body(world, body, **kw):
+    """The stand-in CLI, also writing *body* to the replacement-description
+    file beside the change summary."""
+    agent = _agent(world, **kw)
+
+    def runner(argv, env, stdin, timeout, cwd, ident=None, collect_by=None):
+        got = agent(argv, env, stdin, timeout, cwd, ident=ident, collect_by=collect_by)
+        marker = stdin.split(b"to ", 1)[1].rstrip(b".").decode()
+        Path(marker).parent.joinpath(rd.PR_BODY_NAME).write_text(body)
+        return got
+    return runner
+
+
+def _allow_patch(monkeypatch, status=200):
+    """Let the correction fixture's API also take a PATCH, recording it."""
+    gets, patches = rd._api, []
+
+    def api(method, path, token, body=None):
+        if method == "PATCH":
+            patches.append((path, token, body))
+            return status, None
+        return gets(method, path, token, body)
+    monkeypatch.setattr(rd, "_api", api)
+    return patches
+
+
+def test_existing_correction_replaces_the_description_scrubbed(world, existing_correction, monkeypatch):
+    spec, _, _ = existing_correction
+    patches = _allow_patch(monkeypatch)
+    rc, record = _run(_job(world["tmp"], delivery=spec),
+                      _with_body(world, f"# New description\n\nNow true. {TOKEN}\n"))
+    assert rc == 0 and record["delivery_status"] == "updated" and record["pr_number"] == 12
+    assert len(patches) == 1
+    path, token, body = patches[0]
+    assert path == f"/repos/{REPO}/pulls/12" and token == TOKEN
+    assert set(body) == {"body"}
+    assert body["body"].startswith("# New description\n\nNow true. ") and TOKEN not in body["body"]
+
+
+def test_existing_correction_without_a_body_file_sends_no_patch(world, existing_correction, monkeypatch):
+    spec, _, _ = existing_correction
+    patches = _allow_patch(monkeypatch)
+    _, record = _run(_job(world["tmp"], delivery=spec), _agent(world))
+    assert record["delivery_status"] == "updated" and patches == []
+
+
+def test_a_failed_description_update_keeps_the_delivery_updated(world, existing_correction, monkeypatch):
+    spec, _, _ = existing_correction
+    patches = _allow_patch(monkeypatch, status=422)
+    rc, record = _run(_job(world["tmp"], delivery=spec), _with_body(world, "Replacement.\n"))
+    assert len(patches) == 1
+    assert rc == 0 and record["delivery_status"] == "updated" and record["pr_number"] == 12
+    assert record["pr_url"] == f"https://github.com/{REPO}/pull/12"
+    assert "Replacement." not in record["stdout"]
+
+
+def test_a_new_pull_request_ignores_the_body_file(world):
+    rc, record = _run(_job(world["tmp"]), _with_body(world, "Not for a new PR.\n"))
+    assert rc == 0 and record["delivery_status"] == "opened"
+    assert [c[0] for c in world["api"]["calls"]] == ["GET", "POST"]
+    assert world["api"]["calls"][1][3]["body"] == "What changed."

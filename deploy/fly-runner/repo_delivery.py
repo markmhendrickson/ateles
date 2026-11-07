@@ -151,6 +151,7 @@ _PROTECTED_BRANCH_RE = re.compile(r"(?i)(?:main|master|trunk|develop|release[/_-
 _REPOSITORY_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}", re.ASCII)
 # The agent's pull request text: <export>/pull_request.md, first line the title.
 PR_TEXT_NAME = "pull_request.md"
+PR_BODY_NAME = "pull_request_body.md"  # a correction's complete replacement description
 MAX_PR_TEXT_BYTES = 64 * 1024
 MAX_PR_TITLE_CHARS = 256
 API_TIMEOUT_SECONDS = 30
@@ -1059,6 +1060,38 @@ def open_or_update_pr(*, repository: str, branch: str, default_branch: str, toke
     return PullRequest(number=created.number, url=created.url, action="opened")
 
 
+def _read_export_text(work: Work, name: str) -> str:
+    """The agent's text file *name* in ``<export>``, read without following a
+    link, only as a regular file and size-capped. Missing, oversized, not
+    UTF-8, or unreadable text gives ``""``."""
+    _check_work(work)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        dfd = os.open(work.export, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+        try:
+            fd = os.open(name, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0),
+                         dir_fd=dfd)  # fmt: skip
+        finally:
+            os.close(dfd)
+    except OSError:
+        fd = -1
+    if fd < 0:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ""
+        raw = os.read(fd, MAX_PR_TEXT_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_PR_TEXT_BYTES:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
 @_boundary(PR_FAILED)
 def read_pr_text(work: Work) -> tuple[str, str]:
     """The agent's pull request text from ``<export>/pull_request.md``: the
@@ -1066,32 +1099,31 @@ def read_pr_text(work: Work) -> tuple[str, str]:
     following a link and size-capped. Missing, oversized, not UTF-8, or
     unreadable text gives ``("", "")``: the delivery goes ahead with a
     default title."""
-    _check_work(work)
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    fd = -1
-    try:
-        dfd = os.open(work.export, os.O_RDONLY | os.O_DIRECTORY | nofollow)
-        try:
-            fd = os.open(PR_TEXT_NAME, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0),
-                         dir_fd=dfd)  # fmt: skip
-        finally:
-            os.close(dfd)
-    except OSError:
-        fd = -1
-    if fd < 0:
-        return "", ""
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return "", ""
-        raw = os.read(fd, MAX_PR_TEXT_BYTES + 1)
-    finally:
-        os.close(fd)
-    if len(raw) > MAX_PR_TEXT_BYTES:
-        return "", ""
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
+    text = _read_export_text(work, PR_TEXT_NAME)
+    if not text:
         return "", ""
     first, _, rest = text.strip().partition("\n")
     title = first.lstrip("#").strip()[:MAX_PR_TITLE_CHARS]
     return title, rest.strip()
+
+
+@_boundary(PR_FAILED)
+def read_pr_body(work: Work) -> str:
+    """A correction's complete replacement PR description from
+    ``<export>/pull_request_body.md``; the whole file is the body. Read the
+    same way as ``read_pr_text``. Missing, empty, oversized, not UTF-8, or
+    unreadable gives ``""``: the description stays as it is."""
+    return _read_export_text(work, PR_BODY_NAME).strip()
+
+
+@_boundary(PR_FAILED)
+def update_pr_body(*, repository: str, number: int, token: str, body: str) -> None:
+    """Replace only the description of PR *number*; its title is untouched."""
+    check_repository(repository)
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise RepoWorkError(PR_FAILED, "the existing PR number is invalid")
+    _require_time()
+    status, _ = _api("PATCH", f"/repos/{repository}/pulls/{number}", token, {"body": body})
+    if status != 200:
+        raise RepoWorkError(PR_FAILED, "the pull request description could not be updated",
+                            _status_word(status))  # fmt: skip

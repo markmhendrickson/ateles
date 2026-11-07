@@ -1590,3 +1590,38 @@ def test_existing_correction_cannot_rewind_even_with_an_exact_remote_lease(world
                        default_branch="main", head=world["old"], token=TOKEN,
                        expected_head=world["base"])
     assert git(remote, "rev-parse", f"refs/heads/{BRANCH}", home=world["home"]) == world["base"]
+
+
+@pytest.mark.parametrize("content,expected", [
+    (b"# Whole\n\nbody.\n", "# Whole\n\nbody."),
+    (b"   \n", ""),
+    (b"\xff\xfe not text", ""),
+    (b"x" * (64 * 1024 + 1), ""),
+    (None, ""),
+])
+def test_the_replacement_description_is_read_safely(world, content, expected):
+    path = world["work"].export / rd.PR_BODY_NAME
+    if content is not None:
+        path.write_bytes(content)
+    assert rd.read_pr_body(world["work"]) == expected
+
+
+def test_a_replacement_description_link_is_not_followed(world, tmp_path):
+    secret = tmp_path / "elsewhere.md"
+    secret.write_text("Not the agent's\n")
+    (world["work"].export / rd.PR_BODY_NAME).symlink_to(secret)
+    assert rd.read_pr_body(world["work"]) == ""
+
+
+def test_update_pr_body_sends_only_the_body(monkeypatch):
+    calls = []
+    monkeypatch.setattr(rd, "_api", lambda m, p, t, b=None: calls.append((m, p, t, b)) or (200, None))
+    rd.update_pr_body(repository="owner/repo", number=5, token="tok", body="New.")
+    assert calls == [("PATCH", "/repos/owner/repo/pulls/5", "tok", {"body": "New."})]
+
+
+def test_a_refused_description_update_raises_pr_failed(monkeypatch):
+    monkeypatch.setattr(rd, "_api", lambda *a, **k: (403, None))
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.update_pr_body(repository="owner/repo", number=5, token="tok", body="New.")
+    assert exc.value.category == rd.PR_FAILED
