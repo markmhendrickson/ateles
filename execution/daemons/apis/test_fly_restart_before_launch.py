@@ -49,6 +49,12 @@ Correction round (PR #1684 review). How the added tests looked red:
   removed from ``_approval_binding_holds``, those three cases returned the
   checkpoint (``assert checkpoint is None`` failed).
 
+Round 3 (PR #1684). ``test_unreadable_audit_file_is_held_and_named`` passes on
+7a02329 and was checked by mutation: with the ``None`` branch of
+``_fly_receipt_removed`` made to return without a notice, it failed
+``assert len(notifier.sent) == 1`` (``0 == 1``); with ``None`` treated as "no
+removal", the task was launched again (``assert launches == []`` failed).
+
 Run: timeout 300 python3 -m pytest -q execution/daemons/apis/test_fly_restart_before_launch.py
 """
 
@@ -414,3 +420,27 @@ def test_cleared_receipt_notice_does_not_claim_it_never_launched(env):
     assert len(notifier.sent) == 1
     assert "never launched" not in notifier.sent[0]
     assert "whether its Fly run launched is unknown" in notifier.sent[0]
+
+
+def test_unreadable_audit_file_is_held_and_named(env, monkeypatch):
+    """The ledger reads (no receipt) but its removal audit file does not, so
+    ``_fly_receipt_removed`` returns None: a cleared receipt cannot be ruled
+    out, so the task is held and named, never re-launched."""
+    _, _, launches, dispatched, writes = env
+    audit_reads: list[object] = []
+
+    def _unreadable_audit(ledger):
+        audit_reads.append(ledger)
+        raise OSError("audit file unreadable")
+
+    monkeypatch.setattr(build_delivery, "_removal_audit_lines", _unreadable_audit)
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert audit_reads, "the sweep never reached the audit read"
+    assert launches == [] and dispatched == [] and writes == []
+    assert len(notifier.sent) == 1, notifier.sent
+    assert TASK in notifier.sent[0]
+    assert "whether its Fly run launched is unknown" in notifier.sent[0]
+    assert "audit could not be read" in notifier.sent[0]
+    assert "never launched" not in notifier.sent[0]
+    assert counts["unrecovered"] == 1 and counts["redispatched"] == 0
