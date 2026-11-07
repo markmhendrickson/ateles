@@ -214,18 +214,19 @@ class TaskWatchdog:
             if action == WatchdogAction.NONE:
                 continue
 
+            # A task whose Fly run may be in flight gets nothing from the
+            # watchdog: RECONCILE would write DONE, ESCALATE would write BLOCKED
+            # and RETRY would write ROUTED before dispatch_task's own check
+            # could refuse. No status write, notification, attempt count or
+            # dispatch.
+            if self._fly_run_may_be_in_flight(entity_id, snapshot):
+                counts["skipped_fly_in_flight"] += 1
+                continue
+
             if action == WatchdogAction.RECONCILE:
                 if _reconcile_completed_task(entity_id, snapshot):
                     counts["reconciled"] += 1
                     self.forget(entity_id)
-                continue
-
-            # A task whose Fly run may be in flight gets nothing from the
-            # watchdog: ESCALATE would write BLOCKED and RETRY would write ROUTED
-            # before dispatch_task's own check could refuse. No status write,
-            # notification, attempt count or dispatch.
-            if self._fly_run_may_be_in_flight(entity_id, snapshot):
-                counts["skipped_fly_in_flight"] += 1
                 continue
 
             if action == WatchdogAction.ESCALATE:

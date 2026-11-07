@@ -275,3 +275,67 @@ def test_stale_task_with_no_repository_and_live_receipt_is_untouched(monkeypatch
             monkeypatch, status, attempts, apis._watchdog_fly_guard)
         assert writes == [] and notes == [] and dispatched == [], status
         assert counts["skipped_fly_in_flight"] == 1, status
+
+
+# ── Reconciliation obeys the in-flight refusal too ───────────────────────────
+# RECONCILE was handled before the in-flight check, so _reconcile_completed_task
+# could write DONE on a verified task whose Fly run was still live.
+
+
+def _verified_sweep(monkeypatch, tmp_path, *, live_receipt, ledger_text=None):
+    import apis
+    import build_delivery
+    import fly_runner
+
+    ledger = tmp_path / "fly-ledger.json"
+    monkeypatch.setenv("APIS_FLY_LEDGER_FILE", str(ledger))
+    if ledger_text is not None:
+        ledger.write_text(ledger_text)
+    elif live_receipt:
+        key = build_delivery.fly_delivery_key("markmhendrickson/ateles", None, "ent_fly")
+        assert fly_runner.FlyLedger(ledger).reserve_delivery(
+            key, {"status": "launching", "branch": "b", "run_id": "", "token": "x"})
+    wd = tw.TaskWatchdog(stall_seconds=3600, fly_in_flight_guard=apis._watchdog_fly_guard)
+    snapshot = {
+        "status": "verified", "title": "t", "updated_at": 0,
+        "repo": "markmhendrickson/ateles",
+        "result": "cicada completed; run_session=ent_fly:approved-1; provenance=unverified",
+    }
+    monkeypatch.setattr(tw, "_query_tasks", lambda _limit: [("ent_fly", snapshot)])
+    writes: list = []
+    run_writes: list = []
+    monkeypatch.setattr(tw, "set_task_status", lambda *a, **k: writes.append((a, k)) or True)
+    monkeypatch.setattr(tw, "recover_run_session", lambda **k: {"run": k})
+    monkeypatch.setattr(tw, "update_run_session_status",
+                        lambda run, **k: run_writes.append((run, k)) or True)
+
+    async def dispatch_fn(task_id, snap, trigger):
+        raise AssertionError("verified tasks are never dispatched")
+
+    counts = asyncio.run(wd.sweep(object(), dispatch_fn))
+    return counts, writes, run_writes
+
+
+def test_verified_task_with_live_receipt_is_untouched(monkeypatch, tmp_path):
+    # Seen red before the fix (RECONCILE ran ahead of the in-flight check):
+    #   AssertionError: assert ([(('ent_fly',...ified', ...})] == []
+    #   Left contains one more item: (('ent_fly', <TaskStatus.DONE: 'done'>),
+    #   {'handler': 'apis-watchdog', 'from_status': 'verified', ...
+    #   'result': '...; provenance=verified', ...})
+    counts, writes, run_writes = _verified_sweep(monkeypatch, tmp_path, live_receipt=True)
+    assert writes == [] and run_writes == []
+    assert counts["skipped_fly_in_flight"] == 1 and counts["reconciled"] == 0
+
+
+def test_verified_task_without_live_receipt_still_reconciles(monkeypatch, tmp_path):
+    counts, writes, run_writes = _verified_sweep(monkeypatch, tmp_path, live_receipt=False)
+    assert [a[1] for a, _k in writes] == [tw.TaskStatus.DONE]
+    assert len(run_writes) == 1
+    assert counts["reconciled"] == 1 and counts["skipped_fly_in_flight"] == 0
+
+
+def test_verified_task_with_unreadable_ledger_is_untouched(monkeypatch, tmp_path):
+    counts, writes, run_writes = _verified_sweep(
+        monkeypatch, tmp_path, live_receipt=False, ledger_text="{not json")
+    assert writes == [] and run_writes == []
+    assert counts["skipped_fly_in_flight"] == 1 and counts["reconciled"] == 0
