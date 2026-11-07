@@ -12,9 +12,12 @@ that correction's admission read the live PR head. The dispatcher then replaces
 it with the new reservation under the ledger lock, and first appends the old
 receipt's identity to the same audit file as a ``superseding`` event
 (``action: supersede_delivery_receipt``); if that append fails nothing is
-replaced. Every other receipt (a first delivery, an unsettled or unknown one,
-one with no or another commit, ``no_changes`` and the rest) stays until it is
-cleared here.
+replaced. A settled ``not_delivered`` or ``no_changes`` correction that
+recorded no commit and was admitted against the very head the further
+correction declares is replaced the same way, once its run holds no ledger
+entry still in flight. Every other receipt (a first delivery, an unsettled or
+unknown one, one with another commit, and the rest) stays until it is cleared
+here.
 
 The same ledger holds lens-review entries (``lens_receipts``), keyed
 ``lens:OWNER/REPO#PR@HEAD:LENS``, each recording one lens run on one pull
