@@ -70,6 +70,12 @@ What it will never delete:
 - a `node_modules` whose real path leaves the worktree. Containment is checked against the real path for each
   directory right before it is deleted, so a directory swapped for a symlink after planning is refused too.
 - a `node_modules` that contains files tracked by git, or one inside a nested git repository.
+- a `node_modules` that is a mount point, or has any directory beneath it on a different device from the
+  worktree: refused and reported as `node_modules:mount-point`, so a separately mounted volume is never
+  emptied. This is checked at planning time and again immediately before each directory is deleted.
+
+Recovery: a stripped worktree only lost its installed dependencies. Reinstall them with the project's
+package manager (for example `npm ci`, `pnpm install` or `yarn install`).
 
 `--strip-only` runs this tier alone: no whole-worktree removal, no archive tier, no `git worktree prune`.
 With `--strip-node-modules` the tier runs after the other tiers in the same pass and only on worktrees they
@@ -90,14 +96,27 @@ untracked and small non-regenerable ignored files, and `meta.json` with a restor
 `--archive-cap-mb` (default 25) are skipped, never truncated. Only if the worktree is unchanged after
 archiving is it removed with `git worktree remove --force`; that flag appears nowhere else in the module.
 `--prune-archives` lists archive day directories older than 30 days (`--archive-retention-days`); with
-`--apply` it deletes them.
+`--apply` it deletes them. It only ever deletes a date-named directory whose layout is exactly what this
+tool writes (`<date>/<repo>/<archive>/` holding `meta.json` and only the known members, no symlinks, no
+unfinished `.partial` directory). Any other date-named directory is skipped, logged and reported as
+`skipped_foreign_dirs`.
+
+A worktree that holds an untracked or ignored file with a secret-looking name is never archived and never
+removed by this tier: it is kept with the reason `secrets-present` and counted in `secrets_present` in the
+run summary. Names only are judged, file contents are never read: `.env` and `.env.*`, `*.pem`, `*.key`,
+`*.p12`, `*.pfx`, `credentials*`, anything containing `secret`, `.netrc`, `.npmrc`, `id_rsa*` and
+`id_ed25519*`. Names ending in `.example`, `.sample` or `.template`, and the `.env.development*` family
+(always left out of archives), do not trigger it. Move or delete the file yourself to let the worktree be
+archived.
 
 Restore: in the main clone, `git worktree add --detach <dir> <head>`; if a bundle exists,
 `git fetch <archive>/local-commits.bundle HEAD:refs/heads/restored` first; then
 `git -C <dir> apply <archive>/patch.diff` and `tar -xzf <archive>/untracked.tar.gz -C <dir>`.
 
 `--idle-hours` is one flag for both tiers. Left unset it means 24 hours for the node_modules tier and 72
-for the archive tier; a value given on the command line applies to both.
+for the archive tier. **When given explicitly it applies to both**: `--idle-hours 24` with
+`--archive-remove` runs the archive-then-force-remove tier at 24 hours. A host that wants a shorter archive
+window must pass it knowingly; the launchd template deliberately passes no `--idle-hours`.
 
 ## Safeties that apply to every run
 
@@ -163,13 +182,49 @@ CI runs them in the `ateles package tests` workflow (`Run execution/scripts test
   `WOULD-STRIP`, `KEEP <reason>`); files older than 30 days are deleted.
 - `<state dir>/logs/launchd.{out,err}.log`: stdout and stderr from launchd, truncated when over 1 MB.
 
+## Run status and exit codes
+
+Each run appends one line to `runs.jsonl` whose `status` is one of:
+
+| `status` | Exit code | Meaning |
+|---|---|---|
+| `ok` | 0 | the run completed (also the line written for `--prune-archives`) |
+| `skipped-locked` | 0 | another run holds the lock; nothing was done |
+| `skipped-manual-cleanup-active` | 0 | `--yield-to-file` named a file changed in the last 30 minutes |
+| `aborted-error-ratio` | 2 | more than 20% of git and gh calls failed; no further deletion happened |
+| `crashed` | 1 | an unexpected exception; the line carries a truncated `error` |
+
+## Reasons a worktree was kept
+
+The `kept` map in the run summary (and `KEEP <reason>` in the day log) counts worktrees by why they were left
+alone. The node_modules tier has its own map, `strip_kept`.
+
+| Reason | Meaning |
+|---|---|
+| `never-touch`, `recheck-never-touch` | on the never-touch list, held, outside the home directory, or under `~/Library` |
+| `prunable`, `missing`, `not-linked-worktree`, `no-head` | not a usable linked worktree |
+| `locked`, `in-use` | locked by git, or a process has its working directory inside |
+| `recent`, `not-idle` | modified inside the fresh window (plain tier) or the idle window (archive and node_modules tiers) |
+| `dirty`, `unpushed`, `detached-unreachable` | uncommitted changes, a commit that exists only locally, or a detached HEAD unreachable from origin |
+| `head-moved`, `changed-during-archive` | the worktree changed between the check and the action |
+| `has-ignored-files` | `--protect-ignored` and non-regenerable ignored files are present |
+| `find-error`, `status-error`, `recheck-list-error`, `recheck-lsof-error` | a check could not be completed, so the worktree was kept |
+| `git-refused` | `git worktree remove` refused (logged with git's message) |
+| `over-cap-deferred` | the `--max` cap was reached; next run |
+| `archive-root-inside-repo`, `archive-too-big`, `archive-failed`, `archive-no-dry-tmp`, `nested-repo`, `has-submodules` | archive tier refusals |
+| `secrets-present`, `secrets-check-error` | archive tier: a secret-named file is present (or names could not be listed) |
+| `no-node-modules`, `refused-node-modules`, `strip-failed` | node_modules tier: nothing to do, every candidate refused (`strip_refused` in the log names each with `symlink`, `not-contained`, `mount-point`, `tracked-files`, `nested-repo`), or a delete failed part-way |
+| `aborted-error-ratio` | the error-abort ratio was reached |
+
 ## Installing the launchd job (operator, per host)
 
 The template `execution/scripts/com.ateles.worktree-prune.plist.template` uses two placeholders: `{{HOME}}`
 (the home directory) and `{{CHECKOUT}}` (the absolute path of the Ateles checkout that holds the script).
 The job runs whatever is in that working tree, so use a checkout that is kept clean and current, not a
-development clone. Review the flags in the template first: it applies deletions (`--apply`) with every tier
-on, runs at 03:30 local time, and a Mac that is asleep then runs it on wake.
+development clone. Review the flags in the template first: it applies deletions (`--apply`) with the plain,
+node_modules and archive tiers all on (`--protect-ignored`, `--strip-node-modules`, `--archive-remove`) and
+no `--idle-hours`, so the node_modules tier uses 24 hours and the archive tier 72. It runs at 03:30 local
+time, and a Mac that is asleep then runs it on wake.
 
 ```
 CHECKOUT=/path/to/a/clean/ateles/checkout
@@ -181,11 +236,15 @@ plutil -lint "$HOME/Library/LaunchAgents/com.ateles.worktree-prune.plist"
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.ateles.worktree-prune.plist"
 ```
 
+Re-installing over an existing job: run `launchctl bootout "gui/$(id -u)/com.ateles.worktree-prune"` first,
+then the `bootstrap` line above (bootstrap fails while the old job is loaded).
+
 Verify it took effect:
 
 ```
 launchctl print "gui/$(id -u)/com.ateles.worktree-prune" | head
-python3 "$CHECKOUT/execution/scripts/worktree_prune.py" --list     # a dry run against the real clones
+# a dry run of the tiers the nightly job runs, against the real clones
+python3 "$CHECKOUT/execution/scripts/worktree_prune.py" --protect-ignored --strip-node-modules --archive-remove --list
 ```
 
 To run once now (this applies): `launchctl kickstart "gui/$(id -u)/com.ateles.worktree-prune"`.

@@ -23,8 +23,8 @@ main clone) and re-checks every condition immediately before it acts.
 2. node_modules-only tier (`--strip-node-modules`, off by default). For a linked worktree
    idle for `--idle-hours` (default 24) or more, delete ONLY directories literally named
    `node_modules` (top level and nested; symlinks are never followed and a `node_modules`
-   that is a symlink is refused), when ALL of these hold, each re-checked immediately
-   before deleting:
+   that is a symlink or a mount point, or spans a device boundary, is refused), when ALL
+   of these hold, each re-checked immediately before deleting:
      a) `git status --porcelain` is empty
      b) HEAD is contained in an origin/* ref or is (an ancestor of) a merged PR head
         for the branch (same rule as the plain tier)
@@ -43,7 +43,8 @@ main clone) and re-checks every condition immediately before it acts.
    patch.diff, untracked/ignored-file tarball, meta.json) under the archive root (0700,
    <= 25 MB, otherwise SKIPPED); then, only if the worktree is unchanged since,
    `git worktree remove --force`. `--force` is used ONLY there; the plain tier never uses
-   it. `--prune-archives` lists (or with --apply deletes) archives older than 30 days.
+   it. `--prune-archives` lists (or with --apply deletes) archives older than 30 days, and
+   only those laid out the way this tool writes them.
 
 Operator-specific values are configuration, never code. Each can be set by environment
 variable or CLI flag (flag wins); the defaults are relative to the user's home directory:
