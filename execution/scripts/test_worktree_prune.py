@@ -816,8 +816,45 @@ SECRET_NAMES = [
     "id_rsa.bak",
     "id_ed25519",
     ".npmrc",
+    # round 3: wider families
+    ".envrc",
+    ".git-credentials",
+    ".pgpass",
+    ".htpasswd",
+    ".pypirc",
+    "id_ecdsa",
+    "id_ecdsa.pub",
+    "service-account-prod.json",
+    "prod.tfvars",
+    "prod.tfvars.json",
+    "terraform.tfstate",
+    "terraform.tfstate.backup",
+    "apple.p8",
+    "store.jks",
+    "release.keystore",
+    "vault.kdbx",
+    "mail.gpg",
+    "pub.asc",
+    ".aws",
+    ".ssh",
+    ".gnupg",
+    "my-token.txt",
+    "Password.txt",
+    "passwd",
+    "apikey.json",
+    "api_key.txt",
+    "private_key.der",
+    # case variants
+    ".ENV",
+    "Credentials.JSON",
+    "MY_SECRET.TXT",
+    ".Env.Local",
 ]
 NOT_SECRET_NAMES = [
+    "service-account.json.example",
+    ".envrc.sample",
+    "terraform.tfvars.template",
+    "credentials.json.dist",
     ".env.example",
     ".env.sample",
     ".env.template",
@@ -858,13 +895,16 @@ def test_the_template_rule_is_the_repos_single_definition_and_fails_closed(monke
         assert not wp.secret_name(".env" + suffix), suffix
         assert not wp.secret_name("credentials.json" + suffix.upper()), suffix
     # if the shared definition cannot be loaded, nothing counts as a template: more is kept, never less
+    real = importlib.util.spec_from_file_location
     monkeypatch.setattr(
         importlib.util, "spec_from_file_location", lambda *a, **k: 1 / 0
     )
-    broken = wp._load_template_rule()
-    assert broken(".env.example") is False
+    broken, loaded = wp._load_template_rule()
+    assert loaded is False and broken(".env.example") is False
     monkeypatch.setattr(wp, "is_placeholder_template", broken)
     assert wp.secret_name(".env.example")
+    monkeypatch.setattr(importlib.util, "spec_from_file_location", real)
+    assert wp._load_template_rule()[1] is True  # the control: loads normally
 
 
 @pytest.fixture
@@ -983,16 +1023,216 @@ def test_example_names_and_the_dev_env_family_do_not_block_archiving(repo, archi
     assert not os.path.exists(w)
 
 
-def test_a_tracked_secret_named_file_is_not_an_untracked_secret(repo, archive_on):
+def test_a_pushed_unmodified_secret_named_tracked_file_carries_nothing(
+    repo, archive_on
+):
     w = repo.add_wt("sec-tracked", node_modules=False)
-    open(w + "/credentials.txt", "w").write("committed on purpose")
+    open(w + "/credentials.txt", "w").write("committed and pushed on purpose")
     sh("git", "add", "credentials.txt", cwd=w)
     sh("git", "commit", "-qm", "tracked", cwd=w)
+    sh("git", "push", "-q", "origin", "b-sec-tracked", cwd=w)
+    sh("git", "fetch", "-q", "origin", cwd=repo.main)
+    open(w + "/a.txt", "a").write("edit\n")  # something to archive
     age(w)
     e = wp.analyze(repo.entry(w), False)
-    assert e["status"] == "ARCHIVE-CANDIDATE"  # unpushed commit
-    assert wp.secret_files(w) == []
+    assert e["status"] == "ARCHIVE-CANDIDATE"  # dirty
+    assert (
+        wp.secret_files(w, "b-sec-tracked") == []
+    )  # on the remote, unmodified: no channel carries it
     assert wp.act(e, True, False) == "ARCHIVED-REMOVED"
+
+
+def _assert_kept_whole(repo, archive_on, w, e, expect_path, intact):
+    """The worktree is kept, nothing is archived, and the file is untouched; dry run and real run agree."""
+    for apply_ in (False, True):
+        res = wp.archive_flow(e, apply_)
+        assert res == "secrets-present", (res, e.get("detail"))
+    assert expect_path in e["secrets"], e["secrets"]
+    assert os.path.isdir(w) and os.path.exists(intact)
+    assert not os.path.exists(archive_on)
+    assert os.listdir(repo.home + "/dry") == []
+
+
+@pytest.mark.parametrize(
+    "name", ["deploy.pem", "config/secrets/prod.txt", ".ssh/config"]
+)
+def test_a_staged_new_secret_named_path_keeps_the_worktree_whole(
+    repo, archive_on, name
+):
+    w, e = _dirty_archive_candidate(repo, "sec-staged")
+    os.makedirs(os.path.dirname(w + "/" + name), exist_ok=True)
+    open(w + "/" + name, "w").write("NOT-READ-BY-TEST-OR-TOOL")
+    sh("git", "add", "-f", name, cwd=w)
+    age(w)
+    # untracked-looking channels see nothing (the path is tracked in the index); only the diff channel does
+    assert name in wp.secret_files(w, e.get("branch"))
+    _assert_kept_whole(repo, archive_on, w, e, name, w + "/" + name)
+
+
+def _push_tracked(repo, w, name, branch):
+    os.makedirs(os.path.dirname(w + "/" + name), exist_ok=True)
+    open(w + "/" + name, "w").write("v1")
+    sh("git", "add", "-f", name, cwd=w)
+    sh("git", "commit", "-qm", "add " + name, cwd=w)
+    sh("git", "push", "-q", "origin", branch, cwd=w)
+    sh("git", "fetch", "-q", "origin", cwd=repo.main)
+
+
+@pytest.mark.parametrize("name", ["service.key", "conf/token_store/data.txt"])
+def test_a_modified_tracked_secret_named_file_keeps_the_worktree_whole(
+    repo, archive_on, name
+):
+    w = repo.add_wt("sec-modified", node_modules=False)
+    _push_tracked(repo, w, name, "b-sec-modified")
+    open(w + "/" + name, "a").write(
+        "NOT-READ-BY-TEST-OR-TOOL"
+    )  # now in the working-tree diff
+    age(w)
+    e = wp.analyze(repo.entry(w), False)
+    assert e["status"] == "ARCHIVE-CANDIDATE"
+    _assert_kept_whole(repo, archive_on, w, e, name, w + "/" + name)
+    assert open(w + "/" + name).read().endswith("NOT-READ-BY-TEST-OR-TOOL")
+
+
+def test_a_renamed_secret_named_file_is_caught_at_both_ends(repo, archive_on):
+    w = repo.add_wt("sec-rename", node_modules=False)
+    _push_tracked(repo, w, "old_secret_file.txt", "b-sec-rename")
+    sh(
+        "git", "mv", "old_secret_file.txt", "plain-name.txt", cwd=w
+    )  # target looks harmless
+    age(w)
+    e = wp.analyze(repo.entry(w), False)
+    assert e["status"] == "ARCHIVE-CANDIDATE"
+    _assert_kept_whole(
+        repo, archive_on, w, e, "old_secret_file.txt", w + "/plain-name.txt"
+    )
+    # and the other way round: a harmless source renamed to a secret-looking target
+    w2 = repo.add_wt("sec-rename2", node_modules=False)
+    _push_tracked(repo, w2, "plain2.txt", "b-sec-rename2")
+    sh("git", "mv", "plain2.txt", "id_rsa", cwd=w2)
+    age(w2)
+    e2 = wp.analyze(repo.entry(w2), False)
+    _assert_kept_whole(repo, archive_on, w2, e2, "id_rsa", w2 + "/id_rsa")
+
+
+@pytest.mark.parametrize(
+    "rel",
+    ["config/secrets/prod.txt", ".ssh/known_hosts", "a/.aws/config", "tokens/list.txt"],
+)
+def test_a_secret_named_directory_component_keeps_the_worktree_whole(
+    repo, archive_on, rel
+):
+    w, e = _dirty_archive_candidate(repo, "sec-dir")
+    os.makedirs(os.path.dirname(w + "/" + rel))
+    open(w + "/" + rel, "w").write(
+        "NOT-READ-BY-TEST-OR-TOOL"
+    )  # untracked; the file name itself is harmless
+    assert not wp.secret_name(os.path.basename(rel))  # only the directory gives it away
+    age(w)
+    _assert_kept_whole(repo, archive_on, w, e, rel, w + "/" + rel)
+
+
+def test_secret_paths_are_judged_on_every_component():
+    assert wp.secret_path("config/secrets/prod.txt")
+    assert wp.secret_path("x/.ssh/id")
+    assert wp.secret_path("DEEP/Credentials/ok.txt")
+    assert not wp.secret_path("src/lib/app.js")
+    assert not wp.secret_path("docs/.env.example")  # exempt placeholder
+    assert not wp.secret_path("a/.env.development.local")  # the husky-copy family
+    assert wp.secret_path("a/.env.example", is_link=True)  # unless it is a link
+
+
+def test_a_secret_named_file_in_a_local_only_commit_keeps_the_worktree_whole(
+    repo, archive_on
+):
+    w = repo.add_wt("sec-commit", node_modules=False)
+    open(w + "/deploy.pem", "w").write("NOT-READ-BY-TEST-OR-TOOL")
+    sh("git", "add", "-f", "deploy.pem", cwd=w)
+    sh("git", "commit", "-qm", "local only", cwd=w)
+    age(w)
+    e = wp.analyze(repo.entry(w), False)
+    assert e["status"] == "ARCHIVE-CANDIDATE"  # unpushed
+    assert wp.secret_files(w, "b-sec-commit") == ["deploy.pem"]
+    _assert_kept_whole(repo, archive_on, w, e, "deploy.pem", w + "/deploy.pem")
+    # still caught when a later local commit removed it again: the bundle would carry the history
+    w2 = repo.add_wt("sec-commit2", node_modules=False)
+    open(w2 + "/id_ed25519", "w").write("NOT-READ-BY-TEST-OR-TOOL")
+    sh("git", "add", "-f", "id_ed25519", cwd=w2)
+    sh("git", "commit", "-qm", "oops", cwd=w2)
+    sh("git", "rm", "-q", "id_ed25519", cwd=w2)
+    sh("git", "commit", "-qm", "remove it", cwd=w2)
+    age(w2)
+    e2 = wp.analyze(repo.entry(w2), False)
+    assert wp.secret_files(w2, "b-sec-commit2") == ["id_ed25519"]
+    _assert_kept_whole(repo, archive_on, w2, e2, "id_ed25519", w2 + "/a.txt")
+    # an ordinary local-only commit still archives
+    w3 = repo.add_wt("sec-commit3", node_modules=False)
+    open(w3 + "/ordinary.txt", "w").write("x")
+    sh("git", "add", "ordinary.txt", cwd=w3)
+    sh("git", "commit", "-qm", "ordinary", cwd=w3)
+    age(w3)
+    e3 = wp.analyze(repo.entry(w3), False)
+    assert wp.act(e3, True, False) == "ARCHIVED-REMOVED"
+
+
+def test_a_local_commit_secret_appearing_while_archiving_discards_the_archive(
+    repo, archive_on, monkeypatch
+):
+    w, e = _dirty_archive_candidate(repo, "sec-late-commit")
+    real_build = wp.build_archive
+
+    def build_then_commit_a_secret(entry, dest):
+        info = real_build(entry, dest)
+        open(w + "/late.p12", "w").write("NOT-READ-BY-TEST-OR-TOOL")
+        sh("git", "add", "-f", "late.p12", cwd=w)
+        sh("git", "commit", "-qm", "late", cwd=w)
+        age(w)
+        return info
+
+    monkeypatch.setattr(wp, "build_archive", build_then_commit_a_secret)
+    res = wp.archive_flow(e, True)
+    # the commit moves HEAD, which the unchanged-since check also catches; either way nothing is removed
+    assert res in ("secrets-present", "head-moved"), res
+    assert os.path.isdir(w) and os.path.isfile(w + "/late.p12")
+
+
+def test_a_template_named_symlink_gets_no_template_exemption(repo, archive_on):
+    w, e = _dirty_archive_candidate(repo, "sec-link")
+    os.symlink(
+        "a.txt", w + "/credentials.json.sample"
+    )  # looks like a placeholder, is a link
+    age(w)
+    assert wp.secret_files(w, e.get("branch")) == ["credentials.json.sample"]
+    _assert_kept_whole(repo, archive_on, w, e, "credentials.json.sample", w + "/a.txt")
+    # a staged (tracked) symlink with a template name is caught through its git mode
+    w2, e2 = _dirty_archive_candidate(repo, "sec-link2")
+    os.symlink("a.txt", w2 + "/.env.example")
+    sh("git", "add", ".env.example", cwd=w2)
+    age(w2)
+    assert ".env.example" in wp.secret_files(w2, e2.get("branch"))
+    # the control: the same names as regular files are exempt placeholders
+    w3, e3 = _dirty_archive_candidate(repo, "sec-link3")
+    open(w3 + "/credentials.json.sample", "w").write("{}")
+    open(w3 + "/.env.example", "w").write("A=")
+    sh("git", "add", ".env.example", cwd=w3)
+    age(w3)
+    assert wp.secret_files(w3, e3.get("branch")) == []
+
+
+def test_an_unavailable_template_definition_is_logged_once(repo, monkeypatch):
+    monkeypatch.setattr(wp, "TEMPLATE_RULE_LOADED", False)
+    run_main(repo, "--strip-only")
+    logs = os.listdir(repo.home + "/state/logs")
+    text = "".join(open(repo.home + "/state/logs/" + n).read() for n in logs)
+    assert text.count("credential template definition") == 1
+    assert "stricter secret-name matching applies" in text
+    monkeypatch.setattr(wp, "TEMPLATE_RULE_LOADED", True)
+    other = repo.home + "/state2"
+    wp.main(["--state-dir", other, "--repos-dir", repo.home + "/repos", "--strip-only"])
+    text2 = "".join(
+        open(other + "/logs/" + n).read() for n in os.listdir(other + "/logs")
+    )
+    assert "credential template definition" not in text2
 
 
 def _write_archive(root, day, repo_name="r", name="x-1234abcd", members=("meta.json",)):

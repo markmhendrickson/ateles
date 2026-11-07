@@ -338,18 +338,57 @@ def tar_exclude(rel):
     return rel.endswith((".pyc", ".tsbuildinfo"))
 
 
-# Secret-looking file names. The archive tier never copies such a file anywhere, so a worktree that
-# holds one (untracked or ignored) is kept whole instead of being archived and removed. Decided on the
-# name alone; file contents are never read. The ENV_COPY_PREFIX family is handled separately above
-# (left out of archives, as before) and is not part of this list.
-SECRET_EXACT = (".env", ".netrc", ".npmrc")
-SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
-SECRET_PREFIXES = ("credentials", "id_rsa", "id_ed25519")
-SECRET_SUBSTRINGS = ("secret",)
+# Secret-looking names. The archive tier never copies such a path anywhere, so a worktree that touches
+# one (an untracked or ignored file, a path in the working-tree diff, a path in a local-only commit) is
+# kept whole instead of being archived and removed. Decided on names alone, for every component of the
+# path; file contents are never read. The ENV_COPY_PREFIX family is handled separately above (left out
+# of archives, as before) and is not part of this list. The list errs toward keeping.
+SECRET_EXACT = (
+    ".env",
+    ".envrc",
+    ".netrc",
+    ".npmrc",
+    ".pgpass",
+    ".pypirc",
+    ".git-credentials",
+    ".htpasswd",
+    ".aws",
+    ".ssh",
+    ".gnupg",
+)
+SECRET_SUFFIXES = (
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".p8",
+    ".jks",
+    ".keystore",
+    ".kdbx",
+    ".gpg",
+    ".asc",
+    ".tfvars",
+    ".tfstate",
+)
+SECRET_PREFIXES = ("credentials", "id_rsa", "id_ed25519", "id_ecdsa")
+SECRET_SUBSTRINGS = (
+    "secret",
+    "credential",
+    "token",
+    "password",
+    "passwd",
+    "apikey",
+    "api_key",
+    "private_key",
+    ".tfvars.",
+    ".tfstate.",
+)
+SECRET_SCAN_SKIP = ("node_modules", ".venv", "venv", "__pycache__", ".mcp-venv")
 
 
 def _load_template_rule():
-    """The repo's single definition of a placeholder-template name (lib/credential_templates.py).
+    """(rule, loaded): the repo's single definition of a placeholder-template name
+    (lib/credential_templates.py), and whether it could be loaded.
 
     Loaded by path, as the credential hook does. If it cannot be loaded, no name counts as a template,
     so more files look secret and more worktrees are kept: it fails closed and never uses a copy.
@@ -363,34 +402,77 @@ def _load_template_rule():
         spec = importlib.util.spec_from_file_location("credential_templates", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        return mod.is_placeholder_template
+        return mod.is_placeholder_template, True
     except Exception:
-        return lambda name: False
+        return (lambda name: False), False
 
 
-is_placeholder_template = _load_template_rule()
-SECRET_SCAN_SKIP = ("node_modules", ".venv", "venv", "__pycache__", ".mcp-venv")
+is_placeholder_template, TEMPLATE_RULE_LOADED = _load_template_rule()
 
 
-def secret_name(name):
-    """True if a file's base name looks like it holds a secret (name only; the content is never read)."""
+def secret_name(name, is_link=False):
+    """True if one path component looks like it names a secret (name only; the content is never read).
+
+    A placeholder-template name is exempt, unless it is a symbolic link: a link can point anywhere, so a
+    template-looking name does not launder it. The .env.development family keeps its own exemption.
+    """
     n = name.lower()
-    if n.startswith(ENV_COPY_PREFIX) or is_placeholder_template(n):
+    if n.startswith(ENV_COPY_PREFIX):
+        return False
+    if not is_link and is_placeholder_template(n):
         return False
     return (
         n in SECRET_EXACT
         or n.startswith(".env.")
         or n.endswith(SECRET_SUFFIXES)
         or n.startswith(SECRET_PREFIXES)
+        or (
+            n.startswith(("service-account", "service_account")) and n.endswith(".json")
+        )
         or any(s in n for s in SECRET_SUBSTRINGS)
     )
 
 
-def secret_files(wt):
-    """Relative paths of untracked or ignored files in the worktree whose names look secret.
+def secret_path(rel, is_link=False):
+    """True if ANY component of the relative path (directories included) looks secret."""
+    parts = [p for p in rel.split("/") if p]
+    for i, part in enumerate(parts):
+        if secret_name(part, is_link and i == len(parts) - 1):
+            return True
+    return False
 
-    -> list, or None if it could not be decided (callers keep the worktree on None).
-    Tracked files are not listed here: they live in git, not in the untracked archive.
+
+_RAW_META = re.compile(r"^:\d{6} \d{6} [0-9a-f]+ [0-9a-f]+ [A-Z]\d*$")
+
+
+def _raw_diff_paths(args, wt):
+    """Paths named by a `git ... --raw -z --no-renames` command -> [(path, is_symlink)], or None on error.
+
+    --no-renames lists a rename as a delete of the source plus an add of the target, so both names appear.
+    """
+    rc, o, _ = run(["git", "-C", wt] + args, count=False, timeout=600)
+    if rc != 0:
+        return None
+    toks = o.split("\0")
+    out, i = [], 0
+    while i < len(toks):
+        if _RAW_META.match(toks[i]) and i + 1 < len(toks):
+            modes = toks[i][1:].split(" ")[:2]
+            out.append((toks[i + 1], "120000" in modes))
+            i += 2
+        else:
+            i += 1
+    return out
+
+
+def secret_files(wt, branch=None):
+    """Paths the archive would copy whose names look secret, in every channel the archive carries.
+
+    -> sorted list, or None if it could not be decided (callers keep the worktree on None). Channels:
+      * untracked or ignored files in the worktree (the tarball);
+      * every path in the working-tree and staged diff against HEAD (patch.diff), rename sources included;
+      * every path touched by a commit that exists only locally (the bundle).
+    Tracked, unmodified files that are already on a remote are not carried by any channel.
     """
     rc, o, _ = run(["git", "-C", wt, "ls-files", "-z"], count=False)
     if rc != 0:
@@ -399,15 +481,30 @@ def secret_files(wt):
     hits = []
     try:
         for dp, dn, fn in os.walk(wt, followlinks=False, onerror=_raise):
+            entries = [(d, os.path.islink(os.path.join(dp, d))) for d in dn]
             dn[:] = [d for d in dn if d != ".git" and d not in SECRET_SCAN_SKIP]
-            for f in fn:
-                if secret_name(f):
-                    rel = os.path.relpath(os.path.join(dp, f), wt)
-                    if rel not in tracked:
-                        hits.append(rel)
+            # a symlink to a directory is listed with the directories but archived like a file
+            files = [(f, os.path.islink(os.path.join(dp, f))) for f in fn]
+            files += [(d, True) for d, link in entries if link and d != ".git"]
+            for f, link in files:
+                rel = os.path.relpath(os.path.join(dp, f), wt)
+                if rel not in tracked and secret_path(rel, link):
+                    hits.append(rel)
     except OSError:
         return None
-    return sorted(hits)
+    channels = [
+        ["diff", "--raw", "-z", "--no-renames", "HEAD"],
+        ["diff", "--cached", "--raw", "-z", "--no-renames", "HEAD"],
+        ["log", "--raw", "-z", "--no-renames", "-m", "--format=", "HEAD"]
+        + ([("refs/heads/" + branch)] if branch else [])
+        + ["--not", "--remotes"],
+    ]
+    for args in channels:
+        paths = _raw_diff_paths(args, wt)
+        if paths is None:
+            return None
+        hits += [p for p, link in paths if secret_path(p, link)]
+    return sorted(set(hits))
 
 
 class Stats:
@@ -1144,7 +1241,7 @@ def _gather_files(e):
         else:
             files.append(ent)
     if any(
-        secret_name(os.path.basename(f)) for f in files
+        secret_path(f, os.path.islink(os.path.join(wt, f))) for f in files
     ):  # defence in depth: the walk above found none
         raise ArchiveError("secrets-present")
     return sorted(set(files)), ignored
@@ -1313,7 +1410,7 @@ def _secrets_block(e):
 
     The archive tier never copies such a file and never removes the worktree that holds one.
     """
-    hits = secret_files(e["wt"])
+    hits = secret_files(e["wt"], e.get("branch"))
     if hits is None:
         return "secrets-check-error"
     if hits:
@@ -1474,8 +1571,27 @@ def prune_archives(apply_, retention_days):
     any other date-named directory is skipped and logged.
     """
     root = ARCH["root"]
+    if os.path.islink(root) or os.path.realpath(root) != os.path.abspath(root):
+        detail = (
+            "archive root %s is a symlink or resolves elsewhere (%s): nothing listed or deleted"
+            % (
+                root,
+                os.path.realpath(root),
+            )
+        )
+        log("REFUSE prune-archives: " + detail)
+        return {
+            "refused": "archive-root-not-real",
+            "detail": detail,
+            "old_day_dirs": [],
+            "skipped_foreign_dirs": [],
+            "deleted_day_dirs": [],
+            "kept_day_dirs": 0,
+            "mb": 0,
+            "deleted": False,
+        }
     cutoff = datetime.date.today() - datetime.timedelta(days=retention_days)
-    old, keep, skipped = [], 0, []
+    old, keep, skipped, deleted = [], 0, [], []
     if os.path.isdir(root):
         for d in sorted(os.listdir(root)):
             if not ARCHIVE_DAY_RE.match(d):
@@ -1503,9 +1619,31 @@ def prune_archives(apply_, retention_days):
                 except OSError:
                     pass
         if apply_:
-            shutil.rmtree(d, ignore_errors=True)
+            # Move the directory aside to a name no run treats as an archive, then verify THAT path again
+            # before deleting it: whatever stood at the original name when it was moved is what gets judged.
+            aside = os.path.join(
+                root, ".prune-%s-%s" % (os.path.basename(d), os.urandom(4).hex())
+            )
+            try:
+                os.rename(d, aside)
+            except OSError as ex:
+                skipped.append(os.path.basename(d))
+                log("SKIP prune-archives %s: could not move it aside (%s)" % (d, ex))
+                continue
+            if archive_day_dir_matches(aside):
+                shutil.rmtree(aside, ignore_errors=True)
+                deleted.append(os.path.basename(d))
+            else:
+                skipped.append(os.path.basename(d))
+                log(
+                    "SKIP prune-archives %s: layout changed after it was listed; put back"
+                    % d
+                )
+                if not os.path.lexists(d):
+                    os.rename(aside, d)
     return {
         "old_day_dirs": [os.path.basename(d) for d in old],
+        "deleted_day_dirs": deleted,
         "skipped_foreign_dirs": skipped,
         "kept_day_dirs": keep,
         "mb": round(total / 1048576, 2),
@@ -1573,7 +1711,12 @@ def build_parser():
         default=150,
         help="max worktrees acted on (removed or node_modules-stripped) per run (default 150)",
     )
-    ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=6,
+        help="threads used for the read-only per-worktree checks (default 6); deleting is done one worktree at a time",
+    )
     ap.add_argument(
         "--protect-ignored",
         action="store_true",
@@ -1623,7 +1766,11 @@ def build_parser():
         help="list archive day-directories older than --archive-retention-days (with --apply: delete them) and exit",
     )
     ap.add_argument(
-        "--archive-retention-days", type=int, default=ARCHIVE_RETENTION_DAYS
+        "--archive-retention-days",
+        type=int,
+        default=ARCHIVE_RETENTION_DAYS,
+        help="--prune-archives: archives older than this many days are listed or deleted (default %d)"
+        % ARCHIVE_RETENTION_DAYS,
     )
     ap.add_argument(
         "--state-dir",
@@ -1727,13 +1874,27 @@ def main(argv=None):
     )
     for w in warnings:
         log("WARN " + w)
+    if not TEMPLATE_RULE_LOADED:
+        log(
+            "WARN credential template definition (lib/credential_templates.py) unavailable: "
+            "no name is treated as a placeholder template, so the stricter secret-name matching applies"
+        )
     rotate_logs()
     if a.prune_archives:
         res = prune_archives(a.apply, a.archive_retention_days)
         log("prune-archives " + json.dumps(res, sort_keys=True))
-        write_summary(dict(res, ts=ts, mode=mode, status="ok", action="prune-archives"))
+        refused = bool(res.get("refused"))
+        write_summary(
+            dict(
+                res,
+                ts=ts,
+                mode=mode,
+                status="refused-archive-root" if refused else "ok",
+                action="prune-archives",
+            )
+        )
         print(json.dumps(res, sort_keys=True))
-        return 0
+        return 2 if refused else 0
     if (
         ARCH["enabled"] and not a.apply
     ):  # dry run: build + verify archives in a throwaway dir, then discard them
