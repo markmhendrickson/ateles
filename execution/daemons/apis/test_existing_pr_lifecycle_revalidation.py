@@ -130,7 +130,13 @@ def test_unverified_lifecycle_notice_does_not_invent_a_cause(joined, failure, ph
     assert joined['calls'] == [] and not delivery._delivery_ledger().delivery_receipts()
     text = '\n'.join(notice.sent)
     assert 'could not be verified' in text and 'this attempt was not started' in text
-    assert 'Reconcile current task/admission' in text
+    # A transient executing-write failure schedules a retry: the notice says so
+    # and gives no manual step. Every other case keeps the reconcile instruction.
+    if phase == 'executing' and failure in {'lost_reply', 'failed_http'}:
+        assert 'Apis will retry automatically' in text
+        assert 'Reconcile' not in text
+    else:
+        assert 'Reconcile current task/admission' in text
     assert 'changed during' not in text and 'changed before' not in text
     persisted = joined['record']['snapshot']
     if failure in {'lost_reply', 'missing_token', 'failed_http'}:
