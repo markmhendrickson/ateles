@@ -53,7 +53,11 @@ class _Reached(Exception):
 def runner(monkeypatch, tmp_path):
     state = {
         "gate": RED, "worktrees": 0, "sandboxes": 0, "dispatches": 0,
-        "pr": {"state": "open", "head": {"sha": HEAD}, "base": {"ref": "main"}},
+        "pr": {
+            "state": "open", "head": {"sha": HEAD}, "base": {"ref": "main"},
+            # GitHub has computed mergeability: unknown now holds the lens.
+            "mergeable": True, "mergeable_state": "clean",
+        },
     }
 
     async def read_gate(repository, head_sha, base_ref):
@@ -136,13 +140,32 @@ def test_a_conflicting_pr_is_refused_even_with_a_green_check(runner):
     assert state["worktrees"] == 0
 
 
-def test_mergeable_not_yet_computed_proceeds_on_green_checks(runner):
+def test_mergeable_not_yet_computed_holds_even_on_green_checks(runner):
+    # The old assertion here (the lens proceeded to the worktree) pinned the
+    # defect: unknown mergeability was read as "no conflict". Red before this
+    # fix, observed: `merge_conflict_gate` returned None, so `pytest.raises
+    # (_Reached)` fired and `report` never existed.
     state, go = runner
     state["pr"] = {**state["pr"], "mergeable": None, "mergeable_state": "unknown"}
     state["gate"] = GREEN
-    with pytest.raises(_Reached):
-        go()
-    assert state["worktrees"] == 1
+    report = go()
+    assert report["ok"] is False and report["held_for_checks"] is True
+    assert "has not yet computed whether this pull request conflicts" in report["reason"]
+    assert state["worktrees"] == 0
+
+
+def test_missing_mergeable_field_holds(runner):
+    # Red before this fix (inferred from the same `None` fall-through): a
+    # record with no `mergeable` field seated the lens.
+    state, go = runner
+    state["pr"] = {
+        k: v for k, v in state["pr"].items() if k not in ("mergeable", "mergeable_state")
+    }
+    state["gate"] = GREEN
+    report = go()
+    assert report["held_for_checks"] is True
+    assert "has not yet computed" in report["reason"]
+    assert state["worktrees"] == 0
 
 
 @pytest.mark.parametrize("metadata", [

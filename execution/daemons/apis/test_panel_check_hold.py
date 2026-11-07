@@ -72,6 +72,8 @@ def _pr(head=HEAD, state="open"):
         "number": PR, "state": state, "draft": False, "title": "t",
         "body": "Closes #80", "html_url": "u", "user": {"login": "someone"},
         "head": {"sha": head, "ref": "feat/x"}, "base": {"ref": "main"},
+        # GitHub has computed mergeability: unknown now holds the panel.
+        "mergeable": True, "mergeable_state": "clean",
     }
 
 
@@ -281,9 +283,48 @@ def test_a_conflicting_pr_with_one_green_check_is_held_and_names_the_conflict(
     assert "review panel HELD" in caplog.text and "merge conflict" in caplog.text
 
 
-def test_mergeable_not_yet_computed_with_green_checks_is_not_held(world):
+@pytest.mark.parametrize("unknown", [
+    {"mergeable": None, "mergeable_state": "unknown"},
+    {"mergeable": True, "mergeable_state": "unknown"},
+    {"mergeable": "true", "mergeable_state": "clean"},
+    {"mergeable": True, "mergeable_state": None},
+], ids=["null-unknown", "true-unknown", "not-a-bool", "state-missing"])
+def test_mergeable_not_yet_computed_with_green_checks_is_held(world, unknown):
+    # The old assertion here (`mergeable: null` seated Lanius) pinned the
+    # defect: unknown mergeability was read as "no conflict". Red before this
+    # fix, observed for null-unknown (the panel was seated, raising _Seated);
+    # the other ids are inferred from the same `return None` fall-through.
     d, state = world
-    state["pr"] = {**_pr(), "mergeable": None, "mergeable_state": "unknown"}
+    state["pr"] = {**_pr(), **unknown}
+    state["gate"] = GREEN
+    _run(d._handle_pr(_trigger()))
+    assert state["seated"] == [], "no lens may be seated while mergeability is unknown"
+    assert KEY in d._panel_ci_holds
+    reason = d._panel_ci_holds[KEY].reason
+    assert "has not yet computed whether this pull request conflicts" in reason
+    assert "held until it has" in reason
+
+
+def test_missing_mergeable_field_holds(world):
+    # Red before this fix (inferred): `pr.get("mergeable")` was None and not
+    # False, so the gate fell through to the green check reading and seated.
+    d, state = world
+    pr = _pr()
+    pr.pop("mergeable")
+    pr.pop("mergeable_state")
+    state["pr"] = pr
+    state["gate"] = GREEN
+    _run(d._handle_pr(_trigger()))
+    assert state["seated"] == []
+    assert "has not yet computed" in d._panel_ci_holds[KEY].reason
+    assert state["gate_reads"] == 0, "checks are not read while mergeability is unknown"
+
+
+def test_mergeable_true_clean_releases_as_today(world):
+    # A guard, not a red-before test: it passed before this fix too, and pins
+    # that the stricter rule still releases a known-mergeable green head.
+    d, state = world
+    state["pr"] = {**_pr(), "mergeable": True, "mergeable_state": "clean"}
     state["gate"] = GREEN
     with pytest.raises(_Seated):
         _run(d._handle_pr(_trigger()))

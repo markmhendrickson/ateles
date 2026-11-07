@@ -205,3 +205,104 @@ def test_real_head_change_still_stops_even_after_a_rate_limit(monkeypatch):
     asyncio.run(d._handle_pr(tsd._trigger(body="Closes #80.")))
     assert reasons == ["PR head changed during review or could not be verified"]
     assert not any(kind in {"review", "route", "gate"} for kind, _ in calls), calls
+
+
+# ── the deferral is bounded (failure_posture.md rule 5) ─────────────────────
+
+from test_panel_neotoma_resume import _Comments, _wire_github  # noqa: E402
+
+
+def _defer_on_rate_limit(d):
+    asyncio.run(
+        d._handle_panel_session_limit(
+            tsd._trigger(number=87), None, "panel", "", "",
+            reason=swarm_dispatch.GITHUB_TEMPORARILY_RATE_LIMITED,
+        )
+    )
+
+
+def test_rate_limit_deferral_counts_retries_at_one_head(monkeypatch):
+    # Red before this fix, observed in the code: the GitHub deferral carried
+    # no count, so neither notice said "retry N of L" and no GitHub marker
+    # was posted.
+    monkeypatch.delenv("APIS_NEOTOMA_RETRY_LIMIT", raising=False)
+    comments = _Comments()
+    _wire_github(monkeypatch, comments)
+    d = _dispatcher()
+    _defer_on_rate_limit(d)
+    _defer_on_rate_limit(d)
+    assert d.notifier.priorities == [swarm_dispatch.Priority.INFO] * 2
+    assert "(retry 1 of 3)" in d.notifier.sent[0]
+    assert "(retry 2 of 3)" in d.notifier.sent[1]
+    assert "retry 1 of 3" in comments.posted[0]
+    assert "retry 2 of 3" in comments.posted[1]
+    live = [c["body"] for c in comments.comments]
+    assert len(live) == 1  # the older marker was replaced, not stacked
+    m = SwarmDispatcher._GITHUB_DEFERRAL_RE.search(live[0])
+    assert m and m.group(1) == "2"
+    # A GitHub marker is a deferral of another kind for the Neotoma count.
+    assert asyncio.run(d._prior_neotoma_deferral_attempts(tsd._trigger(number=87))) == 0
+
+
+def test_rate_limit_deferral_stops_at_the_limit(monkeypatch):
+    # Red before this fix, observed in the code: every rate-limit deferral
+    # auto-resumed with a fixed delay, so the third one posted a fourth resume
+    # marker and an INFO notice instead of stopping.
+    monkeypatch.setenv("APIS_NEOTOMA_RETRY_LIMIT", "2")
+    comments = _Comments()
+    _wire_github(monkeypatch, comments)
+    d = _dispatcher()
+    d.__dict__["_github_rate_limit_headers"] = {("owner/repo", 87): ("7", "0")}
+    _defer_on_rate_limit(d)
+    _defer_on_rate_limit(d)
+    _defer_on_rate_limit(d)  # past the limit of 2
+    assert d.notifier.priorities[-1] == swarm_dispatch.Priority.BLOCKER
+    notice = d.notifier.sent[-1]
+    assert "GitHub rate limits" in notice and "after 2 automatic retries" in notice
+    assert "Retry-After=7" in notice and "X-RateLimit-Remaining=0" in notice
+    last = comments.posted[-1]
+    assert "operator attention is required" in last.lower()
+    assert SwarmDispatcher._REVIEW_DEFERRED_RE.search(last) is None
+    assert SwarmDispatcher._GITHUB_DEFERRAL_RE.search(last) is None
+    assert "test-token" not in notice and "test-token" not in last
+
+
+def test_rate_limit_deferral_count_unreadable_stops(monkeypatch):
+    # Red before this fix, inferred: the count was never read, so an
+    # unreadable comment thread still deferred with a resume marker.
+    comments = _Comments()
+    _wire_github(monkeypatch, comments)
+
+    async def unreadable(self, repository, number, client):
+        raise httpx.ConnectError("comments unreadable")
+
+    monkeypatch.setattr(SwarmDispatcher, "_issue_comments_scan", unreadable)
+    d = _dispatcher()
+    assert asyncio.run(d._prior_github_deferral_attempts(tsd._trigger(number=87))) is None
+    _defer_on_rate_limit(d)
+    assert d.notifier.priorities == [swarm_dispatch.Priority.BLOCKER]
+    assert "GitHub rate limits" in d.notifier.sent[-1]
+    assert "retry count could not be confirmed" in d.notifier.sent[-1]
+    assert "Retry-After=absent" in d.notifier.sent[-1]
+
+
+def test_first_panel_head_read_rate_limited_defers(monkeypatch):
+    # QA: the pre-review head read (before any lens is seated) stays
+    # rate-limited. Red before this fix: not observed; this pins an existing
+    # path the earlier test (which limits only the aggregation read) left
+    # uncovered. A resume marker is posted; no lens, routing or gate action.
+    calls: list = []
+    d = tsd._pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**", calls=calls)
+
+    async def head(_t):
+        d.__dict__.setdefault("_rate_limited_pr_reads", set()).add(("owner/repo", 87))
+        return None
+
+    monkeypatch.setattr(d, "_pr_head_sha", head)
+    comments = _Comments()
+    _wire_github(monkeypatch, comments)
+    asyncio.run(d._handle_pr(tsd._trigger(body="Closes #80.")))
+    assert comments.posted, "a deferral notice must be posted"
+    assert SwarmDispatcher._REVIEW_DEFERRED_RE.search(comments.posted[-1])
+    assert SwarmDispatcher._GITHUB_DEFERRAL_RE.search(comments.posted[-1])
+    assert not any(kind in {"review", "route", "gate"} for kind, _ in calls), calls

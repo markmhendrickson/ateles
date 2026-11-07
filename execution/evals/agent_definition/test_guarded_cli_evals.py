@@ -40,6 +40,7 @@ def test_guarded_cli_requires_available_canonical_definition(monkeypatch, tmp_pa
     # a known-green head rather than reading GitHub or the host's credentials.
     monkeypatch.setattr(runner, "current_pr_metadata", lambda **kw: {
         "state": "open", "head": {"sha": "a" * 40}, "base": {"ref": "main"},
+        "mergeable": True, "mergeable_state": "clean",
     })
 
     async def green_checks(repository, head_sha, base_ref):
