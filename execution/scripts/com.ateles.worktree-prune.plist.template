@@ -11,10 +11,11 @@
                   The job runs whatever is in that working tree, so point it at a
                   checkout that is kept clean and up to date (not a development clone).
 
-  Remove --strip-node-modules to switch the node_modules-only tier off,
-  --archive-remove to switch the archive-then-remove tier off. Without --apply the
-  job only reports (dry run). Optional configuration is read from ATELES_WORKTREE_PRUNE_*
-  environment variables (add them to EnvironmentVariables below); see the runbook.
+  Delete the strip-node-modules argument below to switch the node_modules-only tier
+  off, and the archive-remove argument to switch the archive-then-remove tier off.
+  Without the apply argument the job only reports (dry run). Optional configuration
+  is read from ATELES_WORKTREE_PRUNE_* environment variables (add them to
+  EnvironmentVariables below); see the runbook.
 
   launchd does not create the log directory: mkdir -p {{HOME}}/.ateles-work/worktree-prune/logs
 -->
