@@ -283,6 +283,51 @@ def test_settling_a_reservation_keeps_its_task_id(real_dispatch):
     assert receipt["status"] == "launched" and receipt["task_id"] == TASK
 
 
+def test_settled_issue_keyed_run_is_still_in_flight_after_repository_change(real_dispatch):
+    # The effect the settle-side carry promises: a reservation settled to
+    # ``launched`` whose run is still in flight is found for a task whose
+    # repository changed, and dispatch writes and spawns nothing.
+    # Red, observed with task_id dropped from the settled receipt (both carries
+    # removed: `**_task_fields(plan)` in build_delivery._settle_delivery and the
+    # keep-the-reservation's-task_id branch in FlyLedger.settle_delivery; with
+    # only one removed the other still kept it and the test stayed green):
+    # `assert apis._fly_run_in_flight(moved, TASK) is True` failed with
+    # `AssertionError: assert False is True`, because the moved task derives a
+    # different key and the settled receipt no longer named the task.
+    ledger, writes, spawns, _ = real_dispatch
+    plan = build_delivery.FlyDeliveryPlan(
+        repository=REPO, branch="b", base_branch="main",
+        key=build_delivery.fly_delivery_key(REPO, 42, TASK), issue_number=42, task_id=TASK)
+    token = build_delivery._reserve_delivery(plan)
+    assert build_delivery._settle_delivery(plan, token, {"status": "launched", "branch": "b", "run_id": "run-1"})
+    fly = fly_runner.FlyLedger(ledger)
+    fly.record_untracked(machine_id="m-1", run_id="run-1", owner="apis",
+                         config=fly_runner.FlyConfig.from_env(),
+                         started_at=fly._clock(), max_run_seconds=600)
+    doc = fly.snapshot()
+    assert doc["deliveries"][build_delivery.canonical_key(plan.key)]["status"] == "launched"
+    assert "run-1" in doc["in_flight"]
+    moved = _snapshot(issue_number=42, repo="markmhendrickson/other-repo")
+    assert apis._fly_receipt_key(moved, TASK) != plan.key
+    assert apis._fly_run_in_flight(moved, TASK) is True
+    asyncio.run(apis.dispatch_task(TASK, moved, "approved", _Notifier(), gate_override=True))
+    assert writes == [] and spawns == []
+
+
+def test_warning_says_ownership_is_uncertain_for_another_tasks_receipt(real_dispatch, caplog):
+    # A live receipt on this task's key names another task, and no build claim
+    # says which task holds it: the refusal stands, and the warning must not
+    # claim the run is this task's.
+    ledger, writes, spawns, _ = real_dispatch
+    key = build_delivery.fly_delivery_key(REPO, 42, TASK)
+    assert fly_runner.FlyLedger(ledger).reserve_delivery(
+        key, {"status": "launching", "branch": "b", "run_id": "", "token": "x",
+              "task_id": "ent_other_task"})
+    with caplog.at_level("WARNING"):
+        assert apis._fly_run_refuses_dispatch(_snapshot(issue_number=42), TASK, "t") is True
+    assert "uncertain" in caplog.text and "for this task" not in caplog.text
+
+
 def test_receipt_with_no_task_id_still_matches_by_key(real_dispatch):
     # A receipt written before the id was recorded: the key match alone finds
     # it, and dispatch refuses with no state write and no spawn.

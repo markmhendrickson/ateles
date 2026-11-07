@@ -1046,13 +1046,38 @@ def _fly_run_refuses_dispatch(snapshot: dict, entity_id: str, trigger: str) -> b
     in_flight = _fly_run_in_flight(snapshot, entity_id)
     if in_flight is False:
         return False
-    log.warning(
-        f"[{DAEMON_NAME}] {trigger} for {entity_id}: "
-        + ("the Fly ledger could not be read, so whether a run is in flight is unknown"
-           if in_flight is None else "a Fly run is in flight for this task")
-        + " — not routing"
-    )
+    if in_flight is None:
+        why = "the Fly ledger could not be read, so whether a run is in flight is unknown"
+    elif _fly_receipt_names_other_task(snapshot, entity_id) and _fly_run_held_by_other_task(
+            snapshot, entity_id) is None:
+        why = ("a Fly run is in flight on this task's delivery key, but its receipt names "
+               "another task and that task's build claim is unavailable, so whose run it "
+               "is is uncertain")
+    else:
+        why = "a Fly run is in flight for this task"
+    log.warning(f"[{DAEMON_NAME}] {trigger} for {entity_id}: {why} — not routing")
     return True
+
+
+def _fly_receipt_names_other_task(snapshot: dict, entity_id: str) -> bool:
+    """Whether the receipt on this task's delivery key records a different
+    task's id. Only chooses warning wording; False when it cannot tell."""
+    key = _fly_receipt_key(snapshot, entity_id)
+    if not key:
+        return False
+    try:
+        receipts = build_delivery._delivery_ledger().snapshot().get("deliveries", {})
+        entry = build_delivery._receipt_for(build_delivery.canonical_key(key), receipts)
+    except Exception:  # noqa: BLE001 — wording only; never changes the refusal
+        return False
+    owner = str((entry or {}).get("task_id") or "").strip()
+    return bool(owner) and owner != str(entity_id).strip()
+
+
+def _watchdog_fly_guard(entity_id: str, snapshot: dict) -> bool:
+    """The watchdog's guard: refuse to touch a task whose Fly run is in flight
+    or unknown (an unreadable ledger), before any watchdog state write."""
+    return _fly_run_refuses_dispatch(snapshot, entity_id, "watchdog")
 
 
 def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *, lifecycle_version=None,
@@ -5225,7 +5250,7 @@ async def main() -> None:
     # 6. Stall watchdog (task #2): out-of-band sweeper that retries FAILED tasks
     #    with backoff, resumes tasks left mid-flight by a restart, and escalates
     #    once attempts are exhausted — without blocking the SSE loop.
-    watchdog = TaskWatchdog()
+    watchdog = TaskWatchdog(fly_in_flight_guard=_watchdog_fly_guard)
 
     async def watchdog_dispatch(task_id: str, snapshot: dict, trigger: str) -> None:
         await dispatch_task(task_id, snapshot, trigger, notifier=notifier)
