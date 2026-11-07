@@ -1361,6 +1361,25 @@ def fly_delivered_pr(
                     "superseded delivery receipt names no single source task, so "
                     "no correction can be filed under its parent task"))
             return FlyDeliveredPR(True, branch=head, source_task=sources.pop())
+    elif not tasks:
+        # Only a correction receipt (``existing_pr``) names this PR: its first
+        # delivery receipt was cleared or superseded. The parent task comes
+        # from that removal's audit line; a correction is never filed with no
+        # parent, so none, several or an unreadable file holds the route.
+        head = str(head_branch or "").strip() or (
+            next(iter(branches)) if len(branches) == 1 else "")
+        try:
+            removed = _removed_receipt_names_branch(ledger, repo, head)
+        except OSError:
+            removed = None
+        sources = {line.get("source_task") or "" for line in removed or []}
+        if removed is None or len(sources) != 1 or "" in sources:
+            return FlyDeliveredPR(None, unknown_reason=(
+                "this PR came from Fly and a correction receipt names it, but no "
+                "active receipt or audit record of its cleared or superseded first "
+                "delivery names a single source task, so no correction can be "
+                "filed under its parent task"))
+        tasks.add(sources.pop())
     return FlyDeliveredPR(
         delivered,
         branch=branches.pop() if len(branches) == 1 else "",

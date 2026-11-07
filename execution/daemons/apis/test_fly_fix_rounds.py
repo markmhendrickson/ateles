@@ -603,3 +603,66 @@ def test_a_fly_pr_with_fly_delivery_off_holds_for_the_operator(
     assert corrections(stored) == [] and rounds_recorded == [] and world.fix_rounds == 0
     assert any("no longer opted onto Fly" in m and "Needs your attention" in m
                for m in d.notifier.sent)
+
+
+# --- Only a correction receipt names the PR ---------------------------------
+#
+# The first delivery's receipt was cleared while a correction receipt (keyed
+# by the PR, carrying `existing_pr`) is still active. The correction receipt
+# records no task, so the parent comes from the removal's audit line; with
+# none, or several, the round holds and nothing is stored.
+
+def seed_correction_receipt(tmp_path, *lines):
+    write_audit(tmp_path, *lines)
+    assert delivery._delivery_ledger().reserve_delivery(f"{REPO}#{PR}", {
+        "status": "updated", "run_id": "run-2", "token": "seeded", "commit": HEAD,
+        "existing_pr": {"pr_number": PR, "branch": BRANCH, "base_branch": "main"}})
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_correction_receipt_takes_its_parent_from_the_audit_line(
+    monkeypatch, world, stored, tmp_path, route
+):
+    # Red without the fix (seen on all three routes): `fly_delivered_pr`
+    # returned delivered=True with source_task="", so the correction was
+    # stored with `relationships=None` and its edge never read back:
+    #   assert None == [{'relationship_type': 'PART_OF', 'source_index': 0,
+    #                    'target_entity_id': 'ent_synthetic_src'}]
+    seed_correction_receipt(tmp_path, audit_line(source_task="ent_synthetic_src"))
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    run_route(monkeypatch, route)
+    assert rec.of("cicada") == []
+    [task] = corrections(stored)
+    assert task["pr_number"] == PR
+    assert_filed_part_of_source(stored)
+
+
+@pytest.mark.parametrize("lines", [
+    [audit_line()],
+    [audit_line(source_task="ent_synthetic_src"),
+     audit_line(source_task="ent_synthetic_other")],
+], ids=["no-task", "two-tasks"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_correction_receipt_with_no_single_parent_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, lines, route
+):
+    seed_correction_receipt(tmp_path, *lines)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    if summary is not None:
+        assert summary["resumed"] == 0
+    assert rec.calls == []  # no builder, no guidance lenses, no local commit
+    assert stored["calls"] == []
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any("names a single source task" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
+def test_a_correction_with_no_parent_is_never_stored(monkeypatch, world, stored):
+    # By construction: even if routing ever hands it no source task.
+    d = _dispatcher()
+    facts = delivery.FlyDeliveredPR(True, branch=BRANCH, base_branch="main")
+    ok = asyncio.run(d._file_fly_correction(
+        trigger(), kind="review", round_n=1, body=UX_FINDING, facts=facts))
+    assert ok is False and stored["calls"] == []
+    assert any("no parent task" in m for m in d.notifier.sent)

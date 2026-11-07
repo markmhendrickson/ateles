@@ -9967,6 +9967,15 @@ class SwarmDispatcher:
         locally. The task carries `open_or_merge_pr`, so the task path holds it
         at a PLAN checkpoint until a signed release; that gate is unchanged."""
         ref = f"{trigger.repository}#{trigger.number}"
+        if not facts.source_task:
+            # A correction is always filed PART_OF its source task; with none
+            # known, hold rather than file a task with no parent.
+            self._hold_fix_round(
+                trigger, kind, round_n,
+                "no source task is recorded for this Fly delivery, so the "
+                "correction has no parent task to be filed under",
+            )
+            return False
         head = _normalise_full_sha((await self._pr_head_sha(trigger)) or "")
         if not head:
             self._hold_fix_round(
@@ -10010,11 +10019,8 @@ class SwarmDispatcher:
                 trigger, kind, round_n, f"the correction is not admissible ({exc})"
             )
             return False
-        relationships = (
-            [{"relationship_type": "PART_OF", "source_index": 0,
-              "target_entity_id": facts.source_task}]
-            if facts.source_task else None
-        )
+        relationships = [{"relationship_type": "PART_OF", "source_index": 0,
+                          "target_entity_id": facts.source_task}]
         stored = await self._store_entities(
             [task],
             idempotency_key=(
@@ -10085,18 +10091,19 @@ class SwarmDispatcher:
         ]
         if wrong:
             return "wrong " + ", ".join(wrong)
-        if part_of:
-            rels = await self._neotoma_get(f"entities/{task_id}/relationships")
-            if not isinstance(rels, dict):
-                return "its relationships could not be read back"
-            if not any(
-                isinstance(r, dict)
-                and r.get("relationship_type") == "PART_OF"
-                and r.get("source_entity_id") == task_id
-                and r.get("target_entity_id") == part_of
-                for r in rels.get("relationships") or []
-            ):
-                return "missing its PART_OF edge"
+        if not part_of:
+            return "it has no parent task"
+        rels = await self._neotoma_get(f"entities/{task_id}/relationships")
+        if not isinstance(rels, dict):
+            return "its relationships could not be read back"
+        if not any(
+            isinstance(r, dict)
+            and r.get("relationship_type") == "PART_OF"
+            and r.get("source_entity_id") == task_id
+            and r.get("target_entity_id") == part_of
+            for r in rels.get("relationships") or []
+        ):
+            return "missing its PART_OF edge"
         return ""
 
     _ESCALATION_MARKER = "<!-- apis-escalated:{kind} -->"
