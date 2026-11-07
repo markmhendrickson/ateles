@@ -1205,7 +1205,8 @@ def _removal_audit_lines(ledger) -> list[dict] | None:
     An empty list when the file does not exist (no receipt was ever cleared or
     superseded). None when the file exists but cannot be read or decoded, when
     any line is not a JSON object, or when a removal line carries a field this
-    reader uses in a shape it cannot read (a non-string key, branch or
+    reader uses in a shape it cannot read (an ``action`` that is present and
+    not a string, on any line; a non-string key, branch or
     ``source_task``, a non-object ``existing_pr`` or a non-string branch
     inside it): one bad line
     makes the whole file unknown, whatever the other lines say."""
@@ -1227,6 +1228,8 @@ def _removal_audit_lines(ledger) -> list[dict] | None:
         except ValueError:
             return None
         if not isinstance(line, dict):
+            return None
+        if "action" in line and not isinstance(line["action"], str):
             return None
         if line.get("action") not in _RECEIPT_REMOVAL_ACTIONS:
             continue
@@ -1312,7 +1315,8 @@ def fly_delivered_pr(
     origin unknown (None) even when an active receipt matches. With no receipt
     establishing delivery, an unsettled first delivery (``launching``,
     ``unknown``, ``unreported``) on exactly this *head_branch* that records no
-    PR number yet also makes it unknown: its PR may predate its receipt. A
+    PR number yet also makes it unknown: its PR may predate its receipt; so
+    does a missing audit file, which may hold a cleared receipt's only record. A
     removal line marked ``correction`` never supplies the parent task. Used to route a fix
     round: a Fly PR's fix round runs as a Fly correction, never as a commit on
     this host."""
@@ -1395,6 +1399,19 @@ def fly_delivered_pr(
             "a Fly delivery on this PR's head branch has not settled and records no "
             "PR number yet, so whether this PR came from Fly is unknown"))
     if not delivered:
+        import fly_delivery_receipt
+
+        try:
+            audit_exists = fly_delivery_receipt.audit_path(ledger).exists()
+        except OSError:
+            audit_exists = False
+        if not audit_exists:
+            # A cleared receipt may have its only record in the audit file, so
+            # a missing file is no evidence the PR did not come from Fly.
+            return FlyDeliveredPR(None, unknown_reason=(
+                "no active Fly delivery receipt names this PR and the delivery "
+                "ledger's audit file does not exist, so whether this PR came from "
+                "Fly through a cleared receipt is unknown"))
         try:
             removed = _removed_receipt_names_branch(ledger, repo, head)
         except OSError:

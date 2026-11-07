@@ -176,6 +176,7 @@ def test_round_limit_still_holds_for_a_fly_pr(monkeypatch, world, stored):
 
 def test_a_pr_fly_did_not_deliver_keeps_the_local_round(monkeypatch, world, stored):
     seed_fly_delivery(number=PR + 1)  # another PR's receipt names nothing here
+    empty_audit_file()
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
     review_round()
     assert rec.only("cicada").get("agent_git_identity") is True
@@ -324,6 +325,7 @@ def test_a_readable_ledger_with_no_receipt_keeps_the_local_round(
     ledger = delivery._delivery_ledger()
     with ledger._locked():
         ledger._save(ledger._load())  # readable, no receipts at all
+    empty_audit_file()
     assert delivery._delivery_ledger().delivery_receipts() == {}
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
     ci_round(monkeypatch)
@@ -374,6 +376,14 @@ def readable_empty_ledger():
 
 def audit_file(tmp_path):
     return tmp_path / "ledger.json.audit.jsonl"  # next to the isolated_ledger path
+
+
+def empty_audit_file():
+    """An audit file that exists and records no removal: without it, a PR no
+    active receipt names is unknown rather than "not Fly"."""
+    import fly_delivery_receipt
+
+    fly_delivery_receipt.audit_path(delivery._delivery_ledger()).write_text("", encoding="utf-8")
 
 
 def write_audit(tmp_path, *lines, raw=""):
@@ -578,11 +588,11 @@ def test_an_active_receipt_with_a_clean_audit_file_still_routes_to_fly(
     assert len(corrections(stored)) == 1
 
 
-def test_no_audit_file_and_no_receipt_keeps_the_local_round(
+def test_an_empty_audit_file_and_no_receipt_keeps_the_local_round(
     monkeypatch, world, stored, rounds_recorded, tmp_path
 ):
-    readable_empty_ledger()
-    assert not audit_file(tmp_path).exists()
+    write_audit(tmp_path)  # exists, empty: no receipt was ever removed
+    assert audit_file(tmp_path).read_text(encoding="utf-8") == ""
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
     ci_round(monkeypatch)
     assert rec.only("cicada").get("agent_git_identity") is True
@@ -769,6 +779,7 @@ def test_a_not_delivered_receipt_for_this_pr_keeps_its_existing_handling(
     # nothing, so with nothing else naming the PR the local round runs, as
     # it did before this check.
     seed_first_delivery_receipt(status="not_delivered", pr_number=PR)
+    empty_audit_file()
     assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
     d, summary = run_route(monkeypatch, route)
@@ -781,6 +792,7 @@ def test_an_unrecognized_receipt_that_cannot_be_linked_to_this_pr_is_ignored(
     monkeypatch, world, stored, rounds_recorded
 ):
     seed_first_delivery_receipt(status="exhausted")  # no pr_number; key names a task
+    empty_audit_file()
     assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
     seed_first_delivery_receipt(key=f"{REPO}#task:ent_synthetic_x", status="exhausted",
                                 pr_number=PR + 1)
@@ -806,6 +818,7 @@ def test_an_unsettled_receipt_on_this_branch_with_no_pr_number_holds(
 
 def test_an_unsettled_receipt_must_match_the_branch_exactly():
     seed_first_delivery_receipt(status="launching", branch=BRANCH + "-other")
+    empty_audit_file()
     assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
     seed_first_delivery_receipt(key=f"{REPO}#task:ent_synthetic_e", status="launching", branch="")
     # An empty branch on either side never matches.
@@ -818,6 +831,7 @@ def test_a_not_delivered_receipt_on_this_branch_keeps_its_existing_handling(
     monkeypatch, world, stored, rounds_recorded, route
 ):
     seed_first_delivery_receipt(status="not_delivered")  # branch BRANCH, no pr_number
+    empty_audit_file()
     assert delivery.fly_delivered_pr(REPO, PR, BRANCH) == delivery.FlyDeliveredPR(False)
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
     run_route(monkeypatch, route)
@@ -909,3 +923,42 @@ def test_an_active_correction_receipt_skips_marked_removal_lines(
 def test_an_audit_line_with_a_non_boolean_correction_mark_is_unreadable(tmp_path):
     write_audit(tmp_path, audit_line(source_task="ent_synthetic_src", correction="yes"))
     assert delivery.fly_delivered_pr(REPO, PR, BRANCH).delivered is None
+
+
+# --- An audit line whose action is not a string, and a missing audit file --
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_audit_line_with_a_non_string_action_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, route
+):
+    # Before the fix, `line.get("action") not in _RECEIPT_REMOVAL_ACTIONS`
+    # raised on the unhashable list, which only OSError was caught for. Seen
+    # against the unfixed code: the review and CI routes raised
+    #   build_delivery.py:1231: TypeError: unhashable type: 'list'
+    # and the resumed route logged "re-dispatch failed (unhashable type:
+    # 'list')" with no attention notice (AssertionError in assert_held).
+    write_audit(tmp_path, {"action": []})
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    assert_held(d, summary, stored, rounds_recorded, rec)
+    assert world.fix_rounds == 0
+
+
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_a_missing_audit_file_with_no_receipt_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, route
+):
+    # A cleared receipt may have its only record in the audit file, so its
+    # absence is no evidence the PR did not come from Fly.
+    readable_empty_ledger()
+    assert not audit_file(tmp_path).exists()
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    if summary is not None:
+        assert summary["resumed"] == 0
+    assert rec.calls == []  # no builder, no guidance lenses, no local commit
+    assert corrections(stored) == [] and stored["calls"] == []
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any("audit file" in m and "Needs your attention" in m for m in d.notifier.sent)
+
