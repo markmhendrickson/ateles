@@ -789,6 +789,21 @@ def find_node_modules(wt):
     return found, refused
 
 
+def contains_git(path):
+    """True if any `.git` entry (file, directory or link) exists beneath `path`, or if that cannot be told.
+
+    A repository inside node_modules may hold commits that exist nowhere else; the walk that finds
+    node_modules does not descend into it, so this looks for one before the directory is deleted.
+    """
+    try:
+        for _, dn, fn in os.walk(path, followlinks=False, onerror=_raise):
+            if ".git" in dn or ".git" in fn:
+                return True
+    except OSError:
+        return True
+    return False
+
+
 def tree_bytes(path):
     """Apparent bytes under `path`, never following symlinks."""
     total = 0
@@ -872,6 +887,8 @@ def strip_flow(e, apply_):
             refused.append("%s:tracked-check-error" % rel)
         elif t:
             refused.append("%s:tracked-files" % rel)
+        elif contains_git(d):
+            refused.append("%s:contains-git" % rel)
         elif crosses_mount(wt, d):
             refused.append("%s:mount-point" % rel)
         else:

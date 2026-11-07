@@ -754,6 +754,69 @@ def test_node_modules_containment_is_checked_against_the_real_path(repo):
     assert not wp.node_modules_contained(w, w + "/missing/node_modules")
 
 
+@pytest.mark.parametrize("kind", ["repo-dir", "git-file", "deep-repo"])
+def test_a_node_modules_that_contains_a_git_entry_is_refused(repo, kind):
+    w = repo.add_wt("nm-git-" + kind)
+    os.makedirs(
+        w + "/packages/x/node_modules/clean"
+    )  # a sibling without any .git: still stripped
+    open(w + "/packages/x/node_modules/clean/i.js", "w").write("i")
+    if kind == "repo-dir":
+        inner = w + "/node_modules/pkg"
+        sh("git", "init", "-q", inner)
+        open(inner + "/work.txt", "w").write("local-only work")
+        sh("git", "add", ".", cwd=inner)
+        sh("git", "commit", "-qm", "only here", cwd=inner)
+        marker = inner + "/work.txt"
+    elif kind == "git-file":
+        marker = w + "/node_modules/pkg/lib/.git"
+        open(marker, "w").write("gitdir: /somewhere/else\n")
+    else:
+        deep = w + "/node_modules/a/b/c/d"
+        os.makedirs(deep)
+        sh("git", "init", "-q", deep)
+        marker = deep + "/.git/HEAD"
+    age(w)
+    e = repo.entry(w)
+    assert (
+        wp.strip_flow(e, False) == "WOULD-STRIP"
+    )  # the dry run plans only the clean sibling
+    assert e["strip_dirs"] == ["packages/x/node_modules"]
+    e = repo.entry(w)
+    res = wp.strip_flow(e, True)
+    assert res == "STRIPPED", (res, e.get("detail"))
+    assert e["strip_dirs"] == ["packages/x/node_modules"]
+    assert "node_modules:contains-git" in e["strip_refused"]
+    assert os.path.exists(marker)
+    assert os.path.isfile(w + "/node_modules/pkg/index.js")
+    assert not os.path.exists(w + "/packages/x/node_modules")
+
+
+def test_a_node_modules_with_only_a_git_entry_to_refuse_reports_it_alone(repo):
+    w = repo.add_wt("nm-git-only", node_modules=False)
+    os.makedirs(w + "/node_modules/pkg/.git")
+    open(w + "/node_modules/pkg/.git/HEAD", "w").write("ref: refs/heads/main\n")
+    age(w)
+    e = repo.entry(w)
+    assert wp.strip_flow(e, True) == "refused-node-modules"
+    assert e["strip_refused"] == ["node_modules:contains-git"]
+    assert os.path.isfile(w + "/node_modules/pkg/.git/HEAD")
+
+
+def test_contains_git_fails_closed_when_the_tree_cannot_be_read(tmp_path, monkeypatch):
+    d = tmp_path / "node_modules"
+    (d / "p").mkdir(parents=True)
+    assert wp.contains_git(str(d)) is False
+    real_walk = os.walk
+
+    def broken_walk(path, **kw):
+        kw["onerror"](PermissionError("denied"))
+        return real_walk(path, **kw)
+
+    monkeypatch.setattr(wp.os, "walk", broken_walk)
+    assert wp.contains_git(str(d)) is True
+
+
 def test_tracked_node_modules_content_and_nested_repos_are_skipped(repo):
     w = repo.add_wt("tracked")
     os.makedirs(w + "/packages/c/node_modules")
