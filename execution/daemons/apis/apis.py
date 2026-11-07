@@ -1272,12 +1272,16 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
             if reason:
                 return _correction_not_started(skill, f"existing PR correction not started: {reason}")
 
+        # Providers Fly refused for this correction before anything launched.
+        refused_providers: tuple[str, ...] = ()
+
         async def launch():
+            extra = {"exclude_providers": refused_providers} if refused_providers else {}
             return await run_skill(
                 skill, fly_prompt, role=role or skill, task_entity_id=entity_id,
                 agent_session_id=run_agent_session_id or "", notifier=notifier,
                 action_class=action_class, repository=repository, runner="fly",
-                fly_delivery=plan.spec(),
+                fly_delivery=plan.spec(), **extra,
             )  # fmt: skip
 
         refusals: list[str] = []
@@ -1288,6 +1292,31 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
                                fly_delivery_status="unknown")  # fmt: skip
 
         result = await build_delivery.run_fly_delivery(plan, launch, refused)
+        # A correction is dispatched to one provider at a time. When Fly refused
+        # that provider before anything launched, for a reason that is the
+        # provider alone, and this attempt's own prelaunch receipt was proven
+        # removed, the next Fly candidate runs in a fresh dispatch under its
+        # own receipt, as a first delivery's provider loop would try it. Any
+        # other outcome (a launch, an unknown launch, an unproven cleanup,
+        # another refusal, no candidate left) keeps the result as it is.
+        while (target and not refusals and result is not None
+               and result.fly_delivery_not_launched
+               and result.fly_delivery_cleanup == "released"
+               and result.fly_provider_ineligible and result.fly_next_providers):
+            newly = tuple(dict.fromkeys(
+                p for p in (*result.attempted_providers, result.provider)
+                if p and p not in refused_providers))
+            if not newly:
+                break  # nothing new to exclude: another try could only repeat it
+            refused_providers = (*refused_providers, *newly)
+            log.warning(f"[{DAEMON_NAME}] {skill} task {entity_id}: Fly cannot run "
+                        f"{result.provider} for this correction ({result.error}); "
+                        f"trying {result.fly_next_providers[0]} on Fly")
+            result = await build_delivery.run_fly_delivery(plan, launch, refused)
+            if result is not None:
+                result.attempted_providers = (
+                    *refused_providers,
+                    *(p for p in result.attempted_providers if p not in refused_providers))
     if refusals:
         # Nothing was launched here: keep the refusal's own text (the recorded
         # delivery's status, run, branch and the recovery steps).
