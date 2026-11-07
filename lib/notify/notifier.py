@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import subprocess
 import tempfile
@@ -468,12 +469,17 @@ class Notifier:
         """Current (window_start, count), rolled over if the window has passed."""
         now = self._wall_clock()
         try:
-            raw = json.loads(self._budget_path().read_text())
+            raw = json.loads(held_view.read_text_nofollow(self._budget_path()))
             start, count = float(raw["window_start"]), int(raw["count"])
         except FileNotFoundError:
             return now, 0
         except Exception as exc:  # noqa: BLE001 — corrupt state => fresh window
             log.warning("[notify] held-email budget unreadable (%s) — resetting", exc)
+            return now, 0
+        # NaN never compares as elapsed and a negative count would raise the
+        # cap: neither is a state this code writes, so start over.
+        if not math.isfinite(start) or count < 0:
+            log.warning("[notify] held-email budget invalid — resetting")
             return now, 0
         if now - start >= _HELD_EMAIL_WINDOW_SECONDS or start > now:
             return now, 0
@@ -487,9 +493,9 @@ class Notifier:
         with self._queue_lock():
             start, count = self._budget_state()
             try:
-                self._budget_path().parent.mkdir(parents=True, exist_ok=True)
-                self._budget_path().write_text(
-                    json.dumps({"window_start": start, "count": count + 1})
+                held_view.atomic_write(
+                    self._budget_path(),
+                    json.dumps({"window_start": start, "count": count + 1}),
                 )
             except Exception as exc:  # noqa: BLE001
                 log.error("[notify] could not persist held-email budget (%s)", exc)

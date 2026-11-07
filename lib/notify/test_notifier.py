@@ -638,6 +638,7 @@ def test_email_eligible_default_true_is_unchanged_behaviour(monkeypatch):
 # with only subprocess.run (gws) and, where stated, Apprise faked.
 
 import json  # noqa: E402
+import os  # noqa: E402
 import logging  # noqa: E402
 
 from lib.notify import held_view  # noqa: E402
@@ -876,3 +877,73 @@ def test_queue_is_capped_to_newest_items(tmp_path, monkeypatch, caplog):
     assert len(items) == 10
     assert "PR #3 " in items[0] and "PR #12 " in items[-1]
     assert sum("dropped the 1 oldest" in r.getMessage() for r in caplog.records) == 3
+
+
+# ── budget state validation, atomic writes, private files ───────────────────
+
+
+def _budget_file(tmp_path, payload):
+    (tmp_path / "digest-budget-placeholder").write_text("")  # keep dir non-empty
+    (tmp_path / "digest-email-budget.json").write_text(payload)
+
+
+def test_nan_window_start_starts_a_fresh_window(tmp_path, monkeypatch):
+    runs = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    _budget_file(tmp_path, '{"window_start": NaN, "count": 5}')
+    _hold(_daemon(tmp_path, email=True, silent=True), 8)
+    _daemon(tmp_path, email=True, silent=False).flush_digest()
+    assert len(runs.cmds) == 5  # a NaN start would otherwise never roll over: 0 sent
+    saved = json.loads((tmp_path / "digest-email-budget.json").read_text())
+    assert saved["window_start"] == saved["window_start"] and saved["count"] == 5
+
+
+def test_negative_count_does_not_raise_the_cap(tmp_path, monkeypatch):
+    runs = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    _budget_file(tmp_path, '{"window_start": 1000000.0, "count": -100}')
+    _hold(_daemon(tmp_path, email=True, silent=True), 20)
+    _daemon(tmp_path, email=True, silent=False).flush_digest()
+    assert len(runs.cmds) == 5
+
+
+def test_infinite_window_start_is_rejected(tmp_path, monkeypatch):
+    runs = _GwsRuns()
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", runs)
+    _budget_file(tmp_path, '{"window_start": Infinity, "count": 0}')
+    _hold(_daemon(tmp_path, email=True, silent=True), 8)
+    n = _daemon(tmp_path, email=True, silent=False)
+    n.flush_digest()
+    assert len(runs.cmds) == 5
+    _daemon(tmp_path, email=True, silent=False, now=1_000_100.0).flush_digest()
+    assert len(runs.cmds) == 5  # and the new window holds
+
+
+def test_budget_write_is_atomic_and_private(tmp_path, monkeypatch):
+    monkeypatch.setattr("lib.notify.notifier.subprocess.run", _GwsRuns())
+    _hold(_daemon(tmp_path, email=True, silent=True), 1)
+    seen = []
+    real_replace = os.replace
+    monkeypatch.setattr(
+        os, "replace", lambda a, b: (seen.append((str(a), str(b))), real_replace(a, b))[1]
+    )
+    _daemon(tmp_path, email=True, silent=False).flush_digest()
+    budget = str(tmp_path / "digest-email-budget.json")
+    assert any(dst == budget and src != budget for src, dst in seen), seen
+    assert ((tmp_path / "digest-email-budget.json").stat().st_mode & 0o777) == 0o600
+
+
+def test_queue_and_lock_files_are_private(tmp_path):
+    _hold(_daemon(tmp_path, email=True, silent=True), 1)
+    for name in ("digest-email.json", "digest.json.lock"):
+        assert ((tmp_path / name).stat().st_mode & 0o777) == 0o600, name
+
+
+def test_a_planted_symlink_at_the_queue_path_is_replaced_not_followed(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep")
+    (tmp_path / "digest.json").symlink_to(victim)
+    _hold(_daemon(tmp_path, email=False, silent=True), 1)
+    assert victim.read_text() == "keep"
+    assert not (tmp_path / "digest.json").is_symlink()
+    assert len(_file(tmp_path, "digest.json")) == 1

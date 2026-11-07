@@ -40,20 +40,42 @@ def test_prints_once_per_changed_total(tmp_path):
     out = _run(tmp_path)
     assert out.count("\n") == 1
     assert out.startswith("[held-notices] 55 operator notices are waiting undelivered (apis: 55).")
+    assert "In your reply, tell the operator" in out
     assert "python3 lib/notify/held_view.py" in out and "--clear" in out
-    assert _run(tmp_path) == ""  # same total: silent
+    assert _run(tmp_path) == ""  # same contents: silent
     _hold(tmp_path, [f"⚠️ [apis] PR {i}" for i in range(56)])
     assert "56 operator notices" in _run(tmp_path)
+
+
+def test_different_notices_with_the_same_total_are_announced(tmp_path):
+    _hold(tmp_path, ["⚠️ [apis] first"])
+    assert "[held-notices]" in _run(tmp_path)
+    assert _run(tmp_path) == ""
+    _hold(tmp_path, ["⚠️ [apis] second"])
+    assert "[held-notices]" in _run(tmp_path)
+
+
+def test_session_state_holds_only_a_hash_never_notice_text(tmp_path):
+    _hold(tmp_path, ["⚠️ [apis] SECRET-NOTICE-TEXT"])
+    _run(tmp_path)
+    states = list((tmp_path / ".claude" / ".session_state").glob("*.json"))
+    assert states and all("SECRET-NOTICE-TEXT" not in p.read_text() for p in states)
+
+
+def test_singular_wording(tmp_path):
+    _hold(tmp_path, ["⚠️ [apis] x"])
+    out = _run(tmp_path)
+    assert "1 operator notice is waiting undelivered" in out
 
 
 def test_prints_nothing_when_empty_and_rearms_after(tmp_path):
     assert _run(tmp_path) == ""
     _hold(tmp_path, ["⚠️ [apis] x"])
-    assert "1 operator notices" in _run(tmp_path)
+    assert "1 operator notice is" in _run(tmp_path)
     (tmp_path / "q.json").unlink()
     assert _run(tmp_path) == ""
     _hold(tmp_path, ["⚠️ [apis] x"])
-    assert "1 operator notices" in _run(tmp_path)  # same total again, after empty
+    assert "1 operator notice is" in _run(tmp_path)  # same contents again, after empty
 
 
 def test_line_never_contains_notice_text(tmp_path):

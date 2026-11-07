@@ -33,19 +33,26 @@ def _load_held_view():
 
 
 def held_notice_line(state: dict) -> str:
-    """The one-line surface, or "". Updates ``state`` with the total shown."""
+    """The one-line surface, or "". Updates ``state`` with the contents hash shown.
+
+    Keyed on a hash of the queue contents, not the total, so different notices
+    with the same count are announced again. Only the hash is kept in session
+    state, never any notice text.
+    """
     info = _load_held_view().summary()
     total = int(info["total"])
-    if total == 0 or total == state.get("held_notices_shown"):
-        state["held_notices_shown"] = total  # re-arm after the queue empties
+    fingerprint = str(info["fingerprint"])
+    if total == 0 or fingerprint == state.get("held_notices_hash"):
+        state["held_notices_hash"] = fingerprint  # re-arm after the queue empties
         return ""
-    state["held_notices_shown"] = total
+    state["held_notices_hash"] = fingerprint
     ranked = sorted(info["by_handler"].items(), key=lambda kv: (-kv[1], kv[0]))
     parts = ", ".join(f"{name}: {int(n)}" for name, n in ranked[:6])
+    what = "operator notice is" if total == 1 else "operator notices are"
     return (
-        f"[held-notices] {total} operator notices are waiting undelivered "
-        f"({parts}). Show them with: python3 lib/notify/held_view.py. Tell the "
-        "operator what needs them, then clear with --clear."
+        f"[held-notices] {total} {what} waiting undelivered ({parts}). In your "
+        "reply, tell the operator what needs them: read them with python3 "
+        "lib/notify/held_view.py, then clear what you showed with --clear."
     )
 
 

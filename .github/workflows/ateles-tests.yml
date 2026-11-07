@@ -109,6 +109,12 @@ jobs:
         run: uv run --extra dev python -m pytest ateles/ .claude/hooks/ -q
       - name: Run daemon runtime tests
         run: uv run --extra dev python -m pytest lib/daemon_runtime/ -q
+      # lib/notify/ was a path trigger only: its tests (held-notice routing,
+      # email budget, queue locking) ran in no lane. Blocking on purpose; the
+      # package needs httpx and apprise, both core dependencies, so the dev
+      # extra install is sufficient.
+      - name: Run notifier lib tests
+        run: uv run --extra dev python -m pytest lib/notify/ -q
       # Swarm daemon tests (qa #254 finding): test_swarm_dispatch.py and the
       # rest of the Apis daemon suite never ran in CI — the lane above is scoped
       # to ateles/**, so a daemon regression (e.g. a dangling call from a stale

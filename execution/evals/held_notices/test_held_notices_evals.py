@@ -40,7 +40,7 @@ def test_the_eval_covers_every_required_behaviour():
         "an_email_armed_backlog_of_55_sends_exactly_5_in_the_first_hour",
         "an_email_ineligible_hold_is_never_emailed",
         "hostile_notice_text_never_reaches_the_hook_line",
-        "after_clear_the_hook_is_silent_and_the_backup_holds_the_items",
+        "clear_removes_only_what_was_shown_and_the_hook_follows_the_contents",
     }
     assert required <= set(IDS)
 
