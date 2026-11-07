@@ -154,6 +154,29 @@ def build_git_env(parent):
 
 GIT_ENV = build_git_env(os.environ)
 
+# Configuration that can make git report a changed tree as clean. Every git call in this module is built
+# by git_cmd() below, which puts these on the command line (the highest-precedence source), so no global,
+# system or repository setting can hide an untracked file or a change from the cleanliness checks or from
+# the checks `git worktree remove` makes itself.
+GIT_SAFE_CONFIG = (
+    "status.ignoreSubmodules=none",
+    "core.fsmonitor=false",
+    "core.untrackedCache=false",
+)
+
+
+def git_cmd(repo, *args, untracked="all"):
+    """The one place a git command line is built: `git -c <safe config> -C <repo> <args>`.
+
+    `untracked` is the status.showUntrackedFiles value; "all" for every cleanliness decision and for
+    `worktree remove`. Listing ignored files (--protect-ignored) passes "normal" so ignored directories
+    stay collapsed to one entry instead of one entry per file.
+    """
+    cmd = ["git", "-c", "status.showUntrackedFiles=" + untracked]
+    for setting in GIT_SAFE_CONFIG:
+        cmd += ["-c", setting]
+    return cmd + ["-C", repo] + list(args)
+
 
 # ----------------------------------------------------------------------------------------------
 # Configuration
@@ -369,7 +392,7 @@ def discover_mains():
 
 
 def list_worktrees(main, mainset):
-    rc, o, _ = run(["git", "-C", main, "worktree", "list", "--porcelain"])
+    rc, o, _ = run(git_cmd(main, "worktree", "list", "--porcelain"))
     ents, cur = [], None
     if rc != 0:
         return ents
@@ -442,7 +465,7 @@ _slug = {}
 
 def slug_of(main):
     if main not in _slug:
-        rc, o, _ = run(["git", "-C", main, "remote", "get-url", "origin"])
+        rc, o, _ = run(git_cmd(main, "remote", "get-url", "origin"))
         mm = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(\.git)?$", o.strip())
         _slug[main] = mm.group(1) if mm else None
     return _slug[main]
@@ -489,9 +512,7 @@ def merged_heads(main, branch):
 def pushed_via(e, head):
     wt = e["wt"]
     rc, o, _ = run(
-        [
-            "git",
-            "-C",
+        git_cmd(
             wt,
             "for-each-ref",
             "--contains",
@@ -499,7 +520,7 @@ def pushed_via(e, head):
             "--count=1",
             "--format=%(refname)",
             "refs/remotes/origin/",
-        ]
+        )
     )
     if rc == 0 and o.strip():
         return "origin"
@@ -512,7 +533,7 @@ def pushed_via(e, head):
     for oid in oids:
         # exit 1 = "not an ancestor" (a legitimate answer); anything else is an error
         rc2, _, _ = run(
-            ["git", "-C", wt, "merge-base", "--is-ancestor", head, oid], ok_rcs=(0, 1)
+            git_cmd(wt, "merge-base", "--is-ancestor", head, oid), ok_rcs=(0, 1)
         )
         if rc2 == 0:
             return "ancestor-of-merged-PR-head"
@@ -554,21 +575,24 @@ def recent_file(wt, hours=None):
 
 
 def status_clean(wt):
-    rc, o, _ = run(["git", "-C", wt, "status", "--porcelain"])
+    rc, o, _ = run(git_cmd(wt, "status", "--porcelain"))
     if rc != 0:
         return None
     return not o.strip()
 
 
 def ignored_entries(wt):
-    rc, o, _ = run(["git", "-C", wt, "status", "--porcelain", "--ignored"], count=False)
+    rc, o, _ = run(
+        git_cmd(wt, "status", "--porcelain", "--ignored", untracked="normal"),
+        count=False,
+    )
     if rc != 0:
         return None
     return [line[3:] for line in o.splitlines() if line.startswith("!! ")]
 
 
 def is_locked(e):
-    rc, o, _ = run(["git", "-C", e["main"], "worktree", "list", "--porcelain"])
+    rc, o, _ = run(git_cmd(e["main"], "worktree", "list", "--porcelain"))
     if rc != 0:
         return None
     for b in o.split("\n\n"):
@@ -646,7 +670,7 @@ def final_check_and_remove(e, apply_, protect_ignored):
         return "recheck-list-error"
     if lk:
         return "locked"
-    rc, o, _ = run(["git", "-C", wt, "rev-parse", "HEAD"])
+    rc, o, _ = run(git_cmd(wt, "rev-parse", "HEAD"))
     h = o.strip()
     if rc != 0 or h != e["head"]:
         return "head-moved"
@@ -671,8 +695,8 @@ def final_check_and_remove(e, apply_, protect_ignored):
     if not apply_:
         return "WOULD-REMOVE"
     rc, o, err = run(
-        ["git", "-C", e["main"], "worktree", "remove", wt], timeout=600
-    )  # no --force
+        git_cmd(e["main"], "worktree", "remove", wt), timeout=600
+    )  # no --force; git re-checks the tree itself, under the same safe config
     if rc == 0:
         return "REMOVED"
     e["detail"] = err.strip().replace("\n", " ")[:160]
@@ -781,9 +805,7 @@ def tree_bytes(path):
 
 def tracked_under(wt, rel):
     """True/False if git tracks anything under rel; None if git could not say."""
-    rc, o, _ = run(
-        ["git", "-C", wt, "ls-files", "-z", "--", ":(literal)" + rel], count=False
-    )
+    rc, o, _ = run(git_cmd(wt, "ls-files", "-z", "--", ":(literal)" + rel), count=False)
     if rc != 0:
         return None
     return bool(o.strip("\0"))
@@ -814,7 +836,7 @@ def strip_gate(e, hours, full):
         return "recheck-list-error"
     if lk:
         return "locked"
-    rc, o, _ = run(["git", "-C", wt, "rev-parse", "HEAD"])
+    rc, o, _ = run(git_cmd(wt, "rev-parse", "HEAD"))
     if rc != 0 or o.strip() != e["head"]:
         return "head-moved"
     r = recent_file(wt, hours)
@@ -1240,9 +1262,7 @@ def main(argv=None):
     pruned = 0
     if status == "ok" and not STRIP["only"]:
         for m in mains:
-            _, o, _ = run(
-                ["git", "-C", m, "worktree", "list", "--porcelain"], count=False
-            )
+            _, o, _ = run(git_cmd(m, "worktree", "list", "--porcelain"), count=False)
             prunable = [
                 b.split("\n")[0][9:] for b in o.split("\n\n") if "\nprunable" in b
             ]
@@ -1256,8 +1276,7 @@ def main(argv=None):
                 continue
             pruned += len(prunable)
             run(
-                ["git", "-C", m, "worktree", "prune"]
-                + ([] if a.apply else ["--dry-run"]),
+                git_cmd(m, "worktree", "prune", *([] if a.apply else ["--dry-run"])),
                 count=False,
             )
         log(

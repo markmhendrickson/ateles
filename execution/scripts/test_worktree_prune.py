@@ -354,6 +354,80 @@ def test_the_module_source_never_contains_a_forced_worktree_removal():
 
 
 # ======================================================================================
+# git configuration that could hide changes
+# ======================================================================================
+def _hide_untracked(repo, how, tmp_path):
+    """Make plain `git status` omit untracked files, through global-style or repository config."""
+    if how == "local":
+        sh("git", "config", "--local", "status.showUntrackedFiles", "no", cwd=repo.main)
+    else:
+        cfg = tmp_path / "hiding-gitconfig"
+        cfg.write_text("[status]\n\tshowUntrackedFiles = no\n")
+        wp.GIT_ENV = dict(wp.GIT_ENV, GIT_CONFIG_GLOBAL=str(cfg))
+
+
+@pytest.mark.parametrize("how", ["local", "global"])
+def test_config_hiding_untracked_files_does_not_make_a_worktree_look_clean(
+    repo, tmp_path, how
+):
+    w = repo.add_wt("hidden", node_modules=True)
+    open(w + "/precious-notes.txt", "w").write("only copy")
+    age(w)
+    _hide_untracked(repo, how, tmp_path)
+    # the instrument: with this configuration and no override, git itself reports a clean tree
+    rc, out, _ = wp.run(["git", "-C", w, "status", "--porcelain"])
+    assert rc == 0 and out.strip() == "", "the hiding configuration did not take effect"
+    e = repo.entry(w)
+    assert wp.status_clean(w) is False
+    assert wp.analyze(e, False)["status"] == "dirty"  # plain tier keeps it
+    assert wp.strip_flow(repo.entry(w), True) == "dirty"  # and so does the strip gate
+    assert wp.act(wp.analyze(e, False), True, False) == "dirty"
+    assert os.path.isfile(w + "/precious-notes.txt")
+    assert os.path.isfile(w + "/node_modules/pkg/index.js")
+    # the removal itself: even if a cleanliness check were fooled, git's own re-check refuses
+    wp.final_check_and_remove.__globals__["status_clean"], saved = (
+        lambda wt: True,
+        wp.status_clean,
+    )
+    try:
+        e2 = repo.entry(w)
+        res = wp.final_check_and_remove(e2, True, False)
+    finally:
+        wp.final_check_and_remove.__globals__["status_clean"] = saved
+    assert res == "git-refused", (res, e2.get("detail"))
+    assert os.path.isfile(w + "/precious-notes.txt")
+
+
+def test_ignore_submodules_and_fsmonitor_settings_cannot_hide_a_change(repo, tmp_path):
+    cfg = tmp_path / "other-gitconfig"
+    cfg.write_text(
+        "[status]\n\tignoreSubmodules = all\n\tshowUntrackedFiles = no\n"
+        "[core]\n\tuntrackedCache = true\n"
+    )
+    wp.GIT_ENV = dict(wp.GIT_ENV, GIT_CONFIG_GLOBAL=str(cfg))
+    w = repo.add_wt("cfg2", node_modules=False)
+    open(w + "/new-file.txt", "w").write("x")
+    age(w)
+    assert wp.status_clean(w) is False
+    cmd = wp.git_cmd(w, "status", "--porcelain")
+    for setting in (
+        "status.showUntrackedFiles=all",
+        "status.ignoreSubmodules=none",
+        "core.fsmonitor=false",
+        "core.untrackedCache=false",
+    ):
+        assert ["-c", setting] == cmd[cmd.index(setting) - 1 : cmd.index(setting) + 1]
+
+
+def test_every_git_call_is_built_by_the_one_helper():
+    src = Path(wp.__file__).read_text(encoding="utf-8")
+    # the only literal git command list in the module is the helper's own
+    assert len(re.findall(r"""\[\s*["']git["']""", src)) == 1
+    assert re.search(r"""\[\s*["']git["']""", inspect.getsource(wp.git_cmd))
+    assert "git_cmd(" in src and src.count("git_cmd(") >= 12
+
+
+# ======================================================================================
 # node_modules-only tier
 # ======================================================================================
 def test_strip_removes_only_node_modules_from_an_eligible_worktree(repo, monkeypatch):
