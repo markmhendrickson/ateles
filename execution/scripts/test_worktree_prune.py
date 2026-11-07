@@ -1013,9 +1013,13 @@ def test_prune_archives_apply_only_deletes_what_this_tool_wrote(repo):
     for day, make in foreign.items():
         os.makedirs(root + "/" + day, exist_ok=True)
         make(root + "/" + day)
-    os.symlink(
-        outside, root + "/2020-02-08"
-    )  # a date-named symlink to somewhere else entirely
+    # a date-named symlink to somewhere else entirely, whose target looks exactly like a valid archive day
+    elsewhere = repo.home + "/elsewhere-days/2020-02-08"
+    _write_archive(repo.home + "/elsewhere-days", "2020-02-08")
+    os.symlink(elsewhere, root + "/2020-02-08")
+    assert wp.archive_day_dir_matches(
+        elsewhere
+    )  # the control: only the symlink makes it foreign
     listing = wp.prune_archives(False, 30)
     assert listing["old_day_dirs"] == ["2020-01-01"]
     assert listing["skipped_foreign_dirs"] == sorted(list(foreign) + ["2020-02-08"])
@@ -1028,6 +1032,7 @@ def test_prune_archives_apply_only_deletes_what_this_tool_wrote(repo):
     assert open(root + "/2020-02-02/stray.txt").read() == "a file at the top level"
     assert open(outside + "/precious.txt").read() == "keep"
     assert os.path.islink(root + "/2020-02-08")
+    assert os.path.isfile(elsewhere + "/r/x-1234abcd/meta.json")
 
 
 def test_an_archive_this_tool_really_wrote_is_removed_when_old(repo, archive_on):
