@@ -1879,6 +1879,10 @@ class SkillResult:
     # delivery-token mint) or its launch provably did not take effect. A
     # builder may then run its delivery locally, as it would without Fly.
     fly_ineligible_before_launch: bool = False
+    # A Fly-bound run refused before launch for a reason that is its provider
+    # alone (fly_runner.FlyIneligible.provider_specific): the provider loop
+    # may try the next provider that runs on Fly in the same dispatch.
+    fly_provider_ineligible: bool = False
     # Selected correction: retain the original result plus proven prelaunch
     # cleanup. A known no-launch repair is held without automatic redispatch.
     fly_delivery_not_launched: bool = False
@@ -3953,6 +3957,7 @@ async def _run_skill_once(
     # Fly is configured but a cost, capacity or time limit is invalid: a
     # refusal, never a local fallback (ateles#1456).
     _fly_disabled = False
+    _fly_provider_specific = False
     if fly_runner.wants_fly(runner, action_class):
         try:
             if (
@@ -3993,11 +3998,14 @@ async def _run_skill_once(
             )
         except fly_runner.FlyIneligible as exc:
             _fly_reason = f"not eligible for Fly: {exc}"
+            _fly_provider_specific = exc.provider_specific
         except fly_runner.FlyConfigInvalid as exc:
             _fly_reason = str(exc)
             _fly_disabled = True
 
-    def _fly_refusal_or_fallback(reason: str) -> SkillResult | None:
+    def _fly_refusal_or_fallback(
+        reason: str, provider_specific: bool = False
+    ) -> SkillResult | None:
         """A refusal to return, or None to run locally (logged and counted)."""
         fallback_ok = not _fly_forced and not _fly_disabled and (
             reason.startswith("not eligible")
@@ -4013,6 +4021,9 @@ async def _run_skill_once(
                 skill, False, None, "", "", error=msg, provider=provider,
                 fly_ineligible_before_launch=not _fly_disabled and reason.startswith(
                     ("not eligible", "Fly launch failed")),
+                fly_provider_ineligible=(
+                    provider_specific and not _fly_disabled
+                    and reason.startswith("not eligible")),
             )  # fmt: skip
         if local_fallback_check is not None:
             # This provider was chosen WITHOUT the Mac's usage gate because
@@ -4032,7 +4043,7 @@ async def _run_skill_once(
         return None
 
     if _fly_reason:
-        _refusal = _fly_refusal_or_fallback(_fly_reason)
+        _refusal = _fly_refusal_or_fallback(_fly_reason, _fly_provider_specific)
         if _refusal is not None:
             _cleanup_launch_artifacts()
             return _refusal
@@ -4164,7 +4175,8 @@ async def _run_skill_once(
                         if isinstance(exc, fly_runner.FlyIneligible)
                         else f"Fly launch failed: {exc}"
                     )
-                    _refusal = _fly_refusal_or_fallback(reason)
+                    _refusal = _fly_refusal_or_fallback(
+                        reason, getattr(exc, "provider_specific", False))
                     if _refusal is not None:
                         return _refusal
                     if _fly_job.neotoma_tools_unavailable:
@@ -5318,6 +5330,26 @@ async def _run_provider_attempts(
         # ends the dispatch here too. Never failed over to another provider.
         if result.fly_delivery_status:
             return result
+        if result.fly_provider_ineligible:
+            # Fly refused this provider before anything launched, for a reason
+            # that is the provider alone. Try the next candidate that runs on
+            # Fly; that attempt is Fly-bound too, so it cannot fall back to a
+            # local run the refused one could not. No cooldown: the provider
+            # is healthy, only Fly cannot run it for this job. A pinned or
+            # preferred provider gets no other; with none left the refusal
+            # ends the dispatch as before.
+            others = [
+                p for p in pending[index:] if p in fly_bound or p in fly_extra
+            ]
+            if provider is not None or preferred_provider or not others:
+                return result
+            last_result = result
+            log.warning(
+                f"[apis] {skill}: Fly cannot run {selected} for this job "
+                f"({result.error}); trying {others[0]} on Fly"
+            )
+            pending = pending[:index] + others
+            continue
         if result.configuration_repair:
             # The isolated harness home was refused before any child started:
             # a configuration the operator must repair, not a provider failure

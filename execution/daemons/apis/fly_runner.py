@@ -121,7 +121,15 @@ MAX_RECORD_COUNT = 10**9
 
 class FlyIneligible(Exception):
     """This job cannot run on Fly (no own identity, no App, unsupported
-    shape). The reason names what is missing, never a value."""
+    shape). The reason names what is missing, never a value.
+
+    ``provider_specific``: the reason is this job's provider and nothing
+    else about the job, so the same job on another provider may still be
+    eligible (skill_runner then tries that provider in the same dispatch)."""
+
+    def __init__(self, *args, provider_specific: bool = False):
+        super().__init__(*args)
+        self.provider_specific = provider_specific
 
 
 def _command_too_large(provider: str, size: int) -> "FlyConfigInvalid":
@@ -2194,7 +2202,7 @@ def build_job(
         raise FlyConfigInvalid(
             f"the dispatch timeout is outside 1 to {MAX_JOB_TIMEOUT_SECONDS} seconds")
     if provider not in RUNNER_BINARIES:
-        raise FlyIneligible(f"provider {provider!r} has no Fly runner")
+        raise FlyIneligible(f"provider {provider!r} has no Fly runner", provider_specific=True)
     for flag, why in (
         (local_review, "local_review runs stay on the Mac"),
         (inference_only, "inference_only runs stay on the Mac"),
@@ -2211,7 +2219,8 @@ def build_job(
         raise FlyIneligible("seated and gate-owning runs stay on the Mac")
     if provider in LOGIN_PROVIDERS and provider not in config.login_machines:
         raise FlyIneligible(
-            f"no {provider} login machine configured ({login_machine_setting(provider)})"
+            f"no {provider} login machine configured ({login_machine_setting(provider)})",
+            provider_specific=True,
         )
 
     secrets: dict[str, str] = {}
@@ -2283,7 +2292,8 @@ def build_job(
         if jwk_text:
             if provider not in FLY_NEOTOMA_PROXY_PROVIDERS:
                 raise FlyIneligible(
-                    f"the Fly runner cannot yet give a {provider} job its Neotoma tools")
+                    f"the Fly runner cannot yet give a {provider} job its Neotoma tools",
+                    provider_specific=True)
             admitted, reason = role_admission(role, jwk, base_url)
             if not admitted:
                 raise FlyIneligible(
