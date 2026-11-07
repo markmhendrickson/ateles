@@ -204,3 +204,14 @@ short (160 characters for a heartbeat, 2000 for a goal turn). On 639 local goal 
 reads exit 2 as a block. A Stop gate that demands a report (#1374) must not be applied to a turn this guard ended:
 `turn_ended_by_guard(session_id, turn_id)` in this module reports it. Subagent events are ignored. State is one
 0600 JSON file per thread in `.claude/.session_state/`.
+
+## `user_prompt_submit.py` (UserPromptSubmit)
+
+Counts turns, and prints one `[held-notices] ...` line to model context when
+daemons hold operator notices with no delivery channel (queue totals come from
+`lib/notify/held_view.py`, loaded by file path). It prints only when the total
+is non-zero and differs from the last total shown in the session, and the line
+carries integers and regex-validated handler names only — never notice text,
+which can embed attacker-influenced strings. Fail-open: any error prints
+nothing and exits 0. Show the notices with `python3 lib/notify/held_view.py`;
+clear them (after a backup) with `--clear`.
