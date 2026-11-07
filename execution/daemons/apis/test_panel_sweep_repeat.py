@@ -128,6 +128,10 @@ def _run(coro):
 def test_a_stranded_held_head_whose_checks_finished_is_re_entered(sweep):
     # The lost-webhook case: a hold for this head is remembered, its checks
     # have since gone green, and no check_suite/completed arrived to release it.
+    # Red with `_sweep_one_labelled_pr` returning on any held head instead of
+    # re-entering it, observed 2026-11-07:
+    #   AssertionError: assert [] == [(87, 'aaaaaa...aaaaaaaaaaa')]
+    #     Right contains one more item: (87, 'aaaa...aaaa')
     d, state = sweep
     d._panel_ci_holds[KEY] = sd._PanelCIHold(head=OLD_HEAD, reason="pending")
     summary = _run(d.repeat_labelled_panel_sweep([REPO]))
@@ -417,7 +421,8 @@ def test_an_unexpired_marker_on_page_two_leaves_the_pr_alone(monkeypatch):
     # Red with the old one-page read (per_page=100, no page param), observed
     # 2026-11-07:
     #   AssertionError: assert False is True
-    #    +  where False = _run(<coroutine object SwarmDispatcher._unexpired_deferral ...>)
+    #    +  where False = _run(<coroutine object
+    #       SwarmDispatcher._unexpired_deferral ...>)
     # The marker on page two was never fetched, so the PR read as not deferred.
     _paged_comments_client(monkeypatch, _marker_pages(2))
     assert _run(_plain_dispatcher()._unexpired_deferral(REPO, PR)) is True
