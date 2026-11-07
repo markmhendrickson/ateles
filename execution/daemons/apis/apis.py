@@ -976,11 +976,40 @@ def _fly_run_in_flight(snapshot: dict, entity_id: str) -> bool | None:
         doc = build_delivery._delivery_ledger().snapshot()
     except (OSError, fly_runner.FlyLedgerError):
         return None
-    entry = build_delivery._receipt_for(build_delivery.canonical_key(key), doc.get("deliveries", {}))
-    if entry is None:
+    receipts = doc.get("deliveries", {})
+
+    def _live(entry: dict) -> bool:
+        run_id = entry.get("run_id")
+        return entry.get("status") == "launching" or bool(run_id and run_id in doc["in_flight"])
+
+    entry = build_delivery._receipt_for(build_delivery.canonical_key(key), receipts)
+    if entry is not None and _live(entry):
+        return True
+    # The key is derived from the task as it is now, so a task whose repository
+    # changed mid-run misses its own receipt above. The only place the ledger
+    # records a task id is a task-keyed receipt ("owner/name#task:<id>", a task
+    # with no issue or PR), so any live receipt naming this task id that way is
+    # this task's run whatever repository it was launched against. Issue- and
+    # PR-keyed receipts and the in-flight entries (random run id, instance
+    # owner) carry no task id, so a repository change there is not caught here.
+    task_suffix = f"#task:{str(entity_id).strip()}"
+    return any(str(stored).strip().endswith(task_suffix) and _live(other)
+               for stored, other in receipts.items() if isinstance(other, dict))
+
+
+def _fly_run_refuses_dispatch(snapshot: dict, entity_id: str, trigger: str) -> bool:
+    """True when a task must not be dispatched because a Fly run is in flight
+    for it, or the ledger could not be read so that is unknown. Logs why."""
+    in_flight = _fly_run_in_flight(snapshot, entity_id)
+    if in_flight is False:
         return False
-    run_id = entry.get("run_id")
-    return entry.get("status") == "launching" or bool(run_id and run_id in doc["in_flight"])
+    log.warning(
+        f"[{DAEMON_NAME}] {trigger} for {entity_id}: "
+        + ("the Fly ledger could not be read, so whether a run is in flight is unknown"
+           if in_flight is None else "a Fly run is in flight for this task")
+        + " — not routing"
+    )
+    return True
 
 
 def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *, lifecycle_version=None,
@@ -2231,6 +2260,15 @@ async def dispatch_task(
             f"[{DAEMON_NAME}] task {entity_id!r} has a completed effect with "
             f"pending provenance (trigger={trigger}) — not dispatching"
         )
+        return
+
+    # A task whose Fly run is still in flight is not dispatched again, from ANY
+    # entrance: SSE events, checkpoint release, deferred recovery, the watchdog
+    # and the reconciler all reach here. Before every state write, so a
+    # re-dispatch can never move such a task to ROUTED (seen 2026-11-06: a
+    # replay after an Apis restart moved a running task back to routed). An
+    # unreadable ledger leaves the same doubt and refuses the same way.
+    if _fly_run_refuses_dispatch(snapshot, entity_id, f"dispatch (trigger={trigger})"):
         return
 
     # A task the deferral mechanism marked is owned by its recovery sweep: nothing
@@ -4809,24 +4847,11 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
     title = snapshot.get("title", "(untitled)")
     status = snapshot.get("status", "")
 
-    # A replayed task event must not re-route a task whose Fly run is still in
-    # flight (seen 2026-11-06: after an Apis restart a replay moved such a task
-    # from executing to routed, and releasing it could build the change twice).
-    # An unreadable ledger leaves the same doubt, so it does nothing either.
-    if action in ("created", "updated"):
-        in_flight = _fly_run_in_flight(snapshot, entity_id)
-        if in_flight is None:
-            log.warning(
-                f"[{DAEMON_NAME}] task.{action} for {entity_id}: the Fly ledger could "
-                "not be read, so whether a run is in flight is unknown — not routing"
-            )
-            return
-        if in_flight:
-            log.info(
-                f"[{DAEMON_NAME}] task.{action} for {entity_id}: a Fly run is in "
-                "flight for this task — not routing"
-            )
-            return
+    # dispatch_task itself refuses a task whose Fly run is in flight. This
+    # earlier check stays for task.created only, because it also keeps a replay
+    # from announcing "Task created" again and from claiming the created dedupe.
+    if action == "created" and _fly_run_refuses_dispatch(snapshot, entity_id, "task.created"):
+        return
 
     if action == "created":
         # Neotoma redelivers `task.created` for the same entity — measured
@@ -4890,18 +4915,6 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
             handler=DAEMON_NAME,
         )
         if AUTO_EXECUTE:
-            # Same guard as created/updated above: dispatch_task routes the task,
-            # so a due reminder for a task whose Fly run is in flight (or whose
-            # ledger is unreadable) must not re-route it. The reminder still goes.
-            in_flight = _fly_run_in_flight(snapshot, entity_id)
-            if in_flight is None or in_flight:
-                log.warning(
-                    f"[{DAEMON_NAME}] task.due_today for {entity_id}: "
-                    + ("the Fly ledger could not be read" if in_flight is None
-                       else "a Fly run is in flight for this task")
-                    + " — not dispatching"
-                )
-                return
             log.info(
                 f"[{DAEMON_NAME}] AUTO_EXECUTE=1 — dispatching due task {entity_id}"
             )
