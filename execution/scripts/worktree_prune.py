@@ -181,13 +181,27 @@ def git_cmd(repo, *args, untracked="all"):
 # ----------------------------------------------------------------------------------------------
 # Configuration
 # ----------------------------------------------------------------------------------------------
-def _path_list(value):
-    """os.pathsep-separated paths -> absolute, ~-expanded, de-duplicated list (empty entries dropped)."""
+class ConfigError(ValueError):
+    """A configuration value that would silently do the wrong thing; the run stops before doing anything."""
+
+
+def _path_list(value, label):
+    """os.pathsep-separated paths -> absolute, ~-expanded, de-duplicated list (empty entries dropped).
+
+    A relative entry is an error, never resolved against the working directory: a scheduled job starts in
+    `/`, so a relative never-touch entry would silently protect nothing.
+    """
     out = []
     for part in (value or "").split(os.pathsep):
         part = part.strip()
         if part:
-            p = os.path.abspath(os.path.expanduser(part))
+            expanded = os.path.expanduser(part)
+            if not os.path.isabs(expanded):
+                raise ConfigError(
+                    "%s entry %r is a relative path; use an absolute path (or one starting with ~)"
+                    % (label, part)
+                )
+            p = os.path.abspath(expanded)
             if p not in out:
                 out.append(p)
     return out
@@ -236,16 +250,16 @@ def configure(env=None, cli=None):
     LOGDIR = os.path.join(BASE, "logs")
     RUNS = os.path.join(BASE, "runs.jsonl")
     LOCK = os.path.join(BASE, "lock")
-    repos = _path_list(os.pathsep.join(cli.get("repos_dir") or [])) or _path_list(
-        env.get(ENV_PREFIX + "REPOS_DIRS")
-    )
+    repos = _path_list(
+        os.pathsep.join(cli.get("repos_dir") or []), "--repos-dir"
+    ) or _path_list(env.get(ENV_PREFIX + "REPOS_DIRS"), ENV_PREFIX + "REPOS_DIRS")
     REPOS_DIRS = repos or [os.path.join(H, "repos")]
     never = [
         os.path.join(H, p[2:]) for p in DEFAULT_NEVER_TOUCH
     ]  # entries are '~/<name>'
-    for p in _path_list(env.get(ENV_PREFIX + "NEVER_TOUCH")) + _path_list(
-        os.pathsep.join(cli.get("never_touch") or [])
-    ):
+    for p in _path_list(
+        env.get(ENV_PREFIX + "NEVER_TOUCH"), ENV_PREFIX + "NEVER_TOUCH"
+    ) + _path_list(os.pathsep.join(cli.get("never_touch") or []), "--never-touch"):
         if p not in never:
             never.append(p)
     NEVER = never
@@ -255,6 +269,13 @@ def configure(env=None, cli=None):
         if p.strip()
     ]
     prefixes += [p for p in (cli.get("hold_prefix") or []) if p]
+    for p in prefixes:
+        # a prefix is matched against the worktree directory's own name; a path never matches anything
+        if os.sep in p:
+            raise ConfigError(
+                "hold prefix %r is a path, not a directory-name prefix; give the start of the worktree "
+                "directory's name (for example 'wt-')" % p
+            )
     HOLD_PREFIXES = tuple(dict.fromkeys(prefixes))
     until_text = pick("HOLD_UNTIL", "hold_until")
     try:
@@ -335,9 +356,48 @@ STATS = Stats()
 LOGF = None
 
 
+_CONTROL_CHARS = re.compile("[\x00-\x1f\x7f-\x9f  ]")
+
+
+def escape_text(text):
+    """Make text safe to put on one log line: every control character (newline included) becomes \\xNN."""
+    return _CONTROL_CHARS.sub(lambda m: "\\x%02x" % ord(m.group()), str(text))
+
+
 def log(*a):
+    """Write one line to the day log. Every name and path in a line is escaped here, so no caller can
+    forge or split a log line by way of a worktree name."""
     if LOGF:
-        print(time.strftime("%H:%M:%S"), *a, file=LOGF, flush=True)
+        line = " ".join(escape_text(x) for x in a)
+        print(time.strftime("%H:%M:%S"), line, file=LOGF, flush=True)
+
+
+PRIVATE_DIR_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
+
+
+def ensure_private_dir(path):
+    """Create `path` (and parents) mode 0700 and tighten an existing real directory to 0700."""
+    os.makedirs(path, mode=PRIVATE_DIR_MODE, exist_ok=True)
+    if not os.path.islink(path):
+        os.chmod(path, PRIVATE_DIR_MODE)
+
+
+def open_private(path, mode="a"):
+    """Open `path` for appending (mode 'a' or 'a+') as a regular file with mode 0600.
+
+    A symbolic link at `path` is refused (O_NOFOLLOW) rather than followed, and an existing file is
+    tightened to 0600.
+    """
+    flags = os.O_APPEND | os.O_CREAT | (os.O_RDWR if "+" in mode else os.O_WRONLY)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, PRIVATE_FILE_MODE)
+    try:
+        os.fchmod(fd, PRIVATE_FILE_MODE)
+    except OSError:
+        os.close(fd)
+        raise
+    return os.fdopen(fd, mode, buffering=1)
 
 
 def run(args, cwd=None, timeout=300, count=True, ok_rcs=(0,)):
@@ -941,23 +1001,32 @@ def act(e, apply_, protect_ignored):
 
 
 def rotate_logs():
+    """Delete day logs older than 30 days and empty launchd logs over 1 MB. Works on regular files only:
+    a symbolic link in the log directory is never followed, deleted or truncated."""
     cutoff = time.time() - 30 * 86400
     try:
-        for n in os.listdir(LOGDIR):
-            p = os.path.join(LOGDIR, n)
-            if (
-                re.match(r"^\d{4}-\d{2}-\d{2}\.log$", n)
-                and os.path.getmtime(p) < cutoff
-            ):
+        names = os.listdir(LOGDIR)
+    except OSError:
+        return
+    for n in names:
+        p = os.path.join(LOGDIR, n)
+        try:
+            st = os.lstat(p)
+            if not stat.S_ISREG(st.st_mode):
+                if stat.S_ISLNK(st.st_mode):
+                    log("SKIP rotate %s: symbolic link" % p)
+                continue
+            if re.match(r"^\d{4}-\d{2}-\d{2}\.log$", n) and st.st_mtime < cutoff:
                 os.remove(p)
-            elif n.startswith("launchd.") and os.path.getsize(p) > 1048576:
-                open(p, "w").close()
-    except Exception:
-        pass
+            elif n.startswith("launchd.") and st.st_size > 1048576:
+                fd = os.open(p, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+                os.close(fd)
+        except OSError:
+            continue
 
 
 def write_summary(d):
-    with open(RUNS, "a") as f:
+    with open_private(RUNS, "a") as f:
         f.write(json.dumps(d, sort_keys=True) + "\n")
 
 
@@ -1097,32 +1166,45 @@ def reject_removed_options(parser, argv):
 
 
 def main(argv=None):
+    """Run with a private umask (state and logs are created 0700/0600), restored afterwards."""
+    old_umask = os.umask(0o077)
+    try:
+        return _main(argv)
+    finally:
+        os.umask(old_umask)
+
+
+def _main(argv):
     global FRESH_HOURS, LOGF
     parser = build_parser()
     reject_removed_options(parser, sys.argv[1:] if argv is None else list(argv))
     a = parser.parse_args(argv)
-    warnings = configure(
-        os.environ,
-        {
-            "state_dir": a.state_dir,
-            "repos_dir": a.repos_dir,
-            "never_touch": a.never_touch,
-            "hold_prefix": a.hold_prefix,
-            "hold_until": a.hold_until,
-            "yield_to_file": a.yield_to_file,
-        },
-    )
+    try:
+        warnings = configure(
+            os.environ,
+            {
+                "state_dir": a.state_dir,
+                "repos_dir": a.repos_dir,
+                "never_touch": a.never_touch,
+                "hold_prefix": a.hold_prefix,
+                "hold_until": a.hold_until,
+                "yield_to_file": a.yield_to_file,
+            },
+        )
+    except ConfigError as ex:
+        parser.error(str(ex))  # exit 2 before anything is read, written or deleted
     FRESH_HOURS = max(1, a.fresh_hours)
     STRIP["only"] = bool(a.strip_only)
     STRIP["enabled"] = bool(a.strip_node_modules or a.strip_only)
     STRIP["idle_hours"] = idle_windows(a.idle_hours)
 
-    os.makedirs(LOGDIR, exist_ok=True)
+    ensure_private_dir(BASE)
+    ensure_private_dir(LOGDIR)
     t0 = time.time()
     ts = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     mode = "apply" if a.apply else "dry-run"
 
-    lockf = open(LOCK, "a+")
+    lockf = open_private(LOCK, "a+")
     try:
         fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -1140,9 +1222,7 @@ def main(argv=None):
         except OSError:
             pass
 
-    LOGF = open(
-        "%s/%s.log" % (LOGDIR, datetime.date.today().isoformat()), "a", buffering=1
-    )
+    LOGF = open_private("%s/%s.log" % (LOGDIR, datetime.date.today().isoformat()), "a")
     for w in warnings:
         log("WARN " + w)
     rotate_logs()
@@ -1362,18 +1442,25 @@ def main(argv=None):
         for e in eligible:
             print(
                 "%s\t%.2fGB\t%s"
-                % (e["wt"], e.get("kb", 0) / 1048576, e.get("pushed_via"))
+                % (
+                    escape_text(e["wt"]),
+                    e.get("kb", 0) / 1048576,
+                    e.get("pushed_via"),
+                )
             )
         for e in strip_done:
             print(
                 "%s\t%.2fMB\tnode_modules"
-                % (e["wt"], e.get("strip_bytes", 0) / 1048576)
+                % (escape_text(e["wt"]), e.get("strip_bytes", 0) / 1048576)
             )
     print(json.dumps(summ, sort_keys=True))
     return 0 if status == "ok" else 2
 
 
-configure()
+try:
+    configure()
+except ConfigError:
+    pass  # main() runs configure() again and reports the error before doing anything
 
 if __name__ == "__main__":
     try:
