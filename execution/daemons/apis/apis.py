@@ -4901,6 +4901,62 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
+PANEL_SWEEP_INTERVAL_DEFAULT_S = 600
+
+
+def panel_sweep_interval_s(environ=None) -> int:
+    """Seconds between repeating labelled-panel sweeps; 0 means off.
+
+    Read from ``APIS_PANEL_SWEEP_INTERVAL_S`` (default 600). A value that is
+    not a whole number, or is negative, turns the sweep off with a warning
+    rather than guessing a cadence.
+    """
+    env = os.environ if environ is None else environ
+    raw = env.get("APIS_PANEL_SWEEP_INTERVAL_S")
+    if raw is None or raw.strip() == "":
+        return PANEL_SWEEP_INTERVAL_DEFAULT_S
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        value = -1
+    if value < 0:
+        log.warning(
+            f"[{DAEMON_NAME}] APIS_PANEL_SWEEP_INTERVAL_S={raw!r} is not a "
+            "whole number of seconds — the repeating panel sweep is off"
+        )
+        return 0
+    return value
+
+
+async def repeating_panel_sweep(dispatcher: SwarmDispatcher, interval_s: int) -> None:
+    """Re-drive stranded labelled-PR panels every `interval_s` seconds while running.
+
+    The startup sweep covers what a restart drops; this covers a webhook GitHub
+    timed out and never resent (a lost ``check_suite/completed`` strands a
+    held panel). The first pass waits one interval, so it never overlaps the
+    startup sweep's own pass, and the dispatcher's lock keeps two passes from
+    running at once. A failed pass is logged and the loop waits for the next;
+    it never stops Apis. ``interval_s <= 0`` returns at once.
+    """
+    if interval_s <= 0:
+        log.info(f"[{DAEMON_NAME}] repeating panel sweep: off")
+        return
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            await dispatcher.repeat_labelled_panel_sweep(
+                list(dispatcher.config.resume_repositories)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — never stop the loop
+            log.error(
+                f"[{DAEMON_NAME}] repeating panel sweep failed: {exc} — "
+                "will retry next interval",
+                exc_info=True,
+            )
+
+
 async def deferred_review_sweep_pass(dispatcher: SwarmDispatcher) -> None:
     """One pass of Apis's periodic review sweep (``main``'s
     ``deferred_review_sweep`` runs it every APIS_DEFERRED_REVIEW_SWEEP_SECONDS).
@@ -5189,6 +5245,9 @@ async def main() -> None:
                 f"[{DAEMON_NAME}] startup panel sweep failed: {exc}",
                 exc_info=True,
             )
+        # 7a3. The same sweep, repeated while running, for webhooks GitHub
+        #      timed out and never resent (APIS_PANEL_SWEEP_INTERVAL_S).
+        await repeating_panel_sweep(dispatcher, panel_sweep_interval_s())
 
     # 7b. Workflow gate-owner drift check (ateles#441). The workflow_definition
     #     entities name the agent owning each gate; dispatch picks agents from
