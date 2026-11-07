@@ -592,7 +592,9 @@ import model_tiering  # noqa: E402
 import producer_confidence  # noqa: E402
 from red_conditions import ApisNotifier  # noqa: E402
 from skill_runner import SkillResult, _redact_secrets, run_skill  # noqa: E402
-from swarm_dispatch import SwarmDispatcher, _token_for_agent_on_repo  # noqa: E402
+from swarm_dispatch import (  # noqa: E402
+    SwarmDispatcher, _token_for_agent_on_repo, neotoma_read_failure_is_transient,
+)
 from task_reconciler import TaskReconciler  # noqa: E402
 from unroutable_ledger import shared_ledger  # noqa: E402
 
@@ -1971,11 +1973,18 @@ def _read_correction_lifecycle_record(binding):
     return _snapshot_with_tenant(record), version
 
 
-def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
+def _advance_correction_lifecycle(binding, status, *, clear_reason=False, outcome=None):
     """Condition each controller write on the exact admitted/previous state.
 
     A conflict, ambiguous reply or missing next token ends the sequence. A fresh
     token is never fetched to resume after failure, and no new hold is erased.
+
+    A write that did not answer (a timeout, connection failure or 5xx) has an
+    unknown outcome, so the record is read back. When it shows exactly the
+    value written and nothing else changed, the sequence continues as if the
+    write had answered. When it still shows the unchanged previous state the
+    write did not land: ``outcome["transient"]`` is set so the caller may retry
+    the same write later. Any other state ends the sequence as before.
     """
     import json
 
@@ -1994,10 +2003,24 @@ def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
                 handler=DAEMON_NAME,
                 key_suffix=f"{status.value}-approved-{binding.release_key}",
             )
-            if not committed or not committed.version:
-                return None
+            previous_shape = _correction_lifecycle_shape(expected)
             expected[field] = value
             expected_shape = _correction_lifecycle_shape(expected)
+            if not committed or not committed.version:
+                if not getattr(committed, "transient", False):
+                    return None
+                # Outcome unknown: the record says whether it landed.
+                fresh, fresh_version = _read_correction_lifecycle_record(binding)
+                if not isinstance(fresh, dict) or not fresh_version:
+                    return None
+                fresh_shape = _correction_lifecycle_shape(fresh)
+                if fresh_version != version and fresh_shape == expected_shape:
+                    version = fresh_version
+                    continue
+                if (fresh_version == version and fresh_shape == previous_shape
+                        and outcome is not None):
+                    outcome["transient"] = True
+                return None
             fresh, version = _read_correction_lifecycle_record(binding)
             if (not isinstance(fresh, dict) or version != committed.version
                     or _correction_lifecycle_shape(fresh) != expected_shape):
@@ -2110,6 +2133,97 @@ def _guessed_owner_is_low_stakes(skill: str, snapshot: dict) -> bool:
         )
     except Exception:  # noqa: BLE001 — undeterminable means keep today's hold
         return False
+
+
+# A released builder dispatch that failed only because Neotoma was briefly
+# slow (its agent_policy read, or its executing status write, timed out, hit a
+# connection failure or a 5xx) is retried with the same approved checkpoint
+# instead of failing the task. One delay per retry, roughly 15 minutes in all.
+# Never for a missing or bad record, or a state that was read and differs.
+_RELEASED_RETRY_DELAYS: tuple[float, ...] = (120.0, 300.0, 480.0)
+
+
+def _released_retry_eligible(skill: str, trigger: str, gate_override: bool,
+                             release_key: str) -> bool:
+    """Only a builder dispatch released by an approved checkpoint retries."""
+    return (
+        gate_override and trigger == "approved" and bool(release_key)
+        and (skill or "").strip().lower() in build_delivery.BUILDER_SKILLS
+    )
+
+
+def _released_retry_fingerprint(task_id: str, checkpoint_id: str):
+    """What a retry must find unchanged: the task's version, status and hold,
+    and the checkpoint's version and resolution. None when either cannot be
+    read, which never counts as unchanged."""
+    try:
+        task = fetch_task_record(task_id)
+        checkpoint = fetch_checkpoint_record(checkpoint_id)
+        if not isinstance(task, dict) or not isinstance(checkpoint, dict):
+            return None
+        task_snapshot = _record_snapshot(task)
+        checkpoint_snapshot = _record_snapshot(checkpoint)
+        if task_snapshot is None or checkpoint_snapshot is None:
+            return None
+        return (
+            task.get("entity_version"),
+            normalize_status(task_snapshot.get("status")),
+            task_snapshot.get("blocked_reason"),
+            checkpoint.get("entity_version"),
+            read_checkpoint_resolution(checkpoint_snapshot),
+        )
+    except Exception:  # noqa: BLE001 — unreadable is never unchanged
+        return None
+
+
+def _released_retry_note(retries_used: int, why: str) -> str:
+    if not retries_used:
+        return ""
+    return (f" Retried {retries_used} time(s) over the temporary Neotoma "
+            f"failure ({why}); attempts exhausted.")
+
+
+def _schedule_released_retry(*, entity_id: str, checkpoint_id: str, attempt: int,
+                             why: str, notifier: Notifier, resume) -> bool:
+    """Schedule ``resume(attempt + 1)`` after the next delay, off the event
+    stream. False when the attempts are spent or the state to compare against
+    cannot be read, so the caller ends as it did before retries existed."""
+    if attempt >= len(_RELEASED_RETRY_DELAYS):
+        return False
+    baseline = _released_retry_fingerprint(entity_id, checkpoint_id)
+    if baseline is None:
+        return False
+    delay = _RELEASED_RETRY_DELAYS[attempt]
+    log.warning(
+        "[%s] released task %s: %s — retry %d/%d with checkpoint %s in %ss",
+        DAEMON_NAME, entity_id, why, attempt + 1, len(_RELEASED_RETRY_DELAYS),
+        checkpoint_id, delay,
+    )
+
+    async def _wait_then_resume() -> None:
+        await asyncio.sleep(delay)
+        current = _released_retry_fingerprint(entity_id, checkpoint_id)
+        if current is None:
+            log.warning("[%s] released task %s: state unreadable before retry %d — "
+                        "not retrying, left as found", DAEMON_NAME, entity_id, attempt + 1)
+            notifier.send(
+                f"Released task {entity_id} was waiting to retry ({why}) but its state "
+                "could not be read back; nothing was started. Reconcile it.",
+                priority=Priority.BLOCKER, handler=DAEMON_NAME)
+            return
+        if current != baseline:
+            log.info("[%s] released task %s changed during the retry wait — "
+                     "not retrying, left as found", DAEMON_NAME, entity_id)
+            return
+        log.info("[%s] released task %s: retry %d/%d starting", DAEMON_NAME,
+                 entity_id, attempt + 1, len(_RELEASED_RETRY_DELAYS))
+        await resume(attempt + 1)
+
+    task = asyncio.create_task(
+        _wait_then_resume(), name=f"apis-dispatch-{entity_id}-retry-{attempt + 1}")
+    _background_dispatch_tasks.add(task)
+    task.add_done_callback(_background_dispatch_done)
+    return True
 
 
 async def dispatch_task(
@@ -2830,38 +2944,9 @@ async def dispatch_task(
         )
         return True if correction_lifecycle is not None else None
 
-    # Lifecycle: about to spawn the T4 agent.
-    if correction_lifecycle is not None:
-        correction_lifecycle = _advance_correction_lifecycle(
-            correction_lifecycle, TaskStatus.EXECUTING)
-        if correction_lifecycle is None:
-            log.warning("[%s] correction %s executing lifecycle handoff could not be verified — not spawning",
-                        DAEMON_NAME, entity_id)
-            notifier.send(f"Approved correction {entity_id} lifecycle handoff could not be verified; "
-                          "this attempt was not started. Reconcile current task/admission state.",
-                          priority=Priority.BLOCKER, handler=DAEMON_NAME)
-            job.failed(f"task {entity_id} executing handoff was not qualified")
-            return
-    else:
-        set_task_status(
-            entity_id, TaskStatus.EXECUTING, handler=DAEMON_NAME,
-            from_status=TaskStatus.ROUTED.value, key_suffix=lifecycle_key,
-        )
-    if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.EXECUTING):
-        log.warning(
-            f"[{DAEMON_NAME}] approved task {entity_id} did not read back as "
-            "executing — not spawning"
-        )
-        notifier.send(
-            f"Approved task {entity_id} could not enter executing state — manual recovery needed",
-            priority=Priority.BLOCKER,
-            handler=DAEMON_NAME,
-        )
-        return
-
     completed = False
 
-    async def _finish_dispatch() -> None:
+    async def _finish_dispatch(retries_used: int = 0) -> None:
         nonlocal completed
         # E1/E2: this run's thread. run_key keys it to the attempt so SSE
         # replays reuse it while a genuine retry opens a fresh run.
@@ -3554,6 +3639,22 @@ async def dispatch_task(
             job.failed(f"task {entity_id} → {skill} outcome unknown: {result.remote_run_id}")
         else:
             reason = result.error or f"rc={result.returncode}"
+            if retry_ok and neotoma_read_failure_is_transient(result):
+                # The refusal was right (no agent runs without its policy);
+                # only the task's fate changes: retried, not failed.
+                why = "agent_policy/agent_definition read did not complete"
+                if _schedule_released_retry(
+                    entity_id=entity_id, checkpoint_id=release_key,
+                    attempt=retries_used, why=why, notifier=notifier,
+                    resume=_finish_dispatch,
+                ):
+                    _run_stage(
+                        "assistant",
+                        f"{skill} not started (trigger={trigger}): {reason} — retry scheduled",
+                        stage=f"retry-{retries_used + 1}",
+                    )
+                    return
+                reason += _released_retry_note(retries_used, why)
             _run_stage(
                 "assistant",
                 f"{skill} failed (trigger={trigger}): {reason}",
@@ -3577,6 +3678,61 @@ async def dispatch_task(
                 handler=DAEMON_NAME,
             )
             job.failed(f"task {entity_id} → {skill} failed: {reason[:60]}")
+
+    retry_ok = _released_retry_eligible(skill, trigger, gate_override, release_key)
+
+    async def _enter_executing(retries_used: int) -> bool:
+        """Lifecycle: about to spawn the T4 agent. True once the task durably
+        entered EXECUTING; False when this attempt ended (or a retry of it was
+        scheduled)."""
+        nonlocal correction_lifecycle
+        if correction_lifecycle is not None:
+            routed_binding = correction_lifecycle
+            outcome: dict = {}
+            correction_lifecycle = _advance_correction_lifecycle(
+                routed_binding, TaskStatus.EXECUTING, outcome=outcome)
+            if correction_lifecycle is None:
+                why = "executing status write timed out and did not land"
+                if retry_ok and outcome.get("transient"):
+                    async def _resume(attempt: int) -> None:
+                        nonlocal correction_lifecycle
+                        correction_lifecycle = routed_binding
+                        if await _enter_executing(attempt):
+                            await _finish_dispatch(attempt)
+
+                    if _schedule_released_retry(
+                        entity_id=entity_id, checkpoint_id=release_key,
+                        attempt=retries_used, why=why, notifier=notifier, resume=_resume,
+                    ):
+                        return False
+                log.warning("[%s] correction %s executing lifecycle handoff could not be verified — not spawning",
+                            DAEMON_NAME, entity_id)
+                notifier.send(f"Approved correction {entity_id} lifecycle handoff could not be verified; "
+                              "this attempt was not started. Reconcile current task/admission state."
+                              + _released_retry_note(retries_used, why),
+                              priority=Priority.BLOCKER, handler=DAEMON_NAME)
+                job.failed(f"task {entity_id} executing handoff was not qualified")
+                return False
+        else:
+            set_task_status(
+                entity_id, TaskStatus.EXECUTING, handler=DAEMON_NAME,
+                from_status=TaskStatus.ROUTED.value, key_suffix=lifecycle_key,
+            )
+        if gate_override and not _release_lifecycle_proven(entity_id, TaskStatus.EXECUTING):
+            log.warning(
+                f"[{DAEMON_NAME}] approved task {entity_id} did not read back as "
+                "executing — not spawning"
+            )
+            notifier.send(
+                f"Approved task {entity_id} could not enter executing state — manual recovery needed",
+                priority=Priority.BLOCKER,
+                handler=DAEMON_NAME,
+            )
+            return False
+        return True
+
+    if not await _enter_executing(0):
+        return None
 
     if detach_after_accept:
         # Re-checked here with no await since the create_task below, so two

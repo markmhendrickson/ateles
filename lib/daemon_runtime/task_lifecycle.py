@@ -306,11 +306,15 @@ class FieldWrite:
                   committed write; a caller must then STOP the sequence and
                   re-read from the beginning, never fetch a replacement token and
                   continue (that token belongs to a state it did not validate).
+    ``transient`` the write did not answer (a timeout, a connection failure or a
+                  5xx): its outcome is UNKNOWN, so the caller must read the
+                  record back before deciding whether it landed.
     """
 
     ok: bool
     conflict: bool = False
     version: str | None = None
+    transient: bool = False
 
     def __bool__(self) -> bool:
         return self.ok
@@ -372,7 +376,10 @@ def set_task_field_if_version(
         return FieldWrite(True, version=version if isinstance(version, str) else None)
     except Exception as exc:  # noqa: BLE001 — fail open, never crash dispatch
         log.warning("[lifecycle] failed to write task %s %s: %s", task_entity_id, field, exc)
-        return FieldWrite(False)
+        transient = isinstance(exc, (httpx.TimeoutException, httpx.TransportError)) or (
+            isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500
+        )
+        return FieldWrite(False, transient=transient)
 
 
 def set_task_status(
