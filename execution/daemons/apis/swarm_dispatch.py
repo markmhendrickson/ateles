@@ -9710,6 +9710,8 @@ class SwarmDispatcher:
             trigger.repository, trigger.number, trigger.head_ref
         )
         if facts.delivered is None:
+            if facts.unknown_reason:
+                return "hold", facts.unknown_reason
             return "hold", (
                 "the Fly delivery ledger or its audit file is missing or could "
                 "not be read, so "

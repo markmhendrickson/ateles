@@ -206,6 +206,9 @@ def main(argv: list[str] | None = None, *, ledger=None, out=None, err=None) -> i
         "commit": entry.get("commit"),
         "recorded_at": entry.get("recorded_at"),
     }
+    if entry.get("kind") != "lens":
+        # A correction filed from this line later is PART_OF this task.
+        identity["source_task"] = build_delivery.receipt_source_task(stored, entry)
     if entry.get("kind") == "lens":
         identity.update({"kind": "lens", "lens": entry.get("lens"), "pr": entry.get("pr"),
                          "head": entry.get("head"), "notified_at": entry.get("notified_at")})

@@ -1152,12 +1152,36 @@ class FlyDeliveredPR:
     Fly"). A missing audit file adds nothing: no receipt was ever cleared.
     ``branch``/``base_branch`` are what the receipts recorded, when they did;
     ``source_task`` is the task a first delivery was keyed by, when exactly one
-    such receipt names the PR."""
+    such receipt names the PR, or the task an audit line recorded for the
+    cleared or superseded receipt. ``unknown_reason`` says why ``delivered`` is
+    None when the cause is not an unreadable ledger or audit file."""
 
     delivered: bool | None
     branch: str = ""
     base_branch: str = ""
     source_task: str = ""
+    unknown_reason: str = ""
+
+
+def receipt_source_task(stored: object, entry: object) -> str:
+    """The task a delivery receipt was keyed by, or "".
+
+    The same value ``fly_delivered_pr`` reads from an active receipt: the id
+    after ``#task:`` in its key, or in one of its ``associated_keys``. Empty
+    when none names a task, or more than one task. Written on the audit line
+    when a receipt is cleared or superseded (``source_task``), so a correction
+    filed from that line keeps its parent."""
+    keys = [stored]
+    if isinstance(entry, dict) and isinstance(entry.get("associated_keys"), list):
+        keys += entry["associated_keys"]
+    found: set[str] = set()
+    for key in keys:
+        if not isinstance(key, str):
+            continue
+        _, mark, task_id = canonical_key(key).partition(_TASK_KEY_MARK)
+        if mark and task_id.strip():
+            found.add(task_id.strip())
+    return found.pop() if len(found) == 1 else ""
 
 
 _RECEIPT_REMOVAL_ACTIONS = frozenset({"clear_delivery_receipt", "supersede_delivery_receipt"})
@@ -1170,8 +1194,9 @@ def _removal_audit_lines(ledger) -> list[dict] | None:
     An empty list when the file does not exist (no receipt was ever cleared or
     superseded). None when the file exists but cannot be read or decoded, when
     any line is not a JSON object, or when a removal line carries a field this
-    reader uses in a shape it cannot read (a non-string key or branch, a
-    non-object ``existing_pr`` or a non-string branch inside it): one bad line
+    reader uses in a shape it cannot read (a non-string key, branch or
+    ``source_task``, a non-object ``existing_pr`` or a non-string branch
+    inside it): one bad line
     makes the whole file unknown, whatever the other lines say."""
     import fly_delivery_receipt
 
@@ -1198,6 +1223,8 @@ def _removal_audit_lines(ledger) -> list[dict] | None:
             return None
         if not isinstance(line.get("branch"), (str, type(None))):
             return None
+        if not isinstance(line.get("source_task"), (str, type(None))):
+            return None
         prior = line.get("existing_pr")
         if prior is not None:
             if not isinstance(prior, dict) or not isinstance(prior.get("branch"), (str, type(None))):
@@ -1208,14 +1235,14 @@ def _removal_audit_lines(ledger) -> list[dict] | None:
     return removals
 
 
-def _removed_receipt_names_branch(ledger, repo: str, head_branch: str) -> bool | None:
-    """Whether the ledger's audit file shows a cleared or superseded non-lens
-    receipt for *repo* on *head_branch*.
+def _removed_receipt_names_branch(ledger, repo: str, head_branch: str) -> list[dict] | None:
+    """The ledger's audit lines for cleared or superseded non-lens receipts
+    for *repo* on *head_branch* (empty when none).
 
     The audit line carries no PR number, so it is matched on the repository in
     its key and on its branch; Fly branches are unique to a task. The whole
     file is read and validated before a match counts (``_removal_audit_lines``).
-    False when the file does not exist (no receipt was ever cleared or
+    Empty when the file does not exist (no receipt was ever cleared or
     superseded). None when the file exists but cannot be read, any line cannot
     be parsed, or no head branch is known while the file names a removed
     receipt for *repo*: unknown, never "not Fly"."""
@@ -1223,6 +1250,7 @@ def _removed_receipt_names_branch(ledger, repo: str, head_branch: str) -> bool |
     if removals is None:
         return None
     unmatched_for_repo = False
+    matched: list[dict] = []
     for line in removals:
         if canonical_key(line["key"]).partition("#")[0] != repo:
             continue
@@ -1235,8 +1263,10 @@ def _removed_receipt_names_branch(ledger, repo: str, head_branch: str) -> bool |
             unmatched_for_repo = True
             continue
         if head_branch in branches:
-            return True
-    return None if unmatched_for_repo else False
+            matched.append(line)
+    if matched:
+        return matched
+    return None if unmatched_for_repo else []
 
 
 def fly_delivered_pr(
@@ -1250,7 +1280,10 @@ def fly_delivered_pr(
     number, or records an existing-PR correction of it; or, when no active
     receipt names it, when the audit file records a cleared or superseded
     non-lens receipt for the same repository on the PR's *head_branch*. A
-    cleared receipt still means the PR came from Fly. An existing audit file
+    cleared receipt still means the PR came from Fly; that route returns the
+    ``source_task`` its audit line recorded, and is unknown (None, with
+    ``unknown_reason``) when the matching lines record no single source task,
+    so no correction is filed with no parent. An existing audit file
     that cannot be read or has any line that cannot be parsed makes the
     origin unknown (None) even when an active receipt matches. Used to route a fix
     round: a Fly PR's fix round runs as a Fly correction, never as a commit on
@@ -1318,7 +1351,16 @@ def fly_delivered_pr(
         if removed is None:
             return FlyDeliveredPR(None)
         if removed:
-            return FlyDeliveredPR(True, branch=head)
+            # The correction is filed PART_OF the receipt's source task. A
+            # line that recorded none (every line written before the field
+            # existed) holds the route rather than file a task with no parent.
+            sources = {line.get("source_task") or "" for line in removed}
+            if len(sources) != 1 or "" in sources:
+                return FlyDeliveredPR(None, unknown_reason=(
+                    "this PR came from Fly, but the audit record of its cleared or "
+                    "superseded delivery receipt names no single source task, so "
+                    "no correction can be filed under its parent task"))
+            return FlyDeliveredPR(True, branch=head, source_task=sources.pop())
     return FlyDeliveredPR(
         delivered,
         branch=branches.pop() if len(branches) == 1 else "",
@@ -1470,7 +1512,8 @@ def _supersede_settled_correction(plan: FlyDeliveryPlan) -> str | None:
         fly_delivery_receipt._append_audit(ledger, {
             "by": "apis", "action": "supersede_delivery_receipt", "stage": "superseding",
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "key": stored, "status": expected.get("status"), "run_id": expected.get("run_id"),
+            "key": stored, "source_task": receipt_source_task(stored, expected),
+            "status": expected.get("status"), "run_id": expected.get("run_id"),
             "branch": expected.get("branch"), "commit": expected.get("commit"),
             "recorded_at": expected.get("recorded_at"), "existing_pr": expected.get("existing_pr"),
             "superseded_by": {"key": key, "head_sha": plan.target.head_sha}})

@@ -419,17 +419,61 @@ def test_a_cleared_receipt_still_routes_to_fly(monkeypatch, world, stored, tmp_p
     assert rec.of("cicada") == []
     [task] = corrections(stored)
     assert task["pr_number"] == PR
+    assert_filed_part_of_source(stored)
+
+
+def assert_filed_part_of_source(stored):
+    """The correction was filed, and read back, PART_OF the source task."""
+    rels = stored["calls"][-1][2]
+    assert rels == [{"relationship_type": "PART_OF", "source_index": 0,
+                     "target_entity_id": "ent_synthetic_src"}]
+    assert "entities/ent_synthetic_fix/relationships" in stored["reads"]
 
 
 @pytest.mark.parametrize("route", ["review", "ci", "resumed"])
 def test_a_superseded_receipt_still_routes_to_fly(monkeypatch, world, stored, tmp_path, route):
     write_audit(tmp_path, audit_line(
         action="supersede_delivery_receipt", stage="superseding", status="updated",
+        source_task="ent_synthetic_src",
         existing_pr={"pr_number": PR, "branch": BRANCH, "base_branch": "main"}))
     rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
     run_route(monkeypatch, route)
     assert rec.of("cicada") == []
     assert len(corrections(stored)) == 1
+    assert_filed_part_of_source(stored)
+
+
+@pytest.mark.parametrize("line", [
+    audit_line(),  # written before audit lines carried a source task
+    audit_line(source_task=""),
+    audit_line(action="supersede_delivery_receipt", stage="superseding", status="updated",
+               existing_pr={"pr_number": PR, "branch": BRANCH, "base_branch": "main"}),
+], ids=["clear-no-field", "clear-empty", "supersede-no-field"])
+@pytest.mark.parametrize("route", ["review", "ci", "resumed"])
+def test_an_audit_line_with_no_source_task_holds(
+    monkeypatch, world, stored, rounds_recorded, tmp_path, line, route
+):
+    write_audit(tmp_path, line)
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed", "accipiter": GUIDANCE})
+    d, summary = run_route(monkeypatch, route)
+    if summary is not None:
+        assert summary["resumed"] == 0
+    assert rec.calls == []  # no builder, no guidance lenses, no local commit
+    assert corrections(stored) == [] and stored["calls"] == []
+    assert rounds_recorded == [] and world.fix_rounds == 0
+    assert any("names no single source task" in m and "Needs your attention" in m
+               for m in d.notifier.sent)
+
+
+def test_two_audit_lines_naming_different_source_tasks_hold(
+    monkeypatch, world, stored, rounds_recorded, tmp_path
+):
+    write_audit(tmp_path, audit_line(source_task="ent_synthetic_src"),
+                audit_line(source_task="ent_synthetic_other"))
+    rec = _Recorder(monkeypatch, stdout={"cicada": "fixed"})
+    d = ci_round(monkeypatch)
+    assert rec.calls == [] and stored["calls"] == [] and rounds_recorded == []
+    assert any("names no single source task" in m for m in d.notifier.sent)
 
 
 @pytest.mark.parametrize("line", [
@@ -477,6 +521,7 @@ BAD_AUDIT_LINES = {
     "not-an-object": "[1, 2]\n",
     "removal-key-not-a-string": json.dumps(audit_line(key=7)) + "\n",
     "removal-branch-not-a-string": json.dumps(audit_line(branch=["x"])) + "\n",
+    "removal-source-task-not-a-string": json.dumps(audit_line(source_task=["x"])) + "\n",
     "removal-existing-pr-not-an-object": json.dumps(audit_line(existing_pr="87")) + "\n",
     "removal-existing-pr-branch-not-a-string": json.dumps(
         audit_line(existing_pr={"pr_number": PR, "branch": 5})) + "\n",
