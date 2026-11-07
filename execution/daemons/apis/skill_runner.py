@@ -1886,6 +1886,10 @@ class SkillResult:
     # alone (fly_runner.FlyIneligible.provider_specific): the provider loop
     # may try the next provider that runs on Fly in the same dispatch.
     fly_provider_ineligible: bool = False
+    # A single-provider dispatch (an existing-PR correction) refused that way:
+    # the other Fly candidates its caller may try next, each in a fresh
+    # dispatch under its own prelaunch receipt. Empty for every other result.
+    fly_next_providers: tuple[str, ...] = ()
     # Selected correction: retain the original result plus proven prelaunch
     # cleanup. A known no-launch repair is held without automatic redispatch.
     fly_delivery_not_launched: bool = False
@@ -4752,6 +4756,7 @@ async def run_skill(
     repository: str = "",
     fly_delivery: dict | None = None,
     agent_git_identity: bool = False,
+    exclude_providers: tuple[str, ...] = (),
 ) -> SkillResult:
     """Route one skill run across subscription-backed harness providers.
 
@@ -4760,6 +4765,10 @@ async def run_skill(
     agent identity with signing off; with none configured the run is refused
     before any provider is tried, so it never falls through to the host's git
     identity. False leaves the child's environment exactly as before.
+
+    ``exclude_providers``: providers this dispatch must not select. An
+    existing-PR correction's caller names the ones Fly already refused for a
+    provider-only reason, so its next dispatch takes the next Fly candidate.
 
     ``runner`` / ``repository``: forwarded to every ``_run_skill_once``
     attempt; see that function (ateles#1456, the Fly executor).
@@ -4969,6 +4978,7 @@ async def run_skill(
         fly_bound=fly_bound,
         fly_extra=fly_extra,
         single_provider=bool(fly_delivery and "pr_number" in fly_delivery),
+        exclude_providers=tuple(exclude_providers),
     )
 
 
@@ -5127,6 +5137,7 @@ async def _run_provider_attempts(
     fallback_models_for=None,
     fly_bound: frozenset[str] = frozenset(), fly_extra: tuple[str, ...] = (),
     single_provider: bool = False,
+    exclude_providers: tuple[str, ...] = (),
 ) -> SkillResult:
     """One selection/cooldown/failover mechanism for every harness entrypoint.
 
@@ -5182,6 +5193,8 @@ async def _run_provider_attempts(
         binaries, preferred=provider, local_first=local_first and not owns_pending_gate,
         fly_bound=fly_bound, fly_extra=fly_extra,
     )
+    if exclude_providers:
+        candidates = [p for p in candidates if p not in exclude_providers]
     if preferred_provider in candidates and provider is None:
         # A lens preference reorders the frontier providers; a local-first
         # claude-local stays ahead of them.
@@ -5342,10 +5355,21 @@ async def _run_provider_attempts(
             # is healthy, only Fly cannot run it for this job. A pinned or
             # preferred provider gets no other; with none left the refusal
             # ends the dispatch as before.
+            # A single-provider dispatch (an existing-PR correction) holds one
+            # prelaunch receipt for one attempt: it does not try the next
+            # provider here, it names it, and its caller dispatches it afresh
+            # once this attempt's receipt is proven removed.
             others = [
-                p for p in pending[index:] if p in fly_bound or p in fly_extra
+                p for p in (
+                    [c for c in candidates if c not in attempted]
+                    if single_provider else pending[index:]
+                )
+                if p in fly_bound or p in fly_extra
             ]
             if provider is not None or preferred_provider or not others:
+                return result
+            if single_provider:
+                result.fly_next_providers = tuple(others)
                 return result
             last_result = result
             log.warning(
