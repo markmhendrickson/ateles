@@ -26,6 +26,8 @@ import pytest
 import panel_check_gate as pcg
 import swarm_dispatch as sd
 
+_REAL_UNEXPIRED_DEFERRAL = sd.SwarmDispatcher._unexpired_deferral
+
 REPO = "owner/repo"
 PR = 87
 KEY = (REPO, PR)
@@ -361,6 +363,95 @@ def test_unexpired_deferral_reads_the_marker_time(monkeypatch, hours, expected):
         sd.DispatchConfig(neotoma_token="", github_token="", auto_merge=False),
     )
     assert _run(d._unexpired_deferral(REPO, PR)) is expected
+
+
+def _paged_comments_client(monkeypatch, pages):
+    """A GitHub stand-in serving `pages` by the `page` param (absent = page 1)."""
+
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._body
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, params=None, **k):
+            page = int((params or {}).get("page", 1))
+            return _Resp(pages[page - 1] if page <= len(pages) else [])
+
+    monkeypatch.setattr(sd.httpx, "AsyncClient", lambda **k: _Client())
+    monkeypatch.setattr(sd.SwarmDispatcher, "_github_headers", lambda self, repo=None: {})
+
+    async def authored(self, repository, number, cs):
+        return cs
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_swarm_authored", authored)
+
+
+def _plain_dispatcher():
+    return sd.SwarmDispatcher(
+        _Notifier(),
+        sd.DispatchConfig(neotoma_token="", github_token="", auto_merge=False),
+    )
+
+
+def _marker_pages(hours):
+    when = (datetime.now(timezone.utc) + timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    first = [{"body": f"comment {i}"} for i in range(100)]
+    return [first, [{"body": f"<!-- review-deferred-until:{when} -->"}]]
+
+
+def test_an_unexpired_marker_on_page_two_leaves_the_pr_alone(monkeypatch):
+    # Red with the old one-page read (per_page=100, no page param), observed
+    # 2026-11-07:
+    #   AssertionError: assert False is True
+    #    +  where False = _run(<coroutine object SwarmDispatcher._unexpired_deferral ...>)
+    # The marker on page two was never fetched, so the PR read as not deferred.
+    _paged_comments_client(monkeypatch, _marker_pages(2))
+    assert _run(_plain_dispatcher()._unexpired_deferral(REPO, PR)) is True
+
+
+def test_an_expired_marker_on_page_two_does_not_defer(monkeypatch):
+    _paged_comments_client(monkeypatch, _marker_pages(-2))
+    assert _run(_plain_dispatcher()._unexpired_deferral(REPO, PR)) is False
+
+
+@pytest.mark.parametrize("outcome", ["incomplete", "raises"])
+def test_an_incomplete_or_failed_scan_leaves_the_pr_alone(monkeypatch, outcome):
+    # No marker in what was read: only the scan's own incompleteness (or its
+    # failure) can say "deferred", so this pins the fail-closed branch.
+    async def scan(self, repository, number, client):
+        if outcome == "raises":
+            raise RuntimeError("comment read failed")
+        return [{"body": "no marker here"}], False
+
+    _paged_comments_client(monkeypatch, [])
+    monkeypatch.setattr(sd.SwarmDispatcher, "_issue_comments_scan", scan)
+    assert _run(_plain_dispatcher()._unexpired_deferral(REPO, PR)) is True
+
+
+def test_a_deferred_marker_past_page_one_keeps_the_sweep_out(sweep, monkeypatch):
+    # The sweep-level effect: the real `_unexpired_deferral` (not the fixture's
+    # stub) reading a two-page thread keeps `_handle_pr` from being entered.
+    d, state = sweep
+    monkeypatch.setattr(
+        sd.SwarmDispatcher, "_unexpired_deferral", _REAL_UNEXPIRED_DEFERRAL
+    )
+    _paged_comments_client(monkeypatch, _marker_pages(2))
+    summary = _run(d.repeat_labelled_panel_sweep([REPO]))
+    assert state["entered"] == [] and summary["deferred"] == 1
 
 
 def test_two_sweeps_never_run_at_once(sweep, monkeypatch):

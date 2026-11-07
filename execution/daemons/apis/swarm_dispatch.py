@@ -5742,18 +5742,19 @@ class SwarmDispatcher:
         maturity check `_prs_with_matured_deferral` applies: an unmatured
         marker means a usage limit is still in force, and a matured one belongs
         to the deferred sweep. An unreadable thread or marker counts as
-        unexpired, so a read failure leaves the PR alone.
+        unexpired, so a read failure leaves the PR alone. The whole thread is
+        read through `_issue_comments_scan`, as those two do: the newest marker
+        may lie past the first 100 comments, and a scan that could not reach
+        the last page also counts as unexpired.
         """
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                cresp = await client.get(
-                    f"https://api.github.com/repos/{repository}/issues/{number}/comments",
-                    params={"per_page": 100},
-                    headers=self._github_headers(repository),
+                comments, complete = await self._issue_comments_scan(
+                    repository, number, client
                 )
-                cresp.raise_for_status()
-                comments = cresp.json() or []
         except Exception:  # noqa: BLE001
+            return True
+        if not complete:
             return True
         latest_iso = None
         for c in await self._swarm_authored(repository, number, comments):
