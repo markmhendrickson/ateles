@@ -507,6 +507,21 @@ def test_settled_correction_on_the_pushed_commit_is_superseded_and_audited(statu
         _KEY, status, "earlier-run-id", _PUSHED)
     assert event["existing_pr"]["head_sha"] == _OLD_HEAD
     assert event["superseded_by"] == {"key": _KEY, "head_sha": _PUSHED}
+    assert event["source_task"] == ""  # its keys name no task
+
+
+def test_a_supersede_records_the_receipts_source_task_on_its_audit_line():
+    entry = {"status": "updated", "token": "earlier-run", "branch": _BRANCH,
+             "run_id": "earlier-run-id", "recorded_at": 1.0, "commit": _PUSHED,
+             "associated_keys": [REPO + "#task:ent_synthetic_src"],
+             "existing_pr": {"branch": _BRANCH, "base_branch": "main", "pr_number": "12",
+                             "head_sha": _OLD_HEAD}}
+    assert delivery._delivery_ledger().reserve_delivery(_KEY, entry)
+    launched, refused = _dispatch()
+    assert launched == [True] and refused == []
+    (event,) = _audit()
+    assert event["action"] == "supersede_delivery_receipt"
+    assert event["source_task"] == "ent_synthetic_src"
 
 
 @pytest.mark.parametrize("commit", [_OTHER, None, _OLD_HEAD, "not-a-sha"])

@@ -46,6 +46,20 @@ from test_gate_sign_off_fail_closed import HEAD, LENS_TP, _Record, _wire
 from test_skill_runner import _make_def
 
 
+@pytest.fixture
+def _readable_fly_ledger(_fly_runner_off_and_isolated):
+    """Give a fix-round test a readable Fly ledger with no receipts.
+
+    A fix round reads the ledger to tell whether the PR came from Fly, and a
+    missing ledger holds the round (origin unknown). Such a test exercises
+    the local round, so the PR must be one a readable ledger does not name."""
+    import build_delivery
+
+    ledger = build_delivery._delivery_ledger()
+    with ledger._locked():
+        ledger._save(ledger._load())
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -303,7 +317,9 @@ class TestEverySeatedLensIsDeniedCorrect:
 
         assert seen["falco"].get("seated_reviewer") is True
 
-    def test_fix_guidance_of_an_advisory_lens_is_a_seated_reviewer(self, monkeypatch):
+    def test_fix_guidance_of_an_advisory_lens_is_a_seated_reviewer(
+        self, monkeypatch, _readable_fly_ledger
+    ):
         seen: dict = {}
 
         async def fake_run_skill(skill, prompt, **kwargs):
