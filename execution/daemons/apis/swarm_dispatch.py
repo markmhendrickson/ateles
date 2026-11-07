@@ -8502,7 +8502,9 @@ class SwarmDispatcher:
         if problem:
             gate = panel_check_gate.unreadable_gate(head, problem)
         else:
-            gate = await self._read_head_check_gate(
+            gate = panel_check_gate.merge_conflict_gate(
+                pr, head
+            ) or await self._read_head_check_gate(
                 trigger.repository, head, pr["base"]["ref"]
             )
         if gate.green:

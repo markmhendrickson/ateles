@@ -126,6 +126,25 @@ def test_a_green_head_proceeds_to_the_worktree(runner):
     assert state["worktrees"] == 1
 
 
+def test_a_conflicting_pr_is_refused_even_with_a_green_check(runner):
+    state, go = runner
+    state["pr"] = {**state["pr"], "mergeable": False, "mergeable_state": "dirty"}
+    state["gate"] = GREEN
+    report = go()
+    assert report["ok"] is False and report["held_for_checks"] is True
+    assert "merge conflict" in report["reason"]
+    assert state["worktrees"] == 0
+
+
+def test_mergeable_not_yet_computed_proceeds_on_green_checks(runner):
+    state, go = runner
+    state["pr"] = {**state["pr"], "mergeable": None, "mergeable_state": "unknown"}
+    state["gate"] = GREEN
+    with pytest.raises(_Reached):
+        go()
+    assert state["worktrees"] == 1
+
+
 @pytest.mark.parametrize("metadata", [
     None, [], {},
     {"head": {"sha": HEAD}, "base": {"ref": "main"}},

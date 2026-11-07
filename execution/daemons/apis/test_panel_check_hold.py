@@ -252,6 +252,101 @@ def test_direct_missing_lens_entry_holds_before_preparing_or_seating(world, monk
     assert KEY in d._panel_ci_holds
 
 
+# ── a PR that conflicts with its base is held (most CI never runs on it) ─────
+
+# One green secrets scan: all a conflicting head reports, since GitHub runs
+# most CI only on a mergeable head. The check reading alone calls it green.
+ONE_GREEN_CHECK = pcg.describe_gate(
+    HEAD, [_outcome("secrets scan", "success", True)], True
+)
+
+
+@pytest.mark.parametrize("conflict", [
+    {"mergeable": False, "mergeable_state": "dirty"},
+    {"mergeable": False},
+    {"mergeable_state": "dirty"},
+], ids=["both", "mergeable-false", "state-dirty"])
+def test_a_conflicting_pr_with_one_green_check_is_held_and_names_the_conflict(
+    world, caplog, conflict
+):
+    d, state = world
+    state["pr"] = {**_pr(), **conflict}
+    state["gate"] = ONE_GREEN_CHECK
+    with caplog.at_level(logging.INFO):
+        _run(d._handle_pr(_trigger()))
+    assert state["seated"] == [], "no lens may be seated on a conflicting head"
+    assert KEY in d._panel_ci_holds
+    assert "merge conflict" in d._panel_ci_holds[KEY].reason
+    assert "base branch main" in d._panel_ci_holds[KEY].reason
+    assert "review panel HELD" in caplog.text and "merge conflict" in caplog.text
+
+
+def test_mergeable_not_yet_computed_with_green_checks_is_not_held(world):
+    d, state = world
+    state["pr"] = {**_pr(), "mergeable": None, "mergeable_state": "unknown"}
+    state["gate"] = GREEN
+    with pytest.raises(_Seated):
+        _run(d._handle_pr(_trigger()))
+    assert state["seated"] == ["lanius"]
+    assert KEY not in d._panel_ci_holds
+
+
+def test_a_mergeable_pr_with_green_checks_is_released_as_today(world):
+    d, state = world
+    state["pr"] = {**_pr(), "mergeable": True, "mergeable_state": "clean"}
+    state["gate"] = GREEN
+    with pytest.raises(_Seated):
+        _run(d._handle_pr(_trigger()))
+    assert state["seated"] == ["lanius"]
+    assert state["gate_reads"] == 1, "a mergeable head's checks are read as today"
+    assert KEY not in d._panel_ci_holds
+
+
+def test_a_conflict_cleared_by_a_push_reaches_the_completion_event(
+    world, monkeypatch
+):
+    d, state = world
+
+    async def pending_ci(self, trigger):
+        return "pending"
+
+    async def not_clear(self, repo, num, head_sha=""):
+        return False
+
+    async def no_supersede(self, *a, **k):
+        return None
+
+    monkeypatch.setattr(sd.SwarmDispatcher, "_required_ci_state", pending_ci)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_pr_review_is_clear", not_clear)
+    monkeypatch.setattr(sd.SwarmDispatcher, "_supersede_stale_verdicts", no_supersede)
+
+    state["pr"] = {**_pr(), "mergeable": False, "mergeable_state": "dirty"}
+    state["gate"] = ONE_GREEN_CHECK
+    _run(d._handle_pr(_trigger()))
+    assert state["seated"] == [] and "merge conflict" in d._panel_ci_holds[KEY].reason
+
+    # The push that resolves the conflict is a new head; its CI is now running.
+    state["pr"] = {**_pr(head=OTHER_HEAD), "mergeable": True, "mergeable_state": "blocked"}
+    state["gate"] = pcg.describe_gate(
+        OTHER_HEAD, [_outcome("pytest", "pending (in_progress)", False)], False
+    )
+    _run(d._handle_pr(_trigger(
+        kind="pr_synchronize", action="synchronize", head_sha=OTHER_HEAD
+    )))
+    assert state["seated"] == []
+    assert d._panel_ci_holds[KEY].head == OTHER_HEAD
+    assert "merge conflict" not in d._panel_ci_holds[KEY].reason
+
+    # The new head's checks complete green: the completion event seats the panel.
+    state["gate"] = pcg.describe_gate(
+        OTHER_HEAD, [_outcome("pytest", "success", True)], True
+    )
+    with pytest.raises(_Seated):
+        _run(d._handle_ci_status(_ci_trigger(head=OTHER_HEAD)))
+    assert state["seated"] == ["lanius"]
+    assert KEY not in d._panel_ci_holds
+
+
 # ── the head going green re-dispatches the held panel, exactly once ──────────
 
 
