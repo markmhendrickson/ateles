@@ -1476,6 +1476,17 @@ def build_parser():
     return ap
 
 
+def idle_windows(idle_hours_arg):
+    """(node_modules tier hours, archive tier hours) for the `--idle-hours` value (None = flag not given).
+
+    The flag is shared: left unset each tier keeps its own default, given explicitly it sets both.
+    """
+    if idle_hours_arg is None:
+        return DEFAULT_STRIP_IDLE_HOURS, DEFAULT_ARCHIVE_IDLE_HOURS
+    n = max(1, idle_hours_arg)
+    return n, n
+
+
 def main(argv=None):
     global FRESH_HOURS, LOGF
     a = build_parser().parse_args(argv)
@@ -1495,12 +1506,7 @@ def main(argv=None):
     STRIP["only"] = bool(a.strip_only)
     STRIP["enabled"] = bool(a.strip_node_modules or a.strip_only)
     ARCH["enabled"] = bool(a.archive_remove) and not a.strip_only
-    ARCH["idle_hours"] = max(
-        1, a.idle_hours if a.idle_hours is not None else DEFAULT_ARCHIVE_IDLE_HOURS
-    )
-    STRIP["idle_hours"] = max(
-        1, a.idle_hours if a.idle_hours is not None else DEFAULT_STRIP_IDLE_HOURS
-    )
+    STRIP["idle_hours"], ARCH["idle_hours"] = idle_windows(a.idle_hours)
     ARCH["cap"] = max(1, a.archive_cap_mb) * 1024 * 1024
 
     os.makedirs(LOGDIR, exist_ok=True)

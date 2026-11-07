@@ -17,6 +17,10 @@
   is read from ATELES_WORKTREE_PRUNE_* environment variables (add them to
   EnvironmentVariables below); see the runbook.
 
+  No idle-hours argument is passed on purpose: that one flag sets the idle window of
+  BOTH tiers when given, so leaving it out keeps the node_modules tier at 24 hours and
+  the archive-then-remove tier at its own 72 hours.
+
   launchd does not create the log directory: mkdir -p {{HOME}}/.ateles-work/worktree-prune/logs
 -->
 <plist version="1.0">
@@ -32,8 +36,6 @@
     <string>--protect-ignored</string>
     <string>--strip-node-modules</string>
     <string>--archive-remove</string>
-    <string>--idle-hours</string>
-    <string>24</string>
     <string>--max</string>
     <string>200</string>
   </array>

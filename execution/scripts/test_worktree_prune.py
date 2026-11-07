@@ -1402,6 +1402,25 @@ def test_idle_hours_default_is_24_for_node_modules_and_72_for_the_archive_tier(r
     assert wp.STRIP["idle_hours"] == 30 and wp.ARCH["idle_hours"] == 30
 
 
+def test_the_launchd_template_keeps_each_tier_at_its_own_idle_window():
+    import plistlib
+
+    template = Path(wp.__file__).with_name("com.ateles.worktree-prune.plist.template")
+    text = template.read_text(encoding="utf-8")
+    text = text.replace("{{HOME}}", "/h").replace("{{CHECKOUT}}", "/c")
+    argv = plistlib.loads(text.encode("utf-8"))["ProgramArguments"]
+    args = wp.build_parser().parse_args(
+        argv[2:]
+    )  # after the interpreter and the script
+    assert (
+        args.strip_node_modules and args.archive_remove
+    )  # both tiers run from the template
+    assert args.idle_hours is None, "the shared flag would also set the archive window"
+    assert wp.idle_windows(args.idle_hours) == (24, 72)
+    # the control that shows why: given explicitly the flag sets both windows
+    assert wp.idle_windows(24) == (24, 24)
+
+
 def test_defaults_are_relative_to_home_with_an_empty_hold(repo):
     warnings = wp.configure(env={}, cli={})
     assert warnings == []
