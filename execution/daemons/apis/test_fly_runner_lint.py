@@ -147,6 +147,8 @@ ALLOWLIST: dict[str, str] = {
         "None is 'unknown', which _reapable never treats as stale",
     'execution/daemons/apis/fly_runner.py:_parse_ts:return None':
         'an unreadable time: the reaper then charges the whole window',
+    'execution/daemons/apis/fly_runner.py:parse_retry_after:return None':
+        'None is "no stated retry time": the configured backoff applies, never an earlier retry',
     "execution/daemons/apis/fly_runner.py:build_job:os.environ.get('NEOTOMA_BASE_URL', '')":
         'unset is refused straight after (must be https)',
     "execution/daemons/apis/fly_runner.py:build_job:os.environ.get('NEOTOMA_BEARER_TOKEN', '')":
