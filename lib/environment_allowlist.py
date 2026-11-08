@@ -167,6 +167,10 @@ DAEMON_CONFIG_NAMES: frozenset[str] = frozenset(
         "APIS_MAX_FIX_ROUNDS",
         "APIS_MAX_TASK_ATTEMPTS",
         "APIS_MISSING_LENS_MAX_RETRIES",
+        # Seconds between retries of a Fly launch's Neotoma admission check.
+        "APIS_NEOTOMA_ADMISSION_BACKOFF_S",
+        # Bounded retries of a Fly launch whose Neotoma admission check did not answer.
+        "APIS_NEOTOMA_ADMISSION_RETRIES",
         "APIS_NEOTOMA_RETRY_DELAY_SECONDS",
         "APIS_NEOTOMA_RETRY_LIMIT",
         "APIS_OPERATOR_LOGIN",
