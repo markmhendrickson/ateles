@@ -62,6 +62,20 @@ What these looked like RED:
   failed ``not_fly == 1`` (0: the inventory was never read), and
   ``test_sweep_never_reads_the_current_fly_opt_in`` failed on the forbidden
   ``delivery_opted_in`` call.
+* Round 3 of #1694 pins every reporting or silent branch of the sweep with the
+  notice count and the whole counts dict; each new test was checked by
+  mutating ``apis.py`` and restoring it. With the re-read status check
+  replaced by ``status != "executing"``, all six cases of
+  ``test_reread_with_missing_or_unknown_status_is_reported`` failed (silent,
+  counted ``recorded``). With the per-task ``except`` changed to ``break``,
+  ``test_examining_one_task_raises_and_the_sweep_continues`` failed (the second
+  task was never named). With an unreadable row skipped silently, all seven
+  cases of ``test_unreadable_row_id_is_named_not_skipped`` failed. With the
+  second proof check after the re-read removed,
+  ``test_reread_routed_away_from_fly_is_silent`` and
+  ``test_live_run_started_before_the_reread_is_silent`` failed (reported). With
+  a failed re-read made silent, all three cases of
+  ``test_failed_reread_is_reported_with_exact_counts`` failed.
 * ``test_unlaunched_fly_recovery_sweep_is_scheduled_at_startup``, checked by
   removing ``unlaunched_fly_recovery_sweep(),`` from the startup gather: the
   gather-block assertion failed.
@@ -548,3 +562,203 @@ def test_routing_field_with_surrounding_whitespace_is_reported(env, field, value
     assert len(notifier.sent) == 1, notifier.sent
     assert TASK in notifier.sent[0] and f"its {field} field" in notifier.sent[0]
     assert counts["unrecovered"] == 1 and counts["not_fly"] == 0
+
+
+# --- Round 3 of #1694: every branch that reports or stays silent is pinned,
+# each with the exact notice count and the whole counts dict. ---------------
+
+def _counts(complete=True, examined=1, not_fly=0, recorded=0, unrecovered=0) -> dict:
+    return {"complete": complete, "examined": examined, "not_fly": not_fly,
+            "recorded": recorded, "unrecovered": unrecovered}
+
+
+def _sweep():
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    return notifier, counts
+
+
+def test_final_notice_names_the_task_with_exact_counts(env):
+    _, _, effects = env
+    notifier, counts = _sweep()
+    assert effects == []
+    assert len(notifier.sent) == 1 and TASK in notifier.sent[0]
+    assert "no Fly run of it is live in this process" in notifier.sent[0]
+    assert counts == _counts(unrecovered=1)
+
+
+@pytest.mark.parametrize("result", ["raise", None, {"entities": []}, "rows"],
+                         ids=["query_raises", "none", "dict", "string"])
+def test_inventory_query_that_raises_or_is_not_a_list_sends_one_notice(
+        env, monkeypatch, result):
+    """The inventory query raises, or returns something other than a list:
+    one inventory notice, no task judged, ``complete`` False."""
+    _, _, effects = env
+
+    def _query(*a, **k):
+        if result == "raise":
+            raise RuntimeError("listing down")
+        return result
+
+    monkeypatch.setattr(apis, "query_all_entities", _query)
+    notifier, counts = _sweep()
+    assert effects == []
+    assert len(notifier.sent) == 1, notifier.sent
+    assert "could not fully read the executing-task inventory" in notifier.sent[0]
+    assert counts == _counts(complete=False, examined=0)
+
+
+@pytest.mark.parametrize("row", [
+    {"snapshot": _task()},
+    {"entity_id": None, "snapshot": _task()},
+    {"entity_id": 42, "snapshot": _task()},
+    {"entity_id": "", "snapshot": _task()},
+    {"entity_id": f" {TASK}", "snapshot": _task()},
+    {"entity_id": f"{TASK}\n", "snapshot": _task()},
+    "not-a-row",
+], ids=["id_absent", "id_none", "id_not_a_string", "id_empty", "id_padded_left",
+        "id_padded_right", "row_not_a_dict"])
+def test_unreadable_row_id_is_named_not_skipped(env, monkeypatch, row):
+    """A row whose id is not exactly a non-empty string could be the stranded
+    task: one notice naming an unreadable row, never a silent skip."""
+    _, _, effects = env
+    monkeypatch.setattr(apis, "query_all_entities", lambda *a, **k: [row])
+    notifier, counts = _sweep()
+    assert effects == []
+    assert len(notifier.sent) == 1, notifier.sent
+    assert "(unreadable task row)" in notifier.sent[0]
+    assert "its task record could not be read" in notifier.sent[0]
+    assert counts == _counts(unrecovered=1)
+
+
+def test_examining_one_task_raises_and_the_sweep_continues(env, monkeypatch):
+    """The first task's re-read raises: it is named as unexamined, and the
+    second task is still judged and named."""
+    _, _, effects = env
+    other = "ent_task_second"
+    monkeypatch.setattr(apis, "query_all_entities", lambda *a, **k: [
+        {"entity_id": TASK, "snapshot": _task()},
+        {"entity_id": other, "snapshot": _task(title="Second")}])
+
+    def _fetch(entity_id):
+        if entity_id == TASK:
+            raise RuntimeError("read crashed")
+        return _task(title="Second")
+
+    monkeypatch.setattr(apis, "fetch_task_snapshot", _fetch)
+    notifier, counts = _sweep()
+    assert effects == []
+    assert len(notifier.sent) == 2, notifier.sent
+    assert TASK in notifier.sent[0]
+    assert "examining it after the restart failed" in notifier.sent[0]
+    assert other in notifier.sent[1] and "Second" in notifier.sent[1]
+    assert "no Fly run of it is live in this process" in notifier.sent[1]
+    assert counts == _counts(examined=2, unrecovered=2)
+
+
+def test_listing_routed_away_from_fly_is_silent_without_a_reread(env, monkeypatch):
+    _, state, effects = env
+    state["task"] = _task(assigned_to="pavo", action_type="analysis")
+
+    def _no_reread(entity_id):
+        raise AssertionError("a task the listing proved non-Fly was re-read")
+
+    monkeypatch.setattr(apis, "fetch_task_snapshot", _no_reread)
+    notifier, counts = _sweep()
+    assert effects == [] and notifier.sent == []
+    assert counts == _counts(not_fly=1)
+
+
+@pytest.mark.parametrize("fresh", [None, "not-a-dict", []], ids=["none", "string", "list"])
+def test_failed_reread_is_reported_with_exact_counts(env, monkeypatch, fresh):
+    _, _, effects = env
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda entity_id: fresh)
+    notifier, counts = _sweep()
+    assert effects == []
+    assert len(notifier.sent) == 1, notifier.sent
+    assert TASK in notifier.sent[0] and "it could not be re-read" in notifier.sent[0]
+    assert counts == _counts(unrecovered=1)
+
+
+_ABSENT = object()
+
+
+@pytest.mark.parametrize("status", [_ABSENT, None, "", "   ", "paused_by_mars", 5],
+                         ids=["key_absent", "none", "empty", "whitespace", "unknown",
+                              "not_a_string"])
+def test_reread_with_missing_or_unknown_status_is_reported(env, monkeypatch, status):
+    """A re-read whose status is missing or unrecognized proves nothing about
+    whether the task moved on, so it is reported, never counted as moved on."""
+    _, _, effects = env
+    fresh = _task()
+    if status is _ABSENT:
+        fresh.pop("status")
+    else:
+        fresh["status"] = status
+    monkeypatch.setattr(apis, "fetch_task_snapshot", lambda entity_id: dict(fresh))
+    notifier, counts = _sweep()
+    assert effects == []
+    assert len(notifier.sent) == 1, notifier.sent
+    assert TASK in notifier.sent[0]
+    assert counts["unrecovered"] == 1 and counts["recorded"] == 0
+    assert counts == _counts(unrecovered=1)
+
+
+@pytest.mark.parametrize("status", ["done", "completed", "failed", "blocked", "pending",
+                                    "DONE"])
+def test_reread_with_a_recognized_non_executing_status_is_silent(env, monkeypatch, status):
+    """Companion: a recognized status other than executing means the task moved
+    on since the listing; silent, counted ``recorded``."""
+    _, _, effects = env
+    monkeypatch.setattr(apis, "fetch_task_snapshot",
+                        lambda entity_id: _task(status=status))
+    notifier, counts = _sweep()
+    assert effects == [] and notifier.sent == []
+    assert counts == _counts(recorded=1)
+
+
+def test_reread_still_executing_is_reported(env, monkeypatch):
+    _, _, effects = env
+    monkeypatch.setattr(apis, "fetch_task_snapshot",
+                        lambda entity_id: _task(status="executing"))
+    notifier, counts = _sweep()
+    assert effects == [] and len(notifier.sent) == 1
+    assert counts == _counts(unrecovered=1)
+
+
+def test_reread_routed_away_from_fly_is_silent(env, monkeypatch):
+    """The listing reads as a Fly delivery, the fresh re-read shows the task
+    re-routed to a non-delivery class: silent, counted ``not_fly``."""
+    _, _, effects = env
+    monkeypatch.setattr(apis, "fetch_task_snapshot",
+                        lambda entity_id: _task(assigned_to="pavo", action_type="analysis"))
+    notifier, counts = _sweep()
+    assert effects == [] and notifier.sent == []
+    assert counts == _counts(not_fly=1)
+
+
+@pytest.mark.parametrize("where", ["dispatch", "detached"])
+def test_live_run_of_exactly_this_task_at_listing_is_silent(env, monkeypatch, where):
+    _, _, effects = env
+    if where == "dispatch":
+        monkeypatch.setattr(apis, "_tasks_in_dispatch", {TASK: 1})
+    else:
+        monkeypatch.setattr(apis, "_detached_runs_in_progress", {TASK})
+    notifier, counts = _sweep()
+    assert effects == [] and notifier.sent == []
+    assert counts == _counts(recorded=1)
+
+
+def test_live_run_started_before_the_reread_is_silent(env, monkeypatch):
+    """Not live at the listing, but a dispatch of exactly this id began before
+    the re-read: the second proof check clears it."""
+    _, state, effects = env
+
+    def _fetch(entity_id):
+        apis._tasks_in_dispatch[entity_id] = 1
+        return dict(state["task"])
+
+    monkeypatch.setattr(apis, "fetch_task_snapshot", _fetch)
+    notifier, counts = _sweep()
+    assert effects == [] and notifier.sent == []
+    assert counts == _counts(recorded=1)
