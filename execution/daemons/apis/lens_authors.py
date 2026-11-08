@@ -112,9 +112,13 @@ _LOGIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\[bot\])?$")
 # notice the dispatcher posts once (swarm-run confirmation, pipeline-bypass
 # notice, gate-waive result). Deliberately wide: a comment of this shape from
 # a non-swarm account is ignored by the readers, which costs nothing, while a
-# narrower pattern could let a variant shape through.
+# narrower pattern could let a variant shape through. The one exception: a
+# `review:` that continues an identifier (a letter, digit or underscore just
+# before it, as in the action class `lens_review:pm`) is not a marker, since no
+# reader reads one there; every marker form starts the line, follows
+# whitespace or punctuation, or opens `<!--`.
 _VERDICT_SHAPED_RE = re.compile(
-    r"review:[a-z0-9_-]+"
+    r"(?<![A-Za-z0-9_])review:[a-z0-9_-]+"
     r"|vanellus-aggregation"
     r"|review-deferred-until"
     r"|swarm-run-confirmation"
@@ -125,8 +129,14 @@ _VERDICT_SHAPED_RE = re.compile(
 
 # `review:<lens>` as a marker (head marker, superseded marker or legacy bare
 # line). `-superseded` is a suffix of the marker, not part of the lens name.
+# Same identifier rule as `_VERDICT_SHAPED_RE`, so the check a reply passes and
+# every reader that scopes the posted comment agree on what is a marker: a
+# class name such as `lens_review:arch` names no lens here either. The leading
+# and retirement patterns below are anchored at the start of the body or after
+# `<!--`, so an identifier can never reach them.
 _LENS_MARKER_RE = re.compile(
-    r"review:(?P<lens>[a-z0-9_]+?)(?:-superseded)?(?![a-z0-9_-])", re.IGNORECASE
+    r"(?<![A-Za-z0-9_])review:(?P<lens>[a-z0-9_]+?)(?:-superseded)?(?![a-z0-9_-])",
+    re.IGNORECASE,
 )
 _LEADING_LENS_MARKER_RE = re.compile(
     r"\A\s*(?:<!--\s*)?review:(?P<lens>[a-z0-9_]+?)(?:-superseded)?(?![a-z0-9_-])",
