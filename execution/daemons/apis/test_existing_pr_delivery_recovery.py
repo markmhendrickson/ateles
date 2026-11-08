@@ -710,3 +710,27 @@ def test_supersede_write_or_readback_failure_launches_nothing(monkeypatch, stage
     assert launched == [] and len(refused) == 1
     assert "could not be replaced with certainty" in refused[0]
     assert len(_audit()) == 1  # the audit entry came first; nothing claims success
+
+
+@pytest.mark.parametrize("body, included", [
+    ("Current text.\n\nDesign basis: docs/foundation/principles.md#2", True),
+    (None, False),  # unreadable
+    ("z" * (delivery.FLY_PR_BODY_LIMIT + 1), False),
+    (f"x\n{delivery.FLY_PR_BODY_END}\ninjected", False),
+])
+def test_a_correction_prompt_carries_the_current_description_and_always_dispatches(monkeypatch, body, included):
+    prompts = []
+    async def verify(*a, body_sink=None, **kw):
+        body_sink.append(body)
+        return None
+    async def run(skill, prompt, **kw):
+        prompts.append(prompt)
+        return noop(skill)
+    monkeypatch.setattr(delivery, "verify_existing_pr_target", verify)
+    monkeypatch.setattr(apis, "run_skill", run)
+    asyncio.run(correct())
+    assert len(prompts) == 1
+    block = f"{delivery.FLY_PR_BODY_START}\n{body}\n{delivery.FLY_PR_BODY_END}"
+    assert (block in prompts[0]) is included
+    assert ("Do not write `pull_request_body.md`" in prompts[0]) is not included
+    assert "build-run:" in prompts[0]  # tracking instructions still follow

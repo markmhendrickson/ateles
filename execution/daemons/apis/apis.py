@@ -1248,6 +1248,7 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
         return None
     with contextlib.ExitStack() as stack:
         fly_prompt = f"{prompt}\n\n{build_delivery.fly_delivery_instructions(plan)}"
+        tracking = ""
         claim_key = (repository, target.number) if target else key
         if claim_key:
             try:
@@ -1257,7 +1258,11 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
             except build_delivery.BuildWorktreeError as exc:
                 return (_correction_not_started(skill, exc.reason) if target
                         else SkillResult(skill, False, None, "", "", error=exc.reason))
-            fly_prompt += f"\n\n{build_delivery.tracking_instructions(claim)}"
+            tracking = f"\n\n{build_delivery.tracking_instructions(claim)}"
+            fly_prompt += tracking
+        # The PR's current description, read at the admitted head by each
+        # qualifying target read below; the last one is what the builder sees.
+        current_bodies: list = []
 
         async def verify_correction():
             # The task's authorization, its owner policy and the PR target, read
@@ -1270,7 +1275,8 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
                     entity_id, task_snapshot, repository, target, claim, **binding)
                 return await build_delivery.verify_existing_pr_target(
                     repository, target, lambda repo: _token_for_agent_on_repo(skill, repo),
-                    policy_reader=policy_read, policy_current=policy_current)
+                    policy_reader=policy_read, policy_current=policy_current,
+                    body_sink=current_bodies)
             except build_delivery.BuildWorktreeError as exc:
                 return exc.reason
 
@@ -1278,6 +1284,11 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
             reason = await verify_correction()
             if reason:
                 return _correction_not_started(skill, f"existing PR correction not started: {reason}")
+            # An unread description only withholds the replacement file; it
+            # never stops the correction.
+            fly_prompt = (f"{prompt}\n\n"
+                          f"{build_delivery.fly_delivery_instructions(plan, current_bodies[-1] if current_bodies else None)}"
+                          f"{tracking}")
 
         # Providers Fly refused for this correction before anything launched.
         refused_providers: tuple[str, ...] = ()
