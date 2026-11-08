@@ -596,17 +596,18 @@ def test_executing_version_conflict_sends_one_blocker_and_writes_nothing(joined)
     assert 'cannot be released again' in notice and 'refile' in notice
 
 
-def _fly_admission_seam(monkeypatch, tmp_path, on_attempt, *, retries='2'):
+def _fly_admission_seam(monkeypatch, tmp_path, on_attempt, *, retries='2', backoff='0'):
     """The real run_skill Fly path, with fly_runner.build_job refusing on a
     Neotoma outage: every provider binary pinned and no local run possible.
 
     Returns (attempts, notices): the delivery receipts held at each build_job
-    call, and every operator notice sent."""
+    call, and every operator notice sent. A number *on_attempt* returns is the
+    wait Neotoma stated (Retry-After) on that refusal."""
     import fly_runner
     import skill_runner
     from lib.daemon_runtime import AgentDefinition
     monkeypatch.setenv('APIS_NEOTOMA_ADMISSION_RETRIES', retries)
-    monkeypatch.setenv('APIS_NEOTOMA_ADMISSION_BACKOFF_S', '0')
+    monkeypatch.setenv('APIS_NEOTOMA_ADMISSION_BACKOFF_S', backoff)
     skill_dir = tmp_path / '.claude' / 'skills' / 'cicada'
     skill_dir.mkdir(parents=True)
     (skill_dir / 'SKILL.md').write_text('# cicada\n')
@@ -631,8 +632,9 @@ def _fly_admission_seam(monkeypatch, tmp_path, on_attempt, *, retries='2'):
     attempts = []
     def build_job(**kw):
         attempts.append(list(delivery._delivery_ledger().delivery_receipts()))
-        on_attempt(len(attempts))
-        raise fly_runner.FlyIneligible('Neotoma unreachable', neotoma_unavailable=True)
+        stated = on_attempt(len(attempts))
+        raise fly_runner.FlyIneligible('Neotoma /session answered 429', neotoma_unavailable=True,
+                                       retry_after_seconds=stated)
     monkeypatch.setattr(fly_runner, 'build_job', build_job)
     monkeypatch.setattr(apis, 'run_skill', skill_runner.run_skill)
     notices = []
@@ -699,6 +701,9 @@ def _assert_exhaustion(mode, briefs, task_reads, notices, task_id, saved, status
         # Both the checkpoint and the held status were read back.
         assert task_id in task_reads
         assert 'task is held with checkpoint' in notice and 'rounds_exhausted' in notice
+        # The exact action: which checkpoint to approve to release it again.
+        (brief_id,) = [k for k in briefs if k != 'calls']
+        assert f'Approve checkpoint {brief_id} to release the task again.' in notice
     elif mode in ('readback_fails', 'readback_raises'):
         assert 'hold could not be confirmed' in notice and 'task is held' not in notice
     else:
@@ -743,7 +748,8 @@ def test_neotoma_unanswered_admission_is_a_bounded_deferral_never_failed(
         assert answered and 'Neotoma' not in saved.get('blocked_reason', '')
         assert not briefs.get('calls')
         return
-    assert 're-released' in saved['blocked_reason']
+    assert 'rounds_exhausted checkpoint releases it again' in saved['blocked_reason']
+    assert 're-released once Neotoma answers' not in saved['blocked_reason']
     _assert_exhaustion(mode, briefs, task_reads, notices, joined['task_id'], saved, statuses)
 
 
@@ -776,6 +782,9 @@ def test_first_delivery_neotoma_outage_is_bounded_then_escalated(
         high_blast_action_types=frozenset({'open_or_merge_pr'})))
     monkeypatch.setattr(apis, 'fetch_task_record', lambda key: dict(
         entity_id=key, entity_type='task', snapshot=copy.deepcopy(store.rows[key])))
+    # The pre-retry re-read of a first delivery (unchanged record: it retries).
+    monkeypatch.setattr(apis, 'fetch_task_snapshot_and_version',
+                        lambda key: (copy.deepcopy(store.rows[key]), 'task-v1'))
     attempts, notices = _fly_admission_seam(monkeypatch, tmp_path, lambda n: None)
     briefs, task_reads = _decision_queue(
         monkeypatch, mode, lambda: copy.deepcopy(store.rows[eid]))
@@ -787,6 +796,166 @@ def test_first_delivery_neotoma_outage_is_bounded_then_escalated(
     assert all(r == ['owner/repo#123'] for r in attempts), attempts
     assert not delivery._delivery_ledger().delivery_receipts()
     saved = store.rows[eid]
-    assert 're-released' in saved['blocked_reason']
+    assert 'rounds_exhausted checkpoint releases it again' in saved['blocked_reason']
+    assert 're-released once Neotoma answers' not in saved['blocked_reason']
     _assert_exhaustion(mode, briefs, task_reads, notices, eid, saved, statuses)
 
+
+
+def _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt, *,
+                             retries='2', backoff='10', read=None):
+    """The natural first-delivery entry (as in the test above), with the
+    dispatcher's waits recorded instead of slept. *read* replaces the
+    pre-retry task re-read (default: the stored row, unchanged).
+
+    Returns a dict: attempts, notices, sleeps, store row, statuses, briefs."""
+    import test_fly_delivery_dispatch as dispatch
+    from lib.daemon_runtime.gating import ExecutionPolicy
+    monkeypatch.setenv(delivery.FLY_DELIVERY_REGISTRY_ENV, str(tmp_path / 'receipts.json'))
+    _writes, _spawns, store = dispatch_env
+    monkeypatch.setenv('APIS_FLY_RUNNER_CLASSES', 'open_or_merge_pr')
+    eid = 'ent_first_delivery_task'
+    snapshot = dispatch.task_snapshot()
+    store.rows[eid] = snapshot.copy()
+    statuses = []
+    def save(entity_id, state, **kw):
+        statuses.append(getattr(state, 'value', state))
+        store.status(entity_id, state, **kw)
+        if kw.get('result') is not None:
+            store.field(entity_id, 'result', kw['result'])
+        return True
+    monkeypatch.setattr(apis, 'set_task_status', save)
+    monkeypatch.setattr(apis, '_spawn_harness_skill', dispatch._REAL_SPAWN)
+    monkeypatch.setattr(apis, 'resolve_policy_for_agent', lambda *a: ExecutionPolicy(
+        entity_id='inert-policy', loaded=True, low_blast_action_types=frozenset(),
+        high_blast_action_types=frozenset({'open_or_merge_pr'})))
+    monkeypatch.setattr(apis, 'fetch_task_record', lambda key: dict(
+        entity_id=key, entity_type='task', snapshot=copy.deepcopy(store.rows[key])))
+    reads = []
+    def fetch(key):
+        reads.append(key)
+        if read is not None:
+            return read(key, store)
+        return copy.deepcopy(store.rows[key]), 'task-v1'
+    monkeypatch.setattr(apis, 'fetch_task_snapshot_and_version', fetch)
+    attempts, notices = _fly_admission_seam(
+        monkeypatch, tmp_path, lambda n: on_attempt(n, store, eid),
+        retries=retries, backoff=backoff)
+    briefs, _task_reads = _decision_queue(monkeypatch, 'ok', lambda: copy.deepcopy(store.rows[eid]))
+    sleeps = []
+    real_sleep = asyncio.sleep
+    async def record_sleep(delay, *a, **kw):
+        sleeps.append(delay)
+        await real_sleep(0)
+    monkeypatch.setattr(apis.asyncio, 'sleep', record_sleep)
+    asyncio.run(apis.dispatch_task(eid, snapshot, 'approved', _StubNotifier(), gate_override=True))
+    assert attempts, 'run_skill never reached fly_runner.build_job'
+    return dict(attempts=attempts, notices=notices, sleeps=sleeps, saved=store.rows[eid],
+                statuses=statuses, briefs=briefs, reads=reads, eid=eid)
+
+
+def _stated_then_refused(stated):
+    """Attempt 1: a 429 stating *stated*; attempt 2: a real refusal (ends it)."""
+    import fly_runner
+    def on_attempt(n, store, eid):
+        if n == 1:
+            return stated
+        raise fly_runner.FlyIneligible('a later, real refusal')
+    return on_attempt
+
+
+def test_a_stated_retry_after_in_seconds_is_waited_out(monkeypatch, tmp_path, dispatch_env):
+    # Red before (observed): the dispatcher slept the configured 10s only,
+    # sleeps == [10.0], under a 429 that said Retry-After: 25.
+    import fly_runner
+    stated = fly_runner.parse_retry_after('25', now=0.0)
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, _stated_then_refused(stated))
+    assert len(run['attempts']) == 2
+    assert run['sleeps'] == [25.0]
+
+
+def test_a_stated_retry_after_http_date_is_waited_out(monkeypatch, tmp_path, dispatch_env):
+    # Red before (observed): sleeps == [10.0] under a Retry-After date ~28s out.
+    import email.utils
+    import time
+    import fly_runner
+    stated = fly_runner.parse_retry_after(
+        email.utils.formatdate(time.time() + 28, usegmt=True), now=time.time())
+    assert stated is not None and 20 < stated <= 30  # inside the 30s ceiling
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, _stated_then_refused(stated))
+    assert len(run['attempts']) == 2
+    (waited,) = run['sleeps']
+    assert waited >= stated and waited > 10
+
+
+def test_no_stated_retry_after_keeps_the_configured_delay(monkeypatch, tmp_path, dispatch_env):
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, _stated_then_refused(None))
+    assert len(run['attempts']) == 2
+    assert run['sleeps'] == [10.0]
+
+
+def test_a_stated_wait_past_the_ceiling_ends_as_exhaustion(monkeypatch, tmp_path, dispatch_env):
+    # Ceiling for 2 retries at 10s: 10 + 20 = 30s. Neotoma asks for 1000s.
+    # Red before (observed): the dispatcher slept 10s and attempted again
+    # (len(attempts) == 3, sleeps == [10.0, 20.0]).
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
+                                   lambda n, store, eid: 1000.0)
+    assert len(run['attempts']) == 1
+    assert run['sleeps'] == []
+    saved = run['saved']
+    assert 'failed' not in run['statuses']
+    assert saved['status'] == 'blocked'
+    assert 'asked to wait 1000s, past the retry' in saved['blocked_reason']
+    calls = run['briefs'].get('calls', [])
+    assert len(calls) == 1 and calls[0]['decision'].reason == 'rounds_exhausted'
+    (brief_id,) = [k for k in run['briefs'] if k != 'calls']
+    (notice,) = [n for n in run['notices'] if "admission check did not answer" in n]
+    assert f'Approve checkpoint {brief_id} to release the task again.' in notice
+
+
+def test_a_task_changed_between_attempts_is_not_launched_again(monkeypatch, tmp_path, dispatch_env):
+    # Red before (observed): attempt 2 launched under the stale decision
+    # (len(attempts) == 3, the changed title never re-read).
+    def on_attempt(n, store, eid):
+        if n == 1:
+            store.rows[eid]['title'] = 'a different task now'
+        return None
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt)
+    assert len(run['attempts']) == 1
+    assert run['reads'] == [run['eid']]
+    saved = run['saved']
+    assert saved['status'] == 'blocked'
+    assert 'changed since it was dispatched' in saved['blocked_reason']
+    assert not run['briefs'].get('calls')  # not an exhaustion: no rounds_exhausted
+    assert any('retry not started' in n and 'changed since' in n for n in run['notices'])
+
+
+def test_a_failed_task_read_launches_nothing_and_holds(monkeypatch, tmp_path, dispatch_env):
+    # Red before (observed): no re-read at all; len(attempts) == 3.
+    def read(key, store):
+        raise httpx.ConnectError('Neotoma went away')
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
+                                   lambda n, store, eid: None, read=read)
+    assert len(run['attempts']) == 1
+    saved = run['saved']
+    assert saved['status'] == 'blocked'
+    assert 'could not be re-read before the retry (ConnectError)' in saved['blocked_reason']
+    assert 'failed' not in run['statuses']
+
+
+def test_a_task_no_longer_executing_is_not_launched_or_overwritten(
+        monkeypatch, tmp_path, dispatch_env):
+    def on_attempt(n, store, eid):
+        if n == 1:
+            store.rows[eid]['status'] = 'cancelled'
+        return None
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt)
+    assert len(run['attempts']) == 1
+    assert run['saved']['status'] == 'cancelled'  # not written over
+    assert any('no longer in its admitted executing state' in n for n in run['notices'])
+
+
+def test_an_unchanged_task_is_launched_again(monkeypatch, tmp_path, dispatch_env):
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, _stated_then_refused(None))
+    assert len(run['attempts']) == 2
+    assert run['reads'] == [run['eid']]

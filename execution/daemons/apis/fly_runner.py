@@ -42,6 +42,7 @@ import asyncio
 import base64
 import contextlib
 import copy
+import email.utils
 import fcntl
 import json
 import logging
@@ -130,13 +131,19 @@ class FlyIneligible(Exception):
     ``neotoma_unavailable``: Neotoma did not answer the role-key admission
     check (unreachable, a timeout, a 5xx or a 429). Not a refusal: the same
     job may be admitted minutes later, so the dispatch is deferred, not
-    ended (failure_posture.md, the rules)."""
+    ended (failure_posture.md, the rules).
+
+    ``retry_after_seconds``: when Neotoma said how long to wait (a 429 or 503
+    carrying ``Retry-After``), that wait in seconds from now; else None. The
+    dispatcher never retries sooner than it."""
 
     def __init__(self, *args, provider_specific: bool = False,
-                 neotoma_unavailable: bool = False):  # fmt: skip
+                 neotoma_unavailable: bool = False,
+                 retry_after_seconds: float | None = None):  # fmt: skip
         super().__init__(*args)
         self.provider_specific = provider_specific
         self.neotoma_unavailable = neotoma_unavailable
+        self.retry_after_seconds = retry_after_seconds
 
 
 def _command_too_large(provider: str, size: int) -> "FlyConfigInvalid":
@@ -2186,6 +2193,28 @@ def admission_reason_is_temporary(reason: str) -> bool:
         _ADMISSION_NO_ANSWER.fullmatch(reason))
 
 
+def parse_retry_after(value: str | None, *, now: float) -> float | None:
+    """Seconds from *now* that a ``Retry-After`` header asks to wait, or None.
+
+    Accepts delta-seconds or an HTTP-date. Unparseable, negative or past
+    values are ignored (None), never read as "retry now"."""
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{1,10}", text):
+        return float(int(text))
+    try:
+        when = email.utils.parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when is None or when.tzinfo is None:
+        return None
+    delta = when.timestamp() - now
+    return delta if delta > 0 else None
+
+
 def _admission_http_client() -> httpx.Client:
     """The client `role_admission` uses when none is given (tests replace it)."""
     return httpx.Client(timeout=ADMISSION_TIMEOUT_SECONDS, follow_redirects=False)
@@ -2200,7 +2229,8 @@ def _httpsig():
 
 
 def role_admission(role: str, jwk: dict, base_url: str, *, client: httpx.Client | None = None,
-                   clock: Callable[[], float] = time.time) -> tuple[bool, str]:  # fmt: skip
+                   clock: Callable[[], float] = time.time,
+                   retry_after: dict | None = None) -> tuple[bool, str]:  # fmt: skip
     """Whether Neotoma admits *role*'s AAuth key: an active ``agent_grant``
     pins it. Asked from the Mac with a signed ``GET /session``, so a job whose
     key would be refused on the runner never launches.
@@ -2212,7 +2242,11 @@ def role_admission(role: str, jwk: dict, base_url: str, *, client: httpx.Client 
     never cached. It blocks for up to ``ADMISSION_TIMEOUT_SECONDS``, so an
     async caller runs ``build_job`` in a thread. The
     reason is Neotoma's ``admission_reason`` when it is a short safe label,
-    never header or key material."""
+    never header or key material.
+
+    When Neotoma answers 429 or 503 with a usable ``Retry-After`` and
+    *retry_after* is given, the wait in seconds from now is stored in it under
+    ``"seconds"`` (see `parse_retry_after`)."""
     httpsig = _httpsig()
     try:
         cache_key = (role, httpsig.jwk_thumbprint(httpsig.public_part_of(jwk)),
@@ -2261,6 +2295,10 @@ def role_admission(role: str, jwk: dict, base_url: str, *, client: httpx.Client 
             reason = raw if isinstance(raw, str) and _SAFE_ADMISSION_REASON.fullmatch(raw) \
                 else "unrecognized"
     if resp.status_code >= 500 or resp.status_code == 429:
+        if retry_after is not None and resp.status_code in (429, 503):
+            seconds = parse_retry_after(resp.headers.get("retry-after"), now=time.time())
+            if seconds is not None:
+                retry_after["seconds"] = seconds
         return False, reason  # a passing outage, like a network error: not cached
     ttl = ADMISSION_ADMITTED_TTL_SECONDS if admitted else ADMISSION_REFUSED_TTL_SECONDS
     with _ADMISSION_LOCK:
@@ -2431,13 +2469,17 @@ def build_job(
                 raise FlyIneligible(
                     f"the Fly runner cannot yet give a {provider} job its Neotoma tools",
                     provider_specific=True)
-            admitted, reason = role_admission(role, jwk, base_url)
+            stated_wait: dict = {}
+            admitted, reason = role_admission(role, jwk, base_url, retry_after=stated_wait)
             if not admitted:
                 # Neotoma not answering is temporary: the caller defers the
-                # dispatch. A real answer (e.g. no_match) stays a refusal.
+                # dispatch, never sooner than a Retry-After Neotoma stated. A
+                # real answer (e.g. no_match) stays a refusal.
+                temporary = admission_reason_is_temporary(reason)
                 raise FlyIneligible(
                     f"role {role!r}'s AAuth key is not admitted by Neotoma ({reason})",
-                    neotoma_unavailable=admission_reason_is_temporary(reason))
+                    neotoma_unavailable=temporary,
+                    retry_after_seconds=stated_wait.get("seconds") if temporary else None)
         elif not (own_token and provider == "claude"):
             raise FlyIneligible(
                 f"role {role!r} is granted Neotoma tools but has no AAuth key or own "

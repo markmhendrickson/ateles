@@ -1899,6 +1899,11 @@ class SkillResult:
     # retries it after a backoff, a bounded number of times, and then holds
     # the task (apis._neotoma_admission_deferred); it is never marked FAILED.
     fly_neotoma_unavailable: bool = False
+    # With fly_neotoma_unavailable: the wait Neotoma stated (a 429/503
+    # Retry-After), in seconds from when it answered; None when it stated none.
+    # The dispatcher waits at least this long before the next attempt
+    # (fly_runner.FlyIneligible.retry_after_seconds).
+    fly_retry_after_seconds: float | None = None
     # A single-provider dispatch (an existing-PR correction) refused that way:
     # the other Fly candidates its caller may try next, each in a fresh
     # dispatch under its own prelaunch receipt. Empty for every other result.
@@ -3980,6 +3985,7 @@ async def _run_skill_once(
     _fly_disabled = False
     _fly_provider_specific = False
     _fly_neotoma_unavailable = False
+    _fly_retry_after: float | None = None
     if fly_runner.wants_fly(runner, action_class):
         try:
             if (
@@ -4022,12 +4028,14 @@ async def _run_skill_once(
             _fly_reason = f"not eligible for Fly: {exc}"
             _fly_provider_specific = exc.provider_specific
             _fly_neotoma_unavailable = exc.neotoma_unavailable
+            _fly_retry_after = getattr(exc, "retry_after_seconds", None)
         except fly_runner.FlyConfigInvalid as exc:
             _fly_reason = str(exc)
             _fly_disabled = True
 
     def _fly_refusal_or_fallback(
         reason: str, provider_specific: bool = False, neotoma_unavailable: bool = False,
+        retry_after_seconds: float | None = None,
     ) -> SkillResult | None:
         """A refusal to return, or None to run locally (logged and counted)."""
         fallback_ok = not _fly_forced and not _fly_disabled and (
@@ -4042,7 +4050,8 @@ async def _run_skill_once(
             msg = f"fly runner deferred: Neotoma did not answer ({reason})"
             log.warning(f"[apis] {skill} dispatch deferred — {msg}")
             return SkillResult(skill, False, None, "", "", error=msg, provider=provider,
-                               fly_neotoma_unavailable=True)  # fmt: skip
+                               fly_neotoma_unavailable=True,
+                               fly_retry_after_seconds=retry_after_seconds)  # fmt: skip
 
         if not fallback_ok and neotoma_unavailable and not _fly_disabled:
             return _neotoma_deferral()
@@ -4089,7 +4098,7 @@ async def _run_skill_once(
 
     if _fly_reason:
         _refusal = _fly_refusal_or_fallback(
-            _fly_reason, _fly_provider_specific, _fly_neotoma_unavailable)
+            _fly_reason, _fly_provider_specific, _fly_neotoma_unavailable, _fly_retry_after)
         if _refusal is not None:
             _cleanup_launch_artifacts()
             return _refusal
@@ -4223,7 +4232,8 @@ async def _run_skill_once(
                     )
                     _refusal = _fly_refusal_or_fallback(
                         reason, getattr(exc, "provider_specific", False),
-                        getattr(exc, "neotoma_unavailable", False))
+                        getattr(exc, "neotoma_unavailable", False),
+                        getattr(exc, "retry_after_seconds", None))
                     if _refusal is not None:
                         return _refusal
                     if _fly_job.neotoma_tools_unavailable:

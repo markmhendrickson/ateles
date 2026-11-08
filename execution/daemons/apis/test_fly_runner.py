@@ -614,6 +614,49 @@ def test_a_5xx_or_429_admission_answer_is_a_temporary_deferral(fly_env, monkeypa
     assert caught.value.neotoma_unavailable is True
 
 
+@pytest.mark.parametrize("status", [429, 503])
+def test_a_stated_retry_after_in_seconds_rides_on_the_deferral(fly_env, monkeypatch, status):
+    # Red before (observed): FlyIneligible had no retry_after_seconds; the
+    # stated 25s was dropped at "Neotoma /session answered 429".
+    monkeypatch.setattr(fly_runner, "_admission_http_client", lambda: httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            status, headers={"Retry-After": "25"}, text="slow down"))))
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert caught.value.neotoma_unavailable is True
+    assert caught.value.retry_after_seconds == 25.0
+
+
+def test_a_stated_retry_after_http_date_rides_on_the_deferral(fly_env, monkeypatch):
+    import email.utils
+    when = email.utils.formatdate(time.time() + 90, usegmt=True)
+    monkeypatch.setattr(fly_runner, "_admission_http_client", lambda: httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            429, headers={"Retry-After": when}, text="slow down"))))
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert 80 < caught.value.retry_after_seconds <= 90
+
+
+@pytest.mark.parametrize("headers", [{}, {"Retry-After": "soon"}, {"Retry-After": "-5"}])
+def test_a_429_without_a_usable_retry_after_states_no_wait(fly_env, monkeypatch, headers):
+    monkeypatch.setattr(fly_runner, "_admission_http_client", lambda: httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            429, headers=headers, text="slow down"))))
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert caught.value.neotoma_unavailable is True
+    assert caught.value.retry_after_seconds is None
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("0", 0.0), ("120", 120.0), (" 7 ", 7.0), (None, None), ("", None), ("-1", None),
+    ("1.5", None), ("tomorrow", None), ("Wed, 21 Oct 2015 07:28:00 GMT", None),  # past
+])
+def test_parse_retry_after(value, expected):
+    assert fly_runner.parse_retry_after(value, now=time.time()) == expected
+
+
 def test_a_timed_out_admission_check_is_a_temporary_deferral(fly_env, monkeypatch):
     def timeout(request):
         raise httpx.ReadTimeout("injected: Neotoma timed out")
