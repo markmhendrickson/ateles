@@ -112,17 +112,24 @@ AUTOMATIC_REASON_PREFIXES = (
     "low confidence and high blast radius",
     "high blast radius — operator approval required",
     "operator-only action — never auto-executable",
+    "unclassified action type",
     "producer score could not be recorded",
     "task authorization context changed",
     "re-issued checkpoint",
     "checkpoint check failed at boundary",
 )
 OPERATOR_ONLY_PREFIX = "operator-only action"
+#: The gate's never-tier hold on an action type its policy does not classify
+#: (ateles#1599). Before that change it carried the operator-only wording, so it
+#: is read alongside it here and lands in the same classes as before.
+UNCLASSIFIED_PREFIX = "unclassified action type"
+NEVER_TIER_PREFIXES = (OPERATOR_ONLY_PREFIX, UNCLASSIFIED_PREFIX)
 
-#: Action types that really do name the operator. The gate writes the words
-#: "operator-only action" on any action type its policy does not list, so most of
-#: that label is a classification gap, not a reservation; the two are told apart
-#: here and both stay until the operator rules otherwise.
+#: Action types that really do name the operator. Older holds carry the words
+#: "operator-only action" on any action type the policy did not list, and newer
+#: ones say "unclassified action type", so most never-tier holds are a
+#: classification gap, not a reservation; the two are told apart here and both
+#: stay until the operator rules otherwise.
 OPERATOR_ACTION_TYPES = frozenset(
     {"operator_only", "operator_action", "operator_decision", "decision"}
 )
@@ -271,13 +278,13 @@ def bucket_raised_hold(
     reason = str(brief.get("reason") or "").strip()
     if not is_gate_written(brief) or not is_automatic_reason(reason):
         return None
-    if reason.startswith(OPERATOR_ONLY_PREFIX):
+    if reason.startswith(NEVER_TIER_PREFIXES):
         return BUCKET_REAL
     if klass is not None and klass in REAL_DECISION_CLASSES:
         return BUCKET_REAL
     if task is None:
         return BUCKET_OUTSIDE_FLY
-    if str(task.get("blocked_reason") or "").strip().startswith(OPERATOR_ONLY_PREFIX):
+    if str(task.get("blocked_reason") or "").strip().startswith(NEVER_TIER_PREFIXES):
         return BUCKET_REAL
     if resolved_action_type(brief, task) in EFFECT_ACTION_TYPES:
         return BUCKET_REAL
@@ -311,8 +318,8 @@ def classify_one(
     owner = str(task.get("owner") or "").strip().lower()
     status = task.get("status")
     task_reason = str(task.get("blocked_reason") or "").strip()
-    if reason.startswith(OPERATOR_ONLY_PREFIX) or task_reason.startswith(
-        OPERATOR_ONLY_PREFIX
+    if reason.startswith(NEVER_TIER_PREFIXES) or task_reason.startswith(
+        NEVER_TIER_PREFIXES
     ):
         if is_terminal(status):
             return OPERATOR_ONLY_TASK_FINISHED

@@ -23,6 +23,10 @@ UNSCORED_HIGH = (
 OP_ONLY = (
     "operator-only action — never auto-executable at any confidence or recurrence count"
 )
+UNCLASSIFIED = (
+    "unclassified action type 'code_review' — the execution policy does not "
+    "classify it, so it is held until the policy classifies it"
+)
 PEOPLE = frozenset({"operator", "alex"})
 
 
@@ -104,6 +108,15 @@ def klass(b, t, newer=False):
             ),
             task(status="done"),
             dq.OPERATOR_ONLY_TASK_FINISHED,
+        ),
+        (
+            brief(
+                reason=UNCLASSIFIED,
+                blast_radius="never",
+                plan_summary="Action: code_review.",
+            ),
+            task(blocked_reason=UNCLASSIFIED),
+            dq.OPERATOR_ONLY_LABEL,
         ),
         (brief(), task(owner="operator"), dq.OWNED_BY_PERSON),
         (brief(), task(assigned_to="Alex"), dq.OWNED_BY_PERSON),
@@ -402,6 +415,7 @@ _PREFIX_OWNERS = {
     "low confidence and high blast radius": "lib/daemon_runtime/gating.py",
     "high blast radius — operator approval required": "lib/daemon_runtime/gating.py",
     "operator-only action — never auto-executable": "lib/daemon_runtime/gating.py",
+    "unclassified action type": "lib/daemon_runtime/gating.py",
     "producer score could not be recorded": "execution/daemons/apis/apis.py",
     "task authorization context changed": "execution/daemons/apis/apis.py",
     "re-issued checkpoint": "execution/daemons/apis/apis.py",
