@@ -662,7 +662,19 @@ def _fly_admission_seam(monkeypatch, tmp_path, on_attempt, *, retries='2', backo
     return attempts, notices
 
 
-def _decision_queue(monkeypatch, mode, task_snapshot):
+class _Briefs(dict):
+    """The checkpoints written by the dispatch, keyed by id (plus 'calls'),
+    with the held-task recovery calls in ``reissue``."""
+    def __init__(self):
+        super().__init__()
+        self.reissue = []
+
+
+REISSUE_RESULTS = ('skipped', 'retired_stale', 'reissued', 'needs_operator',
+                   'needs_classification', 'incomplete', 'failed', 'raises')
+
+
+def _decision_queue(monkeypatch, mode, task_snapshot, reissue=None):
     """Stand-in for the existing decision queue (write_checkpoint_brief_outcome
     and its read-back). ``mode``: 'ok', 'write_absent' (the writer returned
     before sending any store request), 'write_post_raised' (the store request
@@ -670,8 +682,12 @@ def _decision_queue(monkeypatch, mode, task_snapshot):
     writer's own read-back failed: unconfirmed, id kept),
     'readback_fails' (the written checkpoint does not read back),
     'readback_raises' (the read-back cannot run after the write) or
-    'readback_mismatch' (the read-back returns a different checkpoint)."""
-    briefs = {}
+    'readback_mismatch' (the read-back returns a different checkpoint).
+
+    ``reissue`` picks what the held-task recovery (reissue_held_task_checkpoint)
+    returns; by default it behaves like the real one: it keeps a checkpoint the
+    dispatch wrote, or writes one replacement when none landed."""
+    briefs = _Briefs()
     def write(**kw):
         briefs.setdefault('calls', []).append(kw)
         if mode == 'write_absent':
@@ -702,6 +718,42 @@ def _decision_queue(monkeypatch, mode, task_snapshot):
         if briefs.get('calls'):  # read-backs after the checkpoint write only
             task_reads.append(entity_id)
         return task_snapshot()
+    replacement = 'ent_reissued_checkpoint'
+    def recover(task_id, *, apply):
+        written = [k for k in briefs if k != 'calls']
+        briefs.reissue.append(dict(task_id=task_id, apply=apply,
+                                   status=task_snapshot().get('status')))
+        outcome = reissue or ('skipped' if written else 'reissued')
+        if outcome == 'raises':
+            raise httpx.ConnectError('Neotoma went away during recovery')
+        existing = written[0] if written else None
+        if outcome == 'skipped':
+            return apis.ReissueResult(task_id, 'skipped',
+                                      f'already has a resolvable checkpoint {existing}',
+                                      checkpoint_id=existing)
+        if outcome == 'retired_stale':
+            return apis.ReissueResult(task_id, 'retired_stale', 'retired 1 stale pending',
+                                      checkpoint_id=existing)
+        if outcome in ('reissued', 'incomplete'):
+            briefs.reissue_written = replacement
+            return apis.ReissueResult(task_id, outcome,
+                                      'replacement persisted' if outcome == 'reissued'
+                                      else 'a stale brief could not be retired',
+                                      checkpoint_id=replacement)
+        if outcome in ('needs_operator', 'needs_classification'):
+            blocker = 'operator_only' if outcome == 'needs_operator' else 'unclassified'
+            return apis.ReissueResult(task_id, outcome, apis._BLOCKER_SUMMARIES[blocker],
+                                      checkpoint_id=existing)
+        return apis.ReissueResult(task_id, 'failed', 'checkpoint list could not be read')
+    def listed(task_id):
+        rows = [dict(entity_id=k, snapshot=dict(task_entity_id=task_id, status='awaiting_operator'))
+                for k in briefs if k != 'calls']
+        if getattr(briefs, 'reissue_written', None):
+            rows.append(dict(entity_id=briefs.reissue_written,
+                             snapshot=dict(task_entity_id=task_id, status='awaiting_operator')))
+        return rows
+    monkeypatch.setattr(apis, 'reissue_held_task_checkpoint', recover)
+    monkeypatch.setattr(apis, 'checkpoints_for_task', listed)
     monkeypatch.setattr(apis, 'write_checkpoint_brief_outcome', write)
     monkeypatch.setattr(apis, 'fetch_checkpoint_record', read)
     monkeypatch.setattr(apis, 'fetch_task_snapshot', read_task)
@@ -736,30 +788,24 @@ def _assert_exhaustion(mode, briefs, task_reads, notices, task_id, saved, status
         assert f'Approve checkpoint {brief_id} to release the task again.' in notice
     elif mode in UNCONFIRMED_NO_ID_MODES:
         # A store request was sent but no id came back: the checkpoint may
-        # exist, so the task is held and the notice says to look for one.
-        assert 'failed' not in statuses, statuses
-        assert saved['status'] == 'blocked'
+        # exist, so the task takes the held status the recovery owns, and the
+        # recovery (here writing one replacement) names what to approve.
+        _assert_held_for_recovery(briefs, notice, task_id, saved, statuses)
         assert [k for k in briefs if k != 'calls'] == []
-        assert task_id in notice
         assert 'checkpoint may have been written but could not be confirmed' in notice
-        assert f'Look for a checkpoint for task {task_id}' in notice
-        assert 'if one exists, approve it to release the task' in notice
-        assert 'file a new task with a different title for the same work' in notice
-        assert 'No checkpoint' not in notice and 'no checkpoint' not in notice
+        assert ('The task is held with replacement checkpoint ent_reissued_checkpoint. '
+                'Approving checkpoint ent_reissued_checkpoint releases the task.') in notice
     elif mode in UNCONFIRMED_MODES:
         # Written, but the read-back failed, raised or did not match: the
         # checkpoint may exist, so the task is held (no independent recovery
-        # runs while it may be open), the id is kept, and the notice never
-        # says that no checkpoint exists.
-        assert 'failed' not in statuses, statuses
-        assert saved['status'] == 'blocked'
+        # runs while it may be open), the id is kept, and the recovery keeps
+        # the checkpoint that landed and names it.
+        _assert_held_for_recovery(briefs, notice, task_id, saved, statuses)
         (brief_id,) = [k for k in briefs if k != 'calls']
         assert brief_id in saved['blocked_reason']
-        assert task_id in notice
         assert f'Checkpoint {brief_id} (rounds_exhausted) was written but could not be confirmed' in notice
-        assert f'approve checkpoint {brief_id} to release the task' in notice
-        assert 'file a new task with a different title for the same work' in notice
-        assert 'No checkpoint' not in notice and 'no checkpoint' not in notice
+        assert (f'The task is held with checkpoint {brief_id}. '
+                f'Approving checkpoint {brief_id} releases the task.') in notice
     else:
         # No checkpoint was created (no store request was sent):
         # no held status at all, one notice naming the task and saying no
@@ -771,6 +817,29 @@ def _assert_exhaustion(mode, briefs, task_reads, notices, task_id, saved, status
         assert task_id in notice and 'No checkpoint was created' in notice
         assert 'task is held' not in notice
         assert not task_reads  # no held status was written to read back
+
+
+def _assert_no_refile(notices):
+    for notice in notices:
+        lowered = notice.lower()
+        assert 'new task' not in lowered, notice
+        assert 'different title' not in lowered, notice
+        assert 'replacement task' not in lowered, notice
+        assert 'no checkpoint was' not in lowered, notice
+        assert 'no checkpoint exists' not in lowered, notice
+
+
+def _assert_held_for_recovery(briefs, notice, task_id, saved, statuses):
+    """An unconfirmed checkpoint: held at the status the recovery owns, never
+    BLOCKED or failed, the recovery run exactly once on the held task, and only
+    the one checkpoint write of the dispatch."""
+    assert 'failed' not in statuses and 'blocked' not in statuses, statuses
+    assert statuses[-1] == 'awaiting_approval', statuses
+    assert saved['status'] == 'awaiting_approval'
+    assert briefs.reissue == [dict(task_id=task_id, apply=True, status='awaiting_approval')]
+    assert len(briefs.get('calls', [])) == 1
+    assert task_id in notice
+    _assert_no_refile([notice])
 
 
 ABSENT_MODES = ('write_absent',)
@@ -876,7 +945,7 @@ def test_first_delivery_neotoma_outage_is_bounded_then_escalated(
 def _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt, *,
                              retries='2', backoff='10', read=None, build=None,
                              gate_override=True, release_authorization=None,
-                             policy=None, queue_mode='ok'):
+                             policy=None, queue_mode='ok', reissue=None):
     """The natural first-delivery entry (as in the test above), with the
     dispatcher's waits recorded instead of slept. *read* replaces the
     pre-retry task re-read (default: the stored row, unchanged).
@@ -917,7 +986,8 @@ def _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt, *,
     attempts, notices = _fly_admission_seam(
         monkeypatch, tmp_path, lambda n: on_attempt(n, store, eid),
         retries=retries, backoff=backoff, build=build)
-    briefs, _task_reads = _decision_queue(monkeypatch, queue_mode, lambda: copy.deepcopy(store.rows[eid]))
+    briefs, _task_reads = _decision_queue(monkeypatch, queue_mode,
+                                          lambda: copy.deepcopy(store.rows[eid]), reissue=reissue)
     sleeps = []
     real_sleep = asyncio.sleep
     async def record_sleep(delay, *a, **kw):
@@ -1360,10 +1430,14 @@ def test_an_unconfirmed_checkpoint_holds_and_is_never_reported_absent(
     # Red before (observed): a checkpoint written with an id whose read-back
     # failed, raised or mismatched was reported as "No checkpoint exists" and
     # the task was set failed for independent recovery while it may be open.
+    # Red before round 3 (observed): the task was set 'blocked', which no
+    # recovery owns, and the notice said to file a new task.
     run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
                                    lambda n, store, eid: None, queue_mode=queue_mode)
     assert 'failed' not in run['statuses'], run['statuses']
-    assert run['saved']['status'] == 'blocked'
+    assert 'blocked' not in run['statuses'], run['statuses']
+    assert run['saved']['status'] == 'awaiting_approval'
+    assert len(run['briefs'].reissue) == 1
     calls = run['briefs'].get('calls', [])
     assert len(calls) == 1, calls  # no second checkpoint in the same dispatch
     (brief_id,) = [k for k in run['briefs'] if k != 'calls']
@@ -1371,25 +1445,77 @@ def test_an_unconfirmed_checkpoint_holds_and_is_never_reported_absent(
     notices = [n for n in run['notices'] if 'could not be confirmed' in n]
     assert len(notices) == 1, run['notices']
     assert run['eid'] in notices[0] and brief_id in notices[0]
-    assert 'file a new task with a different title' in notices[0]
+    assert f'Approving checkpoint {brief_id} releases the task.' in notices[0]
+    _assert_no_refile(run['notices'])
 
 
 def test_an_unconfirmed_checkpoint_with_no_id_holds_and_names_the_task(
         monkeypatch, tmp_path, dispatch_env):
     # Red before (observed): the store request raised after it was sent, the
     # writer returned no id, and the task was set failed with "No checkpoint
-    # was created" while a checkpoint may have landed.
+    # was created" while a checkpoint may have landed. Red before round 3
+    # (observed): 'blocked' and "file a new task with a different title".
     run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
                                    lambda n, store, eid: None,
                                    queue_mode='write_post_raised')
     assert 'failed' not in run['statuses'], run['statuses']
-    assert run['saved']['status'] == 'blocked'
+    assert 'blocked' not in run['statuses'], run['statuses']
+    assert run['saved']['status'] == 'awaiting_approval'
     calls = run['briefs'].get('calls', [])
     assert len(calls) == 1, calls  # one checkpoint attempt, never a second
     assert not any('No checkpoint' in n or 'no checkpoint' in n
                    for n in run['notices']), run['notices']
     notices = [n for n in run['notices'] if 'could not be confirmed' in n]
     assert len(notices) == 1, run['notices']
-    assert f"Look for a checkpoint for task {run['eid']}" in notices[0]
-    assert 'if one exists, approve it to release the task' in notices[0]
-    assert 'file a new task with a different title' in notices[0]
+    assert run['eid'] in notices[0]
+    assert ('The task is held with replacement checkpoint ent_reissued_checkpoint. '
+            'Approving checkpoint ent_reissued_checkpoint releases the task.') in notices[0]
+    _assert_no_refile(run['notices'])
+
+
+@pytest.mark.parametrize('result', REISSUE_RESULTS)
+def test_an_unconfirmed_checkpoint_is_recovered_through_reissue(
+        monkeypatch, tmp_path, dispatch_env, result):
+    # Red before round 3 (observed): reissue_held_task_checkpoint was never
+    # called (briefs.reissue == []), the task ended 'blocked' and every notice
+    # said to file a new task with a different title.
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
+                                   lambda n, store, eid: None,
+                                   queue_mode='write_unconfirmed', reissue=result)
+    eid = run['eid']
+    assert 'blocked' not in run['statuses'] and 'failed' not in run['statuses'], run['statuses']
+    assert run['statuses'][-1] == 'awaiting_approval'
+    assert run['saved']['status'] == 'awaiting_approval'
+    # Recovery ran once, on the held task; the dispatch itself wrote one
+    # checkpoint, beyond whatever the recovery writes.
+    assert run['briefs'].reissue == [dict(task_id=eid, apply=True, status='awaiting_approval')]
+    assert len(run['briefs'].get('calls', [])) == 1
+    (written,) = [k for k in run['briefs'] if k != 'calls']
+    notices = [n for n in run['notices'] if "Neotoma's admission check did not answer" in n]
+    assert len(notices) == 1, run['notices']
+    (notice,) = notices
+    _assert_no_refile(run['notices'])
+    command = (f'python3 execution/daemons/apis/reissue_held_checkpoints.py '
+               f'--task {eid} --apply')
+    # The record itself names the recovery step, since nothing is written to
+    # the task after recovery runs.
+    assert f'if recovery does not name a checkpoint to approve, run `{command}` until it exits 0.' in (
+        run['saved']['blocked_reason'])
+    if result in ('skipped', 'retired_stale'):
+        assert (f'The task is held with checkpoint {written}. '
+                f'Approving checkpoint {written} releases the task.') in notice
+        assert f'Run `{command}` and rerun it' not in notice
+    elif result == 'reissued':
+        assert ('The task is held with replacement checkpoint ent_reissued_checkpoint. '
+                'Approving checkpoint ent_reissued_checkpoint releases the task.') in notice
+        assert f'Run `{command}` and rerun it' not in notice
+    elif result in ('needs_operator', 'needs_classification'):
+        blocker = 'operator_only' if result == 'needs_operator' else 'unclassified'
+        assert f'Checkpoint {written} holds the task.' in notice
+        assert apis._BLOCKER_SUMMARIES[blocker] in notice
+        assert 'Approving checkpoint' not in notice
+    else:  # incomplete, failed, raises
+        assert 'The checkpoint state could not be confirmed' in notice
+        assert 'the task stays held' in notice
+        assert f'Run `{command}` and rerun it until it exits 0.' in notice
+        assert 'Approving checkpoint' not in notice

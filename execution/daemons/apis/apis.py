@@ -913,6 +913,70 @@ def _write_neotoma_admission_checkpoint(
             "its read-back did not match the checkpoint written")
 
 
+def _reissue_command(task_id: str) -> str:
+    return (f"python3 execution/daemons/apis/reissue_held_checkpoints.py "
+            f"--task {task_id} --apply")
+
+
+def _held_checkpoint_id(task_id: str, preferred: str | None) -> str | None:
+    """The task's checkpoint to approve, read with ``checkpoints_for_task``.
+
+    ``preferred`` (the id recovery reported) is named when the list holds it;
+    otherwise the one pending checkpoint, if there is exactly one. ``None``
+    when the list cannot be read or does not settle which checkpoint it is."""
+    try:
+        listed = checkpoints_for_task(task_id)
+    except Exception:
+        return None
+    if listed is None:
+        return None
+    ids = [str(item.get("entity_id") or "") for item in listed]
+    if preferred and preferred in ids:
+        return preferred
+    pending = [
+        str(item.get("entity_id") or "") for item in listed
+        if item.get("entity_id")
+        and str((_record_snapshot(item) or {}).get("status") or "").strip().lower()
+        == "awaiting_operator"
+    ]
+    return pending[0] if len(pending) == 1 else None
+
+
+def _recover_unconfirmed_checkpoint(task_id: str) -> str:
+    """Run the held-task checkpoint recovery once and say what it settled.
+
+    ``reissue_held_task_checkpoint`` is idempotent: it leaves a checkpoint that
+    landed or writes one resolvable replacement, never a duplicate. Any result
+    that does not name a checkpoint to approve leaves the task held and gives
+    the exact recovery command to rerun (failure_posture.md: an unknown is
+    never reported as absent)."""
+    unknown = (
+        "The checkpoint state could not be confirmed{why}; the task stays held. "
+        f"Run `{_reissue_command(task_id)}` and rerun it until it exits 0.")
+    try:
+        result = reissue_held_task_checkpoint(task_id, apply=True)
+    except Exception as exc:
+        log.error(f"[{DAEMON_NAME}] task {task_id}: checkpoint recovery raised "
+                  f"{type(exc).__name__}")
+        return unknown.format(why=" (the recovery raised an error)")
+    detail = _redact_secrets(str(result.detail or ""))
+    if result.outcome in {"needs_operator", "needs_classification"}:
+        named = _held_checkpoint_id(task_id, result.checkpoint_id)
+        return (f"Checkpoint {named} holds the task. " if named else "") + detail
+    # A skip because the task is not held, or because an approved checkpoint
+    # awaits release, names nothing to approve: that is reported as unknown.
+    held = not (result.outcome == "skipped"
+                and (detail.startswith("not held") or detail.startswith("approved")))
+    if held and result.outcome in {"skipped", "retired_stale", "reissued"}:
+        named = _held_checkpoint_id(task_id, result.checkpoint_id)
+        if named:
+            kind = "replacement checkpoint" if result.outcome == "reissued" else "checkpoint"
+            return (f"The task is held with {kind} {named}. Approving checkpoint "
+                    f"{named} releases the task.")
+        detail = detail or "no single checkpoint could be read for the task"
+    return unknown.format(why=f" ({detail})" if detail else "")
+
+
 # Hard caps on the admission retry schedule (failure_posture.md: every wait
 # is bounded). A single configured backoff, the retry count, and the whole
 # schedule's total wait each have a ceiling.
@@ -4213,25 +4277,29 @@ async def dispatch_task(
                 # A store request was sent but not confirmed: the checkpoint
                 # may be open, so the task is held (no independent recovery
                 # may run alongside it) and the notice never says that no
-                # checkpoint exists. The id is named when known.
+                # checkpoint exists. The held status is the one the existing
+                # recovery owns, and that recovery runs once here: it keeps a
+                # landed checkpoint or writes one resolvable replacement.
                 if brief_id:
                     reason += (
                         f" Checkpoint {brief_id} ({NEOTOMA_ADMISSION_EXHAUSTED_REASON}) was "
-                        f"written but could not be confirmed ({unrecorded}). Check that it "
-                        f"exists: if it does, approve checkpoint {brief_id} to release the "
-                        "task; if it does not, file a new task with a different title for "
-                        "the same work.")
+                        f"written but could not be confirmed ({unrecorded}).")
                 else:
                     reason += (
                         f" A {NEOTOMA_ADMISSION_EXHAUSTED_REASON} checkpoint may have been "
-                        f"written but could not be confirmed ({unrecorded}). Look for a "
-                        f"checkpoint for task {entity_id}: if one exists, approve it to "
-                        "release the task; if none exists, file a new task with a different "
-                        "title for the same work.")
+                        f"written but could not be confirmed ({unrecorded}).")
+                # The record carries the recovery step itself: nothing is
+                # written to the task after recovery runs, since a later task
+                # write would make the checkpoint it keeps or writes stale.
+                reason += (
+                    " The task is held for checkpoint recovery; if recovery does not "
+                    f"name a checkpoint to approve, run `{_reissue_command(entity_id)}` until it "
+                    "exits 0.")
                 set_task_status(
-                    entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+                    entity_id, TaskStatus.AWAITING_APPROVAL, handler=DAEMON_NAME,
                     from_status=TaskStatus.EXECUTING.value, reason=reason,
                     result=reason, key_suffix=trigger)
+                reason += " " + _recover_unconfirmed_checkpoint(entity_id)
                 notifier.send(f"{skill} on {entity_id}: {reason}",
                               priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
                 job.failed(f"task {entity_id} → {skill} held: admission checkpoint "

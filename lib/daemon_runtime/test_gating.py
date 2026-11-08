@@ -2035,23 +2035,35 @@ def test_envelope_binds_the_estimate_only_for_an_unscored_hold():
 # ── write_checkpoint_brief_outcome: absence is proven only before the POST ────
 
 
-def _hold_outcome(task_id="ent_task", title="Bounded work"):
-    policy = ExecutionPolicy(entity_id="default", loaded=True)
-    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
-    task_record = {
-        "entity_id": task_id,
-        "entity_type": "task",
-        "observation_count": 4,
-        "last_observation_at": "2026-09-21T00:00:00Z",
-        "snapshot": {"title": title, "status": "awaiting_approval"},
-    }
+_DEFAULT = object()
+
+
+def _hold_outcome(
+    task_id="ent_task", title="Bounded work", *, policy=_DEFAULT, task_record=_DEFAULT,
+    user_id="tenant-a",
+):
+    if policy is _DEFAULT:
+        policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(
+        confidence=0.3,
+        action_type="local_edit",
+        policy=policy or ExecutionPolicy(entity_id="default", loaded=True),
+    )
+    if task_record is _DEFAULT:
+        task_record = {
+            "entity_id": task_id,
+            "entity_type": "task",
+            "observation_count": 4,
+            "last_observation_at": "2026-09-21T00:00:00Z",
+            "snapshot": {"title": title, "status": "awaiting_approval"},
+        }
     return write_checkpoint_brief_outcome(
         task_entity_id=task_id,
         decision=decision,
         title=title,
         plan_summary="Bounded work",
         handler="apis",
-        user_id="tenant-a",
+        user_id=user_id,
         action_type="local_edit",
         task_record=task_record,
         policy=policy,
@@ -2131,6 +2143,71 @@ def test_outcome_success_is_confirmed(monkeypatch):
 
     assert outcome == "confirmed"
     assert entity_id and entity_id in server.entities
+
+
+def test_outcome_2xx_without_an_entity_id_is_unconfirmed(monkeypatch):
+    # The store answered 2xx but named no entity: it may still have written
+    # one, so this is never absent and never confirmed.
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    attempts = []
+
+    def answers_without_an_id(url, **kwargs):
+        attempts.append(url)
+        return server._response(200, {"entities": []})
+
+    monkeypatch.setattr(gating_module.httpx, "post", answers_without_an_id)
+
+    assert _hold_outcome() == ("unconfirmed", None)
+    assert attempts, "the store request was sent"
+
+
+def test_outcome_unloaded_policy_is_absent_before_any_store(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    outcome = _hold_outcome(policy=ExecutionPolicy(entity_id="fallback", loaded=False))
+
+    assert outcome == ("absent", None)
+    assert server.stores == []
+
+
+def test_outcome_incomplete_provenance_is_absent_before_any_store(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    assert _hold_outcome(user_id=None) == ("absent", None)
+    assert server.stores == []
+
+
+def test_outcome_producer_key_mismatch_is_absent_before_any_store(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    monkeypatch.setattr(
+        gating_module, "_checkpoint_producer_http_signer", lambda handler: _http_signer()
+    )
+    monkeypatch.setattr(gating_module, "CHECKPOINT_PRODUCER_JKT", "B" * 43)
+
+    assert _hold_outcome() == ("absent", None)
+    assert server.stores == []
+
+
+def test_outcome_error_before_the_store_request_is_absent(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    def signer_fails(handler):
+        raise RuntimeError("producer key could not be loaded")
+
+    monkeypatch.setattr(gating_module, "_checkpoint_producer_http_signer", signer_fails)
+
+    assert _hold_outcome() == ("absent", None)
+    assert server.stores == []
+
+
+def test_outcome_legacy_unsigned_write_is_confirmed(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    outcome, entity_id = _hold_outcome(policy=None, task_record=None)
+
+    assert outcome == "confirmed"
+    assert entity_id and entity_id in server.entities
+    assert server.stores and server.stores[0]["signed"] is False
 
 
 def test_write_checkpoint_brief_still_returns_none_on_unconfirmed(monkeypatch):
