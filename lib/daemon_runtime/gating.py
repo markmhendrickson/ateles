@@ -1754,15 +1754,36 @@ def query_entities(
 
 
 def query_all_entities(
-    entity_type: str, *, snapshot_filters: dict, limit: int | None = None
+    entity_type: str,
+    *,
+    snapshot_filters: dict,
+    limit: int | None = None,
+    strict: bool = False,
 ) -> list[dict] | None:
     """Every entity matching ``snapshot_filters``, or ``None`` if any page failed.
 
-    Pages by offset until a page comes back short; a partial list is never
-    returned for a failed page.  ``limit`` stops early once that many are held.
+    Pages by offset until the server returns a short page, counting the rows the
+    server returned rather than the ones kept, so a dropped row never ends paging
+    early.  A partial list is never returned for a failed page.  ``limit`` stops
+    early once that many are held.
+
+    ``strict`` is for callers that choose among the rows for a safety decision,
+    where a missing row could be the one that decides: any row that is not an
+    object, a page whose ``entities`` is missing or not a list, a page without
+    a non-negative integer ``total`` (or whose ``total`` differs from an
+    earlier page's), a collected row count that does not equal ``total``, or a
+    ``has_more`` that disagrees with the rows still outstanding makes the whole
+    read failed (``None``) instead of silently smaller.  Every row must also
+    carry a non-empty string ``entity_id`` that no other row on any page
+    repeats, and a row that names an ``entity_type`` must name the requested
+    one; the count compared with ``total`` is of distinct ids, so a repeated
+    row can never stand in for an omitted one.  A short page alone is never
+    taken as proof that the listing ended.
     """
     page_size = QUERY_PAGE_SIZE
     found: list[dict] = []
+    seen_ids: set[str] = set()
+    total: int | None = None
     offset = 0
     while True:
         page = query_entities(
@@ -1773,13 +1794,71 @@ def query_all_entities(
         )
         if page is None:
             return None
-        entities = [e for e in page.get("entities") or [] if isinstance(e, dict)]
-        found.extend(entities)
+        raw = page.get("entities")
+        if strict:
+            if not isinstance(raw, list) or not all(isinstance(e, dict) for e in raw):
+                log.warning(
+                    f"[gating] entity query for {entity_type} returned a malformed "
+                    f"page at offset {offset} — listing is unknown"
+                )
+                return None
+            page_total = page.get("total")
+            if (
+                not isinstance(page_total, int)
+                or isinstance(page_total, bool)
+                or page_total < 0
+                or (total is not None and page_total != total)
+            ):
+                log.warning(
+                    f"[gating] entity query for {entity_type} reported total "
+                    f"{page_total!r} at offset {offset} (earlier pages: {total!r}) "
+                    "— listing is unknown"
+                )
+                return None
+            total = page_total
+            for row in raw:
+                row_id = row.get("entity_id")
+                row_type = row.get("entity_type", entity_type)
+                if (
+                    not isinstance(row_id, str)
+                    or not row_id
+                    or row_id in seen_ids
+                    or row_type != entity_type
+                ):
+                    log.warning(
+                        f"[gating] entity query for {entity_type} returned a row "
+                        f"with entity_id {row_id!r} and entity_type {row_type!r} "
+                        f"at offset {offset} that is missing, repeated or of the "
+                        "wrong type — listing is unknown"
+                    )
+                    return None
+                seen_ids.add(row_id)
+            if "has_more" in page:
+                has_more = page.get("has_more")
+                if not isinstance(has_more, bool) or has_more != (
+                    len(seen_ids) < total
+                ):
+                    log.warning(
+                        f"[gating] entity query for {entity_type} reported "
+                        f"has_more={has_more!r} at offset {offset} against a "
+                        f"total of {total} — listing is unknown"
+                    )
+                    return None
+        rows = raw if isinstance(raw, list) else []
+        found.extend(e for e in rows if isinstance(e, dict))
         if limit is not None and len(found) >= limit:
             return found[:limit]
-        if len(entities) < page_size:
-            return found
-        offset += len(entities)
+        if len(rows) < page_size:
+            break
+        offset += len(rows)
+    if strict and total != len(seen_ids):
+        log.warning(
+            f"[gating] entity query for {entity_type} collected "
+            f"{len(seen_ids)} distinct rows against a reported total of "
+            f"{total!r} — listing is unknown"
+        )
+        return None
+    return found
 
 
 def checkpoints_for_task(task_entity_id: str) -> list[dict] | None:
