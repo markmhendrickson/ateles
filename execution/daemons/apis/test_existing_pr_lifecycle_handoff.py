@@ -885,6 +885,17 @@ def _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt, *,
                 statuses=statuses, briefs=briefs, reads=reads, eid=eid)
 
 
+def _assert_failed_dispatch_not_held(run):
+    """A refused retry writes no checkpoint and no held status: one notice and
+    the failed-dispatch status, left to the existing recovery."""
+    assert 'blocked' not in run['statuses'], run['statuses']
+    assert run['statuses'][-1] == 'failed', run['statuses']
+    assert run['saved']['status'] == 'failed'
+    assert not run['briefs'].get('calls')  # no checkpoint, so nothing to approve
+    assert 'failed-dispatch recovery' in run['saved']['blocked_reason']
+    assert len([n for n in run['notices'] if 'retry not started' in n]) == 1, run['notices']
+
+
 def _stated_then_refused(stated):
     """Attempt 1: a 429 stating *stated*; attempt 2: a real refusal (ends it)."""
     import fly_runner
@@ -955,23 +966,23 @@ def test_a_task_changed_between_attempts_is_not_launched_again(monkeypatch, tmp_
     assert len(run['attempts']) == 1
     assert run['reads'] == [run['eid']]
     saved = run['saved']
-    assert saved['status'] == 'blocked'
+    _assert_failed_dispatch_not_held(run)
     assert 'changed since it was dispatched' in saved['blocked_reason']
     assert not run['briefs'].get('calls')  # not an exhaustion: no rounds_exhausted
     assert any('retry not started' in n and 'changed since' in n for n in run['notices'])
 
 
-def test_a_failed_task_read_launches_nothing_and_holds(monkeypatch, tmp_path, dispatch_env):
-    # Red before (observed): no re-read at all; len(attempts) == 3.
+def test_a_failed_task_read_launches_nothing_and_is_not_held(monkeypatch, tmp_path, dispatch_env):
+    # Red before (observed): no re-read at all; len(attempts) == 3. Red before
+    # round 5 (observed): statuses ended 'blocked' with no checkpoint written.
     def read(key, store):
         raise httpx.ConnectError('Neotoma went away')
     run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
                                    lambda n, store, eid: None, read=read)
     assert len(run['attempts']) == 1
     saved = run['saved']
-    assert saved['status'] == 'blocked'
+    _assert_failed_dispatch_not_held(run)
     assert 'could not be re-read before the retry (ConnectError)' in saved['blocked_reason']
-    assert 'failed' not in run['statuses']
 
 
 def test_a_task_no_longer_executing_is_not_launched_or_overwritten(
@@ -1124,7 +1135,7 @@ def test_an_approved_release_unchanged_between_attempts_is_launched_again(
     assert len(run['attempts']) == 2
 
 
-def test_a_policy_revision_change_between_attempts_launches_nothing_and_holds(
+def test_a_policy_revision_change_between_attempts_launches_nothing_and_is_not_held(
         monkeypatch, tmp_path, dispatch_env):
     # Same policy entity, same action type and blast tier; only its revision
     # changed. Red with the authority check removed, leaving the earlier
@@ -1139,9 +1150,8 @@ def test_a_policy_revision_change_between_attempts_launches_nothing_and_holds(
                                    policy=policy, release_authorization=_authorization)
     assert len(run['attempts']) == 1
     saved = run['saved']
-    assert saved['status'] == 'blocked'
+    _assert_failed_dispatch_not_held(run)
     assert 'execution policy changed since the first attempt' in saved['blocked_reason']
-    assert not run['briefs'].get('calls')
     assert any('retry not started' in n and 'execution policy changed' in n
                for n in run['notices'])
 
@@ -1160,9 +1170,34 @@ def test_an_approved_release_whose_task_revision_changed_is_not_relaunched(
                                    policy=policy, release_authorization=_authorization)
     assert len(run['attempts']) == 1
     saved = run['saved']
-    assert saved['status'] == 'blocked'
+    _assert_failed_dispatch_not_held(run)
     assert 'authority it was released under changed' in saved['blocked_reason']
     assert any('retry not started' in n for n in run['notices'])
+
+
+@pytest.mark.parametrize('failure', ['unloaded', 'raises'])
+def test_a_failed_policy_read_between_attempts_launches_nothing_and_is_not_held(
+        monkeypatch, tmp_path, dispatch_env, failure):
+    # Red before round 5 (observed): the retry branch wrote 'blocked' with no
+    # checkpoint behind it.
+    from lib.daemon_runtime.gating import ExecutionPolicy
+    box = {'fail': False}
+    def policy(*a):
+        if not box['fail']:
+            return _policy('rev-1')
+        if failure == 'raises':
+            raise httpx.ConnectError('Neotoma went away')
+        return ExecutionPolicy(entity_id='inert-policy', loaded=False)
+    def on_attempt(n, store, eid):
+        if n == 1:
+            box['fail'] = True
+        return None
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt,
+                                   policy=policy, release_authorization=_authorization)
+    assert len(run['attempts']) == 1
+    _assert_failed_dispatch_not_held(run)
+    assert 'could not be re-read before the retry' in run['saved']['blocked_reason'] or \
+        'could not be read before the retry' in run['saved']['blocked_reason']
 
 
 # ── Round 4: the whole schedule is bounded; the checkpoint is the hold ──
@@ -1235,6 +1270,23 @@ def test_a_non_finite_stated_wait_is_never_slept(monkeypatch, tmp_path, dispatch
     assert all(math.isfinite(s) for s in run['sleeps'])
     calls = run['briefs'].get('calls', [])
     assert len(calls) == 1 and calls[0]['decision'].reason == 'rounds_exhausted'
+
+
+@pytest.mark.parametrize('digits', [11, 400])
+def test_a_stated_delta_too_long_for_the_schedule_ends_without_a_retry(
+        monkeypatch, tmp_path, dispatch_env, digits):
+    # Red before round 5 (observed): an 11-digit or 400-digit Retry-After parsed
+    # to None, so the configured 10s backoff applied and every retry ran
+    # (len(attempts) == 3, sleeps == [10.0, 20.0]).
+    import fly_runner
+    stated = fly_runner.parse_retry_after('9' * digits, now=0.0)
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
+                                   lambda n, store, eid: stated)
+    assert len(run['attempts']) == 1
+    assert run['sleeps'] == []
+    calls = run['briefs'].get('calls', [])
+    assert len(calls) == 1 and calls[0]['decision'].reason == 'rounds_exhausted'
+    assert 'past the retry schedule' in run['saved']['blocked_reason']
 
 
 @pytest.mark.parametrize('queue_mode', ['write_fails', 'readback_fails', 'readback_raises'])

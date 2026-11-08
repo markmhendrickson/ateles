@@ -934,12 +934,20 @@ def _neotoma_admission_retry_bounds() -> tuple[int, float]:
 
 def _neotoma_admission_wait(backoff: float, deferrals: int, retry_after) -> float:
     """The wait before retry *deferrals*: the configured delay, or the wait
-    Neotoma stated (Retry-After) when that is longer. Never shorter."""
+    Neotoma stated (Retry-After) when that is longer. Never shorter. A stated
+    wait too long to represent (``math.inf``, see `fly_runner.parse_retry_after`)
+    is returned as is, so the caller ends through exhaustion with no retry."""
     delay = backoff * deferrals
     if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool) \
-            and math.isfinite(retry_after) and retry_after > delay:
+            and not math.isnan(retry_after) and retry_after > delay:
         return float(retry_after)
     return delay
+
+
+def _stated_wait_text(seconds: float) -> str:
+    """A stated wait for a notice: whole seconds, or "longer than any retry
+    schedule allows" when it was too long to represent."""
+    return f"{seconds:.0f}s" if math.isfinite(seconds) else "longer than any retry schedule allows"
 
 
 def _neotoma_admission_wait_ceiling(retries: int, backoff: float) -> float:
@@ -4133,13 +4141,17 @@ async def dispatch_task(
             _run_stage("assistant", reason, stage="blocked")
             if run_session:
                 update_run_session_status(run_session, status="failed")
+            # No checkpoint is written here, so there is nothing to approve and
+            # no held status (failure_posture.md rule 5: the checkpoint is the
+            # hold). Still this dispatch's task: it takes the failed-dispatch
+            # status and the existing recovery owns it. One that left executing
+            # belongs to whoever moved it and is not written over.
             if revalidation_refusal != "the task is no longer in its admitted executing state":
-                # Still this dispatch's task: hold it. One that left executing
-                # belongs to whoever moved it and is not written over.
+                reason += " The task is left to the failed-dispatch recovery."
                 set_task_status(
-                    entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+                    entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
                     from_status=TaskStatus.EXECUTING.value, reason=reason,
-                    result=reason, key_suffix=f"{trigger}-revalidation")
+                    key_suffix=f"{trigger}-revalidation")
             notifier.send(reason, priority=Priority.BLOCKER, handler=DAEMON_NAME)
             job.failed(f"task {entity_id} → {skill} retry not started: {revalidation_refusal}")
         elif _neotoma_admission_deferred(result):
@@ -4149,8 +4161,8 @@ async def dispatch_task(
             reason = (
                 f"Neotoma's admission check did not answer after {deferrals + 1} "
                 "attempt(s); nothing was launched and no delivery receipt is held."
-                + (f" Neotoma asked to wait {wait_beyond_ceiling:.0f}s, past the retry "
-                   "schedule's limit, so no earlier attempt was made."
+                + (f" Neotoma asked to wait {_stated_wait_text(wait_beyond_ceiling)}, "
+                   "past the retry schedule's limit, so no earlier attempt was made."
                    if wait_beyond_ceiling is not None else "")
             )
             _run_stage("assistant", f"{skill}: {reason}", stage="blocked")

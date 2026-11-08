@@ -657,6 +657,35 @@ def test_parse_retry_after(value, expected):
     assert fly_runner.parse_retry_after(value, now=time.time()) == expected
 
 
+@pytest.mark.parametrize("digits", [11, 400])
+def test_a_retry_after_delta_of_any_length_is_read(digits):
+    # Red before (observed): a delta over ten digits returned None, so the
+    # configured backoff applied instead of ending the schedule. The
+    # 400-digit case must not raise OverflowError (nor int()'s digit limit).
+    stated = fly_runner.parse_retry_after("9" * digits, now=0.0)
+    # Read, and longer than any schedule: exact when representable, else inf.
+    assert stated == (99999999999.0 if digits == 11 else math.inf)
+    assert fly_runner.parse_retry_after("0" * 400 + "25", now=0.0) == 25.0
+
+
+@pytest.mark.parametrize("value", [
+    "Sun, 06 Nov 1994 08:49:37 GMT",   # IMF-fixdate
+    "Sunday, 06-Nov-94 08:49:37 GMT",  # obsolete RFC 850
+    "Sun Nov  6 08:49:37 1994",        # asctime
+])
+def test_each_http_date_form_is_read(value):
+    # Red before (observed): the asctime form returned None (the IMF-fixdate
+    # and RFC 850 forms already parsed; kept here as guards).
+    when = 784111777.0  # 1994-11-06T08:49:37Z
+    assert fly_runner.parse_retry_after(value, now=when - 60) == 60.0
+
+
+@pytest.mark.parametrize("value", ["+25", "-25", "2.5", "1 0", "25s", "\uff12\uff15"])
+def test_a_malformed_retry_after_is_ignored(value):
+    # Ignored (None), so the configured backoff applies.
+    assert fly_runner.parse_retry_after(value, now=0.0) is None
+
+
 def test_a_timed_out_admission_check_is_a_temporary_deferral(fly_env, monkeypatch):
     def timeout(request):
         raise httpx.ReadTimeout("injected: Neotoma timed out")

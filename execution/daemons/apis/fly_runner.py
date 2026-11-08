@@ -42,7 +42,6 @@ import asyncio
 import base64
 import contextlib
 import copy
-import email.utils
 import fcntl
 import json
 import logging
@@ -2193,23 +2192,68 @@ def admission_reason_is_temporary(reason: str) -> bool:
         _ADMISSION_NO_ANSWER.fullmatch(reason))
 
 
+# RFC 9110 section 5.6.7: the three HTTP-date forms a recipient must accept.
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_MONTH = "(" + "|".join(_MONTHS) + ")"
+_CLOCK = r"(\d{2}):(\d{2}):(\d{2})"
+_IMF_FIXDATE = re.compile(
+    r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), (\d{2}) " + _MONTH + r" (\d{4}) " + _CLOCK + " GMT")
+_RFC850_DATE = re.compile(
+    r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), "
+    r"(\d{2})-" + _MONTH + r"-(\d{2}) " + _CLOCK + " GMT")
+_ASCTIME_DATE = re.compile(
+    r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) " + _MONTH + r" ( \d|\d{2}) " + _CLOCK + r" (\d{4})")
+# A delta with more significant digits than this is longer than any retry
+# schedule allows (float holds it exactly below 2**53): read as unbounded
+# rather than converted, so a huge value never reaches int() or float().
+_RETRY_AFTER_MAX_DIGITS = 15
+
+
+def _parse_http_date(text: str, *, now: float) -> datetime:
+    """An HTTP-date in any of RFC 9110's three forms, as UTC.
+
+    Raises ValueError when *text* is none of them or names no real time."""
+    if m := _IMF_FIXDATE.fullmatch(text):
+        day, month, year, hh, mm, ss = m.groups()
+    elif m := _RFC850_DATE.fullmatch(text):
+        day, month, yy, hh, mm, ss = m.groups()
+        # RFC 9110: a two-digit year more than 50 years in the future is
+        # read as the most recent past year with those digits.
+        this_year = datetime.fromtimestamp(now, timezone.utc).year
+        year = this_year - this_year % 100 + int(yy)
+        if year > this_year + 50:
+            year -= 100
+    elif m := _ASCTIME_DATE.fullmatch(text):
+        month, day, hh, mm, ss, year = m.groups()
+    else:
+        raise ValueError("not an HTTP-date")
+    return datetime(int(year), _MONTHS.index(month) + 1, int(day.strip()),
+                    int(hh), int(mm), int(ss), tzinfo=timezone.utc)
+
+
 def parse_retry_after(value: str | None, *, now: float) -> float | None:
     """Seconds from *now* that a ``Retry-After`` header asks to wait, or None.
 
-    Accepts delta-seconds or an HTTP-date. Unparseable, negative or past
-    values are ignored (None), never read as "retry now"."""
+    Accepts delta-seconds (any run of ASCII digits, RFC 9110 section 10.2.3)
+    or an HTTP-date in any of its three forms (IMF-fixdate, RFC 850, asctime).
+    A delta too long for any retry schedule is ``math.inf``, decided by its
+    digit count, so the caller ends through exhaustion without converting it.
+    Unparseable, signed, fractional, negative or past values are ignored
+    (None), never read as "retry now"."""
     if value is None:
         return None
-    text = value.strip()
+    text = value.strip(" \t")
     if not text:
         return None
-    if re.fullmatch(r"\d{1,10}", text):
-        return float(int(text))
+    if text.isascii() and text.isdigit():
+        significant = text.lstrip("0")
+        if len(significant) > _RETRY_AFTER_MAX_DIGITS:
+            return math.inf
+        return float(int(significant)) if significant else 0.0
     try:
-        when = email.utils.parsedate_to_datetime(text)
-    except (TypeError, ValueError, IndexError):
-        return None
-    if when is None or when.tzinfo is None:
+        when = _parse_http_date(text, now=now)
+    except ValueError:
         return None
     delta = when.timestamp() - now
     return delta if delta > 0 else None
