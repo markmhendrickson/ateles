@@ -1027,6 +1027,68 @@ def test_a_lens_app_comment_with_another_lens_marker_is_still_refused():
         "review:arch",
         "x review:arch",
         "(review:arch",
-        "lens_review:arch",
+        "REVIEW:Arch",
+        f"<!-- review:arch-superseded by={_SHA40} -->",
     ):
         assert not scope.admits("pm-app[bot]", f"{own}\n{foreign}"), foreign
+    # A class name is not a claim on a lens: red on head 9d94d50e, where
+    # `claimed_lenses` still read it as an arch marker.
+    assert scope.admits("pm-app[bot]", f"{own}\nlens_review:arch")
+
+
+def test_a_shared_identity_comment_with_an_app_lens_marker_is_still_refused():
+    scope = lens_authors.LensAppScope(lens_logins=(("arch", "arch-app[bot]"),))
+    own = f"<!-- review:pm commit={_SHA40} -->\n**APPROVE**\nfine"
+    assert scope.admits("ateles-agent", own)  # control
+    for foreign in (
+        f"<!-- review:arch commit={_SHA40} -->",
+        f"<!-- review:arch-superseded by={_SHA40} -->",
+        "review:arch",
+        "x review:arch",
+        "(review:arch",
+        "REVIEW:ARCH",
+    ):
+        assert not scope.admits("ateles-agent", f"{own}\n{foreign}"), foreign
+    assert scope.admits("ateles-agent", f"{own}\nthe class lens_review:arch")
+
+
+# One shared fixture list: the check a reply passes (`_VERDICT_SHAPED_RE`) and
+# the reader that scopes the posted comment (`_LENS_MARKER_RE`, through
+# `claimed_lenses`) must give the same yes/no for every `review:` form.
+_PARITY_IDENTIFIERS = [
+    "lens_review:pm",
+    "lens_review:arch",
+    "x_review:qa",
+    "LENS_REVIEW:PM",
+    "x2review:qa",
+    "the class lens_review:arch-superseded",
+]
+_PARITY_MARKERS = [
+    f"<!-- review:pm commit={_SHA40} -->",
+    f"<!--review:arch commit={_SHA40}-->",
+    f"<!-- review:pm-superseded by={_SHA40} -->",
+    "review:arch",
+    "review:arch-superseded",
+    "x review:qa",
+    "(review:pm",
+    "line one\nreview:arch",
+    "REVIEW:PM",
+    "Review:Arch-Superseded",
+]
+
+
+@pytest.mark.parametrize(
+    "text, is_marker",
+    [(t, False) for t in _PARITY_IDENTIFIERS] + [(t, True) for t in _PARITY_MARKERS],
+)
+def test_the_reply_check_and_the_lens_reader_agree_on_what_is_a_marker(text, is_marker):
+    # Red on head 9d94d50e for every identifier: `_LENS_MARKER_RE` had no
+    # identifier rule, so `claimed_lenses` named a lens the check did not see.
+    verdict_review = [
+        m.group(0)
+        for m in lens_authors._VERDICT_SHAPED_RE.finditer(text)
+        if m.group(0).lower().startswith("review:")
+    ]
+    assert bool(verdict_review) is is_marker
+    assert bool(lens_authors._LENS_MARKER_RE.search(text)) is is_marker
+    assert bool(lens_authors.claimed_lenses(text)) is is_marker

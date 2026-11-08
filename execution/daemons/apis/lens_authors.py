@@ -129,8 +129,14 @@ _VERDICT_SHAPED_RE = re.compile(
 
 # `review:<lens>` as a marker (head marker, superseded marker or legacy bare
 # line). `-superseded` is a suffix of the marker, not part of the lens name.
+# Same identifier rule as `_VERDICT_SHAPED_RE`, so the check a reply passes and
+# every reader that scopes the posted comment agree on what is a marker: a
+# class name such as `lens_review:arch` names no lens here either. The leading
+# and retirement patterns below are anchored at the start of the body or after
+# `<!--`, so an identifier can never reach them.
 _LENS_MARKER_RE = re.compile(
-    r"review:(?P<lens>[a-z0-9_]+?)(?:-superseded)?(?![a-z0-9_-])", re.IGNORECASE
+    r"(?<![A-Za-z0-9_])review:(?P<lens>[a-z0-9_]+?)(?:-superseded)?(?![a-z0-9_-])",
+    re.IGNORECASE,
 )
 _LEADING_LENS_MARKER_RE = re.compile(
     r"\A\s*(?:<!--\s*)?review:(?P<lens>[a-z0-9_]+?)(?:-superseded)?(?![a-z0-9_-])",

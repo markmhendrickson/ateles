@@ -952,3 +952,33 @@ def test_a_signed_off_review_naming_a_lens_class_is_accepted(ident):
 def test_a_reply_with_a_marker_after_space_or_punctuation_is_still_refused(marker):
     assert sd.parse_returned_lens_review(returned(body=f"fine\n{marker}"), "pavo") is None
     assert sd.parse_returned_lens_review(returned(body=f"fine {marker} end"), "pavo") is None
+
+
+def test_a_posted_pm_review_naming_another_lens_class_is_read_back():
+    # Red on head 9d94d50e: the reply passed the check and was posted, then
+    # every reader refused it because `claimed_lenses` read `lens_review:arch`
+    # as an arch marker, so the pm verdict counted for nobody.
+    from lens_authors import LensAppScope, ScopedAuthors, scope_lens_comments
+
+    reply = returned(body="The action class `lens_review:arch` keeps its tier. fine")
+    assert sd.parse_returned_lens_review(reply, "pavo") is not None
+    result, _ = sd.unwrap_returned_review(SkillResult("pavo", True, 0, reply, ""), "pavo")
+    assert result.ok
+    posted = sd.compose_remote_lens_comment("pm", result.stdout, HEAD)
+
+    arch_app = "ateles-reviewer-arch[bot]"
+    pm_app = PM_APP.lower()
+    pm_app_scope = LensAppScope(lens_logins=(("pm", pm_app), ("arch", arch_app)))
+    shared_scope = LensAppScope(lens_logins=(("arch", arch_app),))
+    cases = ((pm_app, pm_app_scope), ("ateles-agent", shared_scope))
+    for login, scope in cases:
+        authors = ScopedAuthors({login, arch_app}, scope)
+        comment = {"user": {"login": login}, "body": posted}
+        assert scope_lens_comments([comment], authors) == [comment], login
+
+    # A real arch marker in the same pm comment is still refused for both.
+    foreign = posted + f"\n<!-- review:arch commit={HEAD} -->"
+    for login, scope in cases:
+        authors = ScopedAuthors({login, arch_app}, scope)
+        comment = {"user": {"login": login}, "body": foreign}
+        assert scope_lens_comments([comment], authors) == [], login
