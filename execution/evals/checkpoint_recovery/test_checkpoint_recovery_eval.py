@@ -187,7 +187,9 @@ def test_read_failures_are_reported_distinctly_from_skips(world, monkeypatch, ca
 
     assert code == 1
     got = outcomes(lines)
-    assert all(got[t] == "failed" for t in HELD)
+    # A blanket run reports an unreadable checkpoint list as "unknown" and files
+    # nothing; naming the task (--task) keeps the earlier "failed" behaviour.
+    assert all(got[t] == "unknown" for t in HELD)
     assert world.write_log == []
     # A confirmed skip stays a skip, distinct from a failed read.
     code, lines = run(monkeypatch, capsys, "--apply", "--task", "ent_task_done")
