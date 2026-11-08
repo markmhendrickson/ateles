@@ -417,57 +417,153 @@ def test_a_refusal_outside_the_section_is_not_turned_into_an_approval():
         assert not result.ok
 
 
-def test_combined_pass_never_runs_return_only_on_fly(monkeypatch):
-    """Scope: the combined pass keeps the local prompt and stays on the Mac even
-    when its class is opted in; nothing is parsed return-only and its comments
-    go out through the existing path."""
-    import asyncio
-    import review_carry
+def _combined_setup(monkeypatch, *, opted_in: bool):
+    """A dispatcher whose combined pass (pm + ux) has the first lens's class
+    opted in to Fly or not."""
     import skill_runner
     from test_fly_read_only_call_sites import _async_providers
-    from test_swarm_dispatch import _StubNotifier, _config, _trigger
+    from test_swarm_dispatch import _StubNotifier, _config
 
     d = sd.SwarmDispatcher(_StubNotifier(), _config())
-    pm, ux = sd.lens_by_name("pm"), sd.lens_by_name("ux")
-    monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", True)
+    monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", opted_in)
     monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "lens_review:pm,lens_review:ux")
-    assert sd._lens_return_only_on_fly(pm)  # the individual path would go return-only
     monkeypatch.setattr(d, "_lens_agent_prompt", lambda agent: "own prompt")
     monkeypatch.setattr(sd, "usable_providers_async", lambda: _async_providers())
     monkeypatch.setattr(sd, "resolve_lens_provider", lambda *a, **k: "claude")
+    return d
 
-    def no_parse(*a, **k):
-        raise AssertionError("a combined pass must not parse a return-only response")
 
-    monkeypatch.setattr(sd, "parse_returned_lens_review", no_parse)
-    monkeypatch.setattr(sd, "unwrap_returned_review", no_parse)
+def _block(lens, inner):
+    import review_carry
+    return f"{review_carry.combined_delimiter(lens)}\n{inner}"
+
+
+def _run_combined(monkeypatch, d, reply, *, real_poster=False):
+    """Run the combined pass on *reply*; returns (result, the run_skill call,
+    what was posted). With `real_poster` the real `_post_combined_comments`
+    runs against a recording client (no lens has its own App); otherwise the
+    poster is replaced by one recording (lens, text, remote_agents)."""
+    import asyncio
+    import httpx
+    from test_swarm_dispatch import _trigger
+
     seen: dict = {}
-    reply = "\n".join(
-        f"{review_carry.combined_delimiter(x.lens)}\n"
-        f"{sd.attribution_header(x.agent, f'{x.lens} lens panelist')}\n**APPROVE**\nfine"
-        for x in (pm, ux))
 
     async def fake_run_skill(skill, prompt, **kwargs):
         seen.update(prompt=prompt, kwargs=kwargs)
         return SkillResult(skill, True, 0, reply, "")
 
-    posted: list = []
-
-    async def fake_post(trigger, accepted, head):  # noqa: ANN001
-        posted.append(sorted(accepted))
-        return set(accepted)
-
     monkeypatch.setattr(sd, "run_skill", fake_run_skill)
-    monkeypatch.setattr(d, "_post_combined_comments", fake_post)
+    posted: list = []
+    if real_poster:
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, url, json=None, headers=None):
+                posted.append(json["body"])
+
+                class _R:
+                    def raise_for_status(self):
+                        pass
+
+                return _R()
+
+        async def allowed(*a, **k):
+            return True
+
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _Client())
+        monkeypatch.setattr(d, "_require_github_write_credential", allowed)
+        monkeypatch.setattr(gat, "lens_has_own_app", lambda lens: False)
+    else:
+        async def fake_post(trigger, accepted, head, *, remote_agents=None):
+            for lens, res in accepted.items():
+                posted.append((lens, res.stdout, dict(remote_agents or {})))
+            return set(accepted)
+
+        monkeypatch.setattr(d, "_post_combined_comments", fake_post)
+    pm, ux = sd.lens_by_name("pm"), sd.lens_by_name("ux")
     out = asyncio.run(d._run_combined_pass(
         _trigger(), [pm, ux], {}, 80, HEAD, pending_gates=set(), live_gates={}, signals=None))
-    assert sorted(out) == ["pm", "ux"] and posted == [["pm", "ux"]]
+    return out, seen, posted
+
+
+UX_GOOD = returned("ux", "accipiter")
+UX_BODY = "\n".join(UX_GOOD.split("\n")[1:-1])
+
+
+def _ro_reply(pm_inner=GOOD, ux_inner=UX_GOOD):
+    return f"{_block('pm', pm_inner)}\n{_block('ux', ux_inner)}"
+
+
+def test_opted_in_combined_pass_runs_return_only_and_posts_the_unwrapped_review(monkeypatch):
+    """Red before: the prompt carried no return-only wording, `runner` was
+    "local", and each block was posted as written, delimiters included."""
+    d = _combined_setup(monkeypatch, opted_in=True)
+    assert sd._lens_return_only_on_fly(sd.lens_by_name("pm"))
+    out, seen, posted = _run_combined(monkeypatch, d, _ro_reply(), real_poster=True)
+    assert sd._NO_NEOTOMA_NOTE in seen["prompt"]
+    assert B in seen["prompt"] and "Make no GitHub write" in seen["prompt"]
+    assert "only write you make" not in seen["prompt"]
+    assert seen["kwargs"].get("runner") != "local"
+    assert seen["kwargs"]["github_read_only"] is True
+    assert seen["kwargs"]["seated_reviewer"] is True
+    assert seen["kwargs"]["action_class"] == "lens_review:pm"
+    assert sorted(out) == ["pm", "ux"] and out.remote_lenses == {"pm", "ux"}
+    assert out["pm"].stdout == BODY and out["ux"].stdout == UX_BODY
+    # The single-lens return-only comment shape, so the readers agree on it.
+    assert posted == [
+        sd.compose_remote_lens_comment("pm", BODY, HEAD),
+        sd.compose_remote_lens_comment("ux", UX_BODY, HEAD),
+    ]
+    assert all(B not in body and E not in body for body in posted)
+    assert sd.verified_remote_comment("pm", "pavo", BODY, HEAD) == posted[0]
+
+
+def test_a_malformed_block_is_not_accepted_or_posted_and_runs_alone(monkeypatch):
+    """Red before: the block's own verdict was readable, so it was accepted
+    and posted as written although it is two review sections, not one."""
+    d = _combined_setup(monkeypatch, opted_in=True)
+    out, _, posted = _run_combined(monkeypatch, d, _ro_reply(pm_inner=f"{GOOD}\n{GOOD}"))
+    assert sorted(out) == ["ux"] and out.remote_lenses == {"ux"}
+    assert [lens for lens, _, _ in posted] == ["ux"]  # pm never reached the poster
+    assert posted[0][2] == {"ux": "accipiter"}
+
+
+def test_an_accepted_blocks_expectation_update_reaches_the_caller(monkeypatch):
+    """Red before: the pass returned a plain dict with no expectation updates
+    (AttributeError on `.expectation_updates`)."""
+    d = _combined_setup(monkeypatch, opted_in=True)
+    update = "**review_expectation (pm)**\n- [x] a"
+    out, _, _ = _run_combined(
+        monkeypatch, d, _ro_reply(pm_inner=f"{GOOD}\n{XB}\n{update}\n{XE}"))
+    assert out.expectation_updates == {"pm": update}
+    assert out["pm"].stdout == BODY and "pm" in out.remote_lenses
+
+
+def test_not_opted_in_combined_pass_is_called_exactly_as_before(monkeypatch):
+    """Unchanged when not opted in: local runner, no return-only wording,
+    blocks accepted as written and never unwrapped."""
+    d = _combined_setup(monkeypatch, opted_in=False)
+
+    def no_parse(*a, **k):
+        raise AssertionError("a local combined pass must not parse return-only")
+
+    monkeypatch.setattr(sd, "unwrap_returned_review", no_parse)
+    reply = "\n".join(
+        _block(x.lens, f"{sd.attribution_header(x.agent, f'{x.lens} lens panelist')}"
+               "\n**APPROVE**\nfine")
+        for x in (sd.lens_by_name("pm"), sd.lens_by_name("ux")))
+    out, seen, posted = _run_combined(monkeypatch, d, reply)
+    assert sorted(out) == ["pm", "ux"] and out.remote_lenses == frozenset()
+    assert out.expectation_updates == {}
     assert seen["kwargs"]["runner"] == "local"
     assert B not in seen["prompt"] and XB not in seen["prompt"]
-    # and the runner honours it: no Fly job is built for that call
-    monkeypatch.setattr(skill_runner.fly_runner, "build_job",
-                        lambda **kw: pytest.fail("a Fly job was built"))
-    assert skill_runner.fly_runner.wants_fly("local", "lens_review:pm") is False
+    assert sd._NO_NEOTOMA_NOTE not in seen["prompt"]
+    assert all(remote == {} for _, _, remote in posted)
 
 
 # ── a response the gate reader refuses is never made acceptable ─────────────

@@ -3043,6 +3043,24 @@ def unwrap_returned_review(
     return dataclasses.replace(result, stdout=parsed[0]), parsed[1]
 
 
+class CombinedPassResults(dict):
+    """The combined pass's accepted results (lens -> SkillResult, read as a
+    plain dict), plus the lenses among them that ran return-only and the
+    expectation updates those returned, so the panel loop publishes them the
+    same as a single return-only lens's."""
+
+    def __init__(
+        self,
+        results=(),
+        *,
+        remote_lenses=frozenset(),
+        expectation_updates: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(results)
+        self.remote_lenses: frozenset[str] = frozenset(remote_lenses)
+        self.expectation_updates: dict[str, str] = dict(expectation_updates or {})
+
+
 def compose_remote_lens_comment(lens: str, text: str, commit_sha: str) -> str:
     """The comment posted for a return-only lens: this lens's head marker, a
     newline, then the reviewed bytes unchanged (no normalising, no footer: any
@@ -9000,7 +9018,7 @@ class SwarmDispatcher:
         # pm, qa and ux in one mid-tier pass (ruling `combined_pm_qa_ux_pass`).
         # A lens whose block is missing or unreadable is simply absent here and
         # runs alone below, so the combined pass can only save work.
-        combined_results: dict[str, SkillResult] = {}
+        combined_results: CombinedPassResults = CombinedPassResults()
         # Lenses whose prompt was return-only (decided before the run, so a
         # Mac fallback of a Fly launch is still published by the dispatcher),
         # and the expectation updates they returned.
@@ -9101,6 +9119,12 @@ class SwarmDispatcher:
                     remote_lenses.add(lens.lens)
                     if returned_update:
                         expectation_updates[lens.lens] = returned_update
+            elif lens.lens in combined_results.remote_lenses:
+                # Already unwrapped and posted by the combined pass.
+                remote_lenses.add(lens.lens)
+                combined_update = combined_results.expectation_updates.get(lens.lens)
+                if combined_update:
+                    expectation_updates[lens.lens] = combined_update
             if result.ok:
                 reviews.append((lens.lens, result.stdout))
                 # ateles#795 amended ADR: the dispatcher — not the lens's own
@@ -15780,6 +15804,24 @@ class SwarmDispatcher:
                     f"Apply the `{lens.lens}` lens criteria below. Return all "
                     "publication content in this lens's final block.\n\n"
                 )
+            # Return-only: the lens's review is one delimited section inside
+            # its block, so `unwrap_returned_review` judges each block exactly
+            # as it judges a single return-only lens's reply.
+            shape = (
+                f"{review_carry.combined_delimiter(lens.lens)}\n"
+                f"{DISPATCHER_REVIEW_BEGIN}\n{header}\n**<VERDICT>**\n"
+                f"<findings for the {lens.lens} lens only>\n"
+                f"{DISPATCHER_REVIEW_END}\n"
+                + (
+                    "<this lens's expectation update section, if asked for above>\n"
+                    if checkoff_block
+                    else ""
+                )
+                if read_only
+                else f"{review_carry.combined_delimiter(lens.lens)}\n{header}\n"
+                "**<VERDICT>**\n"
+                f"<findings for the {lens.lens} lens only>\n"
+            )
             sections.append(
                 f"######## LENS `{lens.lens}` (agent `{lens.agent}`) ########\n"
                 f"{own_prompt}"
@@ -15787,9 +15829,7 @@ class SwarmDispatcher:
                 f"{expectation_block}\n\n{blocking_rules}"
                 f"{checkoff_block}{gate_block}{foundation_block}\n\n"
                 "Your block, exactly in this shape:\n"
-                f"{review_carry.combined_delimiter(lens.lens)}\n{header}\n"
-                "**<VERDICT>**\n"
-                f"<findings for the {lens.lens} lens only>\n"
+                f"{shape}"
                 + (
                     "State in your findings that this lens ran diff-only in the "
                     "combined pass (no checkout, nothing executed).\n"
@@ -15812,19 +15852,36 @@ class SwarmDispatcher:
                 "write you make.\n\n"
             )
             + checks_green_note(checks_green_head if checks_green_head == head else "")
-            + "Return ONE reply made of one block per lens, in this order. Each "
-            "block starts with its own delimiter line, then that lens's header "
-            "line EXACTLY as shown, then its verdict line (replace `**<VERDICT>**` "
-            "with your bold verdict token), then its findings. Never write one "
-            "lens's header or verdict inside another lens's block, do not quote "
-            "a verdict line anywhere, and add no artifact or attribution line of "
-            "your own after the last block. The dispatcher posts each block "
-            "under its head marker ("
-            + ", ".join(
-                f"`{compose_lens_review_marker(lens.lens, head)}`" for lens in lenses
+            + (
+                "Return ONE reply made of one block per lens, in this order. Each "
+                "block starts with its own delimiter line, then "
+                f"`{DISPATCHER_REVIEW_BEGIN}`, then that lens's header line "
+                "EXACTLY as shown, then its verdict line (replace `**<VERDICT>**` "
+                "with your bold verdict token), then its findings, then "
+                f"`{DISPATCHER_REVIEW_END}`. Never write one lens's header or "
+                "verdict inside another lens's block, do not quote a verdict line "
+                "anywhere, and add no artifact or attribution line of your own "
+                "after the last block. The dispatcher publishes each lens's review "
+                "and adds its head marker itself. Write no `<!-- review:... -->` "
+                "marker and, outside the block delimiter lines, never write the "
+                "text `review:` followed by a name: a block containing one is "
+                "refused. A review whose second line is not its own verdict is "
+                f"read as not passing. {GATE_VERDICT_POSITION_RULE}.\n\n"
+                if read_only
+                else "Return ONE reply made of one block per lens, in this order. Each "
+                "block starts with its own delimiter line, then that lens's header "
+                "line EXACTLY as shown, then its verdict line (replace `**<VERDICT>**` "
+                "with your bold verdict token), then its findings. Never write one "
+                "lens's header or verdict inside another lens's block, do not quote "
+                "a verdict line anywhere, and add no artifact or attribution line of "
+                "your own after the last block. The dispatcher posts each block "
+                "under its head marker ("
+                + ", ".join(
+                    f"`{compose_lens_review_marker(lens.lens, head)}`" for lens in lenses
+                )
+                + "); do not write a marker yourself. A block whose second line is "
+                f"not its own verdict is read as not passing. {GATE_VERDICT_POSITION_RULE}.\n\n"
             )
-            + "); do not write a marker yourself. A block whose second line is "
-            f"not its own verdict is read as not passing. {GATE_VERDICT_POSITION_RULE}.\n\n"
             + "\n".join(sections)
         )
 
@@ -15841,28 +15898,41 @@ class SwarmDispatcher:
         live_gates,
         signals,
         checks_green_head: str = "",
-    ) -> dict[str, SkillResult]:
+    ) -> CombinedPassResults:
         """Review the panel's pm/qa/ux lenses in one mid-tier dispatch.
 
         Returns a synthesized result per lens whose block the gate's own reader
         accepts (its header names that lens's agent, its verdict is readable),
         already posted as that lens's own head-marked comment. Anything less —
         fewer than two combinable lenses, a failed run, an unreadable or
-        missing block — leaves that lens out, and it runs alone as before."""
+        missing block — leaves that lens out, and it runs alone as before.
+
+        When the first lens's class is opted in to Fly the pass runs
+        return-only, as a single lens does: the class picks the runner, each
+        block must be exactly one well-formed review section
+        (`unwrap_returned_review`), and the result names those lenses and their
+        expectation updates for the panel loop to publish."""
         combinable = [item for item in panel if item.lens in review_carry.COMBINED_LENSES]
         if len(combinable) < 2:
-            return {}
+            return CombinedPassResults()
         try:
             first = combinable[0]
             if not all(self._lens_agent_prompt(item.agent) for item in combinable):
                 # A lens whose own prompt cannot be loaded cannot be reviewed
                 # in a pass that promises its full duties: run them one by one.
-                return {}
+                return CombinedPassResults()
+            # The run is launched as `first` under its class, so this is the
+            # same decision the runner makes for it.
+            return_only = _lens_return_only_on_fly(first)
+            # Return-only: the class decides the runner. Otherwise the local
+            # prompt has the lens post its own comments, so it stays on the Mac.
+            runner_kwargs = {} if return_only else {"runner": "local"}
             result = await run_skill(
                 first.agent,
                 self._combined_prompt(
                     trigger, combinable, expectations, review_head, parent,
-                    changed_files, checks_green_head=checks_green_head,
+                    changed_files, read_only=return_only,
+                    checks_green_head=checks_green_head,
                 ),
                 github_token=_token_for_agent_on_repo(first.agent, trigger.repository),
                 include_github_contract=True,
@@ -15879,40 +15949,77 @@ class SwarmDispatcher:
                 seated_reviewer=True,
                 # Read-only on Fly: a lens reviews and never delivers.
                 github_read_only=True,
-                # The combined pass keeps the local prompt, which has the lens
-                # post its own comments: it never runs return-only on Fly.
-                runner="local",
+                **runner_kwargs,
                 repository=trigger.repository,
                 action_class=model_tiering.lens_review_class(first.lens),
                 escalation_signals=signals,
             )
             if not result.ok:
-                return {}
+                return CombinedPassResults()
             blocks = review_carry.split_combined_reply(
                 result.stdout, [item.lens for item in combinable]
             )
             accepted: dict[str, SkillResult] = {}
+            updates: dict[str, str] = {}
             for item in combinable:
                 block = blocks.get(item.lens)
-                if block is None or lens_own_verdict(block, lens_agent=item.agent) is None:
+                if block is None:
+                    continue
+                if return_only:
+                    unwrapped, update = unwrap_returned_review(
+                        dataclasses.replace(result, stdout=block),
+                        item.agent, item.lens, review_head,
+                    )
+                    if not unwrapped.ok or lens_own_verdict(
+                        unwrapped.stdout, lens_agent=item.agent
+                    ) is None:
+                        continue  # never posted, signed or persisted: runs alone
+                    accepted[item.lens] = unwrapped
+                    if update:
+                        updates[item.lens] = update
+                    continue
+                if lens_own_verdict(block, lens_agent=item.agent) is None:
                     continue
                 accepted[item.lens] = dataclasses.replace(result, stdout=block)
-            posted = await self._post_combined_comments(trigger, accepted, review_head)
-            return {lens: res for lens, res in accepted.items() if lens in posted}
+            remote_agents = (
+                {item.lens: item.agent for item in combinable if item.lens in accepted}
+                if return_only
+                else {}
+            )
+            posted = await self._post_combined_comments(
+                trigger, accepted, review_head, remote_agents=remote_agents
+            )
+            kept = {lens: res for lens, res in accepted.items() if lens in posted}
+            return CombinedPassResults(
+                kept,
+                remote_lenses=set(kept) if return_only else (),
+                expectation_updates={
+                    lens: text for lens, text in updates.items() if lens in kept
+                },
+            )
         except Exception as exc:
             log.warning(
                 f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: combined "
                 f"pm/qa/ux pass failed ({exc}) — lenses run one by one"
             )
-            return {}
+            return CombinedPassResults()
 
     async def _post_combined_comments(
         self,
         trigger: SwarmTrigger,
         accepted: dict[str, SkillResult],
         review_head: str,
+        *,
+        remote_agents: dict[str, str] | None = None,
     ) -> set[str]:
-        """Post each accepted lens's own verdict comment; the lenses posted."""
+        """Post each accepted lens's own verdict comment; the lenses posted.
+
+        ``remote_agents`` (lens -> agent) names the lenses that ran
+        return-only. Each is posted exactly as a single return-only lens is:
+        `verified_remote_comment`'s shape, as the lens's own App when it has
+        one (`_post_remote_lens_verdict`), and not at all when the final
+        comment would be read differently."""
+        remote = remote_agents or {}
         posted: set[str] = set()
         combined_by = next(iter(accepted.values())).skill if accepted else ""
         if not accepted or not review_head:
@@ -15929,6 +16036,31 @@ class SwarmDispatcher:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 for lens, res in accepted.items():
+                    if lens in remote:
+                        if _github_app_token.lens_has_own_app(lens):
+                            if await self._post_remote_lens_verdict(
+                                client, url, trigger, lens, remote[lens],
+                                res.stdout, review_head,
+                            ):
+                                posted.add(lens)
+                            continue
+                        remote_body = verified_remote_comment(
+                            lens, remote[lens], res.stdout, review_head
+                        )
+                        if remote_body is None:
+                            log.error(
+                                f"[{DAEMON_NAME}] review:{lens} final comment would "
+                                f"be read differently on {trigger.repository}"
+                                f"#{trigger.number}: not posted"
+                            )
+                            continue
+                        resp = await client.post(
+                            url, json={"body": remote_body},
+                            headers=self._github_headers(trigger.repository),
+                        )
+                        resp.raise_for_status()
+                        posted.add(lens)
+                        continue
                     body = review_carry.compose_combined_comment(
                         res.stdout,
                         compose_lens_review_marker(lens, review_head),

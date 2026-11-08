@@ -206,6 +206,7 @@ def test_combined_lens_entrance_keeps_local_prompt_and_read_only_runner_contract
     prompt, kwargs = captured[0]
     assert kwargs["github_read_only"] is True
     assert "only write you make" in prompt
+    assert kwargs["runner"] == "local"
     _assert_lens_runner_guard(monkeypatch, kwargs)
     monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", True)
     monkeypatch.setattr(fly_runner, "FLY_VETTED_CLASSES", frozenset({kwargs["action_class"]}))
@@ -217,11 +218,16 @@ def test_combined_lens_entrance_keeps_local_prompt_and_read_only_runner_contract
         pending_gates=set(), live_gates={}, signals=None,
     ))
     assert len(captured) == 1
-    # The combined pass is out of scope for Fly: even opted in it keeps the
-    # local prompt and is pinned to the Mac.
-    assert "<<<DISPATCHER_EXPECTATION_UPDATE>>>" not in captured[0][0]
-    assert "only write you make" in captured[0][0]
-    assert captured[0][1]["runner"] == "local"
+    # Opted in, the combined pass runs return-only like a single lens: the
+    # return-only prompt, and the class (not a "local" pin) picks the runner.
+    assert "<<<DISPATCHER_EXPECTATION_UPDATE>>>" in captured[0][0]
+    assert "<<<DISPATCHER_REVIEW>>>" in captured[0][0]
+    assert "only write you make" not in captured[0][0]
+    assert "runner" not in captured[0][1]
+    assert captured[0][1]["github_read_only"] is True
+    assert captured[0][1]["seated_reviewer"] is True
+    assert captured[0][1]["repository"] == kwargs["repository"]
+    assert captured[0][1]["action_class"] == kwargs["action_class"]
 
 
 async def _async_providers():
