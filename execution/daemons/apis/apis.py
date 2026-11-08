@@ -2117,6 +2117,204 @@ async def _redispatch_deferred(
         _recovering.discard(entity_id)
 
 
+# ── Restart before launch: a Fly delivery left executing with no record ──────
+#
+# A Fly delivery task becomes EXECUTING well before its delivery receipt is
+# reserved: the run session is opened, the build claim taken and (for a
+# correction) the PR re-read first. An Apis restart in that window (the
+# redeploy after a merge to main is the usual cause, and its wait reads only
+# the Fly ledger) leaves the task EXECUTING with no receipt, no run and nobody
+# awaiting it. Seen on 2026-11-06: approved, dispatched, restarted 12 s later,
+# and no run followed.
+#
+# The startup sweep below finds exactly those tasks, once per process, and
+# names each to the operator. It never relaunches one: whether a stranded run
+# launched cannot always be told (a cleared receipt leaves none), and resuming
+# would reuse an approval the dispatcher already consumed. It touches only
+# tasks ``dispatch_task`` would send to Fly and writes nothing; the operator
+# checks for an earlier run and refiles through a fresh checkpoint.
+
+# Task ids inside ``dispatch_task`` in this process: the sweep leaves them to
+# the dispatch already running (an event can arrive while the sweep runs).
+_tasks_in_dispatch: dict[str, int] = {}
+
+
+def _fly_routed_delivery(snapshot: dict) -> bool:
+    """Whether ``dispatch_task`` would send this task to Fly: a builder of the
+    delivery class, naming a repository, with deliveries opted onto Fly. Never
+    raises; anything undeterminable is not Fly-routed (and is not touched)."""
+    try:
+        import fly_runner
+
+        if not fly_runner.delivery_opted_in() or not _dispatch_repo_from_snapshot(snapshot):
+            return False
+        skill = _resolve_skill(_routing_tags(snapshot),
+                               assigned_to=_canonical_assignee(snapshot.get("assigned_to")),
+                               owner=snapshot.get("owner"))
+        if not isinstance(skill, str) or skill in (_HUMAN_OWNED, _SESSION_OWNED):
+            return False
+        return build_delivery.is_delivery_dispatch(skill, _dispatch_action_class(skill, snapshot))
+    except Exception:  # noqa: BLE001 — not known to be Fly-routed: leave it
+        return False
+
+
+def _fly_delivery_recorded(snapshot: dict, entity_id: str) -> bool | None:
+    """Whether the Fly ledger holds any receipt, of any status, for this task:
+    on its delivery key, or naming its id. None: the ledger could not be read,
+    or a live receipt with no task id could be this task's."""
+    import fly_runner
+
+    in_flight, _ = _fly_run_state(snapshot, entity_id)
+    if in_flight is not False:
+        return in_flight
+    try:
+        receipts = build_delivery._delivery_ledger().snapshot().get("deliveries", {})
+    except (OSError, fly_runner.FlyLedgerError):
+        return None
+    # A receipt this reader cannot interpret could be this task's: the whole
+    # ledger is unknown rather than that entry skipped.
+    if not isinstance(receipts, dict) or not all(
+            isinstance(stored, str) and isinstance(entry, dict)
+            for stored, entry in receipts.items()):
+        return None
+    key = _fly_receipt_key(snapshot, entity_id)
+    if key and build_delivery._receipt_for(build_delivery.canonical_key(key), receipts) is not None:
+        return True
+    task_id = str(entity_id).strip()
+    return any(
+        str(entry.get("task_id") or "").strip() == task_id
+        or stored.strip().endswith(f"{build_delivery._TASK_KEY_MARK}{task_id}")
+        for stored, entry in receipts.items()
+    )
+
+
+_RECEIPT_UNKNOWN = ("its Fly receipt state is unknown because the Fly ledger could not be "
+                    "read (or a live run that records no task id may be its own), so it "
+                    "needs checking or refiling")
+
+
+def _unrecovered_notice(notifier: Notifier, entity_id: str, title: str, why: str) -> None:
+    """Name one task the restart sweep left executing and did not relaunch.
+
+    Every such notice says its launch is unknown: the sweep cannot always tell
+    (an unreadable ledger, a cleared receipt that leaves none, a task it
+    could not re-read), so no notice claims a run never launched, and each asks
+    the operator to look for an earlier run before refiling."""
+    notifier.send(
+        f"Fly delivery task was not recovered after an Apis restart: {title[:70]}\n"
+        f"  task={entity_id} is executing, and whether its Fly run launched is unknown. "
+        f"It was not relaunched because {why}. Nothing was dispatched; check for an "
+        "earlier Fly run of this task (its branch or pull request) before refiling it "
+        "through a fresh checkpoint.",
+        priority=Priority.WARN, handler=DAEMON_NAME,
+    )
+
+
+async def recover_unlaunched_fly_tasks(notifier: Notifier) -> dict:
+    """Report Fly delivery tasks a restart left EXECUTING before launch.
+
+    Selects tasks that are EXECUTING, Fly-routed (``_fly_routed_delivery``),
+    not being dispatched in this process, and with no Fly receipt
+    (``_fly_delivery_recorded`` False) or an unreadable ledger (None). Each is
+    named to the operator once; nothing is written and nothing is dispatched.
+    ``complete`` is False when the executing-task inventory could not be fully
+    read, in which case one notice says so and no task is judged. Never raises."""
+    counts = {"complete": False, "examined": 0, "not_fly": 0, "recorded": 0,
+              "unrecovered": 0}
+    try:
+        import fly_runner
+
+        if not fly_runner.delivery_opted_in():
+            counts["complete"] = True
+            return counts
+        # strict: a dropped row, a malformed page or a short count could be the
+        # stranded task, so the inventory is unknown rather than smaller.
+        rows = await asyncio.to_thread(
+            query_all_entities, "task",
+            snapshot_filters={"status": {"op": "eq", "value": TaskStatus.EXECUTING.value}},
+            strict=True)
+    except Exception as exc:  # noqa: BLE001 — never raise out of the sweep
+        rows, reason = None, f"{type(exc).__name__}: {exc}"
+    else:
+        reason = "the task query failed or returned rows it could not read"
+    if not isinstance(rows, list):
+        log.error(f"[{DAEMON_NAME}] unlaunched Fly task recovery: {reason}")
+        notifier.send(
+            "Apis could not fully read the executing-task inventory after a restart, so "
+            f"a Fly delivery cut off before launch may be stranded ({reason}). Look for "
+            "executing builder tasks with no Fly receipt.",
+            priority=Priority.WARN, handler=DAEMON_NAME)
+        return counts
+    for row in rows:
+        entity_id = row.get("entity_id") if isinstance(row, dict) else None
+        if not isinstance(entity_id, str) or not entity_id.strip():
+            # An unreadable row could be a stranded task: name it, never skip it.
+            counts["examined"] += 1
+            counts["unrecovered"] += 1
+            _unrecovered_notice(notifier, "(unknown)", "(unreadable task row)",
+                                "its task record could not be read")
+            continue
+        entity_id = entity_id.strip()
+        try:
+            await _recover_unlaunched_fly_task(entity_id, _record_snapshot(row) or row,
+                                               notifier, counts)
+        except Exception:  # noqa: BLE001 — one task must never stop the sweep
+            log.exception(f"[{DAEMON_NAME}] examining task {entity_id} crashed")
+            counts["unrecovered"] += 1
+            _unrecovered_notice(notifier, entity_id, "(untitled)",
+                                "examining it after the restart failed")
+    counts["complete"] = True
+    if counts["examined"]:
+        log.info(f"[{DAEMON_NAME}] unlaunched Fly task recovery: {counts}")
+    return counts
+
+
+async def _recover_unlaunched_fly_task(entity_id: str, listed: dict, notifier: Notifier,
+                                       counts: dict) -> None:
+    """Judge one listed EXECUTING task and report it if stranded. Reads only."""
+    counts["examined"] += 1
+    if not _fly_routed_delivery(listed):
+        counts["not_fly"] += 1
+        return
+    if entity_id in _tasks_in_dispatch or entity_id in _detached_runs_in_progress:
+        # Being dispatched right now: that dispatch owns it.
+        counts["recorded"] += 1
+        return
+    recorded = _fly_delivery_recorded(listed, entity_id)
+    if recorded:
+        # Launched, outcome unknown, or in flight: the existing paths own it.
+        counts["recorded"] += 1
+        return
+    title = str(listed.get("title") or "(untitled)")
+    if recorded is None:
+        counts["unrecovered"] += 1
+        _unrecovered_notice(notifier, entity_id, title, _RECEIPT_UNKNOWN)
+        return
+    # No receipt in the listing's view: re-read, so a task that moved on since
+    # the listing (or started dispatching) is not reported.
+    fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
+    if fresh is None:
+        counts["unrecovered"] += 1
+        _unrecovered_notice(notifier, entity_id, title, "it could not be re-read")
+        return
+    title = str(fresh.get("title") or title)
+    if (normalize_status(fresh.get("status")) != TaskStatus.EXECUTING.value
+            or not _fly_routed_delivery(fresh)
+            or entity_id in _tasks_in_dispatch or entity_id in _detached_runs_in_progress):
+        counts["recorded"] += 1
+        return
+    recorded = _fly_delivery_recorded(fresh, entity_id)
+    if recorded:
+        counts["recorded"] += 1
+        return
+    counts["unrecovered"] += 1
+    _unrecovered_notice(
+        notifier, entity_id, title,
+        _RECEIPT_UNKNOWN if recorded is None else
+        "the Fly ledger holds no receipt for it, and restart recovery never relaunches "
+        "a delivery (a cleared receipt would leave none either)")
+
+
 @dataclasses.dataclass(frozen=True)
 class _ApprovedCorrectionLifecycle:
     """Invocation-local input from the authenticated checkpoint consumer.
@@ -2304,7 +2502,22 @@ def _guessed_owner_is_low_stakes(skill: str, snapshot: dict) -> bool:
         return False
 
 
-async def dispatch_task(
+async def dispatch_task(entity_id: str, *args, **kwargs) -> bool | None:
+    """``_dispatch_task`` (its docstring has the contract), with the task held
+    in ``_tasks_in_dispatch`` until it returns, so the restart-recovery sweep
+    never reports a task this process is dispatching right now."""
+    _tasks_in_dispatch[entity_id] = _tasks_in_dispatch.get(entity_id, 0) + 1
+    try:
+        return await _dispatch_task(entity_id, *args, **kwargs)
+    finally:
+        left = _tasks_in_dispatch.get(entity_id, 1) - 1
+        if left > 0:
+            _tasks_in_dispatch[entity_id] = left
+        else:
+            _tasks_in_dispatch.pop(entity_id, None)
+
+
+async def _dispatch_task(
     entity_id: str,
     snapshot: dict,
     trigger: str,
@@ -5421,6 +5634,19 @@ async def main() -> None:
                 exc_info=True,
             )
 
+    # 6d. Fly deliveries cut off before launch: a task dispatched to Fly is
+    #     EXECUTING before its ledger receipt exists, so a restart in that
+    #     window strands it with nothing to resume it (2026-11-06). Report
+    #     those once, at startup; see recover_unlaunched_fly_tasks.
+    async def unlaunched_fly_recovery_sweep() -> None:
+        try:
+            await recover_unlaunched_fly_tasks(notifier)
+        except Exception as exc:  # noqa: BLE001 — never let recovery kill startup
+            log.error(
+                f"[{DAEMON_NAME}] unlaunched Fly task recovery failed: {exc}",
+                exc_info=True,
+            )
+
     # 7. Issue-pipeline resume sweep: the task watchdog above resumes `task`
     #    work left mid-flight by a restart, but the GitHub issue pipeline
     #    creates no task entity, so it was invisible to that sweeper — a
@@ -5576,6 +5802,7 @@ async def main() -> None:
         watchdog.run(notifier, watchdog_dispatch),
         reconciler.run(reconcile_dispatch),
         deferred_recovery_sweep(),
+        unlaunched_fly_recovery_sweep(),
         resume_sweep(),
         labelled_panel_sweep(),
         clear_closed_issue_markers_sweep(),
