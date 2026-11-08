@@ -611,6 +611,13 @@ def test_neotoma_unanswered_admission_is_a_bounded_deferral_never_failed(
     skill_dir.mkdir(parents=True)
     (skill_dir / 'SKILL.md').write_text('# cicada\n')
     monkeypatch.setattr(skill_runner, 'ATELES_REPO', tmp_path)
+    # Like test_fly_runner's `seam` fixture: pin every provider binary, so
+    # provider selection never depends on which CLIs the host has on PATH
+    # (with none, run_skill returned before the Fly path and this test
+    # passed vacuously).
+    monkeypatch.setattr(skill_runner, 'CLAUDE_BIN', '/usr/bin/claude-test')
+    monkeypatch.setattr(skill_runner, 'CODEX_BIN', '/usr/bin/codex-test')
+    monkeypatch.setattr(skill_runner, 'CURSOR_BIN', '/usr/bin/cursor-agent-test')
     monkeypatch.setattr(skill_runner, '_load_agent_def', lambda role: AgentDefinition(
         entity_id='e', name=role, prompt_markdown='You are cicada.', tool_allowlist='*',
         aauth_sub=f'{role}@ateles-swarm'))
@@ -638,6 +645,8 @@ def test_neotoma_unanswered_admission_is_a_bounded_deferral_never_failed(
         return original_send(self, message, *a, **kw)
     monkeypatch.setattr(_StubNotifier, 'send', send)
     release(joined)
+    # The Fly path was really taken; every assertion below depends on it.
+    assert receipts_at_launch, 'run_skill never reached fly_runner.build_job'
     statuses = [w.get('value') for w in joined['writes'] if w.get('field') == 'status']
     assert 'failed' not in statuses
     assert not any('marked FAILED' in n for n in notices)
