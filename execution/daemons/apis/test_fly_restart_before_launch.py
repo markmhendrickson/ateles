@@ -41,7 +41,7 @@ What these looked like RED:
 * ``test_receipt_on_the_key_with_no_owner_is_unknown``, same mutation: the
   ownerless receipt read as recorded (True) instead of None.
 * ``test_routing_check_that_raises_is_reported_as_unknown``, checked by
-  mutation: with ``_fly_routing`` returning ``(False, "")`` on an exception
+  mutation: with ``_fly_routing`` (now ``_fly_routed_delivery``) returning ``(False, "")`` on an exception
   (round 1's ``_fly_routed_delivery`` behaviour), no notice was sent and the
   task counted as ``not_fly``.
 * Round 2 (silent only on proof; one id identity), each checked by mutating
