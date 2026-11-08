@@ -1128,25 +1128,52 @@ def _same_description(sent: str, got: object) -> bool:
 
 
 @_boundary(PR_FAILED)
-def current_pr_body_sha256(*, repository: str, number: int, token: str) -> str:
-    """SHA-256 (hex) of PR *number*'s description exactly as GitHub returns
-    it now, UTF-8 encoded. A null description is the empty string, as Apis
-    hashes it. An unreadable PR or a body of any other type raises; the text
-    is never printed or raised."""
+def current_pr_body(*, repository: str, number: int, token: str) -> str:
+    """PR *number*'s description exactly as GitHub returns it now. An explicit
+    null ``body`` is GitHub's empty description, the empty string, as Apis
+    reads it. An answer with no ``body`` key, a ``body`` of any other type, or
+    an answer that is not an object is unknown, not empty: it raises, so an
+    unknown description never authorises a replacement. The text is never
+    printed or raised."""
     check_repository(repository)
     if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
         raise RepoWorkError(PR_FAILED, "the existing PR number is invalid")
     _require_time()
     status, payload = _api("GET", f"/repos/{repository}/pulls/{number}", token)
-    if status != 200 or not isinstance(payload, dict):
+    if status != 200 or not isinstance(payload, dict) or "body" not in payload:
         raise RepoWorkError(PR_FAILED, "the current pull request description could not be read",
                             _status_word(status))  # fmt: skip
-    body = payload.get("body")
+    body = payload["body"]
     if body is None:
-        body = ""  # GitHub's null description; Apis hashes it as "" too
+        return ""  # GitHub's null description; Apis hashes it as "" too
     if not isinstance(body, str):
         raise RepoWorkError(PR_FAILED, "the current pull request description could not be read")
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return body
+
+
+def pr_body_sha256(text: str) -> str:
+    """SHA-256 (hex) of a description's UTF-8 bytes, as Apis hashes it."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def current_pr_body_sha256(*, repository: str, number: int, token: str) -> str:
+    """SHA-256 (hex) of ``current_pr_body``; raises exactly when it does."""
+    return pr_body_sha256(current_pr_body(repository=repository, number=number, token=token))
+
+
+@_boundary(PR_FAILED)
+def write_pr_body(*, repository: str, number: int, token: str, body: str) -> None:
+    """One PATCH of PR *number*'s description, and nothing else: no read
+    before or after it, so a caller can place its own final read immediately
+    before this call. A non-200 raises; the text is never printed or raised."""
+    check_repository(repository)
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise RepoWorkError(PR_FAILED, "the existing PR number is invalid")
+    _require_time()
+    status, _ = _api("PATCH", f"/repos/{repository}/pulls/{number}", token, {"body": body})
+    if status != 200:
+        raise RepoWorkError(PR_FAILED, "the pull request description could not be updated",
+                            _status_word(status))  # fmt: skip
 
 
 def update_pr_body(*, repository: str, number: int, token: str, body: str) -> None:

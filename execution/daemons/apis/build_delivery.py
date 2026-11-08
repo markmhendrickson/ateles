@@ -900,8 +900,9 @@ def _gh_pr_body_view(repository: str, number: int, token: str) -> tuple[int, str
 def read_existing_pr_body(repository: str, target: ExistingPRTarget, token_provider) -> str | None:
     """The PR's current description, read at the admitted head, or None.
 
-    None means it could not be read: no token, a failed or malformed answer,
-    or a head other than the admitted one. Never raises; a correction is
+    None means it could not be read: no token, a failed or malformed answer
+    (not an object, no ``body`` key, a non-string non-null body), or a head
+    other than the admitted one. An explicit null body is ``""``. Never raises; a correction is
     never refused because its description could not be read.
     """
     try:
@@ -914,11 +915,15 @@ def read_existing_pr_body(repository: str, target: ExistingPRTarget, token_provi
         answer = json.loads(out)
         if not isinstance(answer, dict) or answer.get("headRefOid") != target.head_sha:
             return None
-        # A PR with no description has a null body: it is the empty string
-        # here and in the runner's check, so both sides hash the same text.
-        body = answer.get("body")
+        # A PR with no description has an explicit null body: it is the empty
+        # string here and in the runner's check, so both sides hash the same
+        # text. An answer with no ``body`` key at all is unknown, not empty:
+        # None, so no description is included and no hash is sent.
+        if "body" not in answer:
+            return None
+        body = answer["body"]
         if body is None:
-            body = ""
+            return ""
         return body if isinstance(body, str) else None
     except Exception:  # noqa: BLE001 - an unread body only withholds the replacement
         return None

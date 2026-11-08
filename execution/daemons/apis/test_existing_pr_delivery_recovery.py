@@ -800,3 +800,41 @@ def test_a_provider_retry_never_pairs_a_prompt_and_hash_from_different_reads(mon
     assert first_prompt == second_prompt and _shown(second_prompt) == "read 1"
     assert first_spec == second_spec
     assert second_spec["expected_description_sha256"] == hashlib.sha256(b"read 1").hexdigest()
+
+
+
+# -- Round 3: an omitted body key is unknown, not empty ----------------------
+# Through the real read (only the gh call and the target qualification are
+# stood in). On head c7603c64 the omitted-key case sent the hash of "" and
+# showed an empty description between the delimiters.
+
+
+@pytest.mark.parametrize("answer, shown", [
+    ({}, None),                 # no ``body`` key at all
+    ({"body": None}, ""),       # GitHub's explicit null: the empty description
+])
+def test_an_omitted_body_sends_no_hash_and_a_null_body_hashes_as_empty(monkeypatch, answer, shown):
+    import hashlib
+    import json
+    heads, launches = [], []
+    async def qualified(repository, target, *a, **kw):
+        heads.append(target.head_sha)
+        return None
+    def view(repository, number, token):
+        return 0, json.dumps({**answer, "headRefOid": heads[-1]})
+    async def run(skill, prompt, **kw):
+        launches.append((prompt, kw["fly_delivery"]))
+        return noop(skill)
+    monkeypatch.setattr(delivery, "_verify_existing_pr_target", qualified)
+    monkeypatch.setattr(delivery, "_gh_pr_body_view", view)
+    monkeypatch.setattr(apis, "_token_for_agent_on_repo", lambda skill, repo: "tok")
+    monkeypatch.setattr(apis, "run_skill", run)
+    asyncio.run(correct())
+    [(prompt, spec)] = launches
+    if shown is None:
+        assert "expected_description_sha256" not in spec
+        assert "The current PR description could not be read for this run" in prompt
+        assert delivery.FLY_PR_BODY_START not in prompt
+    else:
+        assert _shown(prompt) == shown
+        assert spec["expected_description_sha256"] == hashlib.sha256(b"").hexdigest()

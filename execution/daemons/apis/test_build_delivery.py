@@ -2843,6 +2843,11 @@ def test_a_new_pr_prompt_ignores_any_description():
     ((1, ""), None),
     ((0, "not json"), None),
     ((0, json.dumps({"body": 3, "headRefOid": "a" * 40})), None),
+    # Round 3: an omitted body key is unknown, not empty (on head c7603c64 it
+    # returned ""); an explicit null is GitHub's empty description.
+    ((0, json.dumps({"headRefOid": "a" * 40})), None),
+    ((0, json.dumps({"body": None, "headRefOid": "a" * 40})), ""),
+    ((0, json.dumps(["body", "a" * 40])), None),
 ])
 def test_reading_the_body_requires_the_admitted_head(monkeypatch, answer, expected):
     monkeypatch.setattr(build_delivery, "_gh_pr_body_view", lambda repo, number, token: answer)

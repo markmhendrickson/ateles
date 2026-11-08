@@ -738,7 +738,8 @@ def existing_correction(world, monkeypatch):
     git(src, "push", str(world["remote"]), f"HEAD:refs/heads/{branch}", home=world["home"])
     spec = {**DELIVERY, "branch": branch, "pr_number": "12", "head_sha": head}
     calls = []
-    state = {"state": "open", "merged": False}
+    # GitHub's explicit null description: the empty string on both sides.
+    state = {"state": "open", "merged": False, "body": None}
 
     def api(method, path, token, body=None):
         calls.append((method, path))
@@ -891,8 +892,8 @@ def test_optional_exact_head_is_only_absent_for_legacy_new_delivery(target):
 
 def _bound(spec, shown=""):
     """*spec* carrying the hash of the description the builder was shown. The
-    correction fixture's PR has no ``body`` key, which reads like GitHub's null:
-    the empty string on both sides."""
+    correction fixture's PR has an explicit null ``body``, GitHub's empty
+    description: the empty string on both sides."""
     return {**spec, "expected_description_sha256": hashlib.sha256(shown.encode("utf-8")).hexdigest()}
 
 
@@ -972,13 +973,15 @@ def test_an_unconfirmed_description_keeps_the_delivery_updated(world, existing_c
     assert "Replacement." not in record["stdout"] and "Some other text." not in record["stdout"]
 
 
-def test_a_description_differing_only_in_line_endings_is_confirmed(world, existing_correction, monkeypatch):
+def test_a_description_read_back_with_other_line_endings_is_not_confirmed(world, existing_correction,
+                                                                          monkeypatch):  # fmt: skip
+    # "updated" means the read-back equals the replacement exactly.
     spec, _, _ = existing_correction
     spec = _bound(spec)
-    _allow_patch(monkeypatch, readback=(200, "# Title\r\n\r\nReplacement.\r\n"))
+    _allow_patch(monkeypatch, readback=(200, "# Title\r\n\r\nReplacement."))
     rc, record = _run(_job(world["tmp"], delivery=spec), _with_body(world, "# Title\n\nReplacement.\n"))
     assert rc == 0 and record["delivery_status"] == "updated"
-    assert record["pr_description"] == "updated"
+    assert record["pr_description"] == "not_confirmed"
 
 
 def test_a_failed_description_update_keeps_the_delivery_updated(world, existing_correction, monkeypatch):
@@ -1086,3 +1089,100 @@ def test_a_new_delivery_never_carries_a_description_hash():
     raw = {**DELIVERY, "expected_description_sha256": "a" * 64}
     with pytest.raises(run_job.JobError):
         run_job._load_delivery(raw, REPO, {run_job.DELIVERY_TOKEN_NAME: TOKEN}, ())
+
+
+
+# -- Round 3: an unknown description is not an empty one, and the final read
+# sits immediately before the write ---------------------------------------
+# On head c7603c64: the omitted-key test sent one PATCH and reported
+# "updated" (the missing key read as GitHub's null); the call-order and
+# stale-between-reads tests could not run (``current_pr_body`` and
+# ``write_pr_body`` did not exist, and the only read before the PATCH was the
+# first check); no result carried ``pr_description_replaced_sha256``.
+
+
+def test_an_omitted_body_key_is_unverified_and_writes_nothing(world, existing_correction, monkeypatch, capsys):
+    spec, _, state = existing_correction
+    del state["body"]  # an answer with no description at all, not a null one
+    patches = _allow_patch(monkeypatch)
+    rc, record = _run(_job(world["tmp"], delivery=_bound(spec)), _with_body(world, "Replacement.\n"))
+    assert patches == []
+    assert rc == 0 and record["delivery_status"] == "updated"
+    assert record["pr_description"] == "unverified"
+    assert "pr_description_replaced_sha256" not in record
+    assert "its current text could not be read" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("body", [5, ["x"], {"text": "x"}])
+def test_a_non_string_body_is_unverified_and_writes_nothing(world, existing_correction, monkeypatch, body):
+    spec, _, state = existing_correction
+    state["body"] = body
+    patches = _allow_patch(monkeypatch)
+    rc, record = _run(_job(world["tmp"], delivery=_bound(spec)), _with_body(world, "Replacement.\n"))
+    assert patches == [] and record["pr_description"] == "unverified"
+
+
+def _recording(monkeypatch):
+    """Record, in order, every GitHub call and every description read."""
+    order = []
+    api, read = rd._api, rd.current_pr_body
+
+    def recorded_api(method, path, token, body=None):
+        order.append((method, path))
+        return api(method, path, token, body)
+
+    def recorded_read(**kw):
+        order.append("read")
+        return read(**kw)
+    monkeypatch.setattr(rd, "_api", recorded_api)
+    monkeypatch.setattr(rd, "current_pr_body", recorded_read)
+    return order
+
+
+def test_the_final_read_is_immediately_before_the_write(world, existing_correction, monkeypatch):
+    spec, _, state = existing_correction
+    state["body"] = "Shown."
+    _allow_patch(monkeypatch)
+    order = _recording(monkeypatch)
+    rc, record = _run(_job(world["tmp"], delivery=_bound(spec, "Shown.")), _with_body(world, "Replacement.\n"))
+    assert record["pr_description"] == "updated"
+    pr = f"/repos/{REPO}/pulls/12"
+    at = order.index(("PATCH", pr))
+    # first check, final read, write, read-back: nothing between the final read and the write
+    assert order[at - 4:at + 3] == ["read", ("GET", pr), "read", ("GET", pr), ("PATCH", pr), "read", ("GET", pr)]
+    assert order[at - 2:at + 3] == ["read", ("GET", pr), ("PATCH", pr), "read", ("GET", pr)]
+    assert order.count(("PATCH", pr)) == 1
+
+
+def test_a_description_changed_after_the_first_check_is_stale(world, existing_correction, monkeypatch, capsys):
+    spec, _, state = existing_correction
+    state["body"] = "Edited between the first check and the final read."
+    shown = hashlib.sha256(b"Shown.").hexdigest()
+    monkeypatch.setattr(rd, "current_pr_body_sha256", lambda **kw: shown)  # the first check still matched
+    patches = _allow_patch(monkeypatch)
+    rc, record = _run(_job(world["tmp"], delivery=_bound(spec, "Shown.")), _with_body(world, "Replacement.\n"))
+    assert patches == []
+    assert rc == 0 and record["pr_description"] == "stale"
+    assert "pr_description_replaced_sha256" not in record
+    assert "changed after the builder was shown it" in capsys.readouterr().out
+
+
+def test_the_replaced_description_hash_is_of_the_text_read_before_the_write(world, existing_correction,
+                                                                           monkeypatch):  # fmt: skip
+    spec, _, state = existing_correction
+    state["body"] = "Shown.\r\n"
+    _allow_patch(monkeypatch)
+    _recording(monkeypatch)
+    read = rd.current_pr_body
+    texts = []
+
+    def keep(**kw):
+        texts.append(read(**kw))
+        return texts[-1]
+    monkeypatch.setattr(rd, "current_pr_body", keep)
+    rc, record = _run(_job(world["tmp"], delivery=_bound(spec, "Shown.\r\n")), _with_body(world, "Replacement.\n"))
+    assert record["pr_description"] == "updated"
+    before_write = texts[-2]  # the read-back is the last; the final read is the one before it
+    assert before_write == "Shown.\r\n"
+    assert record["pr_description_replaced_sha256"] == hashlib.sha256(before_write.encode("utf-8")).hexdigest()
+    assert texts[-1] == "Replacement."

@@ -246,6 +246,9 @@ class DeliveryRun:
     # could not be read; not written); empty when the correction supplied
     # none. The delivery's status never depends on it.
     pr_description: str = ""
+    # SHA-256 of the description a correction's write replaced, read just
+    # before that write; empty when nothing was written.
+    pr_description_replaced_sha256: str = ""
     work: Any = None
     base: str = ""
 
@@ -1027,6 +1030,8 @@ def build_record(
             record["pr_number"] = delivery.pr_number
         if delivery.pr_description:
             record["pr_description"] = delivery.pr_description
+        if delivery.pr_description_replaced_sha256:
+            record["pr_description_replaced_sha256"] = delivery.pr_description_replaced_sha256
     return record
 
 
@@ -1461,8 +1466,9 @@ def _deliver(job: Job, delivery: DeliveryRun, rc: int, timed_out: bool,
                                            branch=spec.branch, base_branch=spec.base_branch,
                                            head=imported.head, token=token,
                                            wait_for_head=True)
-                delivery.pr_description = _update_pr_body(rd, work, job, pr, token,
-                                                          spec.expected_description_sha256)
+                (delivery.pr_description,
+                 delivery.pr_description_replaced_sha256) = _update_pr_body(
+                    rd, work, job, pr, token, spec.expected_description_sha256)
             else:
                 title, body = _pr_text(rd, work, job.secrets)
                 pr = rd.open_or_update_pr(repository=job.repository, branch=spec.branch,
@@ -1504,46 +1510,75 @@ def _pr_text(rd, work, secrets: dict[str, str]) -> tuple[str, str]:
     return scrub(title, secrets), scrub(body, secrets)
 
 
-def _update_pr_body(rd, work, job, pr, token: str, expected_sha256: str | None) -> str:
+def _update_pr_body(rd, work, job, pr, token: str,
+                    expected_sha256: str | None) -> tuple[str, str]:  # fmt: skip
     """Apply a correction's replacement description, when it wrote one, and
-    say what happened: ``updated`` (read back and confirmed), ``not_confirmed``
-    (attempted, not confirmed), ``stale`` or ``unverified`` (not written) or
-    ``""`` (none supplied). The code has already landed, so none of these ever
-    changes the delivery's outcome: each is reported in one line and on the
-    record.
+    say what happened, with the SHA-256 of the description the write replaced
+    (``""`` when nothing was written). The outcome is ``updated`` (read back
+    and equal to the replacement exactly), ``not_confirmed`` (attempted, not
+    confirmed), ``stale`` or ``unverified`` (not written) or ``""`` (none
+    supplied). The code has already landed, so none of these ever changes the
+    delivery's outcome: each is reported in one line and on the record.
 
     The replacement is written only while the PR's current description, read
-    now with the job's own token, hashes to *expected_sha256*: the text the
-    builder was shown; ``None`` (no hash) never writes. A description edited during the run is never
-    overwritten, and a replacement not bound to shown text is never written,
-    so text injected through the description can at most shape a replacement
-    of that same description."""
+    with the job's own token, hashes to *expected_sha256*: the text the
+    builder was shown; ``None`` (no hash) never writes. A description that is
+    unknown (unreadable, or an answer without a description) is never
+    treated as empty, so it never authorises a write.
+
+    GitHub's pull-request update has no conditional form, so the check and
+    the write are two calls; this narrows the window between them, it does
+    not close it. The final read happens immediately before the write, in
+    this function, with no other call between them. An edit landing between
+    that final read and the write can still be replaced: the window is one
+    request long. GitHub keeps the earlier text in the description's edit
+    history, so it can be recovered, and the replaced text's hash is recorded
+    on the job's result."""
     try:
         body = scrub(rd.read_pr_body(work), job.secrets)
     except rd.RepoWorkError:
         body = ""
     if not body:
-        return ""
+        return "", ""
     if expected_sha256 is None:
         print("fly-runner: the pull request description was not updated: "
               "the builder was not shown a description to replace", flush=True)
-        return "unverified"
+        return "unverified", ""
+    where = {"repository": job.repository, "number": pr.number, "token": token}
+    unread = ("fly-runner: the pull request description was not updated: "
+              "its current text could not be read")
+    changed = ("fly-runner: the pull request description was not updated: "
+               "it changed after the builder was shown it")
     try:
-        current = rd.current_pr_body_sha256(repository=job.repository, number=pr.number, token=token)
+        first = rd.current_pr_body_sha256(**where)
     except rd.RepoWorkError:
-        print("fly-runner: the pull request description was not updated: "
-              "its current text could not be read", flush=True)
-        return "unverified"
-    if current != expected_sha256:
-        print("fly-runner: the pull request description was not updated: "
-              "it changed after the builder was shown it", flush=True)
-        return "stale"
+        print(unread, flush=True)
+        return "unverified", ""
+    if first != expected_sha256:
+        print(changed, flush=True)
+        return "stale", ""
+    # The final read, then the write: nothing may be placed between these two calls.
     try:
-        rd.update_pr_body(repository=job.repository, number=pr.number, token=token, body=body)
+        replaced = rd.pr_body_sha256(rd.current_pr_body(**where))
+    except rd.RepoWorkError:
+        print(unread, flush=True)
+        return "unverified", ""
+    if replaced != expected_sha256:
+        print(changed, flush=True)
+        return "stale", ""
+    try:
+        rd.write_pr_body(**where, body=body)
     except rd.RepoWorkError:
         print("fly-runner: the pull request description update could not be confirmed", flush=True)
-        return "not_confirmed"
-    return "updated"
+        return "not_confirmed", replaced
+    try:
+        confirmed = rd.current_pr_body(**where) == body
+    except rd.RepoWorkError:
+        confirmed = False
+    if not confirmed:
+        print("fly-runner: the pull request description update could not be confirmed", flush=True)
+        return "not_confirmed", replaced
+    return "updated", replaced
 
 
 def _end_delivery() -> None:

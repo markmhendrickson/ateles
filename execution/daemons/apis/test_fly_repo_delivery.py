@@ -1677,9 +1677,26 @@ def test_current_pr_body_sha256_hashes_githubs_exact_text(monkeypatch, body, tex
     assert calls == [("GET", "/repos/owner/repo/pulls/5", "tok", None)]
 
 
-@pytest.mark.parametrize("answer", [(404, None), (0, None), (200, None), (200, {"body": 5})])
+@pytest.mark.parametrize("answer", [(404, None), (0, None), (200, None), (200, {"body": 5}),
+                                    (200, {}), (200, {"number": 5}), (200, ["body"])])  # fmt: skip
 def test_an_unreadable_current_description_raises(monkeypatch, answer):
     monkeypatch.setattr(rd, "_api", _pr_api([], answer))
     with pytest.raises(rd.RepoWorkError) as exc:
         rd.current_pr_body_sha256(repository="owner/repo", number=5, token="tok")
     assert exc.value.category == rd.PR_FAILED
+
+
+
+# Round 3: an omitted body key is unknown, never the empty description. On
+# head c7603c64 the ``{}`` and ``{"number": 5}`` cases above returned the hash
+# of "" instead of raising.
+def test_an_explicit_null_body_is_the_empty_description(monkeypatch):
+    monkeypatch.setattr(rd, "_api", _pr_api([], (200, {"body": None})))
+    assert rd.current_pr_body(repository="owner/repo", number=5, token="tok") == ""
+
+
+def test_write_pr_body_sends_one_patch_and_reads_nothing(monkeypatch):
+    calls = []
+    monkeypatch.setattr(rd, "_api", _pr_api(calls, (200, None)))
+    rd.write_pr_body(repository="owner/repo", number=5, token="tok", body="New.")
+    assert calls == [("PATCH", "/repos/owner/repo/pulls/5", "tok", {"body": "New."})]
