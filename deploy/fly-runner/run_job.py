@@ -235,9 +235,12 @@ class DeliveryRun:
     commit: str = ""
     pr_number: int | None = None
     pr_url: str = ""
-    # A correction's replacement description: ``updated`` (read back and
+    # A correction's change-summary comment: ``posted`` (read back and
     # confirmed) or ``not_confirmed`` (attempted, not confirmed); empty when
-    # the correction supplied none. The delivery's status never depends on it.
+    # the summary was empty or unreadable. ``+ignored`` (or ``ignored`` alone)
+    # marks a builder-written pull_request_body.md, which is never applied.
+    # The name is kept for the existing record and receipt consumers. The
+    # delivery's status never depends on it.
     pr_description: str = ""
     work: Any = None
     base: str = ""
@@ -1447,7 +1450,7 @@ def _deliver(job: Job, delivery: DeliveryRun, rc: int, timed_out: bool,
                                            branch=spec.branch, base_branch=spec.base_branch,
                                            head=imported.head, token=token,
                                            wait_for_head=True)
-                delivery.pr_description = _update_pr_body(rd, work, job, pr, token)
+                delivery.pr_description = _post_change_summary(rd, work, job, pr, imported.head, token)
             else:
                 title, body = _pr_text(rd, work, job.secrets)
                 pr = rd.open_or_update_pr(repository=job.repository, branch=spec.branch,
@@ -1489,24 +1492,36 @@ def _pr_text(rd, work, secrets: dict[str, str]) -> tuple[str, str]:
     return scrub(title, secrets), scrub(body, secrets)
 
 
-def _update_pr_body(rd, work, job, pr, token: str) -> str:
-    """Apply a correction's replacement description, when it wrote one, and
-    say what happened: ``updated`` (read back and confirmed), ``not_confirmed``
-    (attempted, not confirmed) or ``""`` (none supplied). The code has already
-    landed, so a failure here never changes the delivery's outcome: it is
-    reported in one line and on the record."""
+def _post_change_summary(rd, work, job, pr, head: str, token: str) -> str:
+    """Post a correction's change summary as one comment on its pull request,
+    scrubbed of every job secret, and say what happened: ``posted`` (read back
+    and confirmed), ``not_confirmed`` (attempted, not confirmed) or ``""``
+    (empty or unreadable; nothing posted). The description is never written;
+    a builder-written ``pull_request_body.md`` only adds ``ignored``. The code
+    has already landed, so a failure here never changes the delivery's
+    outcome: it is reported in one line and on the record."""
     try:
-        body = scrub(rd.read_pr_body(work), job.secrets)
+        ignored = "ignored" if rd.read_pr_body(work) else ""
     except rd.RepoWorkError:
-        body = ""
-    if not body:
-        return ""
+        ignored = ""
+    if ignored:
+        print("fly-runner: pull_request_body.md was ignored; a correction never changes the description",
+              flush=True)  # fmt: skip
     try:
-        rd.update_pr_body(repository=job.repository, number=pr.number, token=token, body=body)
+        summary = scrub(rd.read_change_summary(work), job.secrets)
     except rd.RepoWorkError:
-        print("fly-runner: the pull request description update could not be confirmed", flush=True)
-        return "not_confirmed"
-    return "updated"
+        summary = ""
+    outcome = ""
+    if summary.strip():
+        body = f"Correction round summary (run {job.run_id}, head {head[:7]}):\n\n{summary}"
+        try:
+            outcome = "posted" if rd.post_pr_comment(repository=job.repository, number=pr.number,
+                                                     token=token, body=body) else "not_confirmed"
+        except rd.RepoWorkError:
+            outcome = "not_confirmed"
+        if outcome != "posted":
+            print("fly-runner: the change summary comment could not be confirmed", flush=True)
+    return "+".join(part for part in (outcome, ignored) if part)
 
 
 def _end_delivery() -> None:

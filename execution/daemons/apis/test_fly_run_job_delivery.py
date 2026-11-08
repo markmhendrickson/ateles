@@ -738,8 +738,17 @@ def existing_correction(world, monkeypatch):
     spec = {**DELIVERY, "branch": branch, "pr_number": "12", "head_sha": head}
     calls = []
     state = {"state": "open", "merged": False}
+    comments = world.setdefault("comments", [])
 
     def api(method, path, token, body=None):
+        # The change-summary comment is append-only; it is recorded apart
+        # from the PR traffic, which must stay read-only.
+        if method == "POST" and path == f"/repos/{REPO}/issues/12/comments":
+            comments.append(("POST", token, body))
+            return 201, {"id": 900 + len(comments)}
+        if method == "GET" and path.startswith(f"/repos/{REPO}/issues/comments/"):
+            comments.append(("GET", token, path))
+            return 200, {"body": comments[-2][2]["body"]}
         calls.append((method, path))
         assert method == "GET", "an existing correction attempted PR publication"
         if path == f"/repos/{REPO}":
@@ -885,12 +894,12 @@ def test_optional_exact_head_is_only_absent_for_legacy_new_delivery(target):
     assert spec.head_sha == ("a" * 40 if target else "")
 
 
-# ── A correction's replacement PR description ────────────────────────────────
+# ── A correction's change summary is a comment, never a description ──────────
 
 
 def _with_body(world, body, **kw):
-    """The stand-in CLI, also writing *body* to the replacement-description
-    file beside the change summary."""
+    """The stand-in CLI, also writing *body* to ``pull_request_body.md``
+    beside the change summary."""
     agent = _agent(world, **kw)
 
     def runner(argv, env, stdin, timeout, cwd, ident=None, collect_by=None):
@@ -901,84 +910,92 @@ def _with_body(world, body, **kw):
     return runner
 
 
-def _allow_patch(monkeypatch, status=200, readback=None, calls=None):
-    """Let the correction fixture's API also take a PATCH, recording it. Every
-    later GET of the PR answers with the patched body, unless *readback* gives
-    ``(status, body)`` for that read-back instead. *calls* collects the
-    methods of PATCH and of every GET after it."""
-    gets, patches = rd._api, []
+def _comment_readback(monkeypatch, answer):
+    """Make the comment read-back answer *answer* ``(status, payload)``."""
+    inner = rd._api
 
     def api(method, path, token, body=None):
-        if patches and calls is not None:
-            calls.append(method)
-        if method == "PATCH":
-            patches.append((path, token, body))
-            if calls is not None:
-                calls.append(method)
-            return status, None
-        got_status, payload = gets(method, path, token, body)
-        if patches and path == f"/repos/{REPO}/pulls/12":
-            if readback is not None:
-                return readback[0], ({**payload, "body": readback[1]} if readback[0] == 200 else None)
-            return got_status, {**payload, "body": patches[-1][2]["body"]}
-        return got_status, payload
+        got = inner(method, path, token, body)
+        if method == "GET" and path.startswith(f"/repos/{REPO}/issues/comments/"):
+            return answer
+        return got
     monkeypatch.setattr(rd, "_api", api)
-    return patches
 
 
-def test_existing_correction_replaces_the_description_scrubbed(world, existing_correction, monkeypatch):
-    spec, _, _ = existing_correction
-    calls = []
-    patches = _allow_patch(monkeypatch, calls=calls)
+def test_a_correction_posts_its_summary_as_one_comment(world, existing_correction):
+    # Red on main: no comment was posted (the summary reached nobody) and
+    # pr_description was absent from the record.
+    spec, calls, _ = existing_correction
     rc, record = _run(_job(world["tmp"], delivery=spec),
-                      _with_body(world, f"# New description\n\nNow true. {TOKEN}\n"))
+                      _agent(world, pr_text="# Round 2\n\nFinding 1: guarded the read.\n"))
     assert rc == 0 and record["delivery_status"] == "updated" and record["pr_number"] == 12
-    assert calls == ["PATCH", "GET"] and record["pr_description"] == "updated"
-    assert len(patches) == 1
-    path, token, body = patches[0]
-    assert path == f"/repos/{REPO}/pulls/12" and token == TOKEN
-    assert set(body) == {"body"}
-    assert body["body"].startswith("# New description\n\nNow true. ") and TOKEN not in body["body"]
+    posts = [c for c in world["comments"] if c[0] == "POST"]
+    assert len(posts) == 1 and posts[0][1] == TOKEN
+    head = record["delivery_commit"][:7]
+    assert posts[0][2] == {"body": f"Correction round summary (run fly-deliver-1, head {head}):\n\n"
+                                   "# Round 2\n\nFinding 1: guarded the read."}
+    assert [c[0] for c in world["comments"]] == ["POST", "GET"]
+    assert all(method == "GET" for method, _ in calls)  # the description is never written
+    assert record["pr_description"] == "posted"
 
 
-def test_existing_correction_without_a_body_file_sends_no_patch(world, existing_correction, monkeypatch):
+@pytest.mark.parametrize("answer", [(200, {"body": "Some other text."}), (404, None)])
+def test_an_unconfirmed_comment_keeps_the_delivery_updated(world, existing_correction,
+                                                           monkeypatch, answer):
     spec, _, _ = existing_correction
-    patches = _allow_patch(monkeypatch)
-    _, record = _run(_job(world["tmp"], delivery=spec), _agent(world))
-    assert record["delivery_status"] == "updated" and patches == []
+    _comment_readback(monkeypatch, answer)
+    rc, record = _run(_job(world["tmp"], delivery=spec), _agent(world))
+    assert rc == 0 and record["delivery_status"] == "updated" and record["pr_number"] == 12
+    assert record["pr_description"] == "not_confirmed"
+    assert "Some other text." not in record["stdout"]
+
+
+def test_a_refused_comment_keeps_the_delivery_updated(world, existing_correction, monkeypatch):
+    spec, _, _ = existing_correction
+    inner = rd._api
+
+    def api(method, path, token, body=None):
+        if method == "POST":
+            return 403, None
+        return inner(method, path, token, body)
+    monkeypatch.setattr(rd, "_api", api)
+    rc, record = _run(_job(world["tmp"], delivery=spec), _agent(world))
+    assert rc == 0 and record["delivery_status"] == "updated"
+    assert record["pr_url"] == f"https://github.com/{REPO}/pull/12"
+    assert record["pr_description"] == "not_confirmed"
+
+
+@pytest.mark.parametrize("pr_text", [None, "   \n"])
+def test_an_empty_summary_posts_nothing(world, existing_correction, pr_text):
+    spec, calls, _ = existing_correction
+    _, record = _run(_job(world["tmp"], delivery=spec), _agent(world, pr_text=pr_text))
+    assert record["delivery_status"] == "updated"
+    assert world["comments"] == [] and all(method == "GET" for method, _ in calls)
     assert "pr_description" not in record
 
 
-@pytest.mark.parametrize("readback", [(200, "Some other text."), (404, None)])
-def test_an_unconfirmed_description_keeps_the_delivery_updated(world, existing_correction,
-                                                               monkeypatch, readback):
+@pytest.mark.parametrize("pr_text,expected", [(None, "ignored"),
+                                              ("# Round\n\nFixed.\n", "posted+ignored")])
+def test_a_builder_written_description_is_ignored(world, existing_correction, pr_text, expected):
+    # Red on main: the runner PATCHed the PR description with this file, which
+    # the fixture refuses ("an existing correction attempted PR publication").
+    spec, calls, _ = existing_correction
+    _, record = _run(_job(world["tmp"], delivery=spec),
+                     _with_body(world, "# New description\n", pr_text=pr_text))
+    assert record["delivery_status"] == "updated"
+    assert all(method == "GET" for method, _ in calls)
+    assert [c[0] for c in world["comments"]] == ([] if pr_text is None else ["POST", "GET"])
+    assert record["pr_description"] == expected
+
+
+def test_secrets_in_the_summary_are_scrubbed_before_posting(world, existing_correction):
     spec, _, _ = existing_correction
-    calls = []
-    patches = _allow_patch(monkeypatch, readback=readback, calls=calls)
-    rc, record = _run(_job(world["tmp"], delivery=spec), _with_body(world, "Replacement.\n"))
-    assert len(patches) == 1 and calls == ["PATCH", "GET"]
-    assert rc == 0 and record["delivery_status"] == "updated" and record["pr_number"] == 12
-    assert record["pr_description"] == "not_confirmed"
-    assert "Replacement." not in record["stdout"] and "Some other text." not in record["stdout"]
-
-
-def test_a_description_differing_only_in_line_endings_is_confirmed(world, existing_correction, monkeypatch):
-    spec, _, _ = existing_correction
-    _allow_patch(monkeypatch, readback=(200, "# Title\r\n\r\nReplacement.\r\n"))
-    rc, record = _run(_job(world["tmp"], delivery=spec), _with_body(world, "# Title\n\nReplacement.\n"))
-    assert rc == 0 and record["delivery_status"] == "updated"
-    assert record["pr_description"] == "updated"
-
-
-def test_a_failed_description_update_keeps_the_delivery_updated(world, existing_correction, monkeypatch):
-    spec, _, _ = existing_correction
-    patches = _allow_patch(monkeypatch, status=422)
-    rc, record = _run(_job(world["tmp"], delivery=spec), _with_body(world, "Replacement.\n"))
-    assert len(patches) == 1
-    assert rc == 0 and record["delivery_status"] == "updated" and record["pr_number"] == 12
-    assert record["pr_url"] == f"https://github.com/{REPO}/pull/12"
-    assert record["pr_description"] == "not_confirmed"
-    assert "Replacement." not in record["stdout"]
+    _, record = _run(_job(world["tmp"], delivery=spec),
+                     _agent(world, pr_text=f"# Round\n\nLeaked {TOKEN} here.\n"))
+    posts = [c for c in world["comments"] if c[0] == "POST"]
+    assert len(posts) == 1 and TOKEN not in posts[0][2]["body"]
+    assert posts[0][2]["body"].endswith(" here.")
+    assert record["pr_description"] == "posted"
 
 
 def test_a_new_pull_request_ignores_the_body_file(world):

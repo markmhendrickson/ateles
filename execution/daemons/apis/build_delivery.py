@@ -917,10 +917,9 @@ def fly_delivery_instructions(plan: FlyDeliveryPlan) -> str:
             "Correct only this scoped task. Preserve prior WIP, findings and review/attempt history. "
             "Do not change branch/remote, push, open another PR or merge. Commit before finishing; "
             "the runner conditionally updates only this existing PR. No changes is a held outcome, not completion. "
-            f"Write the change summary to {fly_runner.PR_FILE_PLACEHOLDER}; it does not replace the PR body. "
-            "If this correction makes the current PR description untrue, also write the complete "
-            "replacement description to `pull_request_body.md` in the same folder as that summary file; "
-            "otherwise do not write it, and the description stays as it is."
+            f"Write the change summary to {fly_runner.PR_FILE_PLACEHOLDER}. The runner posts it on the "
+            "pull request as a comment for reviewers, so it must say what this round changed for each "
+            "finding. A correction never changes the pull request description."
         )
     closes = (f" Reference the issue in the body with `Closes #{plan.issue_number}`."
               if plan.issue_number else "")  # fmt: skip
