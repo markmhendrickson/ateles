@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import errno
+import hashlib
 import json
 import os
 import stat
@@ -888,6 +889,13 @@ def test_optional_exact_head_is_only_absent_for_legacy_new_delivery(target):
 # ── A correction's replacement PR description ────────────────────────────────
 
 
+def _bound(spec, shown=""):
+    """*spec* carrying the hash of the description the builder was shown. The
+    correction fixture's PR has no ``body`` key, which reads like GitHub's null:
+    the empty string on both sides."""
+    return {**spec, "expected_description_sha256": hashlib.sha256(shown.encode("utf-8")).hexdigest()}
+
+
 def _with_body(world, body, **kw):
     """The stand-in CLI, also writing *body* to the replacement-description
     file beside the change summary."""
@@ -928,6 +936,7 @@ def _allow_patch(monkeypatch, status=200, readback=None, calls=None):
 
 def test_existing_correction_replaces_the_description_scrubbed(world, existing_correction, monkeypatch):
     spec, _, _ = existing_correction
+    spec = _bound(spec)
     calls = []
     patches = _allow_patch(monkeypatch, calls=calls)
     rc, record = _run(_job(world["tmp"], delivery=spec),
@@ -953,6 +962,7 @@ def test_existing_correction_without_a_body_file_sends_no_patch(world, existing_
 def test_an_unconfirmed_description_keeps_the_delivery_updated(world, existing_correction,
                                                                monkeypatch, readback):
     spec, _, _ = existing_correction
+    spec = _bound(spec)
     calls = []
     patches = _allow_patch(monkeypatch, readback=readback, calls=calls)
     rc, record = _run(_job(world["tmp"], delivery=spec), _with_body(world, "Replacement.\n"))
@@ -964,6 +974,7 @@ def test_an_unconfirmed_description_keeps_the_delivery_updated(world, existing_c
 
 def test_a_description_differing_only_in_line_endings_is_confirmed(world, existing_correction, monkeypatch):
     spec, _, _ = existing_correction
+    spec = _bound(spec)
     _allow_patch(monkeypatch, readback=(200, "# Title\r\n\r\nReplacement.\r\n"))
     rc, record = _run(_job(world["tmp"], delivery=spec), _with_body(world, "# Title\n\nReplacement.\n"))
     assert rc == 0 and record["delivery_status"] == "updated"
@@ -972,6 +983,7 @@ def test_a_description_differing_only_in_line_endings_is_confirmed(world, existi
 
 def test_a_failed_description_update_keeps_the_delivery_updated(world, existing_correction, monkeypatch):
     spec, _, _ = existing_correction
+    spec = _bound(spec)
     patches = _allow_patch(monkeypatch, status=422)
     rc, record = _run(_job(world["tmp"], delivery=spec), _with_body(world, "Replacement.\n"))
     assert len(patches) == 1
@@ -986,3 +998,78 @@ def test_a_new_pull_request_ignores_the_body_file(world):
     assert rc == 0 and record["delivery_status"] == "opened"
     assert [c[0] for c in world["api"]["calls"]] == ["GET", "POST"]
     assert world["api"]["calls"][1][3]["body"] == "What changed."
+
+
+# -- Round 2: the replacement is bound to the text the builder was shown ------
+# On head 92e681e3 the runner patched unconditionally: each test below that
+# expects no PATCH failed there (one PATCH was sent and pr_description was
+# "updated"), and a spec carrying the hash was refused as malformed.
+
+
+def test_a_matching_description_hash_updates_and_reads_back(world, existing_correction, monkeypatch):
+    spec, _, state = existing_correction
+    state["body"] = "Shown text.\r\n"
+    calls = []
+    patches = _allow_patch(monkeypatch, calls=calls)
+    rc, record = _run(_job(world["tmp"], delivery=_bound(spec, "Shown text.\r\n")),
+                      _with_body(world, "Replacement.\n"))
+    assert rc == 0 and record["delivery_status"] == "updated"
+    assert len(patches) == 1 and calls == ["PATCH", "GET"]
+    assert record["pr_description"] == "updated"
+
+
+def test_a_description_edited_during_the_run_is_not_overwritten(world, existing_correction, monkeypatch, capsys):
+    spec, _, state = existing_correction
+    state["body"] = "Edited by someone during the run."
+    patches = _allow_patch(monkeypatch)
+    rc, record = _run(_job(world["tmp"], delivery=_bound(spec, "Shown text.")),
+                      _with_body(world, "Replacement.\n"))
+    assert patches == []
+    assert rc == 0 and record["delivery_status"] == "updated" and record["pr_number"] == 12
+    assert record["pr_description"] == "stale"
+    printed = capsys.readouterr().out
+    assert "changed after the builder was shown it" in printed and "Edited by someone" not in printed
+    assert "Edited by someone" not in record["stdout"] and "Replacement." not in record["stdout"]
+
+
+def test_no_description_hash_writes_no_replacement(world, existing_correction, monkeypatch):
+    spec, _, _ = existing_correction
+    patches = _allow_patch(monkeypatch)
+    rc, record = _run(_job(world["tmp"], delivery=spec), _with_body(world, "Replacement.\n"))
+    assert patches == []
+    assert rc == 0 and record["delivery_status"] == "updated"
+    assert record["pr_description"] == "unverified"
+
+
+def test_an_unreadable_current_description_writes_no_replacement(world, existing_correction, monkeypatch, capsys):
+    spec, _, _ = existing_correction
+    patches = _allow_patch(monkeypatch)
+
+    def unreadable(**kw):
+        raise rd.RepoWorkError(rd.PR_FAILED, "the current pull request description could not be read")
+    monkeypatch.setattr(rd, "current_pr_body_sha256", unreadable)
+    rc, record = _run(_job(world["tmp"], delivery=_bound(spec)), _with_body(world, "Replacement.\n"))
+    assert patches == []
+    assert rc == 0 and record["delivery_status"] == "updated"
+    assert record["pr_description"] == "unverified"
+    assert "its current text could not be read" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("value, valid", [
+    ("a" * 64, True), ("A" * 64, False), ("a" * 63, False), ("a" * 65, False),
+    ("g" * 64, False), ("", False), (None, False), ("a" * 64 + "\n", False),
+])
+def test_the_description_hash_must_be_64_lowercase_hex(value, valid):
+    raw = {**DELIVERY, "pr_number": "12", "head_sha": "b" * 40, "expected_description_sha256": value}
+    secrets = {run_job.DELIVERY_TOKEN_NAME: TOKEN}
+    if not valid:
+        with pytest.raises(run_job.JobError):
+            run_job._load_delivery(raw, REPO, secrets, ())
+        return
+    assert run_job._load_delivery(raw, REPO, secrets, ()).expected_description_sha256 == value
+
+
+def test_a_new_delivery_never_carries_a_description_hash():
+    raw = {**DELIVERY, "expected_description_sha256": "a" * 64}
+    with pytest.raises(run_job.JobError):
+        run_job._load_delivery(raw, REPO, {run_job.DELIVERY_TOKEN_NAME: TOKEN}, ())

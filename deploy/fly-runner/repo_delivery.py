@@ -78,6 +78,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import functools
+import hashlib
 import json
 import os
 import re
@@ -1124,6 +1125,28 @@ def _same_description(sent: str, got: object) -> bool:
         return False
     norm = lambda text: text.replace("\r\n", "\n").replace("\r", "\n").strip()  # noqa: E731
     return norm(got) == norm(sent)
+
+
+@_boundary(PR_FAILED)
+def current_pr_body_sha256(*, repository: str, number: int, token: str) -> str:
+    """SHA-256 (hex) of PR *number*'s description exactly as GitHub returns
+    it now, UTF-8 encoded. A null description is the empty string, as Apis
+    hashes it. An unreadable PR or a body of any other type raises; the text
+    is never printed or raised."""
+    check_repository(repository)
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise RepoWorkError(PR_FAILED, "the existing PR number is invalid")
+    _require_time()
+    status, payload = _api("GET", f"/repos/{repository}/pulls/{number}", token)
+    if status != 200 or not isinstance(payload, dict):
+        raise RepoWorkError(PR_FAILED, "the current pull request description could not be read",
+                            _status_word(status))  # fmt: skip
+    body = payload.get("body")
+    if body is None:
+        body = ""  # GitHub's null description; Apis hashes it as "" too
+    if not isinstance(body, str):
+        raise RepoWorkError(PR_FAILED, "the current pull request description could not be read")
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def update_pr_body(*, repository: str, number: int, token: str, body: str) -> None:

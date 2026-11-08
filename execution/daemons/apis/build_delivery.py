@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import json
 import os
@@ -913,7 +914,11 @@ def read_existing_pr_body(repository: str, target: ExistingPRTarget, token_provi
         answer = json.loads(out)
         if not isinstance(answer, dict) or answer.get("headRefOid") != target.head_sha:
             return None
+        # A PR with no description has a null body: it is the empty string
+        # here and in the runner's check, so both sides hash the same text.
         body = answer.get("body")
+        if body is None:
+            body = ""
         return body if isinstance(body, str) else None
     except Exception:  # noqa: BLE001 - an unread body only withholds the replacement
         return None
@@ -958,6 +963,29 @@ async def _verify_existing_pr_target(repository: str, target: ExistingPRTarget, 
         base=target.base_branch, branch=target.branch, commit=target.head_sha,
         attempts=1, require_open=True, token_provider=token_provider)
     return reason or (await policy_current() if policy_current is not None else None)
+
+def included_pr_body(current_body: str | None) -> str | None:
+    """The description exactly as the correction prompt includes it, or None
+    when the prompt withholds it (unread, over the cap, or containing a
+    delimiter line). The ONE test both the prompt and its hash use."""
+    if (not isinstance(current_body, str) or len(current_body) > FLY_PR_BODY_LIMIT
+            or FLY_PR_BODY_START in current_body or FLY_PR_BODY_END in current_body):
+        return None
+    return current_body
+
+
+def pr_body_sha256(current_body: str | None) -> str:
+    """SHA-256 (hex) of the description the prompt included, or ``""`` when it
+    included none. The runner writes a replacement only while the PR's
+    description still hashes to this, so the builder's replacement can only
+    replace the text it was shown. GitHub reads a null description as ``""``;
+    ``read_existing_pr_body`` passes only a string, so an included body is
+    hashed exactly as GitHub returned it, UTF-8 encoded."""
+    body = included_pr_body(current_body)
+    if body is None:
+        return ""
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
 
 def _current_description_block(current_body: str | None) -> str:
     """The existing-PR prompt's description rule: the current body between the

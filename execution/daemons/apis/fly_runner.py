@@ -2485,7 +2485,8 @@ def _check_delivery(delivery: Any, *, repository: str, stdin: bytes, github_requ
     """A delivery spec the job runner will accept, or ``FlyIneligible`` (the
     builder then runs locally, as today)."""
     keys = set(delivery) if isinstance(delivery, dict) else set()
-    if keys not in (set(DELIVERY_SPEC_KEYS), set(DELIVERY_SPEC_KEYS) | {"pr_number", "head_sha"}):
+    existing = set(DELIVERY_SPEC_KEYS) | {"pr_number", "head_sha"}
+    if keys not in (set(DELIVERY_SPEC_KEYS), existing, existing | {"expected_description_sha256"}):
         raise FlyIneligible("the delivery spec is malformed")
     if not all(isinstance(delivery[k], str) and delivery[k] for k in keys):
         raise FlyIneligible("the delivery spec has an empty field")
@@ -2493,6 +2494,9 @@ def _check_delivery(delivery: Any, *, repository: str, stdin: bytes, github_requ
     if "pr_number" in delivery and (not re.fullmatch(r"[1-9][0-9]*", delivery["pr_number"])
                                      or not re.fullmatch(r"[0-9a-f]{40}", delivery["head_sha"])):
         raise FlyIneligible("the existing PR number or exact head is malformed")
+    if ("expected_description_sha256" in delivery
+            and not re.fullmatch(r"[0-9a-f]{64}", delivery["expected_description_sha256"])):
+        raise FlyIneligible("the expected PR description hash is malformed")
     if github_requested:
         raise FlyIneligible("a delivering job carries no read-class GitHub token")
     if not isinstance(stdin, bytes) or PR_FILE_PLACEHOLDER.encode() not in stdin:

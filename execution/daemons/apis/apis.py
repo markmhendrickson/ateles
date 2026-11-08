@@ -1260,11 +1260,15 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
                         else SkillResult(skill, False, None, "", "", error=exc.reason))
             tracking = f"\n\n{build_delivery.tracking_instructions(claim)}"
             fly_prompt += tracking
-        # The PR's current description, read at the admitted head by each
-        # qualifying target read below; the last one is what the builder sees.
+        # The PR's current description, read at the admitted head by the
+        # FIRST qualifying target read only. The prompt and the hash the runner
+        # checks before writing a replacement both come from that one read;
+        # a later re-verification never reads the description again, so a
+        # prompt and a hash from different reads are never paired.
         current_bodies: list = []
+        description_hash = ""
 
-        async def verify_correction():
+        async def verify_correction(body_sink=None):
             # The task's authorization, its owner policy and the PR target, read
             # fresh each time: before the first attempt and before every further one.
             try:
@@ -1276,19 +1280,22 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
                 return await build_delivery.verify_existing_pr_target(
                     repository, target, lambda repo: _token_for_agent_on_repo(skill, repo),
                     policy_reader=policy_read, policy_current=policy_current,
-                    body_sink=current_bodies)
+                    body_sink=body_sink)
             except build_delivery.BuildWorktreeError as exc:
                 return exc.reason
 
         if target:
-            reason = await verify_correction()
+            reason = await verify_correction(current_bodies)
             if reason:
                 return _correction_not_started(skill, f"existing PR correction not started: {reason}")
             # An unread description only withholds the replacement file; it
-            # never stops the correction.
+            # never stops the correction. No description in the prompt, no hash:
+            # the runner then writes no replacement.
+            current_body = current_bodies[0] if current_bodies else None
             fly_prompt = (f"{prompt}\n\n"
-                          f"{build_delivery.fly_delivery_instructions(plan, current_bodies[-1] if current_bodies else None)}"
+                          f"{build_delivery.fly_delivery_instructions(plan, current_body)}"
                           f"{tracking}")
+            description_hash = build_delivery.pr_body_sha256(current_body)
 
         # Providers Fly refused for this correction before anything launched.
         refused_providers: tuple[str, ...] = ()
@@ -1299,7 +1306,9 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
                 skill, fly_prompt, role=role or skill, task_entity_id=entity_id,
                 agent_session_id=run_agent_session_id or "", notifier=notifier,
                 action_class=action_class, repository=repository, runner="fly",
-                fly_delivery=plan.spec(), **extra,
+                fly_delivery={**plan.spec(),
+                              **({"expected_description_sha256": description_hash}
+                                 if description_hash else {})}, **extra,
             )  # fmt: skip
 
         refusals: list[str] = []
@@ -1326,7 +1335,7 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
                 if p and p not in refused_providers))
             if not newly:
                 break  # nothing new to exclude: another try could only repeat it
-            reason = await verify_correction()
+            reason = await verify_correction()  # no body read: the first prompt and hash stand
             if reason:
                 # The task, its policy or the PR changed during the refused
                 # attempt. Its receipt was already released (checked above), so
