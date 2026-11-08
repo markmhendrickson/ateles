@@ -206,7 +206,7 @@ def test_the_dispatch_path_derives_its_class_from_the_old_resolver_only():
 
 
 def test_the_gate_paths_use_the_gate_resolver_and_not_the_old_one():
-    for fn in (apis._task_gate_context, apis.dispatch_task):
+    for fn in (apis._task_gate_context, apis._dispatch_task):
         src = inspect.getsource(fn)
         assert "_resolve_gate_action_type(" in src, fn.__name__
         assert "_infer_action_type(" not in src, fn.__name__
