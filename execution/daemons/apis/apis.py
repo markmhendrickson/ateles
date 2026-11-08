@@ -1266,7 +1266,7 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
         # a later re-verification never reads the description again, so a
         # prompt and a hash from different reads are never paired.
         current_bodies: list = []
-        description_hash = ""
+        description_hash: str | None = None
 
         async def verify_correction(body_sink=None):
             # The task's authorization, its owner policy and the PR target, read
@@ -1308,7 +1308,7 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
                 action_class=action_class, repository=repository, runner="fly",
                 fly_delivery={**plan.spec(),
                               **({"expected_description_sha256": description_hash}
-                                 if description_hash else {})}, **extra,
+                                 if description_hash is not None else {})}, **extra,
             )  # fmt: skip
 
         refusals: list[str] = []

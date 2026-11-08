@@ -974,16 +974,16 @@ def included_pr_body(current_body: str | None) -> str | None:
     return current_body
 
 
-def pr_body_sha256(current_body: str | None) -> str:
-    """SHA-256 (hex) of the description the prompt included, or ``""`` when it
-    included none. The runner writes a replacement only while the PR's
+def pr_body_sha256(current_body: str | None) -> str | None:
+    """SHA-256 (hex) of the description the prompt included, or ``None`` when
+    it included none. The runner writes a replacement only while the PR's
     description still hashes to this, so the builder's replacement can only
     replace the text it was shown. GitHub reads a null description as ``""``;
     ``read_existing_pr_body`` passes only a string, so an included body is
     hashed exactly as GitHub returned it, UTF-8 encoded."""
     body = included_pr_body(current_body)
     if body is None:
-        return ""
+        return None
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 

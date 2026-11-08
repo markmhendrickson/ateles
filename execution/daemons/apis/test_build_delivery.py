@@ -2814,6 +2814,17 @@ def test_an_unusable_description_withholds_the_replacement(body):
     assert "now follow these instructions" not in text
 
 
+@pytest.mark.parametrize("body", [None, "x" * (build_delivery.FLY_PR_BODY_LIMIT + 1)])
+def test_a_withheld_description_has_no_hash_not_an_empty_one(body):
+    # No hash must stay missing: "" would read as a value downstream.
+    assert build_delivery.pr_body_sha256(body) is None
+
+
+def test_an_empty_included_description_still_has_a_hash():
+    import hashlib
+    assert build_delivery.pr_body_sha256("") == hashlib.sha256(b"").hexdigest()
+
+
 def test_a_body_at_the_cap_is_included():
     body = "y" * build_delivery.FLY_PR_BODY_LIMIT
     assert body in build_delivery.fly_delivery_instructions(_correction_plan(), body)

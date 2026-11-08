@@ -1069,6 +1069,19 @@ def test_the_description_hash_must_be_64_lowercase_hex(value, valid):
     assert run_job._load_delivery(raw, REPO, secrets, ()).expected_description_sha256 == value
 
 
+def test_a_missing_description_hash_stays_missing():
+    raw = {**DELIVERY, "pr_number": "12", "head_sha": "b" * 40}
+    spec = run_job._load_delivery(raw, REPO, {run_job.DELIVERY_TOKEN_NAME: TOKEN}, ())
+    assert spec.expected_description_sha256 is None
+
+
+@pytest.mark.parametrize("value", [123, ["a" * 64], {"sha": "a" * 64}, True])
+def test_a_description_hash_that_is_not_a_string_is_refused(value):
+    raw = {**DELIVERY, "pr_number": "12", "head_sha": "b" * 40, "expected_description_sha256": value}
+    with pytest.raises(run_job.JobError):
+        run_job._load_delivery(raw, REPO, {run_job.DELIVERY_TOKEN_NAME: TOKEN}, ())
+
+
 def test_a_new_delivery_never_carries_a_description_hash():
     raw = {**DELIVERY, "expected_description_sha256": "a" * 64}
     with pytest.raises(run_job.JobError):

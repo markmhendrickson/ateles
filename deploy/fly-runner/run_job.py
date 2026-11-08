@@ -226,7 +226,8 @@ class DeliverySpec:
     head_sha: str = ""
     # SHA-256 of the PR description the correction builder was shown; a
     # replacement is written only while the PR's description still has it.
-    expected_description_sha256: str = ""
+    # ``None`` when the job carried none: then no replacement is ever written.
+    expected_description_sha256: str | None = None
 
 
 @dataclass
@@ -293,8 +294,9 @@ def _load_delivery(raw: Any, repository: str, secrets: dict[str, str],
         if "pr_number" in raw and (not re.fullmatch(r"[1-9][0-9]*", raw["pr_number"])
                                    or not re.fullmatch(r"[0-9a-f]{40}", raw["head_sha"])):
             raise JobError("the existing PR number or exact head is invalid")
-        if ("expected_description_sha256" in raw
-                and not re.fullmatch(r"[0-9a-f]{64}", raw["expected_description_sha256"])):
+        expected_hash = raw.get("expected_description_sha256")
+        if expected_hash is not None and (not isinstance(expected_hash, str)
+                                          or not re.fullmatch(r"[0-9a-f]{64}", expected_hash)):
             raise JobError("the expected PR description hash is invalid")
     except rd.RepoWorkError as exc:
         raise JobError(f"delivery refused: {exc.reason}") from None
@@ -302,7 +304,7 @@ def _load_delivery(raw: Any, repository: str, secrets: dict[str, str],
                         author_name=raw["author_name"], author_email=raw["author_email"],
                         pr_number=int(raw["pr_number"]) if "pr_number" in raw else None,
                         head_sha=raw.get("head_sha", ""),
-                        expected_description_sha256=raw.get("expected_description_sha256", ""))  # fmt: skip
+                        expected_description_sha256=expected_hash)  # fmt: skip
 
 
 def load_job(job_dir: Path) -> Job:
@@ -1502,7 +1504,7 @@ def _pr_text(rd, work, secrets: dict[str, str]) -> tuple[str, str]:
     return scrub(title, secrets), scrub(body, secrets)
 
 
-def _update_pr_body(rd, work, job, pr, token: str, expected_sha256: str = "") -> str:
+def _update_pr_body(rd, work, job, pr, token: str, expected_sha256: str | None) -> str:
     """Apply a correction's replacement description, when it wrote one, and
     say what happened: ``updated`` (read back and confirmed), ``not_confirmed``
     (attempted, not confirmed), ``stale`` or ``unverified`` (not written) or
@@ -1512,7 +1514,7 @@ def _update_pr_body(rd, work, job, pr, token: str, expected_sha256: str = "") ->
 
     The replacement is written only while the PR's current description, read
     now with the job's own token, hashes to *expected_sha256*: the text the
-    builder was shown. A description edited during the run is never
+    builder was shown; ``None`` (no hash) never writes. A description edited during the run is never
     overwritten, and a replacement not bound to shown text is never written,
     so text injected through the description can at most shape a replacement
     of that same description."""
@@ -1522,7 +1524,7 @@ def _update_pr_body(rd, work, job, pr, token: str, expected_sha256: str = "") ->
         body = ""
     if not body:
         return ""
-    if not expected_sha256:
+    if expected_sha256 is None:
         print("fly-runner: the pull request description was not updated: "
               "the builder was not shown a description to replace", flush=True)
         return "unverified"
