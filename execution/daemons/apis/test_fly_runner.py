@@ -595,6 +595,57 @@ def test_unreachable_neotoma_makes_a_key_only_job_ineligible(fly_env):
         _job(neotoma_tools_granted=True)
 
 
+def test_unreachable_admission_check_is_a_temporary_deferral(fly_env):
+    # Neotoma did not answer: the job is deferred, not refused (the caller
+    # turns `neotoma_unavailable` into a bounded deferral, never a FAILED task).
+    _session(fly_env).fail = True
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert caught.value.neotoma_unavailable is True
+    assert caught.value.provider_specific is False
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 429])
+def test_a_5xx_or_429_admission_answer_is_a_temporary_deferral(fly_env, monkeypatch, status):
+    monkeypatch.setattr(fly_runner, "_admission_http_client", lambda: httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status, text="x"))))
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert caught.value.neotoma_unavailable is True
+
+
+def test_a_timed_out_admission_check_is_a_temporary_deferral(fly_env, monkeypatch):
+    def timeout(request):
+        raise httpx.ReadTimeout("injected: Neotoma timed out")
+
+    monkeypatch.setattr(fly_runner, "_admission_http_client", lambda: httpx.Client(
+        transport=httpx.MockTransport(timeout)))
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert caught.value.neotoma_unavailable is True
+
+
+@pytest.mark.parametrize("answer", [
+    {"aauth": {"admitted": False, "admission_reason": "no_match"}},
+    {"aauth": {"admitted": "true"}},  # an unreadable 200 is still an answer
+], ids=["no_match", "unreadable-200"])
+def test_a_real_admission_refusal_stays_final(fly_env, answer):
+    _session(fly_env).answer = answer
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert caught.value.neotoma_unavailable is False
+
+
+@pytest.mark.parametrize("reason,temporary", [
+    ("Neotoma unreachable", True), ("Neotoma /session answered 503", True),
+    ("Neotoma /session answered 429", True), ("Neotoma /session answered 401", False),
+    ("Neotoma /session answered 404", False), ("no_match", False), ("unrecognized", False),
+    ("Neotoma /session returned no readable admission decision", False),
+])
+def test_admission_reason_is_temporary(reason, temporary):
+    assert fly_runner.admission_reason_is_temporary(reason) is temporary
+
+
 def test_no_key_and_no_token_with_neotoma_tools_is_ineligible(fly_env, monkeypatch):
     monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")
     with pytest.raises(fly_runner.FlyIneligible):
@@ -5213,6 +5264,31 @@ def test_a_declined_lens_the_mac_may_not_run_logs_both_reasons(fly_env, seam, cl
     assert str(raised) in result.error and local in result.error
     # Handed back to the provider loop to fail over, not a dead end.
     assert not result.ok and result.fly_local_fallback_refused
+
+
+def test_a_neotoma_outage_the_mac_may_not_run_is_a_deferral_not_a_failover(
+        fly_env, seam, claude_login, monkeypatch):  # fmt: skip
+    # Neotoma did not answer the admission check, and the Mac may not run the
+    # provider either. Every provider would hit the same outage, so this ends
+    # the dispatch as the bounded deferral, never the next-provider failover a
+    # Mac refusal otherwise takes (fly_local_fallback_refused).
+    spawned, fake_exec = seam
+
+    def unanswered(**kwargs):
+        raise fly_runner.FlyIneligible(
+            "role 'lanius''s AAuth key is not admitted by Neotoma (Neotoma unreachable)",
+            neotoma_unavailable=True)
+
+    monkeypatch.setattr(fly_runner, "build_job", unanswered)
+    local = "claude is not enabled for local dispatch (APIS_HARNESS_PROVIDERS)"
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        _, raised, result = _panel_lens_dispatch(
+            "claude", monkeypatch, local_fallback_check=lambda p: local)
+    assert raised is not None and raised.neotoma_unavailable and spawned == []
+    assert not result.ok and result.fly_neotoma_unavailable
+    assert not result.fly_local_fallback_refused
+    assert not result.fly_ineligible_before_launch
+    assert "deferred" in result.error
 
 
 def test_every_lens_review_class_is_vetted_and_delivery_only_is_unchanged(monkeypatch):

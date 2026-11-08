@@ -797,6 +797,118 @@ def _dispatch_mode_from_snapshot(snapshot: dict) -> str | None:
 
 
 
+# A Fly launch deferred only because Neotoma did not answer the role-key
+# admission check, with its prelaunch receipt proven released: nothing ran.
+# The dispatcher retries it in process after a backoff, at most this many
+# times, then holds the task (BLOCKED) with one operator notice. Never FAILED
+# (failure_posture.md, rule 8). The build-claim deferral sweep does not fit:
+# it is keyed to a running build, and an outage has no holder to wait on.
+NEOTOMA_ADMISSION_RETRIES_DEFAULT = 3
+NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT = 120.0
+
+
+def _neotoma_admission_deferred(result) -> bool:
+    return bool(getattr(result, "fly_neotoma_unavailable", False)
+                and getattr(result, "fly_delivery_not_launched", False)
+                and getattr(result, "fly_delivery_cleanup", "") == "released"
+                and not getattr(result, "fly_delivery_status", "")
+                and not getattr(result, "remote_run_id", "")
+                and not getattr(result, "remote_outcome_unknown", False))
+
+
+NEOTOMA_ADMISSION_EXHAUSTED_REASON = "rounds_exhausted"
+
+
+def _escalate_neotoma_admission_exhaustion(
+    entity_id: str, *, skill: str, title: str, trigger: str, reason: str,
+) -> str:
+    """Escalate an exhausted admission deferral; return the one operator notice.
+
+    failure_posture.md rule 5: when the record is reachable, exactly one
+    checkpoint with reason ``rounds_exhausted`` through the existing decision
+    queue, and the notice says the task is held only once both the checkpoint
+    and the held status read back. When it is not reachable, nothing can be
+    written and the notice (rule 2) says so. Never writes FAILED.
+    """
+    unrecorded = (
+        f"{skill} on {entity_id}: {reason} The exhaustion could not be recorded "
+        "(Neotoma did not take the checkpoint); nothing was launched. Reconcile the "
+        "task once Neotoma answers."
+    )
+    brief_id = checkpoint = held = None
+    try:
+        task_record = fetch_task_record(entity_id)
+        tenant_id = str(fetch_entity_user_id(entity_id) or "").strip()
+        task_snapshot = _record_snapshot(task_record)
+        if task_snapshot is None or not tenant_id:
+            return unrecorded
+        _gate_skill_name, action_type, policy, gate = _task_gate_context(task_snapshot)
+        decision = GateDecision(
+            action=GateAction.CHECKPOINT,
+            blast_radius=gate.blast_radius,
+            confidence=gate.confidence,
+            threshold=gate.threshold,
+            policy_id=gate.policy_id,
+            reason=NEOTOMA_ADMISSION_EXHAUSTED_REASON,
+            confidence_unscored=gate.confidence_unscored,
+        )
+        brief_id = write_checkpoint_brief(
+            task_entity_id=entity_id,
+            decision=decision,
+            title=title,
+            plan_summary=(
+                f"Assigned to {skill}. Trigger: {trigger}. The step waited on "
+                f"Neotoma's admission check, which did not answer; the bounded "
+                f"retries ran out. Nothing was launched. {reason}"
+            ),
+            handler=DAEMON_NAME,
+            user_id=tenant_id,
+            action_type=action_type,
+            idempotency_context=f"neotoma-admission-exhausted-{trigger}",
+            task_record=task_record,
+            policy=policy,
+        )
+        if not brief_id:
+            return unrecorded
+        checkpoint = _record_snapshot(fetch_checkpoint_record(brief_id))
+        held = fetch_task_snapshot(entity_id)
+    except Exception as exc:
+        log.error(f"[{DAEMON_NAME}] task {entity_id}: admission exhaustion not recorded "
+                  f"or not read back: {type(exc).__name__}")
+        if not brief_id:
+            return unrecorded
+        # Written, but the read-back could not run: say so, not "not taken".
+    confirmed = (
+        isinstance(checkpoint, dict)
+        and checkpoint.get("reason") == NEOTOMA_ADMISSION_EXHAUSTED_REASON
+        and checkpoint.get("task_entity_id") == entity_id
+        and isinstance(held, dict)
+        and normalize_status(held.get("status")) == TaskStatus.BLOCKED.value
+        and held.get("result") == reason
+    )
+    if confirmed:
+        return (f"{skill} on {entity_id}: {reason} The task is held with checkpoint "
+                f"{brief_id} ({NEOTOMA_ADMISSION_EXHAUSTED_REASON}).")
+    return (f"{skill} on {entity_id}: {reason} Checkpoint {brief_id} was written but "
+            "the hold could not be confirmed; nothing was launched. Reconcile the task "
+            "record.")
+
+
+def _neotoma_admission_retry_bounds() -> tuple[int, float]:
+    """(retries, base backoff seconds) from the environment; bad values use the defaults."""
+    try:
+        retries = max(0, int(os.environ.get("APIS_NEOTOMA_ADMISSION_RETRIES",
+                                            NEOTOMA_ADMISSION_RETRIES_DEFAULT)))
+    except ValueError:
+        retries = NEOTOMA_ADMISSION_RETRIES_DEFAULT
+    try:
+        backoff = max(0.0, float(os.environ.get("APIS_NEOTOMA_ADMISSION_BACKOFF_S",
+                                                NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT)))
+    except ValueError:
+        backoff = NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT
+    return retries, backoff
+
+
 def _correction_not_started(skill: str, reason: str):
     return SkillResult(skill, False, None, "", "", error=reason,
                        fly_delivery_not_launched=True, fly_delivery_cleanup="not_reserved")
@@ -2199,6 +2311,28 @@ def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
         return None
 
 
+def _executing_handoff_unverified_notice(entity_id: str, binding) -> str:
+    """The one BLOCKER notice for an approved correction whose versioned
+    executing write could not be verified. Names no cause: a refused write,
+    a lost reply and an unreadable record look the same from here. Names the
+    task and the status it was last read in, says nothing was started and that
+    the spent approval cannot be released again, so the task needs refiling."""
+    import json
+
+    status = ""
+    try:
+        status = normalize_status(json.loads(binding.snapshot_json).get("status"))
+    except Exception:  # noqa: BLE001 - an unreadable shape still gets the notice
+        pass
+    return (
+        f"Approved correction {entity_id} executing status write could not be verified; "
+        f"this attempt was not started. The task was last read as "
+        f"{status or TaskStatus.ROUTED.value}. Nothing was started and this approval "
+        "cannot be released again: refile the task for a new approval. "
+        "Reconcile current task/admission state. No automatic retry."
+    )
+
+
 # Statuses that mean "filed, nothing has happened to it yet". An allow-list: a
 # status the lifecycle does not know, or any started one (routed, executing,
 # failed, blocked, ...), keeps its normal dispatch path. `open` is what some
@@ -3053,13 +3187,17 @@ async def dispatch_task(
 
     # Lifecycle: about to spawn the T4 agent.
     if correction_lifecycle is not None:
+        routed_binding = correction_lifecycle
         correction_lifecycle = _advance_correction_lifecycle(
             correction_lifecycle, TaskStatus.EXECUTING)
         if correction_lifecycle is None:
             log.warning("[%s] correction %s executing lifecycle handoff could not be verified — not spawning",
                         DAEMON_NAME, entity_id)
-            notifier.send(f"Approved correction {entity_id} lifecycle handoff could not be verified; "
-                          "this attempt was not started. Reconcile current task/admission state.",
+            # The versioned executing write could not be verified (refused, lost
+            # reply or unreadable record; Apis cannot tell which). Nothing was
+            # started and the approval is spent: say so once, with no retry and
+            # no write, naming no cause.
+            notifier.send(_executing_handoff_unverified_notice(entity_id, routed_binding),
                           priority=Priority.BLOCKER, handler=DAEMON_NAME)
             job.failed(f"task {entity_id} executing handoff was not qualified")
             return
@@ -3170,17 +3308,35 @@ async def dispatch_task(
                 dispatch_snapshot = json.loads(correction_lifecycle.snapshot_json)
                 lifecycle_binding["_lifecycle_version"] = correction_lifecycle.version
                 lifecycle_binding["_lifecycle_provenance"] = correction_lifecycle
-            result = await _spawn_harness_skill(
-                skill,
-                entity_id,
-                dispatch_snapshot,
-                trigger,
-                notifier,
-                role=role,
-                run_conversation_id=run_conversation_id,
-                run_agent_session_id=run_agent_session_id,
-                **lifecycle_binding,
-            )
+            retries, backoff = _neotoma_admission_retry_bounds()
+            deferrals = 0
+            while True:
+                result = await _spawn_harness_skill(
+                    skill,
+                    entity_id,
+                    dispatch_snapshot,
+                    trigger,
+                    notifier,
+                    role=role,
+                    run_conversation_id=run_conversation_id,
+                    run_agent_session_id=run_agent_session_id,
+                    **lifecycle_binding,
+                )
+                if not _neotoma_admission_deferred(result) or deferrals >= retries:
+                    break
+                # Nothing launched and the receipt is released: wait out the
+                # outage and try again. Each retry re-reads and re-reserves.
+                deferrals += 1
+                delay = backoff * deferrals
+                log.warning(
+                    f"[{DAEMON_NAME}] {skill} task {entity_id}: Neotoma did not answer the "
+                    f"Fly admission check; nothing launched; retry {deferrals}/{retries} "
+                    f"in {delay:.0f}s")
+                _run_stage("assistant",
+                           f"{skill}: Neotoma did not answer the admission check; nothing "
+                           f"was launched; retry {deferrals}/{retries} in {delay:.0f}s",
+                           stage="deferred")
+                await asyncio.sleep(delay)
         except Exception as exc:
             # Unexpected crash in the spawn machinery itself → record as a
             # failed run.
@@ -3726,6 +3882,26 @@ async def dispatch_task(
             )
             notifier.send(notice, priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
             job.failed(f"task {entity_id} → {skill} Fly delivery ended")
+        elif _neotoma_admission_deferred(result):
+            # The bounded retries ran out with Neotoma still not answering.
+            # Nothing launched: held, never FAILED, and one notice.
+            reason = (
+                f"Neotoma's admission check did not answer after {deferrals + 1} "
+                "attempt(s); nothing was launched and no delivery receipt is held. "
+                "The task can be re-released once Neotoma answers."
+            )
+            _run_stage("assistant", f"{skill}: {reason}", stage="blocked")
+            if run_session:
+                update_run_session_status(run_session, status="failed")
+            set_task_status(
+                entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value, reason=reason,
+                result=reason, key_suffix=trigger)
+            notifier.send(
+                _escalate_neotoma_admission_exhaustion(
+                    entity_id, skill=skill, title=title, trigger=trigger, reason=reason),
+                priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
+            job.failed(f"task {entity_id} → {skill} held: Neotoma admission did not answer")
         elif (getattr(result, "fly_delivery_not_launched", False)
               and getattr(result, "fly_delivery_cleanup", "") in {"released", "not_reserved"}):
             reason = _redact_secrets(build_delivery.fly_prelaunch_failure_summary(result))

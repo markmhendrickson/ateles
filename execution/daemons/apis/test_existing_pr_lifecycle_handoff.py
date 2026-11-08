@@ -19,6 +19,7 @@ from lib.daemon_runtime.gating import (
 from test_existing_pr_owner_reader import normal as normal, admitted_reader as admitted_reader
 from test_fly_run_job_delivery import world as world, existing_correction as existing_correction
 from test_fly_delivery_dispatch import _StubNotifier
+from test_build_delivery import dispatch_env as dispatch_env
 
 
 @pytest.fixture
@@ -557,3 +558,235 @@ def test_normal_checkpoint_private_git_receipt_and_daemon_readback(
     assert delivery.active_build('owner/repo', 34) is None
     assert release(joined) is False
     assert len(records) == 1 and joined['calls'] == ['owner', 'private-git-runner']
+
+
+class _RecordingNotifier:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, message, priority=None, handler=None, **kwargs):
+        self.sent.append((message, priority))
+
+
+def test_executing_version_conflict_sends_one_blocker_and_writes_nothing(joined):
+    # Another writer moves the task's version just before the executing write
+    # (e.g. a note lands at that moment): the versioned write is refused.
+    def before(write):
+        if write['field'] == 'status' and write['value'] == 'executing':
+            mutate(joined, 'notes', 'a note written at that moment')
+    joined['before_write'] = before
+    notifier = _RecordingNotifier()
+    released = asyncio.run(apis.handle_checkpoint_brief(
+        joined['checkpoint_id'], copy.deepcopy(joined['checkpoint']['snapshot']), notifier))
+    assert released is False
+    assert joined['calls'] == []
+    assert_no_delivery(joined)
+    # Only the routed and reason-clear writes happened; the conflict branch
+    # wrote nothing, and the task is left routed.
+    assert [(w['field'], w['value']) for w in joined['writes']] == [
+        ('status', 'routed'), ('blocked_reason', '')]
+    assert joined['record']['snapshot']['status'] == 'routed'
+    blockers = [m for m, p in notifier.sent if p == apis.Priority.BLOCKER]
+    assert len(blockers) == 1, notifier.sent
+    (notice,) = blockers
+    assert joined['task_id'] in notice
+    assert 'could not be verified' in notice and 'last read as routed' in notice
+    assert 'refused' not in notice and 'changed under it' not in notice
+    assert 'Nothing was started' in notice
+    assert 'cannot be released again' in notice and 'refile' in notice
+
+
+def _fly_admission_seam(monkeypatch, tmp_path, on_attempt, *, retries='2'):
+    """The real run_skill Fly path, with fly_runner.build_job refusing on a
+    Neotoma outage: every provider binary pinned and no local run possible.
+
+    Returns (attempts, notices): the delivery receipts held at each build_job
+    call, and every operator notice sent."""
+    import fly_runner
+    import skill_runner
+    from lib.daemon_runtime import AgentDefinition
+    monkeypatch.setenv('APIS_NEOTOMA_ADMISSION_RETRIES', retries)
+    monkeypatch.setenv('APIS_NEOTOMA_ADMISSION_BACKOFF_S', '0')
+    skill_dir = tmp_path / '.claude' / 'skills' / 'cicada'
+    skill_dir.mkdir(parents=True)
+    (skill_dir / 'SKILL.md').write_text('# cicada\n')
+    monkeypatch.setattr(skill_runner, 'ATELES_REPO', tmp_path)
+    # Like test_fly_runner's `seam` fixture: pin every provider binary, so
+    # provider selection never depends on which CLIs the host has on PATH
+    # (with none, run_skill returned before the Fly path and a test passed
+    # vacuously).
+    monkeypatch.setattr(skill_runner, 'CLAUDE_BIN', '/usr/bin/claude-test')
+    monkeypatch.setattr(skill_runner, 'CODEX_BIN', '/usr/bin/codex-test')
+    monkeypatch.setattr(skill_runner, 'CURSOR_BIN', '/usr/bin/cursor-agent-test')
+    monkeypatch.setattr(skill_runner, '_load_agent_def', lambda role: AgentDefinition(
+        entity_id='e', name=role, prompt_markdown='You are cicada.', tool_allowlist='*',
+        aauth_sub=f'{role}@ateles-swarm'))
+    monkeypatch.setattr(skill_runner, '_load_active_policy_prompt', lambda role, **kw: '')
+    monkeypatch.setattr(skill_runner, '_write_harness_event', lambda **kw: None)
+    monkeypatch.setattr(skill_runner, 'neotoma_token_for_agent', lambda role: ('inert-role-token', 'inert'))
+    monkeypatch.setenv('NEOTOMA_BASE_URL', 'https://neotoma.example.test')
+    async def no_local(*a, **kw):
+        pytest.fail('a Neotoma deferral must never run the delivery locally')
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', no_local)
+    attempts = []
+    def build_job(**kw):
+        attempts.append(list(delivery._delivery_ledger().delivery_receipts()))
+        on_attempt(len(attempts))
+        raise fly_runner.FlyIneligible('Neotoma unreachable', neotoma_unavailable=True)
+    monkeypatch.setattr(fly_runner, 'build_job', build_job)
+    monkeypatch.setattr(apis, 'run_skill', skill_runner.run_skill)
+    notices = []
+    original_send = _StubNotifier.send
+    def send(self, message, *a, **kw):
+        notices.append(message)
+        return original_send(self, message, *a, **kw)
+    monkeypatch.setattr(_StubNotifier, 'send', send)
+    return attempts, notices
+
+
+def _decision_queue(monkeypatch, mode, task_snapshot):
+    """Stand-in for the existing decision queue (write_checkpoint_brief and its
+    read-back). ``mode``: 'ok', 'write_fails' (the write returns None) or
+    'readback_fails' (the written checkpoint does not read back) or
+    'readback_raises' (the read-back cannot run after the write)."""
+    briefs = {}
+    def write(**kw):
+        briefs.setdefault('calls', []).append(kw)
+        if mode == 'write_fails':
+            return None
+        key = 'ent_exhausted_' + kw['idempotency_context']
+        briefs[key] = dict(entity_id=key, entity_type='checkpoint_brief', snapshot=dict(  # vocab-ok: existing authenticated checkpoint wire type
+            task_entity_id=kw['task_entity_id'], reason=kw['decision'].reason,
+            plan_summary=kw['plan_summary'], status='awaiting_operator'))
+        return key
+    earlier = apis.fetch_checkpoint_record
+    def read(key):
+        if key in briefs:
+            if mode == 'readback_raises':
+                raise httpx.ConnectError('Neotoma went away after the write')
+            return None if mode == 'readback_fails' else copy.deepcopy(briefs[key])
+        return earlier(key)
+    task_reads = []
+    def read_task(entity_id):
+        if briefs.get('calls'):  # read-backs after the checkpoint write only
+            task_reads.append(entity_id)
+        return task_snapshot()
+    monkeypatch.setattr(apis, 'write_checkpoint_brief', write)
+    monkeypatch.setattr(apis, 'fetch_checkpoint_record', read)
+    monkeypatch.setattr(apis, 'fetch_task_snapshot', read_task)
+    monkeypatch.setattr(apis, 'fetch_entity_user_id', lambda key: 'inert-tenant')
+    return briefs, task_reads
+
+
+def _assert_exhaustion(mode, briefs, task_reads, notices, task_id, saved, statuses):
+    """failure_posture.md rule 5 at the ceiling, on each branch of the record."""
+    assert 'failed' not in statuses
+    assert not any('marked FAILED' in n for n in notices)
+    assert saved['status'] == 'blocked'
+    assert "Neotoma's admission check did not answer" in saved['blocked_reason']
+    calls = briefs.get('calls', [])
+    assert len(calls) == 1, calls  # exactly one checkpoint, through the queue
+    assert calls[0]['decision'].reason == 'rounds_exhausted'
+    assert calls[0]['task_entity_id'] == task_id
+    assert calls[0]['idempotency_context']
+    assert "Neotoma's admission check" in calls[0]['plan_summary']
+    assert 'Nothing was launched' in calls[0]['plan_summary']
+    neotoma = [n for n in notices if "Neotoma's admission check did not answer" in n]
+    assert len(neotoma) == 1, notices
+    (notice,) = neotoma
+    assert 'nothing was launched' in notice
+    if mode == 'ok':
+        # Both the checkpoint and the held status were read back.
+        assert task_id in task_reads
+        assert 'task is held with checkpoint' in notice and 'rounds_exhausted' in notice
+    elif mode in ('readback_fails', 'readback_raises'):
+        assert 'hold could not be confirmed' in notice and 'task is held' not in notice
+    else:
+        assert 'could not be recorded' in notice and 'task is held' not in notice
+        assert not task_reads
+
+
+@pytest.mark.parametrize('mode,recovers', [('ok', False), ('ok', True),
+                                           ('write_fails', False), ('readback_fails', False)])
+def test_neotoma_unanswered_admission_is_a_bounded_deferral_never_failed(
+        joined, monkeypatch, tmp_path, mode, recovers):
+    # Red before the deferral (observed): the real run_skill returned
+    # fly_neotoma_unavailable without fly_delivery_not_launched, the general
+    # failure branch wrote status 'failed' and sent "task marked FAILED", and
+    # build_job was called once (no retry). Red before the exhaustion
+    # escalation (observed): no write_checkpoint_brief call (len(calls) == 0)
+    # and the notice carried neither 'is held with checkpoint' nor
+    # 'could not be recorded'.
+    import fly_runner
+    answered = []
+    def on_attempt(n):
+        joined['calls'].append('admission')
+        if recovers and n == 3:
+            answered.append(True)
+            raise fly_runner.FlyIneligible('a later, real refusal')
+    attempts, notices = _fly_admission_seam(monkeypatch, tmp_path, on_attempt)
+    briefs, task_reads = _decision_queue(
+        monkeypatch, mode, lambda: copy.deepcopy(joined['record']['snapshot']))
+    release(joined)
+    # The Fly path was really taken; every assertion below depends on it.
+    assert attempts, 'run_skill never reached fly_runner.build_job'
+    statuses = [w.get('value') for w in joined['writes'] if w.get('field') == 'status']
+    assert 'failed' not in statuses
+    # One first attempt plus the two bounded retries, each with its own
+    # receipt that was reserved for the attempt and released after it.
+    assert len(attempts) == 3
+    assert all(r == ['owner/repo#12'] for r in attempts), attempts
+    assert not delivery._delivery_ledger().delivery_receipts()
+    saved = joined['record']['snapshot']
+    if recovers:
+        # The third attempt was no longer an outage: it is handled as before.
+        assert answered and 'Neotoma' not in saved.get('blocked_reason', '')
+        assert not briefs.get('calls')
+        return
+    assert 're-released' in saved['blocked_reason']
+    _assert_exhaustion(mode, briefs, task_reads, notices, joined['task_id'], saved, statuses)
+
+
+@pytest.mark.parametrize('mode', ['ok', 'write_fails', 'readback_fails', 'readback_raises'])
+def test_first_delivery_neotoma_outage_is_bounded_then_escalated(
+        monkeypatch, tmp_path, mode, dispatch_env):
+    # The natural first-delivery entry: dispatch_task -> run_fly_delivery ->
+    # run_skill -> fly_runner.build_job. Red before the deferral (observed for
+    # the shared run_skill path): one build_job call and a 'failed' write. Red
+    # before the exhaustion escalation (observed): no checkpoint call.
+    import test_fly_delivery_dispatch as dispatch
+    from lib.daemon_runtime.gating import ExecutionPolicy
+    monkeypatch.setenv(delivery.FLY_DELIVERY_REGISTRY_ENV, str(tmp_path / 'receipts.json'))
+    _writes, _spawns, store = dispatch_env
+    monkeypatch.setenv('APIS_FLY_RUNNER_CLASSES', 'open_or_merge_pr')
+    eid = 'ent_first_delivery_task'
+    snapshot = dispatch.task_snapshot()
+    store.rows[eid] = snapshot.copy()
+    statuses = []
+    def save(entity_id, state, **kw):
+        statuses.append(getattr(state, 'value', state))
+        store.status(entity_id, state, **kw)
+        if kw.get('result') is not None:
+            store.field(entity_id, 'result', kw['result'])
+        return True
+    monkeypatch.setattr(apis, 'set_task_status', save)
+    monkeypatch.setattr(apis, '_spawn_harness_skill', dispatch._REAL_SPAWN)
+    monkeypatch.setattr(apis, 'resolve_policy_for_agent', lambda *a: ExecutionPolicy(
+        entity_id='inert-policy', loaded=True, low_blast_action_types=frozenset(),
+        high_blast_action_types=frozenset({'open_or_merge_pr'})))
+    monkeypatch.setattr(apis, 'fetch_task_record', lambda key: dict(
+        entity_id=key, entity_type='task', snapshot=copy.deepcopy(store.rows[key])))
+    attempts, notices = _fly_admission_seam(monkeypatch, tmp_path, lambda n: None)
+    briefs, task_reads = _decision_queue(
+        monkeypatch, mode, lambda: copy.deepcopy(store.rows[eid]))
+    asyncio.run(apis.dispatch_task(eid, snapshot, 'approved', _StubNotifier(), gate_override=True))
+    assert attempts, 'run_skill never reached fly_runner.build_job'
+    # One first attempt plus two bounded retries; each reserved its own
+    # receipt and released it, and nothing launched or ran locally.
+    assert len(attempts) == 3
+    assert all(r == ['owner/repo#123'] for r in attempts), attempts
+    assert not delivery._delivery_ledger().delivery_receipts()
+    saved = store.rows[eid]
+    assert 're-released' in saved['blocked_reason']
+    _assert_exhaustion(mode, briefs, task_reads, notices, eid, saved, statuses)
+
