@@ -272,7 +272,7 @@
       "expect": {
         "outcome": "held",
         "scorer_called": false,
-        "reason": "operator-only"
+        "reason": "unclassified action type"
       }
     },
     {
