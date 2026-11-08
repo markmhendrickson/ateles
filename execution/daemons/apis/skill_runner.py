@@ -1886,6 +1886,11 @@ class SkillResult:
     # alone (fly_runner.FlyIneligible.provider_specific): the provider loop
     # may try the next provider that runs on Fly in the same dispatch.
     fly_provider_ineligible: bool = False
+    # Fly declined this run before anything launched, and the Mac may not run
+    # its provider either (not enabled locally, or gated). Nothing ran: the
+    # provider loop tries the next provider, without cooling this one (it is
+    # healthy; only where it was routed could not take this job).
+    fly_local_fallback_refused: bool = False
     # A single-provider dispatch (an existing-PR correction) refused that way:
     # the other Fly candidates its caller may try next, each in a fresh
     # dispatch under its own prelaunch receipt. Empty for every other result.
@@ -4039,10 +4044,15 @@ async def _run_skill_once(
             # local gate again; an exemption never carries over.
             local_reason = local_fallback_check(provider)
             if local_reason:
-                msg = (f"fly runner fell back to the Mac, where {provider} may not run: "
-                       f"{local_reason}")  # fmt: skip
-                log.warning(f"[apis] {skill} not dispatched — {msg}")
-                return SkillResult(skill, False, None, "", "", error=msg, provider=provider)
+                # Name BOTH reasons: why Fly declined, and why the Mac may not
+                # run this provider either. Then hand the dispatch back to
+                # the provider loop, which tries the next provider rather
+                # than leaving a seated lens with no verdict.
+                msg = (f"fly runner fell back to the Mac ({reason}), where {provider} "
+                       f"may not run: {local_reason}")  # fmt: skip
+                log.warning(f"[apis] {skill}: {provider} not dispatched — {msg}")
+                return SkillResult(skill, False, None, "", "", error=msg, provider=provider,
+                                   fly_local_fallback_refused=True)  # fmt: skip
         count = fly_runner.get_executor().ledger.count_local_fallback()
         log.warning(
             f"[apis] {skill} running locally instead of on Fly ({reason}); "
@@ -5377,6 +5387,15 @@ async def _run_provider_attempts(
                 f"({result.error}); trying {others[0]} on Fly"
             )
             pending = pending[:index] + others
+            continue
+        if result.fly_local_fallback_refused:
+            # Same failover as a launch failure, minus the cooldown. A pinned
+            # provider has no other to try.
+            if provider is not None:
+                return result
+            last_result = result
+            log.warning(f"[apis] {skill}: {selected} could run neither on Fly nor on the "
+                        f"Mac ({result.error}); trying the next provider")  # fmt: skip
             continue
         if result.configuration_repair:
             # The isolated harness home was refused before any child started:

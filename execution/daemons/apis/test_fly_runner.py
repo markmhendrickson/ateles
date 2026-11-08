@@ -5128,6 +5128,93 @@ def test_a_seated_run_that_is_not_read_only_or_is_cursor_stays_on_the_mac(
         _seated("cursor", ["/x/cursor-agent"], github_read_only=True)
 
 
+def _panel_lens_dispatch(provider, monkeypatch, **kw):
+    """One panel lens as ``_run_panel`` dispatches it (swarm_dispatch): seated,
+    read-only, the GitHub contract on, no working directory, the lens's class
+    opted onto Fly. Returns the ``build_job`` keywords, what it raised (or
+    None), and the result."""
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "lens_review:arch")
+    monkeypatch.setenv("APIS_FLY_CODEX_MACHINE_ID", "m-codex")
+    # Pinned like ``seam`` pins CLAUDE_BIN: without it a host with no codex
+    # install skips the dispatch before the Fly seam is ever reached.
+    monkeypatch.setattr(skill_runner, "CODEX_BIN", "/usr/bin/codex-test")
+    seen: dict = {}
+    real = fly_runner.build_job
+
+    def spy(**kwargs):
+        seen["kwargs"] = kwargs
+        try:
+            return real(**kwargs)
+        except fly_runner.FlyIneligible as exc:
+            seen["raised"] = exc
+            raise
+
+    monkeypatch.setattr(fly_runner, "build_job", spy)
+    result = asyncio.run(skill_runner._run_skill_once(
+        "lanius", "review the PR", provider=provider, role="lanius",
+        action_class="lens_review:arch", model="m", repository="owner/repo",
+        github_token="t-lens", include_github_contract=True,
+        owns_pending_gate=True,  # run_skill's deny: seated_reviewer=True
+        github_read_only=True, cwd=None, **kw))  # fmt: skip
+    return seen["kwargs"], seen.get("raised"), result
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_build_job_accepts_a_seated_read_only_panel_lens(fly_env, seam, claude_login,
+                                                         monkeypatch, provider):  # fmt: skip
+    _, fake_exec = seam
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", "lanius-own-token-0009")
+    executor, _, _ = make_executor(FakeFly())
+    launched = []
+
+    async def run(job):  # the launch itself is tested elsewhere
+        launched.append(job.provider)
+        return 0, b"VERDICT\n", b""
+
+    monkeypatch.setattr(executor, "run", run)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        kwargs, raised, result = _panel_lens_dispatch(provider, monkeypatch)
+    # The lens path's own arguments: nothing in them sends it home.
+    assert kwargs["owns_pending_gate"] and kwargs["github_read_only"]
+    assert kwargs["neotoma_tools_granted"] and not kwargs["github_delivery_contract"]
+    assert not (kwargs["cwd"] or kwargs["local_review"] or kwargs["inference_only"]
+                or kwargs["command_wrapper"] or kwargs["codex_outer_sandboxed"])
+    assert raised is None
+    assert launched == [provider] and result.ok
+
+
+def test_a_seated_lens_whose_role_has_no_neotoma_identity_stays_off_fly(
+        fly_env, seam, claude_login, monkeypatch):  # fmt: skip
+    # Kept safety rule: the shared daemon bearer never leaves the Mac, so a
+    # role with neither its own token nor an AAuth key is not Fly work, seated
+    # or not. Its runner still needs an identity for its result record.
+    _, fake_exec = seam
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        _, raised, _ = _panel_lens_dispatch(
+            "claude", monkeypatch, local_fallback_check=lambda p: None)
+    assert isinstance(raised, fly_runner.FlyIneligible)
+    assert "has no Neotoma identity of its own" in str(raised)
+
+
+def test_a_declined_lens_the_mac_may_not_run_logs_both_reasons(fly_env, seam, claude_login,
+                                                               monkeypatch, caplog):  # fmt: skip
+    spawned, fake_exec = seam
+    monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")  # Fly declines: no role identity
+    local = "claude is not enabled for local dispatch (APIS_HARNESS_PROVIDERS)"
+    with caplog.at_level(logging.WARNING), \
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        _, raised, result = _panel_lens_dispatch(
+            "claude", monkeypatch, local_fallback_check=lambda p: local)
+    assert raised is not None and spawned == []
+    line = next(r.getMessage() for r in caplog.records if "not dispatched" in r.getMessage())
+    assert str(raised) in line and local in line
+    assert str(raised) in result.error and local in result.error
+    # Handed back to the provider loop to fail over, not a dead end.
+    assert not result.ok and result.fly_local_fallback_refused
+
+
 def test_every_lens_review_class_is_vetted_and_delivery_only_is_unchanged(monkeypatch):
     import model_tiering
 

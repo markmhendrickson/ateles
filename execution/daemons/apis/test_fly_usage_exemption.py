@@ -320,3 +320,59 @@ def test_a_seated_review_names_the_fly_reason_not_the_macs_reading(monkeypatch, 
                                                owns_pending_gate=True))  # fmt: skip
     # Bound for the Mac, the Mac's usage gate is the real reason, and is named.
     assert not local.ok and "usage gate" in local.error and "claude" in local.error
+
+
+# ── A lens Fly declines, on a provider the Mac may not run, fails over ──────
+
+
+def test_a_lens_fly_declines_on_a_fly_only_provider_runs_on_the_next_provider(monkeypatch):
+    # 7 Nov: a seated arch lens chose claude for Fly, Fly declined it, and the
+    # Mac may not run claude. That returned "not dispatched" and the lens had
+    # no verdict. Now the provider loop tries the next provider, uncooled.
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "lens_review:arch")
+    monkeypatch.setenv("APIS_FLY_CLAUDE_MACHINE_ID", "m-claude")
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: dict(BINARIES))
+    for provider in ("claude", "codex"):
+        hr.record_usage(provider, [{"name": "weekly_all", "used_percent": 1.0,
+                                    "resets_at": hr._iso_from_wall(time.time() + 86400)}])
+    calls = []
+
+    async def once(skill, prompt, *, provider, **kw):
+        calls.append(provider)
+        if provider == "claude":
+            reason = kw["local_fallback_check"]("claude")
+            assert reason and "not enabled for local dispatch" in reason
+            return skill_runner.SkillResult(
+                skill, False, None, "", "", provider=provider,
+                error=f"fly runner fell back to the Mac (not eligible for Fly: x), "
+                      f"where claude may not run: {reason}",
+                fly_local_fallback_refused=True)  # fmt: skip
+        return skill_runner.SkillResult(skill, True, 0, "VERDICT: approve", "", provider=provider)
+
+    monkeypatch.setattr(skill_runner, "_run_skill_once", once)
+    result = asyncio.run(skill_runner.run_skill(
+        "waxwing", "review", role="waxwing", model="m", preferred_provider="claude",
+        seated_reviewer=True, github_read_only=True, include_github_contract=True,
+        action_class="lens_review:arch", repository="owner/repo"))  # fmt: skip
+    assert calls[0] == "claude" and calls[-1] != "claude"
+    assert result.ok and result.stdout == "VERDICT: approve"
+    assert "claude" not in hr.cooling_providers()
+
+
+def test_a_pinned_provider_fly_and_the_mac_both_decline_is_not_failed_over(monkeypatch):
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "lens_review:arch")
+    monkeypatch.setenv("APIS_FLY_CLAUDE_MACHINE_ID", "m-claude")
+    monkeypatch.setattr(skill_runner, "_provider_binaries", lambda: dict(BINARIES))
+    calls = []
+
+    async def once(skill, prompt, *, provider, **kw):
+        calls.append(provider)
+        return skill_runner.SkillResult(skill, False, None, "", "", provider=provider,
+                                        error="fly runner fell back to the Mac",
+                                        fly_local_fallback_refused=True)  # fmt: skip
+
+    monkeypatch.setattr(skill_runner, "_run_skill_once", once)
+    result = asyncio.run(skill_runner.run_skill(
+        "waxwing", "review", role="waxwing", model="m", provider="claude",
+        action_class="lens_review:arch", repository="owner/repo"))  # fmt: skip
+    assert calls == ["claude"] and not result.ok and result.fly_local_fallback_refused
