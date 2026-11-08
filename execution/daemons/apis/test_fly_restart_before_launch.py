@@ -170,6 +170,8 @@ def test_stranded_task_is_reported_once_and_never_relaunched(env):
     assert effects == [], "the sweep must never dispatch, launch or write"
     assert len(notifier.sent) == 1, notifier.sent
     notice = notifier.sent[0]
+    assert notice.startswith("Executing task may be stranded after an Apis restart: ")
+    assert "Fly delivery task was not recovered" not in notice
     assert TASK in notice and "Build the thing" in notice
     assert "whether its Fly run launched or finished is not confirmed" in notice
     assert "no Fly run of it is live in this process" in notice
