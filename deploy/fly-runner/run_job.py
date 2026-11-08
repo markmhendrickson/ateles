@@ -224,6 +224,10 @@ class DeliverySpec:
     author_email: str
     pr_number: int | None = None
     head_sha: str = ""
+    # SHA-256 of the PR description the correction builder was shown; a
+    # replacement is written only while the PR's description still has it.
+    # ``None`` when the job carried none: then no replacement is ever written.
+    expected_description_sha256: str | None = None
 
 
 @dataclass
@@ -236,8 +240,11 @@ class DeliveryRun:
     pr_number: int | None = None
     pr_url: str = ""
     # A correction's replacement description: ``updated`` (read back and
-    # confirmed) or ``not_confirmed`` (attempted, not confirmed); empty when
-    # the correction supplied none. The delivery's status never depends on it.
+    # confirmed), ``not_confirmed`` (attempted, not confirmed), ``stale`` (the
+    # description changed since the builder was shown it; not written) or
+    # ``unverified`` (no hash to check against, or the current description
+    # could not be read; not written); empty when the correction supplied
+    # none. The delivery's status never depends on it.
     pr_description: str = ""
     work: Any = None
     base: str = ""
@@ -265,7 +272,9 @@ def _load_delivery(raw: Any, repository: str, secrets: dict[str, str],
                    child_names: tuple[str, ...]) -> DeliverySpec:  # fmt: skip
     """The job's delivery spec, or ``JobError`` naming what is wrong."""
     rd = _repo_delivery()
-    if not isinstance(raw, dict) or set(raw) not in (DELIVERY_KEYS, DELIVERY_KEYS | {"pr_number", "head_sha"}):
+    existing = DELIVERY_KEYS | {"pr_number", "head_sha"}
+    if not isinstance(raw, dict) or set(raw) not in (DELIVERY_KEYS, existing,
+                                                     existing | {"expected_description_sha256"}):
         raise JobError("delivery must be an object with exactly "
                        + ", ".join(sorted(DELIVERY_KEYS)))  # fmt: skip
     if not all(isinstance(raw[k], str) and raw[k] for k in raw):
@@ -285,12 +294,17 @@ def _load_delivery(raw: Any, repository: str, secrets: dict[str, str],
         if "pr_number" in raw and (not re.fullmatch(r"[1-9][0-9]*", raw["pr_number"])
                                    or not re.fullmatch(r"[0-9a-f]{40}", raw["head_sha"])):
             raise JobError("the existing PR number or exact head is invalid")
+        expected_hash = raw.get("expected_description_sha256")
+        if expected_hash is not None and (not isinstance(expected_hash, str)
+                                          or not re.fullmatch(r"[0-9a-f]{64}", expected_hash)):
+            raise JobError("the expected PR description hash is invalid")
     except rd.RepoWorkError as exc:
         raise JobError(f"delivery refused: {exc.reason}") from None
     return DeliverySpec(branch=raw["branch"], base_branch=raw["base_branch"],
                         author_name=raw["author_name"], author_email=raw["author_email"],
                         pr_number=int(raw["pr_number"]) if "pr_number" in raw else None,
-                        head_sha=raw.get("head_sha", ""))  # fmt: skip
+                        head_sha=raw.get("head_sha", ""),
+                        expected_description_sha256=expected_hash)  # fmt: skip
 
 
 def load_job(job_dir: Path) -> Job:
@@ -1447,7 +1461,8 @@ def _deliver(job: Job, delivery: DeliveryRun, rc: int, timed_out: bool,
                                            branch=spec.branch, base_branch=spec.base_branch,
                                            head=imported.head, token=token,
                                            wait_for_head=True)
-                delivery.pr_description = _update_pr_body(rd, work, job, pr, token)
+                delivery.pr_description = _update_pr_body(rd, work, job, pr, token,
+                                                          spec.expected_description_sha256)
             else:
                 title, body = _pr_text(rd, work, job.secrets)
                 pr = rd.open_or_update_pr(repository=job.repository, branch=spec.branch,
@@ -1489,18 +1504,40 @@ def _pr_text(rd, work, secrets: dict[str, str]) -> tuple[str, str]:
     return scrub(title, secrets), scrub(body, secrets)
 
 
-def _update_pr_body(rd, work, job, pr, token: str) -> str:
+def _update_pr_body(rd, work, job, pr, token: str, expected_sha256: str | None) -> str:
     """Apply a correction's replacement description, when it wrote one, and
     say what happened: ``updated`` (read back and confirmed), ``not_confirmed``
-    (attempted, not confirmed) or ``""`` (none supplied). The code has already
-    landed, so a failure here never changes the delivery's outcome: it is
-    reported in one line and on the record."""
+    (attempted, not confirmed), ``stale`` or ``unverified`` (not written) or
+    ``""`` (none supplied). The code has already landed, so none of these ever
+    changes the delivery's outcome: each is reported in one line and on the
+    record.
+
+    The replacement is written only while the PR's current description, read
+    now with the job's own token, hashes to *expected_sha256*: the text the
+    builder was shown; ``None`` (no hash) never writes. A description edited during the run is never
+    overwritten, and a replacement not bound to shown text is never written,
+    so text injected through the description can at most shape a replacement
+    of that same description."""
     try:
         body = scrub(rd.read_pr_body(work), job.secrets)
     except rd.RepoWorkError:
         body = ""
     if not body:
         return ""
+    if expected_sha256 is None:
+        print("fly-runner: the pull request description was not updated: "
+              "the builder was not shown a description to replace", flush=True)
+        return "unverified"
+    try:
+        current = rd.current_pr_body_sha256(repository=job.repository, number=pr.number, token=token)
+    except rd.RepoWorkError:
+        print("fly-runner: the pull request description was not updated: "
+              "its current text could not be read", flush=True)
+        return "unverified"
+    if current != expected_sha256:
+        print("fly-runner: the pull request description was not updated: "
+              "it changed after the builder was shown it", flush=True)
+        return "stale"
     try:
         rd.update_pr_body(repository=job.repository, number=pr.number, token=token, body=body)
     except rd.RepoWorkError:

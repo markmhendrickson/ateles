@@ -1663,3 +1663,23 @@ def test_a_refused_description_update_raises_pr_failed(monkeypatch):
     with pytest.raises(rd.RepoWorkError) as exc:
         rd.update_pr_body(repository="owner/repo", number=5, token="tok", body="New.")
     assert exc.value.category == rd.PR_FAILED
+
+
+
+# Round 2: the current description is hashed exactly as GitHub returns it.
+@pytest.mark.parametrize("body, text", [("Shown.\r\n", "Shown.\r\n"), (None, ""), ("", "")])
+def test_current_pr_body_sha256_hashes_githubs_exact_text(monkeypatch, body, text):
+    import hashlib
+    calls = []
+    monkeypatch.setattr(rd, "_api", _pr_api(calls, (200, {"body": body})))
+    got = rd.current_pr_body_sha256(repository="owner/repo", number=5, token="tok")
+    assert got == hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert calls == [("GET", "/repos/owner/repo/pulls/5", "tok", None)]
+
+
+@pytest.mark.parametrize("answer", [(404, None), (0, None), (200, None), (200, {"body": 5})])
+def test_an_unreadable_current_description_raises(monkeypatch, answer):
+    monkeypatch.setattr(rd, "_api", _pr_api([], answer))
+    with pytest.raises(rd.RepoWorkError) as exc:
+        rd.current_pr_body_sha256(repository="owner/repo", number=5, token="tok")
+    assert exc.value.category == rd.PR_FAILED
