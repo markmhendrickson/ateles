@@ -1613,53 +1613,49 @@ def test_a_replacement_description_link_is_not_followed(world, tmp_path):
     assert rd.read_pr_body(world["work"]) == ""
 
 
-def _pr_api(calls, get_answer):
-    """A fake ``_api`` that takes the PATCH and answers the read-back GET."""
+def test_the_change_summary_is_read_whole_and_safely(world, tmp_path):
+    (world["work"].export / rd.PR_TEXT_NAME).write_text("# Round\n\nFixed finding 1.\n")
+    assert rd.read_change_summary(world["work"]) == "# Round\n\nFixed finding 1."
+    (world["work"].export / rd.PR_TEXT_NAME).unlink()
+    assert rd.read_change_summary(world["work"]) == ""
+    secret = tmp_path / "elsewhere.md"
+    secret.write_text("Not the agent's\n")
+    (world["work"].export / rd.PR_TEXT_NAME).symlink_to(secret)
+    assert rd.read_change_summary(world["work"]) == ""
+
+
+def _comment_api(calls, post_answer, get_answer):
+    """A fake ``_api`` that takes the comment POST and answers its read-back GET."""
     def api(method, path, token, body=None):
         calls.append((method, path, token, body))
-        return (200, None) if method == "PATCH" else get_answer
+        return post_answer if method == "POST" else get_answer
     return api
 
 
-def test_update_pr_body_sends_only_the_body_and_reads_it_back(monkeypatch):
+def test_post_pr_comment_posts_one_comment_and_reads_it_back(monkeypatch):
+    # Red on main: post_pr_comment did not exist (AttributeError).
     calls = []
-    monkeypatch.setattr(rd, "_api", _pr_api(calls, (200, {"body": "New."})))
-    rd.update_pr_body(repository="owner/repo", number=5, token="tok", body="New.")
-    assert calls == [("PATCH", "/repos/owner/repo/pulls/5", "tok", {"body": "New."}),
-                     ("GET", "/repos/owner/repo/pulls/5", "tok", None)]
+    monkeypatch.setattr(rd, "_api", _comment_api(calls, (201, {"id": 77}), (200, {"body": "Round."})))
+    assert rd.post_pr_comment(repository="owner/repo", number=5, token="tok", body="Round.") is True
+    assert calls == [("POST", "/repos/owner/repo/issues/5/comments", "tok", {"body": "Round."}),
+                     ("GET", "/repos/owner/repo/issues/comments/77", "tok", None)]
+    assert all("/pulls/" not in c[1] and c[0] != "PATCH" for c in calls)
 
 
-def test_a_description_differing_only_in_line_endings_is_confirmed(monkeypatch):
-    calls = []
-    monkeypatch.setattr(rd, "_api", _pr_api(calls, (200, {"body": "# A\r\n\r\nB.\r\n"})))
-    rd.update_pr_body(repository="owner/repo", number=5, token="tok", body="# A\n\nB.")
-    assert [c[0] for c in calls] == ["PATCH", "GET"]
+@pytest.mark.parametrize("post,get", [
+    ((201, {"id": 77}), (200, {"body": "Other."})),
+    ((201, {"id": 77}), (404, None)),
+    ((201, {"id": 77}), (200, None)),
+    ((201, {"id": True}), (200, {"body": "Round."})),
+    ((201, None), (200, {"body": "Round."})),
+])
+def test_an_unconfirmed_comment_read_back_is_false(monkeypatch, post, get):
+    monkeypatch.setattr(rd, "_api", _comment_api([], post, get))
+    assert rd.post_pr_comment(repository="owner/repo", number=5, token="tok", body="Round.") is False
 
 
-def test_a_read_back_description_that_differs_raises_pr_failed(monkeypatch, capsys):
-    # Before the fix this did not raise: pytest reported
-    # "Failed: DID NOT RAISE RepoWorkError", because
-    # the PATCH's 200 alone counted as success and no GET was sent.
-    calls = []
-    monkeypatch.setattr(rd, "_api", _pr_api(calls, (200, {"body": "Old text."})))
-    with pytest.raises(rd.RepoWorkError) as exc:
-        rd.update_pr_body(repository="owner/repo", number=5, token="tok", body="New.")
-    assert exc.value.category == rd.PR_FAILED
-    assert "Old text." not in str(exc.value) and "New." not in str(exc.value)
-    out = capsys.readouterr()
-    assert "Old text." not in out.out + out.err and "New." not in out.out + out.err
-
-
-@pytest.mark.parametrize("answer", [(404, None), (0, None), (200, None), (200, {"body": 5})])
-def test_an_unreadable_description_read_back_raises_pr_failed(monkeypatch, answer):
-    monkeypatch.setattr(rd, "_api", _pr_api([], answer))
-    with pytest.raises(rd.RepoWorkError) as exc:
-        rd.update_pr_body(repository="owner/repo", number=5, token="tok", body="New.")
-    assert exc.value.category == rd.PR_FAILED
-
-
-def test_a_refused_description_update_raises_pr_failed(monkeypatch):
+def test_a_refused_comment_raises_pr_failed_without_its_text(monkeypatch):
     monkeypatch.setattr(rd, "_api", lambda *a, **k: (403, None))
     with pytest.raises(rd.RepoWorkError) as exc:
-        rd.update_pr_body(repository="owner/repo", number=5, token="tok", body="New.")
-    assert exc.value.category == rd.PR_FAILED
+        rd.post_pr_comment(repository="owner/repo", number=5, token="tok", body="Round text.")
+    assert exc.value.category == rd.PR_FAILED and "Round text." not in str(exc.value)

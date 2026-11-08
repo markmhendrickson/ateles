@@ -151,7 +151,7 @@ _PROTECTED_BRANCH_RE = re.compile(r"(?i)(?:main|master|trunk|develop|release[/_-
 _REPOSITORY_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}", re.ASCII)
 # The agent's pull request text: <export>/pull_request.md, first line the title.
 PR_TEXT_NAME = "pull_request.md"
-PR_BODY_NAME = "pull_request_body.md"  # a correction's complete replacement description
+PR_BODY_NAME = "pull_request_body.md"  # never applied; a correction that writes it is reported "ignored"
 MAX_PR_TEXT_BYTES = 64 * 1024
 MAX_PR_TITLE_CHARS = 256
 API_TIMEOUT_SECONDS = 30
@@ -1109,38 +1109,37 @@ def read_pr_text(work: Work) -> tuple[str, str]:
 
 @_boundary(PR_FAILED)
 def read_pr_body(work: Work) -> str:
-    """A correction's complete replacement PR description from
-    ``<export>/pull_request_body.md``; the whole file is the body. Read the
-    same way as ``read_pr_text``. Missing, empty, oversized, not UTF-8, or
-    unreadable gives ``""``: the description stays as it is."""
+    """Whatever a builder wrote to ``<export>/pull_request_body.md``, read
+    the same way as ``read_pr_text``. The runner never applies it to a pull
+    request; it is read only so a correction can report it was ignored."""
     return _read_export_text(work, PR_BODY_NAME).strip()
 
 
 @_boundary(PR_FAILED)
-def _same_description(sent: str, got: object) -> bool:
-    """Whether GitHub's *got* is the description that was *sent*, ignoring
-    only line endings and surrounding whitespace."""
-    if not isinstance(got, str):
-        return False
-    norm = lambda text: text.replace("\r\n", "\n").replace("\r", "\n").strip()  # noqa: E731
-    return norm(got) == norm(sent)
+def read_change_summary(work: Work) -> str:
+    """The builder's whole change summary, ``<export>/pull_request.md``, read
+    the same way as ``read_pr_text``. Missing, empty, oversized, not UTF-8, or
+    unreadable gives ``""``."""
+    return _read_export_text(work, PR_TEXT_NAME).strip()
 
 
-def update_pr_body(*, repository: str, number: int, token: str, body: str) -> None:
-    """Replace only the description of PR *number*; its title is untouched.
-    The PR is then read back: a 200 that did not leave *body* on GitHub, or an
-    unreadable answer, raises. Neither text is ever printed or raised."""
+@_boundary(PR_FAILED)
+def post_pr_comment(*, repository: str, number: int, token: str, body: str) -> bool:
+    """Add *body* as one comment on PR *number*; the description and title are
+    never touched. The comment is then read back by the id GitHub returned:
+    ``True`` only when its body equals *body*. A refused POST raises. Neither
+    text is ever printed or raised."""
     check_repository(repository)
     if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
         raise RepoWorkError(PR_FAILED, "the existing PR number is invalid")
     _require_time()
-    status, _ = _api("PATCH", f"/repos/{repository}/pulls/{number}", token, {"body": body})
-    if status != 200:
-        raise RepoWorkError(PR_FAILED, "the pull request description could not be updated",
+    status, made = _api("POST", f"/repos/{repository}/issues/{number}/comments", token, {"body": body})
+    if status != 201:
+        raise RepoWorkError(PR_FAILED, "the pull request comment could not be posted",
                             _status_word(status))  # fmt: skip
-    status, payload = _api("GET", f"/repos/{repository}/pulls/{number}", token)
-    if status != 200 or not isinstance(payload, dict):
-        raise RepoWorkError(PR_FAILED, "the updated pull request description could not be read back",
-                            _status_word(status))  # fmt: skip
-    if not _same_description(body, payload.get("body")):
-        raise RepoWorkError(PR_FAILED, "the pull request description read back differs from the one sent")
+    comment_id = made.get("id") if isinstance(made, dict) else None
+    if isinstance(comment_id, bool) or not isinstance(comment_id, int) or comment_id <= 0:
+        return False
+    _require_time()
+    status, payload = _api("GET", f"/repos/{repository}/issues/comments/{comment_id}", token)
+    return status == 200 and isinstance(payload, dict) and payload.get("body") == body

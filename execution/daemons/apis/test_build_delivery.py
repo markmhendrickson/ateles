@@ -2716,16 +2716,31 @@ def test_a_first_delivery_no_changes_receipt_is_not_superseded(monkeypatch):
     assert not build_delivery.supersedable_correction(_undelivered_plan(), _PR_KEY, entry)
 
 
-def test_correction_instructions_name_the_replacement_description_file():
+# The new-PR prompt as it stood before corrections stopped rewriting the
+# description; it must stay byte-identical.
+_NEW_PR_PROMPT_SHA256 = "ce45d0d1b17671ba889a628f0df5caf0a9427f0d88ed2f54a0ec3db0b8b80198"
+
+
+def test_correction_instructions_post_the_summary_and_never_name_a_description_file():
+    # Red on main: the existing-PR prompt told the builder to write
+    # `pull_request_body.md`, so the first assertion failed.
     target = build_delivery.ExistingPRTarget(12, "codex/fix", "main", "a" * 40)
     plan = build_delivery.FlyDeliveryPlan("owner/repo", "codex/fix", "main", "owner/repo#1", 1,
                                           target=target)
     text = build_delivery.fly_delivery_instructions(plan)
-    assert "it does not replace the PR body" in text
-    assert "`pull_request_body.md` in the same folder" in text
+    assert "pull_request_body.md" not in text
+    assert "posts it on the pull request as a comment for reviewers" in text
+    assert "what this round changed for each finding" in text
+    assert "never changes the pull request description" in text
+
+
+def test_the_new_pr_prompt_is_unchanged():
+    import hashlib
+
     new = build_delivery.fly_delivery_instructions(
         build_delivery.FlyDeliveryPlan("owner/repo", "codex/fix", "main", "owner/repo#1", 1))
     assert "pull_request_body.md" not in new
+    assert hashlib.sha256(new.encode()).hexdigest() == _NEW_PR_PROMPT_SHA256
 
 
 # --- A correction's replacement description is recorded on the receipt ---
