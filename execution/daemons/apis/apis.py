@@ -816,6 +816,84 @@ def _neotoma_admission_deferred(result) -> bool:
                 and not getattr(result, "remote_outcome_unknown", False))
 
 
+NEOTOMA_ADMISSION_EXHAUSTED_REASON = "rounds_exhausted"
+
+
+def _escalate_neotoma_admission_exhaustion(
+    entity_id: str, *, skill: str, title: str, trigger: str, reason: str,
+) -> str:
+    """Escalate an exhausted admission deferral; return the one operator notice.
+
+    failure_posture.md rule 5: when the record is reachable, exactly one
+    checkpoint with reason ``rounds_exhausted`` through the existing decision
+    queue, and the notice says the task is held only once both the checkpoint
+    and the held status read back. When it is not reachable, nothing can be
+    written and the notice (rule 2) says so. Never writes FAILED.
+    """
+    unrecorded = (
+        f"{skill} on {entity_id}: {reason} The exhaustion could not be recorded "
+        "(Neotoma did not take the checkpoint); nothing was launched. Reconcile the "
+        "task once Neotoma answers."
+    )
+    brief_id = checkpoint = held = None
+    try:
+        task_record = fetch_task_record(entity_id)
+        tenant_id = str(fetch_entity_user_id(entity_id) or "").strip()
+        task_snapshot = _record_snapshot(task_record)
+        if task_snapshot is None or not tenant_id:
+            return unrecorded
+        _gate_skill_name, action_type, policy, gate = _task_gate_context(task_snapshot)
+        decision = GateDecision(
+            action=GateAction.CHECKPOINT,
+            blast_radius=gate.blast_radius,
+            confidence=gate.confidence,
+            threshold=gate.threshold,
+            policy_id=gate.policy_id,
+            reason=NEOTOMA_ADMISSION_EXHAUSTED_REASON,
+            confidence_unscored=gate.confidence_unscored,
+        )
+        brief_id = write_checkpoint_brief(
+            task_entity_id=entity_id,
+            decision=decision,
+            title=title,
+            plan_summary=(
+                f"Assigned to {skill}. Trigger: {trigger}. The step waited on "
+                f"Neotoma's admission check, which did not answer; the bounded "
+                f"retries ran out. Nothing was launched. {reason}"
+            ),
+            handler=DAEMON_NAME,
+            user_id=tenant_id,
+            action_type=action_type,
+            idempotency_context=f"neotoma-admission-exhausted-{trigger}",
+            task_record=task_record,
+            policy=policy,
+        )
+        if not brief_id:
+            return unrecorded
+        checkpoint = _record_snapshot(fetch_checkpoint_record(brief_id))
+        held = fetch_task_snapshot(entity_id)
+    except Exception as exc:
+        log.error(f"[{DAEMON_NAME}] task {entity_id}: admission exhaustion not recorded "
+                  f"or not read back: {type(exc).__name__}")
+        if not brief_id:
+            return unrecorded
+        # Written, but the read-back could not run: say so, not "not taken".
+    confirmed = (
+        isinstance(checkpoint, dict)
+        and checkpoint.get("reason") == NEOTOMA_ADMISSION_EXHAUSTED_REASON
+        and checkpoint.get("task_entity_id") == entity_id
+        and isinstance(held, dict)
+        and normalize_status(held.get("status")) == TaskStatus.BLOCKED.value
+        and held.get("result") == reason
+    )
+    if confirmed:
+        return (f"{skill} on {entity_id}: {reason} The task is held with checkpoint "
+                f"{brief_id} ({NEOTOMA_ADMISSION_EXHAUSTED_REASON}).")
+    return (f"{skill} on {entity_id}: {reason} Checkpoint {brief_id} was written but "
+            "the hold could not be confirmed; nothing was launched. Reconcile the task "
+            "record.")
+
+
 def _neotoma_admission_retry_bounds() -> tuple[int, float]:
     """(retries, base backoff seconds) from the environment; bad values use the defaults."""
     try:
@@ -3819,8 +3897,10 @@ async def dispatch_task(
                 entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
                 from_status=TaskStatus.EXECUTING.value, reason=reason,
                 result=reason, key_suffix=trigger)
-            notifier.send(f"{skill} on {entity_id}: {reason}",
-                          priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
+            notifier.send(
+                _escalate_neotoma_admission_exhaustion(
+                    entity_id, skill=skill, title=title, trigger=trigger, reason=reason),
+                priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
             job.failed(f"task {entity_id} → {skill} held: Neotoma admission did not answer")
         elif (getattr(result, "fly_delivery_not_launched", False)
               and getattr(result, "fly_delivery_cleanup", "") in {"released", "not_reserved"}):
