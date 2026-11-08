@@ -288,6 +288,7 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     query_all_entities,
     require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
+    CHECKPOINT_SUPERSEDED,
     supersede_checkpoint,
 )
 from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
@@ -4711,7 +4712,37 @@ _BLOCKER_SUMMARIES = {
 }
 
 
-def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
+def _newest_checkpoint_superseded(checkpoints: list[dict]) -> str | None:
+    """Return the id of the task's newest checkpoint when it was superseded.
+
+    A hold retired on purpose with ``supersede_checkpoint`` leaves its newest
+    brief at ``superseded``.  Newest is judged by the record's creation time;
+    when any brief lacks one the order is unknown, so the hold counts as
+    retired only when every brief is superseded.
+    """
+    rows = [c for c in checkpoints if str(c.get("entity_id") or "")]
+    if not rows:
+        return None
+
+    def _status(item: dict) -> str:
+        return str((_record_snapshot(item) or {}).get("status") or "").strip().lower()
+
+    def _stamp(item: dict) -> str:
+        return str(item.get("created_at") or "")
+
+    if all(_stamp(c) for c in rows):
+        newest = max(rows, key=lambda c: (_stamp(c), str(c["entity_id"])))
+        if _status(newest) == CHECKPOINT_SUPERSEDED:
+            return str(newest["entity_id"])
+        return None
+    if all(_status(c) == CHECKPOINT_SUPERSEDED for c in rows):
+        return str(max(rows, key=lambda c: str(c["entity_id"]))["entity_id"])
+    return None
+
+
+def reissue_held_task_checkpoint(
+    task_id: str, *, apply: bool, keep_retired: bool = False
+) -> ReissueResult:
     """Give one still-held task a fresh, signed, resolvable checkpoint.
 
     The recovery for tasks that were left at ``awaiting_approval`` with no
@@ -4740,6 +4771,14 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
         be assessed or fixed.  A checkpoint or authorization read that fails is
         reported here and never treated as proof a brief is stale.
 
+    With ``keep_retired`` (a blanket run that did not name the task):
+      * ``retired`` - the task has no live checkpoint and its newest one was
+        superseded on purpose; it is not refiled, so a clean-up stays done.
+        ``checkpoint_id`` is that superseded checkpoint.  Naming the task
+        (``keep_retired=False``) refiles it as before;
+      * ``unknown`` - the task's checkpoints could not be read, so whether its
+        hold was retired is unknown; nothing is filed.
+
     Guarantees, each pinned by a test:
       * only a task at ``awaiting_approval`` right now is touched, so a done,
         declined, superseded, blocked, or running task is never re-issued;
@@ -4764,6 +4803,15 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
 
     existing = checkpoints_for_task(task_id)
     if existing is None:
+        if keep_retired:
+            # A failed read is never "no checkpoint": a retired hold would be
+            # refiled.  Report it as unknown and file nothing.
+            return ReissueResult(
+                task_id,
+                "unknown",
+                "checkpoint list could not be read; whether the hold was "
+                "retired is unknown, nothing was filed",
+            )
         return ReissueResult(task_id, "failed", "checkpoint list could not be read")
     current_id: str | None = None
     stale_pending: list[str] = []
@@ -4798,6 +4846,17 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
             current_id = checkpoint_id
         else:
             stale_pending.append(checkpoint_id)
+
+    if keep_retired and current_id is None:
+        retired_id = _newest_checkpoint_superseded(existing)
+        if retired_id:
+            return ReissueResult(
+                task_id,
+                "retired",
+                f"newest checkpoint {retired_id} was superseded on purpose; "
+                "not refiled (name the task with --task to refile it)",
+                checkpoint_id=retired_id,
+            )
 
     blocker = _approval_cannot_release(snapshot)
     blocker_outcome = _BLOCKER_OUTCOMES.get(blocker or "")

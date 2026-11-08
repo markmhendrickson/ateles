@@ -821,3 +821,91 @@ def test_an_unloaded_policy_neither_replaces_nor_retires(record):
     assert result.outcome == "failed"
     assert record.writes == writes and record.events == []
     assert _awaiting(record) == [first.checkpoint_id]
+
+
+# ── a deliberately retired hold stays retired in a blanket run (ateles#1600) ──
+
+
+def _retired_hold(record):
+    """A held task whose only checkpoint was superseded on purpose."""
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_old", "ent_t1", signed=True, status="superseded")
+    record.checkpoints["ent_old"]["created_at"] = "2026-11-01T10:00:00Z"
+
+
+def _blanket(monkeypatch, *task_ids):
+    monkeypatch.setattr(cli, "iter_held_task_ids", lambda limit=None: iter(task_ids))
+
+
+def _records(out):
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+@pytest.mark.parametrize("apply_flag", [[], ["--apply"]])
+def test_blanket_run_leaves_a_superseded_hold_retired_and_reports_it(
+    record, monkeypatch, capsys, apply_flag
+):
+    _retired_hold(record)
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, *apply_flag) == 0
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["task_id"] == "ent_t1"
+    assert rows[0]["outcome"] == "retired"
+    assert rows[0]["checkpoint_id"] == "ent_old"
+    assert rows[-1]["summary"] == {"retired": 1}
+    assert record.writes == 0
+    assert _awaiting(record) == []
+
+
+def test_naming_a_retired_hold_with_task_refiles_it(record, monkeypatch, capsys):
+    _retired_hold(record)
+
+    assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 0
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["outcome"] == "reissued"
+    assert record.writes == 1
+    assert _awaiting(record) == [rows[0]["checkpoint_id"]]
+
+
+def test_blanket_run_still_refiles_a_lost_hold(record, monkeypatch, capsys):
+    # No checkpoint at all, and one whose newest checkpoint is neither live nor
+    # superseded (an older superseded brief does not make it retired).
+    record.add_task("ent_none")
+    record.add_task("ent_rejected")
+    record.add_checkpoint("ent_a", "ent_rejected", signed=True, status="superseded")
+    record.checkpoints["ent_a"]["created_at"] = "2026-11-01T10:00:00Z"
+    record.add_checkpoint("ent_b", "ent_rejected", signed=True, status="rejected")
+    record.checkpoints["ent_b"]["created_at"] = "2026-11-02T10:00:00Z"
+    # A retired hold in the same run is the only one held back.
+    record.add_task("ent_retired")
+    record.add_checkpoint("ent_c", "ent_retired", signed=True, status="superseded")
+    record.checkpoints["ent_c"]["created_at"] = "2026-11-03T10:00:00Z"
+    _blanket(monkeypatch, "ent_none", "ent_rejected", "ent_retired")
+
+    assert _run_cli(monkeypatch, "--apply") == 0
+    rows = _records(capsys.readouterr().out)
+
+    assert {r["task_id"]: r["outcome"] for r in rows[:3]} == {
+        "ent_none": "reissued",
+        "ent_rejected": "reissued",
+        "ent_retired": "retired",
+    }
+    assert record.writes == 2
+
+
+def test_blanket_run_does_not_refile_when_checkpoints_cannot_be_read(
+    record, monkeypatch, capsys
+):
+    record.add_task("ent_t1")
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id: None)
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["task_id"] == "ent_t1"
+    assert rows[0]["outcome"] == "unknown"
+    assert record.writes == 0
