@@ -664,14 +664,18 @@ def _fly_admission_seam(monkeypatch, tmp_path, on_attempt, *, retries='2', backo
 
 def _decision_queue(monkeypatch, mode, task_snapshot):
     """Stand-in for the existing decision queue (write_checkpoint_brief and its
-    read-back). ``mode``: 'ok', 'write_fails' (the write returns None) or
-    'readback_fails' (the written checkpoint does not read back) or
-    'readback_raises' (the read-back cannot run after the write)."""
+    read-back). ``mode``: 'ok', 'write_fails' (the write returns None),
+    'write_raises' (the write raises before returning an id),
+    'readback_fails' (the written checkpoint does not read back),
+    'readback_raises' (the read-back cannot run after the write) or
+    'readback_mismatch' (the read-back returns a different checkpoint)."""
     briefs = {}
     def write(**kw):
         briefs.setdefault('calls', []).append(kw)
         if mode == 'write_fails':
             return None
+        if mode == 'write_raises':
+            raise httpx.ConnectError('Neotoma went away during the write')
         key = 'ent_exhausted_' + kw['idempotency_context']
         briefs[key] = dict(entity_id=key, entity_type='checkpoint_brief', snapshot=dict(  # vocab-ok: existing authenticated checkpoint wire type
             task_entity_id=kw['task_entity_id'], reason=kw['decision'].reason,
@@ -682,7 +686,12 @@ def _decision_queue(monkeypatch, mode, task_snapshot):
         if key in briefs:
             if mode == 'readback_raises':
                 raise httpx.ConnectError('Neotoma went away after the write')
-            return None if mode == 'readback_fails' else copy.deepcopy(briefs[key])
+            if mode == 'readback_fails':
+                return None
+            record = copy.deepcopy(briefs[key])
+            if mode == 'readback_mismatch':
+                record['snapshot']['reason'] = 'some_other_reason'
+            return record
         return earlier(key)
     task_reads = []
     def read_task(entity_id):
@@ -721,21 +730,41 @@ def _assert_exhaustion(mode, briefs, task_reads, notices, task_id, saved, status
         # The exact action: which checkpoint to approve to release it again.
         (brief_id,) = [k for k in briefs if k != 'calls']
         assert f'Approve checkpoint {brief_id} to release the task again.' in notice
+    elif mode in UNCONFIRMED_MODES:
+        # Written, but the read-back failed, raised or did not match: the
+        # checkpoint may exist, so the task is held (no independent recovery
+        # runs while it may be open), the id is kept, and the notice never
+        # says that no checkpoint exists.
+        assert 'failed' not in statuses, statuses
+        assert saved['status'] == 'blocked'
+        (brief_id,) = [k for k in briefs if k != 'calls']
+        assert brief_id in saved['blocked_reason']
+        assert task_id in notice
+        assert f'Checkpoint {brief_id} (rounds_exhausted) was written but could not be confirmed' in notice
+        assert f'approve checkpoint {brief_id} to release the task' in notice
+        assert 'file a new task with a different title for the same work' in notice
+        assert 'No checkpoint' not in notice and 'no checkpoint' not in notice
     else:
-        # No checkpoint read back: no held status at all, one notice naming
-        # the task and saying no checkpoint exists, and the failed-dispatch
-        # status so the existing recovery handles it.
+        # No checkpoint was created (no id returned, or the write raised):
+        # no held status at all, one notice naming the task and saying no
+        # checkpoint was created, and the failed-dispatch status so the
+        # existing recovery handles it.
         assert 'blocked' not in statuses, statuses
         assert saved['status'] == 'failed'
         assert statuses[-1] == 'failed'
-        assert task_id in notice and 'No checkpoint exists' in notice
+        assert task_id in notice and 'No checkpoint was created' in notice
         assert 'task is held' not in notice
         assert not task_reads  # no held status was written to read back
 
 
+ABSENT_MODES = ('write_fails', 'write_raises')
+UNCONFIRMED_MODES = ('readback_fails', 'readback_raises', 'readback_mismatch')
+
+
 @pytest.mark.parametrize('mode,recovers', [('ok', False), ('ok', True),
-                                           ('write_fails', False), ('readback_fails', False),
-                                           ('readback_raises', False)])
+                                           ('write_fails', False), ('write_raises', False),
+                                           ('readback_fails', False), ('readback_raises', False),
+                                           ('readback_mismatch', False)])
 def test_neotoma_unanswered_admission_is_a_bounded_deferral_never_failed(
         joined, monkeypatch, tmp_path, mode, recovers):
     # Red before the deferral (observed): the real run_skill returned
@@ -1289,11 +1318,11 @@ def test_a_stated_delta_too_long_for_the_schedule_ends_without_a_retry(
     assert 'past the retry schedule' in run['saved']['blocked_reason']
 
 
-@pytest.mark.parametrize('queue_mode', ['write_fails', 'readback_fails', 'readback_raises'])
+@pytest.mark.parametrize('queue_mode', ABSENT_MODES)
 def test_no_checkpoint_means_no_hold(monkeypatch, tmp_path, dispatch_env, queue_mode):
     # Red before (observed): BLOCKED was written before the checkpoint call, so
     # the task ended 'blocked' with nothing to approve, and no notice said that
-    # no checkpoint exists.
+    # no checkpoint was created.
     run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
                                    lambda n, store, eid: None, queue_mode=queue_mode)
     assert 'blocked' not in run['statuses'], run['statuses']
@@ -1301,6 +1330,26 @@ def test_no_checkpoint_means_no_hold(monkeypatch, tmp_path, dispatch_env, queue_
     assert run['saved']['status'] == 'failed'
     calls = run['briefs'].get('calls', [])
     assert len(calls) == 1, calls  # no second checkpoint in the same dispatch
-    notices = [n for n in run['notices'] if 'No checkpoint exists' in n]
+    notices = [n for n in run['notices'] if 'No checkpoint was created' in n]
     assert len(notices) == 1, run['notices']
     assert run['eid'] in notices[0]
+
+
+@pytest.mark.parametrize('queue_mode', UNCONFIRMED_MODES)
+def test_an_unconfirmed_checkpoint_holds_and_is_never_reported_absent(
+        monkeypatch, tmp_path, dispatch_env, queue_mode):
+    # Red before (observed): a checkpoint written with an id whose read-back
+    # failed, raised or mismatched was reported as "No checkpoint exists" and
+    # the task was set failed for independent recovery while it may be open.
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
+                                   lambda n, store, eid: None, queue_mode=queue_mode)
+    assert 'failed' not in run['statuses'], run['statuses']
+    assert run['saved']['status'] == 'blocked'
+    calls = run['briefs'].get('calls', [])
+    assert len(calls) == 1, calls  # no second checkpoint in the same dispatch
+    (brief_id,) = [k for k in run['briefs'] if k != 'calls']
+    assert not any('No checkpoint' in n for n in run['notices']), run['notices']
+    notices = [n for n in run['notices'] if 'could not be confirmed' in n]
+    assert len(notices) == 1, run['notices']
+    assert run['eid'] in notices[0] and brief_id in notices[0]
+    assert 'file a new task with a different title' in notices[0]
