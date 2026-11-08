@@ -468,11 +468,17 @@ def fetch_entity_observations_strict(
         return None
 
     def read_page(offset: int) -> tuple[list[dict], int]:
-        resp = httpx.get(
-            f"{NEOTOMA_BASE_URL}/entities/{entity_id}/observations",
-            headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
-            params={"limit": limit, "offset": offset},
-            timeout=10,
+        # Only the request itself is retried, and only on a timeout or a
+        # connection error; an HTTP status and every consistency check below
+        # still fail closed at once.
+        resp = call_with_transient_retry(
+            lambda: httpx.get(
+                f"{NEOTOMA_BASE_URL}/entities/{entity_id}/observations",
+                headers={"Authorization": f"Bearer {NEOTOMA_BEARER_TOKEN}"},
+                params={"limit": limit, "offset": offset},
+                timeout=10,
+            ),
+            label=f"observations read of entity {entity_id} (offset {offset})",
         )
         resp.raise_for_status()
         data = resp.json()

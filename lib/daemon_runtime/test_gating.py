@@ -142,6 +142,122 @@ def test_fetch_entity_user_id_requires_complete_stable_pages(
         assert calls == [0, 100, 0]
 
 
+class _ObservationResponse:
+    def __init__(self, data, status_code=200):
+        self.data = data
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import httpx
+
+            request = httpx.Request("GET", "https://neotoma.test/observations")
+            raise httpx.HTTPStatusError(
+                f"status {self.status_code}",
+                request=request,
+                response=httpx.Response(self.status_code, request=request),
+            )
+
+    def json(self):
+        return self.data
+
+
+def _observation_page(rows, *, total=None, offset=0, limit=100):
+    return {
+        "observations": rows,
+        "total": len(rows) if total is None else total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@pytest.fixture
+def observation_reads(monkeypatch):
+    """Route observation page requests to a scripted ``get`` with no sleeping."""
+    from lib.daemon_runtime import neotoma_transient
+
+    sleeps = []
+    monkeypatch.setattr(neotoma_transient, "_sleep", sleeps.append)
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+
+    def install(get):
+        monkeypatch.setattr(gating_module.httpx, "get", get)
+
+    install.sleeps = sleeps
+    return install
+
+
+def test_observations_read_retries_a_timed_out_page(observation_reads):
+    import httpx
+
+    rows = [{"id": "obs-1"}, {"id": "obs-2"}]
+    calls = []
+
+    def get(url, *, headers, params, timeout):
+        calls.append(params["offset"])
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("The read operation timed out")
+        return _ObservationResponse(_observation_page(rows))
+
+    observation_reads(get)
+    assert gating_module.fetch_entity_observations_strict("ent_task") == rows
+    assert calls == [0, 0]
+    assert observation_reads.sleeps == [2.0]
+
+
+def test_observations_read_gives_up_after_bounded_timeouts(observation_reads):
+    import httpx
+
+    from lib.daemon_runtime import neotoma_transient
+
+    calls = []
+
+    def get(url, *, headers, params, timeout):
+        calls.append(params["offset"])
+        raise httpx.ReadTimeout("The read operation timed out")
+
+    observation_reads(get)
+    assert gating_module.fetch_entity_observations_strict("ent_task") is None
+    assert len(calls) == len(neotoma_transient.RETRY_PAUSES_SECONDS) + 1
+    assert observation_reads.sleeps == list(neotoma_transient.RETRY_PAUSES_SECONDS)
+
+
+@pytest.mark.parametrize("mode", ["wrong_total", "repeated_id"])
+def test_observations_read_does_not_retry_an_inconsistent_page(
+    observation_reads, mode
+):
+    calls = []
+
+    def get(url, *, headers, params, timeout):
+        calls.append(params["offset"])
+        if mode == "wrong_total":
+            return _ObservationResponse(
+                _observation_page([{"id": "obs-1"}], total=2)
+            )
+        return _ObservationResponse(
+            _observation_page([{"id": "obs-1"}, {"id": "obs-1"}])
+        )
+
+    observation_reads(get)
+    assert gating_module.fetch_entity_observations_strict("ent_task") is None
+    assert calls == [0]
+    assert observation_reads.sleeps == []
+
+
+@pytest.mark.parametrize("status", [404, 503])
+def test_observations_read_does_not_retry_an_http_status(observation_reads, status):
+    calls = []
+
+    def get(url, *, headers, params, timeout):
+        calls.append(params["offset"])
+        return _ObservationResponse({}, status_code=status)
+
+    observation_reads(get)
+    assert gating_module.fetch_entity_observations_strict("ent_task") is None
+    assert calls == [0]
+    assert observation_reads.sleeps == []
+
+
 def test_high_conf_low_blast_auto_executes():
     d = evaluate_gate(confidence=0.9, action_type="local_edit", policy=_default())
     assert d.action == GateAction.AUTO_EXECUTE
