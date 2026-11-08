@@ -287,6 +287,10 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
     supersede_checkpoint,
+    write_checkpoint_brief_outcome,
+    CHECKPOINT_WRITE_ABSENT,
+    CHECKPOINT_WRITE_CONFIRMED,
+    CHECKPOINT_WRITE_UNCONFIRMED,
 )
 from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
     TaskStatus,
@@ -802,10 +806,11 @@ def _dispatch_mode_from_snapshot(snapshot: dict) -> str | None:
 # The dispatcher retries it in process after a backoff, at most this many
 # times, then writes one rounds_exhausted checkpoint and, once it reads back,
 # holds the task (BLOCKED) with one operator notice (failure_posture.md, rule 5).
-# The checkpoint is the hold: if no checkpoint was written, no held status is
-# written and the task takes the failed-dispatch status instead. If one was
-# written but its read-back failed, it may exist, so the task is still held
-# and the notice asks the reader to confirm it. The build-claim deferral sweep does not fit:
+# The checkpoint is the hold: only if no store request was sent is the task
+# left unheld, taking the failed-dispatch status instead. If a store request
+# was sent but the checkpoint could not be confirmed (no id, a failed read-back
+# or an error after sending), it may exist, so the task is still held and the
+# notice asks the reader to confirm it. The build-claim deferral sweep does not fit:
 # it is keyed to a running build, and an outage has no holder to wait on.
 NEOTOMA_ADMISSION_RETRIES_DEFAULT = 3
 NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT = 120.0
@@ -825,27 +830,33 @@ NEOTOMA_ADMISSION_EXHAUSTED_REASON = "rounds_exhausted"
 
 def _write_neotoma_admission_checkpoint(
     entity_id: str, *, skill: str, title: str, trigger: str, reason: str,
-) -> tuple[str | None, bool, str]:
+) -> tuple[str, str | None, str]:
     """Write the one ``rounds_exhausted`` checkpoint and read it back.
 
     failure_posture.md rule 5: the checkpoint is the hold. Returns
-    ``(brief_id, confirmed, why)`` with three distinct outcomes:
+    ``(outcome, brief_id, why)`` with three distinct outcomes:
 
-    - confirmed: ``(brief_id, True, "")``, written and read back matching;
-    - absent: ``(None, False, why)``, the write returned no id or raised
-      before returning one, so no checkpoint exists;
-    - unconfirmed: ``(brief_id, False, why)``, the write returned an id but
-      the read-back failed, raised or did not match. The checkpoint may
-      exist, so it is never reported as absent.
+    - confirmed: ``("confirmed", brief_id, "")``, written and read back
+      matching;
+    - absent: ``("absent", None, why)``, only when no store request was sent
+      (the task could not be read to write it, or the writer returned before
+      its store request), so no checkpoint was written;
+    - unconfirmed: ``("unconfirmed", brief_id or None, why)``, a store request
+      was sent but the checkpoint is not proven: the writer could not confirm
+      it, raised, or its read-back here failed, raised or did not match. The
+      checkpoint may exist, so it is never reported as absent; the id is kept
+      when known.
 
     Exactly one write is attempted per call; it is never retried here."""
     brief_id = None
+    write_attempted = False
     try:
         task_record = fetch_task_record(entity_id)
         tenant_id = str(fetch_entity_user_id(entity_id) or "").strip()
         task_snapshot = _record_snapshot(task_record)
         if task_snapshot is None or not tenant_id:
-            return None, False, "the task record could not be read to write it"
+            return (CHECKPOINT_WRITE_ABSENT, None,
+                    "the task record could not be read to write it")
         _gate_skill_name, action_type, policy, gate = _task_gate_context(task_snapshot)
         decision = GateDecision(
             action=GateAction.CHECKPOINT,
@@ -856,7 +867,10 @@ def _write_neotoma_admission_checkpoint(
             reason=NEOTOMA_ADMISSION_EXHAUSTED_REASON,
             confidence_unscored=gate.confidence_unscored,
         )
-        brief_id = write_checkpoint_brief(
+        # From here the writer may have sent its store request, so an error
+        # raised by it can no longer be read as absence.
+        write_attempted = True
+        outcome, brief_id = write_checkpoint_brief_outcome(
             task_entity_id=entity_id,
             decision=decision,
             title=title,
@@ -872,22 +886,31 @@ def _write_neotoma_admission_checkpoint(
             task_record=task_record,
             policy=policy,
         )
-        if not brief_id:
-            return None, False, "Neotoma did not take the checkpoint"
+        if outcome == CHECKPOINT_WRITE_ABSENT:
+            return (CHECKPOINT_WRITE_ABSENT, None,
+                    "the checkpoint writer returned before sending its store request")
+        if outcome != CHECKPOINT_WRITE_CONFIRMED:
+            return (CHECKPOINT_WRITE_UNCONFIRMED, brief_id or None,
+                    "the store request was sent but the write could not be confirmed")
         checkpoint = _record_snapshot(fetch_checkpoint_record(brief_id))
     except Exception as exc:
         log.error(f"[{DAEMON_NAME}] task {entity_id}: admission exhaustion checkpoint "
                   f"not written or not read back: {type(exc).__name__}")
+        if not write_attempted:
+            return (CHECKPOINT_WRITE_ABSENT, None,
+                    "the task record could not be read to write it")
         if not brief_id:
-            return None, False, "the checkpoint write could not run"
-        return brief_id, False, "its read-back raised an error"
+            return (CHECKPOINT_WRITE_UNCONFIRMED, None,
+                    "the checkpoint write raised an error after it may have been sent")
+        return CHECKPOINT_WRITE_UNCONFIRMED, brief_id, "its read-back raised an error"
     if (isinstance(checkpoint, dict)
             and checkpoint.get("reason") == NEOTOMA_ADMISSION_EXHAUSTED_REASON
             and checkpoint.get("task_entity_id") == entity_id):
-        return brief_id, True, ""
+        return CHECKPOINT_WRITE_CONFIRMED, brief_id, ""
     if checkpoint is None:
-        return brief_id, False, "its read-back returned nothing"
-    return brief_id, False, "its read-back did not match the checkpoint written"
+        return CHECKPOINT_WRITE_UNCONFIRMED, brief_id, "its read-back returned nothing"
+    return (CHECKPOINT_WRITE_UNCONFIRMED, brief_id,
+            "its read-back did not match the checkpoint written")
 
 
 # Hard caps on the admission retry schedule (failure_posture.md: every wait
@@ -4168,8 +4191,9 @@ async def dispatch_task(
             job.failed(f"task {entity_id} → {skill} retry not started: {revalidation_refusal}")
         elif _neotoma_admission_deferred(result):
             # The bounded retries ran out with Neotoma still not answering.
-            # Nothing launched. Held when a checkpoint was written (confirmed
-            # or not); with no checkpoint, the failed-dispatch status. One
+            # Nothing launched. Held when a store request for the checkpoint
+            # was sent (confirmed or not); only when none was sent, the
+            # failed-dispatch status. One
             # notice in every case, and never a second checkpoint.
             reason = (
                 f"Neotoma's admission check did not answer after {deferrals + 1} "
@@ -4183,18 +4207,27 @@ async def dispatch_task(
                 update_run_session_status(run_session, status="failed")
             # The checkpoint is the hold: it is written (and read back) first,
             # and only then does the task take its held status.
-            brief_id, confirmed, unrecorded = _write_neotoma_admission_checkpoint(
+            outcome, brief_id, unrecorded = _write_neotoma_admission_checkpoint(
                 entity_id, skill=skill, title=title, trigger=trigger, reason=reason)
-            if brief_id and not confirmed:
-                # Written but not confirmed: the checkpoint may be open, so the
-                # task is held (no independent recovery may run alongside it)
-                # and the notice never says that no checkpoint exists.
-                reason += (
-                    f" Checkpoint {brief_id} ({NEOTOMA_ADMISSION_EXHAUSTED_REASON}) was "
-                    f"written but could not be confirmed ({unrecorded}). Check that it "
-                    f"exists: if it does, approve checkpoint {brief_id} to release the "
-                    "task; if it does not, file a new task with a different title for "
-                    "the same work.")
+            if outcome == CHECKPOINT_WRITE_UNCONFIRMED:
+                # A store request was sent but not confirmed: the checkpoint
+                # may be open, so the task is held (no independent recovery
+                # may run alongside it) and the notice never says that no
+                # checkpoint exists. The id is named when known.
+                if brief_id:
+                    reason += (
+                        f" Checkpoint {brief_id} ({NEOTOMA_ADMISSION_EXHAUSTED_REASON}) was "
+                        f"written but could not be confirmed ({unrecorded}). Check that it "
+                        f"exists: if it does, approve checkpoint {brief_id} to release the "
+                        "task; if it does not, file a new task with a different title for "
+                        "the same work.")
+                else:
+                    reason += (
+                        f" A {NEOTOMA_ADMISSION_EXHAUSTED_REASON} checkpoint may have been "
+                        f"written but could not be confirmed ({unrecorded}). Look for a "
+                        f"checkpoint for task {entity_id}: if one exists, approve it to "
+                        "release the task; if none exists, file a new task with a different "
+                        "title for the same work.")
                 set_task_status(
                     entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
                     from_status=TaskStatus.EXECUTING.value, reason=reason,
@@ -4203,7 +4236,7 @@ async def dispatch_task(
                               priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
                 job.failed(f"task {entity_id} → {skill} held: admission checkpoint "
                            "written but unconfirmed")
-            elif brief_id:
+            elif outcome == CHECKPOINT_WRITE_CONFIRMED and brief_id:
                 reason += " Approving this task's rounds_exhausted checkpoint releases it again."
                 set_task_status(
                     entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
@@ -4226,8 +4259,8 @@ async def dispatch_task(
                 notifier.send(notice, priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
                 job.failed(f"task {entity_id} → {skill} held: Neotoma admission did not answer")
             else:
-                # No checkpoint was created (no id returned, or the write
-                # raised first), so nothing to approve: no held status. The
+                # No checkpoint was created (no store request was sent), so
+                # nothing to approve: no held status. The
                 # task takes the failed-dispatch status so the existing
                 # recovery (the stall watchdog) owns it.
                 failed_reason = (f"{reason} No checkpoint was created ({unrecorded}); the "

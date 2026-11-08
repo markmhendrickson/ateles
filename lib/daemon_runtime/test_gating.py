@@ -25,6 +25,7 @@ from lib.daemon_runtime.gating import (
     require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
     write_checkpoint_brief,
+    write_checkpoint_brief_outcome,
 )
 
 
@@ -2029,3 +2030,112 @@ def test_envelope_binds_the_estimate_only_for_an_unscored_hold():
     scored = _envelope_for(False)
     assert "confidence" not in scored
     assert "confidence_unscored" not in scored
+
+
+# ── write_checkpoint_brief_outcome: absence is proven only before the POST ────
+
+
+def _hold_outcome(task_id="ent_task", title="Bounded work"):
+    policy = ExecutionPolicy(entity_id="default", loaded=True)
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    task_record = {
+        "entity_id": task_id,
+        "entity_type": "task",
+        "observation_count": 4,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {"title": title, "status": "awaiting_approval"},
+    }
+    return write_checkpoint_brief_outcome(
+        task_entity_id=task_id,
+        decision=decision,
+        title=title,
+        plan_summary="Bounded work",
+        handler="apis",
+        user_id="tenant-a",
+        action_type="local_edit",
+        task_record=task_record,
+        policy=policy,
+    )
+
+
+def test_outcome_early_return_before_the_post_is_absent(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "")
+
+    assert _hold_outcome() == ("absent", None)
+    assert server.stores == [], "absent only when no store request was sent"
+
+
+def test_outcome_readback_failure_is_unconfirmed_with_the_id(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    monkeypatch.setattr(gating_module, "_fetch_entity", lambda entity_id: None)
+
+    outcome, entity_id = _hold_outcome()
+
+    assert outcome == "unconfirmed"
+    assert entity_id and entity_id in server.entities
+
+
+def test_outcome_readback_mismatch_is_unconfirmed_with_the_id(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    monkeypatch.setattr(
+        gating_module,
+        "read_authenticated_checkpoint_authorization",
+        lambda entity_id, record: {"not": "the authorization written"},
+    )
+
+    outcome, entity_id = _hold_outcome()
+
+    assert outcome == "unconfirmed"
+    assert entity_id and entity_id in server.entities
+
+
+def test_outcome_post_exception_is_unconfirmed_with_no_id(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    attempts = []
+
+    def raises(url, **kwargs):
+        attempts.append(url)
+        raise ValueError("the store request failed after it was sent")
+
+    monkeypatch.setattr(gating_module.httpx, "post", raises)
+
+    assert _hold_outcome() == ("unconfirmed", None)
+    assert attempts, "the store request was attempted"
+    assert server.stores == []
+
+
+def test_outcome_timeout_after_retries_is_unconfirmed(monkeypatch):
+    import httpx
+
+    from lib.daemon_runtime import neotoma_transient
+
+    _FakeNeotoma(monkeypatch, _http_signer())
+    monkeypatch.setattr(neotoma_transient, "_sleep", lambda seconds: None)
+    attempts = []
+
+    def times_out(url, **kwargs):
+        attempts.append(url)
+        raise httpx.ReadTimeout("no answer; the request may have landed")
+
+    monkeypatch.setattr(gating_module.httpx, "post", times_out)
+
+    assert _hold_outcome() == ("unconfirmed", None)
+    assert len(attempts) == len(neotoma_transient.RETRY_PAUSES_SECONDS) + 1
+
+
+def test_outcome_success_is_confirmed(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+
+    outcome, entity_id = _hold_outcome()
+
+    assert outcome == "confirmed"
+    assert entity_id and entity_id in server.entities
+
+
+def test_write_checkpoint_brief_still_returns_none_on_unconfirmed(monkeypatch):
+    server = _FakeNeotoma(monkeypatch, _http_signer())
+    monkeypatch.setattr(gating_module, "_fetch_entity", lambda entity_id: None)
+
+    assert _hold() is None
+    assert len(server.entities) == 1, "a store landed; the wrapper still says None"

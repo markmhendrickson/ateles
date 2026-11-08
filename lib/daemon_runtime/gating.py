@@ -1018,6 +1018,14 @@ def _server_error_detail(exc: Exception) -> str:
     return f" [server: {code} {message}]" if code or message else ""
 
 
+# Outcomes of ``write_checkpoint_brief_outcome``.  Only "absent" proves that
+# this call wrote no checkpoint: it is returned only before any store request
+# was sent.
+CHECKPOINT_WRITE_CONFIRMED = "confirmed"
+CHECKPOINT_WRITE_ABSENT = "absent"
+CHECKPOINT_WRITE_UNCONFIRMED = "unconfirmed"
+
+
 def write_checkpoint_brief(
     *,
     task_entity_id: str,
@@ -1035,12 +1043,60 @@ def write_checkpoint_brief(
     """
     Store a blocking checkpoint_brief entity in Neotoma and link it to the task.
 
-    Returns the new entity_id, or None if Neotoma is unreachable (caller should
-    still NOT execute — the gate already decided CHECKPOINT).
+    Returns the new entity_id when the write is confirmed, otherwise None
+    (caller should still NOT execute — the gate already decided CHECKPOINT).
+    None does not prove that no checkpoint exists: a caller that must tell an
+    absent checkpoint from an unconfirmed one uses
+    ``write_checkpoint_brief_outcome``.
+    """
+    outcome, entity_id = write_checkpoint_brief_outcome(
+        task_entity_id=task_entity_id,
+        decision=decision,
+        title=title,
+        plan_summary=plan_summary,
+        handler=handler,
+        alternatives=alternatives,
+        user_id=user_id,
+        action_type=action_type,
+        idempotency_context=idempotency_context,
+        task_record=task_record,
+        policy=policy,
+    )
+    return entity_id if outcome == CHECKPOINT_WRITE_CONFIRMED else None
+
+
+def write_checkpoint_brief_outcome(
+    *,
+    task_entity_id: str,
+    decision: GateDecision,
+    title: str,
+    plan_summary: str,
+    handler: str,
+    alternatives: list[str] | None = None,
+    user_id: str | None = None,
+    action_type: str | None = None,
+    idempotency_context: str | None = None,
+    task_record: dict | None = None,
+    policy: ExecutionPolicy | None = None,
+) -> tuple[str, str | None]:
+    """
+    Store a blocking checkpoint_brief entity and say what is known of it.
+
+    Returns ``(outcome, entity_id)``:
+
+    - ``("confirmed", id)``: the store returned an id and, where authority is
+      expected, the read-back matched;
+    - ``("absent", None)``: returned before any store request was sent, so no
+      checkpoint was written by this call;
+    - ``("unconfirmed", id or None)``: a store request was sent but the result
+      is not proven: a failed or mismatching read-back (the id is kept), or an
+      error raised once the request had been attempted, including a timeout on
+      a request that may have landed (the id is kept when known). The
+      checkpoint may exist, so this is never reported as absent.
     """
     if not NEOTOMA_BEARER_TOKEN:
         log.warning("[gating] no bearer token — checkpoint_brief not persisted")
-        return None
+        return CHECKPOINT_WRITE_ABSENT, None
 
     # The fallback policy keeps ordinary classification available; it is not
     # authoritative enough to mint an approval artifact.  Otherwise a stable
@@ -1051,7 +1107,7 @@ def write_checkpoint_brief(
             "checkpoint authority",
             policy.entity_id or "(fallback)",
         )
-        return None
+        return CHECKPOINT_WRITE_ABSENT, None
 
     body = {
         "entities": [
@@ -1101,7 +1157,7 @@ def write_checkpoint_brief(
                 "[gating] incomplete task, producer, or resolver provenance for "
                 "checkpoint authority"
             )
-            return None
+            return CHECKPOINT_WRITE_ABSENT, None
         encoded_authorization = build_checkpoint_authorization_envelope(
             task_record=task_record,
             policy=policy,
@@ -1158,6 +1214,10 @@ def write_checkpoint_brief(
     body["idempotency_key"] += "-" + hashlib.sha256(
         _canonical_json(body["entities"]).encode()
     ).hexdigest()[:16]
+    # Set immediately before the first store request: from then on the request
+    # may have landed, so no later failure may be read as absence.
+    store_attempted = False
+    entity_id: str | None = None
     try:
         signer = None
         encoded_request_body: bytes | None = None
@@ -1168,7 +1228,7 @@ def write_checkpoint_brief(
                     "[gating] checkpoint producer JWK does not match the configured "
                     "RFC 7638 thumbprint — refusing to create authority"
                 )
-                return None
+                return CHECKPOINT_WRITE_ABSENT, None
             encoded_request_body = _canonical_json(body).encode("utf-8")
         store_url = f"{NEOTOMA_BASE_URL.rstrip('/')}/store"
 
@@ -1194,6 +1254,7 @@ def write_checkpoint_brief(
                 timeout=15,
             )
 
+        store_attempted = True
         resp = call_with_transient_retry(
             _post_checkpoint, label="checkpoint_brief store"
         )
@@ -1214,14 +1275,19 @@ def write_checkpoint_brief(
                     "materialize exactly on read-back",
                     entity_id,
                 )
-                return None
-        return entity_id
+                return CHECKPOINT_WRITE_UNCONFIRMED, entity_id
+        if not entity_id:
+            # The store answered without an id: it may still have written one.
+            return CHECKPOINT_WRITE_UNCONFIRMED, None
+        return CHECKPOINT_WRITE_CONFIRMED, entity_id
     except Exception as exc:  # noqa: BLE001
         log.warning(
             f"[gating] failed to persist checkpoint_brief: {exc}"
             f"{_server_error_detail(exc)}"
         )
-        return None
+        if not store_attempted:
+            return CHECKPOINT_WRITE_ABSENT, None
+        return CHECKPOINT_WRITE_UNCONFIRMED, entity_id
 
 
 # ── Producer-score assessment record ──────────────────────────────────────────
