@@ -305,9 +305,16 @@ def _assert_checkpointed_as_unscored(world):
         # high blast: gated on blast radius, reason text unchanged
         ("open_or_merge_pr", "cicada", "propose alternatives"),
         ("payment", "monedula", "propose alternatives"),
-        # never-tier and unrecognised (resolves to NEVER, not LOW)
+        # never-tier: a reserved type keeps the operator-only reason
         ("operator_only", "cicada", "operator-only"),
-        ("a_brand_new_action_nobody_classified", "cicada", "operator-only"),
+        # unrecognised: still NEVER, not LOW, but the reason names the type and
+        # says the policy does not classify it, rather than calling it operator-only
+        (
+            "a_brand_new_action_nobody_classified",
+            "cicada",
+            "unclassified action type 'a_brand_new_action_nobody_classified' — "
+            "the execution policy does not classify it",
+        ),
     ],
 )
 def test_high_blast_and_unrecognised_actions_are_not_scored_and_stay_gated(
@@ -319,6 +326,9 @@ def test_high_blast_and_unrecognised_actions_are_not_scored_and_stay_gated(
     brief = _only_brief(world)["decision"]
     assert world["spawns"] == []
     assert expected_reason in brief.reason
+    if expected_reason.startswith("unclassified action type"):
+        assert brief.blast_radius == BlastRadius.NEVER
+        assert "operator-only" not in brief.reason
     assert brief.confidence_source == ""
     if brief.blast_radius == BlastRadius.HIGH:
         assert brief.confidence == MECHANICAL
