@@ -657,7 +657,7 @@ def test_every_dropped_checkpoint_row_reads_as_unknown(env, monkeypatch, pages):
     offsets: list[int] = []
 
     def _query(entity_type, *, snapshot_filters, offset=0, limit=None):
-        assert entity_type == "checkpoint_brief" and limit == _PAGE
+        assert entity_type == "checkpoint_brief" and limit == _PAGE  # vocab-ok: pins the live Neotoma record type the gating query reads
         offsets.append(offset)
         return served[len(offsets) - 1] if len(offsets) <= len(served) else {"entities": []}
 
