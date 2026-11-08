@@ -134,6 +134,29 @@ _FALLBACK_LOW_BLAST = frozenset(
 # more certainly it auto-executed.
 NEVER_AUTO_EXECUTE_ACTION_TYPES = frozenset({"operator_only"})
 
+# Reason prefixes the gate writes on a NEVER-tier hold (ateles#1599). A type in
+# NEVER_AUTO_EXECUTE_ACTION_TYPES is reserved to the operator; any other NEVER
+# decision comes from a gap in the policy (an unclassified or missing action
+# type under a fail-closed default), which needs a classification, not a person
+# doing the work. `execution/scripts/decision_queue.py` reads both prefixes.
+OPERATOR_ONLY_REASON = (
+    "operator-only action — never auto-executable at any "
+    "confidence or recurrence count"
+)
+UNCLASSIFIED_REASON_PREFIX = "unclassified action type"
+
+
+def never_tier_reason(action_type: str | None) -> str:
+    """One-line reason for a NEVER-tier hold, telling reserved from unclassified."""
+    at = (action_type or "").strip().lower()
+    if at in NEVER_AUTO_EXECUTE_ACTION_TYPES:
+        return OPERATOR_ONLY_REASON
+    named = repr(at) if at else "(none declared)"
+    return (
+        f"{UNCLASSIFIED_REASON_PREFIX} {named} — the execution policy does not "
+        "classify it, so it is held until the policy classifies it"
+    )
+
 
 class BlastRadius(str, Enum):
     LOW = "low"
@@ -682,10 +705,7 @@ def evaluate_gate(
             confidence=confidence,
             threshold=threshold,
             policy_id=policy.entity_id,
-            reason=(
-                "operator-only action — never auto-executable at any "
-                "confidence or recurrence count"
-            ),
+            reason=never_tier_reason(action_type),
             confidence_unscored=confidence_unscored,
         )
 

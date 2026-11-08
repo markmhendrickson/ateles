@@ -2135,3 +2135,43 @@ def test_non_strict_listing_keeps_repeated_and_unidentified_rows(monkeypatch):
     found = gating_module.query_all_entities("task", snapshot_filters={})
     assert found == [{"entity_id": "a"}, {"entity_id": "a"},
                      {"entity_type": "other"}]
+
+
+# ── never-tier hold reasons: reserved vs unclassified (ateles#1599) ──────────
+OPERATOR_ONLY_REASON_TEXT = (
+    "operator-only action — never auto-executable at any confidence or "
+    "recurrence count"
+)
+
+
+def test_reserved_action_type_keeps_the_operator_only_reason():
+    d = evaluate_gate(confidence=0.95, action_type="operator_only", policy=_default())
+    assert d.blast_radius == BlastRadius.NEVER
+    assert d.action == GateAction.CHECKPOINT
+    assert d.reason == OPERATOR_ONLY_REASON_TEXT
+
+
+def test_unclassified_action_type_gets_its_own_reason_naming_it():
+    d = evaluate_gate(confidence=0.95, action_type="code_review", policy=_default())
+    assert d.blast_radius == BlastRadius.NEVER
+    assert d.action == GateAction.CHECKPOINT
+    assert not d.may_auto_execute
+    assert d.reason.startswith("unclassified action type 'code_review'")
+    assert "execution policy does not classify it" in d.reason
+    assert "held until the policy classifies it" in d.reason
+    assert "operator-only" not in d.reason
+    assert "\n" not in d.reason
+
+
+def test_missing_action_type_under_never_default_gets_the_unclassified_reason():
+    pol = ExecutionPolicy(
+        entity_id="p", blast_radius_default=BlastRadius.NEVER, loaded=True
+    )
+    for missing in (None, "", "   "):
+        d = evaluate_gate(confidence=0.95, action_type=missing, policy=pol)
+        assert d.blast_radius == BlastRadius.NEVER
+        assert d.action == GateAction.CHECKPOINT
+        assert not d.may_auto_execute
+        assert d.reason.startswith("unclassified action type (none declared)")
+        assert "execution policy does not classify it" in d.reason
+        assert "operator-only" not in d.reason
