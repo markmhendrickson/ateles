@@ -274,7 +274,8 @@ def test_consumed_approval_refuses_an_older_approval_behind_a_newer_checkpoint(m
 
 def test_consumed_approval_refuses_an_unconsumed_approval(monkeypatch):
     monkeypatch.setattr(apis, "checkpoints_for_task", lambda task_id: [
-        {"entity_id": "ent_unconsumed", "snapshot": {"status": "approved"}}])
+        {"entity_id": "ent_unconsumed", "created_at": "2026-11-06T10:00:00Z",
+         "snapshot": {"status": "approved"}}])
     monkeypatch.setattr(apis, "fetch_checkpoint_record",
                         lambda cid: pytest.fail("an unconsumed checkpoint was read for release"))
     checkpoint, why = apis._consumed_approval(TASK, _task())
@@ -293,7 +294,8 @@ class _Policy:
 
 
 def _approval_records(monkeypatch, *, authorization: dict | None = None,
-                      later: list[dict] | None = None, brief: dict | None = None):
+                      later: list[dict] | None = None, brief: dict | None = None,
+                      newer: list | None = None):
     """Fixture records for the REAL ``_consumed_approval``: one consumed,
     authenticated approval of the task at observation count 3, then the task's
     observations since (newest first). Only Neotoma reads and the policy lookup
@@ -316,7 +318,8 @@ def _approval_records(monkeypatch, *, authorization: dict | None = None,
                                  blast_radius=apis.BlastRadius.HIGH, confidence=0.5,
                                  threshold=0.85, policy_id="ent_policy", reason="")
     monkeypatch.setattr(apis, "checkpoints_for_task", lambda task_id: [
-        {"entity_id": CHECKPOINT, "snapshot": brief}])
+        {"entity_id": CHECKPOINT, "created_at": "2026-11-06T10:00:00Z", "snapshot": brief},
+        *(newer or [])])
     monkeypatch.setattr(apis, "_checkpoint_denial_persisted", lambda cid: False)
     monkeypatch.setattr(apis, "fetch_checkpoint_record", lambda cid: {"entity_id": cid})
     monkeypatch.setattr(apis, "read_authenticated_checkpoint_authorization",
@@ -503,3 +506,100 @@ def test_every_unrecovered_notice_says_launch_is_unknown(why):
     assert "whether its Fly run launched is unknown" in text
     assert "never launched" not in text
     assert "earlier Fly run" in text and "before refiling" in text
+
+
+# ── Correction round 2: an unreadable checkpoint set fails closed ────────────
+
+_NEWER = "2026-11-07T10:00:00Z"
+
+
+@pytest.mark.parametrize("malformed", [
+    {"created_at": _NEWER, "snapshot": {"status": "awaiting_operator"}},
+    {"entity_id": "", "created_at": _NEWER, "snapshot": {"status": "awaiting_operator"}},
+    {"entity_id": "ent_newer", "snapshot": {"status": "awaiting_operator"}},
+    {"entity_id": "ent_newer", "created_at": "yesterday-ish",
+     "snapshot": {"status": "awaiting_operator"}},
+    {"entity_id": "ent_newer", "created_at": _NEWER, "snapshot": {}},
+    {"entity_id": "ent_newer", "created_at": _NEWER, "snapshot": {"status": "pending_review"}},
+    {"entity_id": "ent_newer", "created_at": _NEWER, "snapshot": {"status": None}},
+    {"entity_id": "ent_newer", "created_at": _NEWER},
+    "ent_newer",
+    None,
+], ids=["no_entity_id", "empty_entity_id", "no_time", "unparseable_time", "no_status",
+        "unrecognised_status", "null_status", "no_snapshot", "not_a_dict_str",
+        "not_a_dict_none"])
+def test_newer_unreadable_checkpoint_is_not_skipped_for_an_older_approval(
+        env, monkeypatch, malformed):
+    """A newer checkpoint row that cannot take part in choosing the newest
+    makes the whole set unknown: the older consumed approval beside it never
+    releases the task, nothing is written, and one notice says launch is
+    unknown."""
+    _, _, launches, dispatched, writes = env
+    monkeypatch.setattr(apis, "_consumed_approval", _REAL_CONSUMED_APPROVAL)
+    _approval_records(monkeypatch, later=[_handoff("executing")], newer=[malformed])
+    monkeypatch.setattr(apis, "fetch_checkpoint_record",
+                        lambda cid: pytest.fail("a checkpoint was read for release"))
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert launches == [] and dispatched == [] and writes == []
+    assert len(notifier.sent) == 1 and TASK in notifier.sent[0]
+    assert "whether its Fly run launched is unknown" in notifier.sent[0]
+    assert "its checkpoints could not all be read" in notifier.sent[0]
+    assert counts["unrecovered"] == 1 and counts["redispatched"] == 0
+
+
+def test_well_formed_set_still_relaunches_on_the_newest_approval(env, monkeypatch):
+    """The fail-closed check does not refuse a readable set: an older
+    superseded checkpoint beside the newest consumed approval still relaunches."""
+    _, _, launches, dispatched, _ = env
+    monkeypatch.setattr(apis, "_consumed_approval", _REAL_CONSUMED_APPROVAL)
+    _approval_records(monkeypatch, later=[_handoff("executing")], newer=[
+        {"entity_id": "ent_older", "created_at": "2026-11-01T10:00:00Z",
+         "snapshot": {"status": "superseded"}}])
+    notifier = _Notifier()
+    asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert launches == [TASK] and len(dispatched) == 1, notifier.sent
+    assert dispatched[0]["release_key"].startswith(CHECKPOINT)
+
+
+def test_tied_newest_checkpoints_are_not_ordered(monkeypatch):
+    _approval_records(monkeypatch, later=[_handoff("executing")], newer=[
+        {"entity_id": "ent_twin", "created_at": "2026-11-06T10:00:00Z",
+         "snapshot": {"status": "awaiting_operator"}}])
+    checkpoint, why = apis._consumed_approval(TASK, _task())
+    assert checkpoint is None and "cannot be told" in why
+
+
+@pytest.mark.parametrize("row", [{"snapshot": {"status": "executing"}}, "garbage"],
+                         ids=["no_entity_id", "not_a_dict"])
+def test_unreadable_task_row_is_named_not_skipped(env, monkeypatch, row):
+    _, _, launches, dispatched, _ = env
+    monkeypatch.setattr(apis, "query_all_entities", lambda *a, **k: [row])
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert launches == [] and dispatched == []
+    assert len(notifier.sent) == 1 and "launched is unknown" in notifier.sent[0]
+    assert counts["unrecovered"] == 1
+
+
+def test_uninterpretable_ledger_entry_makes_the_receipt_state_unknown(monkeypatch):
+    """A ledger entry that is not an object could be this task's receipt: the
+    receipt state is unknown, not absent."""
+
+    class _Ledger:
+        def snapshot(self):
+            return {"deliveries": {"some-key": "not-an-object"}}
+
+    monkeypatch.setattr(apis, "_fly_run_state", lambda snap, eid: (False, None))
+    monkeypatch.setattr(build_delivery, "_delivery_ledger", lambda: _Ledger())
+    assert apis._fly_delivery_recorded(_task(), TASK) is None
+
+
+def test_non_object_task_observation_is_unreadable_not_a_change(env, monkeypatch):
+    _, _, launches, dispatched, _ = env
+    monkeypatch.setattr(apis, "_consumed_approval", _REAL_CONSUMED_APPROVAL)
+    _approval_records(monkeypatch, later=["not-an-observation"])
+    notifier = _Notifier()
+    asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert launches == [] and dispatched == []
+    assert len(notifier.sent) == 1 and "could not be read" in notifier.sent[0]

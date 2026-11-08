@@ -267,6 +267,11 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     _snapshot_with_tenant,
     ExecutionPolicy,
     checkpoint_already_dispatched,
+    CHECKPOINT_APPROVED_NO_RELEASE,
+    CHECKPOINT_APPROVED_STATES,
+    CHECKPOINT_REJECTED_STATES,
+    CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+    CHECKPOINT_SUPERSEDED,
     checkpoints_for_task,
     close_checkpoint_without_release,
     entity_record_digest,
@@ -2178,14 +2183,19 @@ def _fly_delivery_recorded(snapshot: dict, entity_id: str) -> bool | None:
         receipts = build_delivery._delivery_ledger().snapshot().get("deliveries", {})
     except (OSError, fly_runner.FlyLedgerError):
         return None
+    # A receipt this reader cannot interpret could be this task's: the whole
+    # ledger is unknown rather than that entry skipped.
+    if not isinstance(receipts, dict) or not all(
+            isinstance(stored, str) and isinstance(entry, dict)
+            for stored, entry in receipts.items()):
+        return None
     key = _fly_receipt_key(snapshot, entity_id)
     if key and build_delivery._receipt_for(build_delivery.canonical_key(key), receipts) is not None:
         return True
     task_id = str(entity_id).strip()
     return any(
-        isinstance(entry, dict)
-        and (str(entry.get("task_id") or "").strip() == task_id
-             or str(stored).strip().endswith(f"{build_delivery._TASK_KEY_MARK}{task_id}"))
+        str(entry.get("task_id") or "").strip() == task_id
+        or stored.strip().endswith(f"{build_delivery._TASK_KEY_MARK}{task_id}")
         for stored, entry in receipts.items()
     )
 
@@ -2215,14 +2225,49 @@ def _fly_receipt_removed(snapshot: dict, entity_id: str) -> bool | None:
 
 
 def _created_at(item: dict) -> float | None:
-    """A checkpoint's creation time from its record, or None if unreadable."""
-    for value in (item.get("created_at"), (_record_snapshot(item) or {}).get("created_at")):
-        if isinstance(value, str) and value.strip():
-            try:
-                return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp()
-            except ValueError:
-                continue
-    return None
+    """A checkpoint's creation time from its record (or, when the record has
+    none, its snapshot), or None if missing or unparseable. A present but
+    unparseable record time is unreadable; it does not fall back."""
+    value = item.get("created_at")
+    if value is None:
+        value = (_record_snapshot(item) or {}).get("created_at")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+# Every status a checkpoint_brief is written with: pending at the gate, an
+# operator resolution, or a dispatcher transition. Any other value is one this
+# reader cannot order or classify.
+_KNOWN_CHECKPOINT_STATUSES = frozenset({
+    "awaiting_operator", *CHECKPOINT_APPROVED_STATES, *CHECKPOINT_REJECTED_STATES,
+    CHECKPOINT_APPROVED_NO_RELEASE, CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+    CHECKPOINT_SUPERSEDED,
+})
+
+_CHECKPOINTS_UNREADABLE = "its checkpoints could not all be read"
+
+
+def _readable_checkpoint(item: object) -> tuple[float, str, dict] | None:
+    """``(created_at, entity_id, snapshot)`` for a checkpoint row that can take
+    part in choosing the newest checkpoint; None for any row that cannot (not a
+    dict, no entity id, no snapshot, a missing or unparseable time, or a
+    missing or unrecognised status)."""
+    if not isinstance(item, dict):
+        return None
+    entity_id = item.get("entity_id")
+    brief = _record_snapshot(item)
+    if not isinstance(entity_id, str) or not entity_id.strip() or brief is None:
+        return None
+    when = _created_at(item)
+    status = brief.get("status")
+    if (when is None or not isinstance(status, str)
+            or status.strip().lower() not in _KNOWN_CHECKPOINT_STATUSES):
+        return None
+    return when, entity_id.strip(), brief
 
 
 def _consumed_approval(task_id: str, task_snapshot: dict) -> tuple[str | None, str]:
@@ -2235,19 +2280,21 @@ def _consumed_approval(task_id: str, task_snapshot: dict) -> tuple[str | None, s
     pending or rejected checkpoint, or checkpoints whose order cannot be told,
     refuse: an older approval never releases a later attempt. Reads only."""
     items = checkpoints_for_task(task_id)
-    if items is None:
-        return None, "its checkpoints could not be read"
-    items = [i for i in items if isinstance(i, dict) and i.get("entity_id")]
+    if not isinstance(items, list):
+        return None, _CHECKPOINTS_UNREADABLE
     if not items:
         return None, "it has no checkpoint that released it"
-    if len(items) > 1:
-        stamped = [(_created_at(i), i) for i in items]
-        if any(when is None for when, _ in stamped):
-            return None, "which checkpoint released it cannot be told"
-        items = [max(stamped, key=lambda pair: pair[0])[1]]
-    item = items[0]
-    checkpoint_id = str(item["entity_id"])
-    brief = _record_snapshot(item) or {}
+    # Any row that cannot take part in choosing the newest could itself be the
+    # newest, so one unreadable row makes the whole set unknown: no row is
+    # skipped before choosing.
+    readable = [_readable_checkpoint(i) for i in items]
+    if any(r is None for r in readable):
+        return None, _CHECKPOINTS_UNREADABLE
+    newest = max(when for when, _, _ in readable)
+    latest = [r for r in readable if r[0] == newest]
+    if len(latest) != 1:
+        return None, "which checkpoint released it cannot be told"
+    _when, checkpoint_id, brief = latest[0]
     if (read_checkpoint_resolution(brief) != "approved"
             or not checkpoint_already_dispatched(brief)
             or _checkpoint_denial_persisted(checkpoint_id)):
@@ -2333,7 +2380,8 @@ def _later_observations_only_lifecycle_handoff(task_id: str, task_record: dict,
                 and authorization.get("task_last_observation_at")
                 == task_record.get("last_observation_at"))
     observations = fetch_entity_observations_strict(task_id)
-    if observations is None or len(observations) != current:
+    if (not isinstance(observations, list) or len(observations) != current
+            or not all(isinstance(obs, dict) for obs in observations)):
         return None
     # The observations endpoint lists newest first: the first ones are later.
     return all(_is_lifecycle_handoff(obs, task_id)
@@ -2415,9 +2463,15 @@ async def recover_unlaunched_fly_tasks(notifier: Notifier) -> dict:
             priority=Priority.WARN, handler=DAEMON_NAME)
         return counts
     for row in rows:
-        entity_id = str(row.get("entity_id") or "")
-        if not entity_id:
+        entity_id = row.get("entity_id") if isinstance(row, dict) else None
+        if not isinstance(entity_id, str) or not entity_id.strip():
+            # An unreadable row could be a stranded task: name it, never skip it.
+            counts["examined"] += 1
+            counts["unrecovered"] += 1
+            _unrecovered_notice(notifier, "(unknown)", "(unreadable task row)",
+                                "its task record could not be read")
             continue
+        entity_id = entity_id.strip()
         try:
             await _recover_unlaunched_fly_task(entity_id, _record_snapshot(row) or row,
                                                notifier, counts)
