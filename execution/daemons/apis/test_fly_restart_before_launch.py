@@ -241,7 +241,9 @@ def test_row_without_an_entity_id_is_named_not_skipped(env, monkeypatch):
     [{"total": 1}],
     [{"entities": {"entity_id": TASK}}],
     [{"entities": [{"entity_id": TASK}], "total": 3}],
-], ids=["non_object_row", "entities_missing", "entities_not_a_list", "paging_cut_short"])
+    [{"entities": [{"entity_id": TASK}]}],
+], ids=["non_object_row", "entities_missing", "entities_not_a_list", "paging_cut_short",
+        "short_page_without_total"])
 def test_partial_task_inventory_sends_one_notice_and_reports_incomplete(env, monkeypatch, pages):
     """Through the real ``query_all_entities``: any row the listing could not
     keep makes the whole inventory unknown, never silently smaller."""

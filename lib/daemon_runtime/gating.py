@@ -1769,13 +1769,16 @@ def query_all_entities(
 
     ``strict`` is for callers that choose among the rows for a safety decision,
     where a missing row could be the one that decides: any row that is not an
-    object, a page whose ``entities`` is missing or not a list, or a reported
-    ``total`` the collected rows do not match makes the whole read failed
-    (``None``) instead of silently smaller.
+    object, a page whose ``entities`` is missing or not a list, a page without
+    a non-negative integer ``total`` (or whose ``total`` differs from an
+    earlier page's), a collected row count that does not equal ``total``, or a
+    ``has_more`` that disagrees with the rows still outstanding makes the whole
+    read failed (``None``) instead of silently smaller.  A short page alone is
+    never taken as proof that the listing ended.
     """
     page_size = QUERY_PAGE_SIZE
     found: list[dict] = []
-    totals: set[object] = set()
+    total: int | None = None
     offset = 0
     while True:
         page = query_entities(
@@ -1794,8 +1797,31 @@ def query_all_entities(
                     f"page at offset {offset} — listing is unknown"
                 )
                 return None
-            if "total" in page:
-                totals.add(page.get("total"))
+            page_total = page.get("total")
+            if (
+                not isinstance(page_total, int)
+                or isinstance(page_total, bool)
+                or page_total < 0
+                or (total is not None and page_total != total)
+            ):
+                log.warning(
+                    f"[gating] entity query for {entity_type} reported total "
+                    f"{page_total!r} at offset {offset} (earlier pages: {total!r}) "
+                    "— listing is unknown"
+                )
+                return None
+            total = page_total
+            if "has_more" in page:
+                has_more = page.get("has_more")
+                if not isinstance(has_more, bool) or has_more != (
+                    offset + len(raw) < total
+                ):
+                    log.warning(
+                        f"[gating] entity query for {entity_type} reported "
+                        f"has_more={has_more!r} at offset {offset} against a "
+                        f"total of {total} — listing is unknown"
+                    )
+                    return None
         rows = raw if isinstance(raw, list) else []
         found.extend(e for e in rows if isinstance(e, dict))
         if limit is not None and len(found) >= limit:
@@ -1803,20 +1829,12 @@ def query_all_entities(
         if len(rows) < page_size:
             break
         offset += len(rows)
-    if totals:
-        total = next(iter(totals))
-        if (
-            len(totals) != 1
-            or not isinstance(total, int)
-            or isinstance(total, bool)
-            or total != len(found)
-        ):
-            log.warning(
-                f"[gating] entity query for {entity_type} collected {len(found)} "
-                f"rows against a reported total of {sorted(map(str, totals))} — "
-                "listing is unknown"
-            )
-            return None
+    if strict and total != len(found):
+        log.warning(
+            f"[gating] entity query for {entity_type} collected {len(found)} "
+            f"rows against a reported total of {total!r} — listing is unknown"
+        )
+        return None
     return found
 
 
