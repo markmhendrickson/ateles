@@ -257,6 +257,7 @@ from lib.daemon_runtime import (  # noqa: E402
     resolve_policy_for_agent,
     write_checkpoint_brief,
 )
+from lib.daemon_runtime import label_gate as _label_gate  # noqa: E402
 from lib.daemon_runtime.action_type import (  # noqa: E402
     AGENT_ACTION_TYPE_PRIOR,
     SOURCE_AGENT_PRIOR,
@@ -1364,7 +1365,80 @@ async def _run_fly_delivery_task(skill: str, prompt: str, *, entity_id: str, rol
                      f"Read-back FAILED: {result.fly_delivery_readback_reason}.")
         else:
             log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: {summary}")
+        if (not target and result.ok and result.fly_delivery_status == "opened"
+                and result.fly_pr_number):
+            await _label_canary_pull_request(skill, entity_id, repository,
+                                             result.fly_pr_number, task_snapshot)
     return result
+
+
+def _canary_label_for_task(task_snapshot) -> str:
+    """The configured canary label when this task declares itself canary-lane
+    work, else "".
+
+    The declaration is the task's own ``tags`` list carrying exactly the label
+    the swarm label gate is configured with. Nothing about the pull request
+    (title, body, branch, author, repository) counts: adding the label opts the
+    pull request into automatic swarm work. A gate that is off labels nothing."""
+    label = _label_gate.required_label()
+    if not label or not isinstance(task_snapshot, dict):
+        return ""
+    tags = task_snapshot.get("tags")
+    if not isinstance(tags, (list, tuple)):
+        return ""
+    return label if _label_gate.carries_label(label, tags) else ""
+
+
+def _gh_pr_labels(repo: str, number: int, token: str, label: str | None = None) -> tuple[int, str]:
+    """Add *label* to the pull request (or, with no label, read its labels) as
+    (returncode, stdout). Argv only, never a shell; the token is passed in the
+    environment and never logged. The one place the canary labelling talks to
+    GitHub; tests replace it."""
+    import subprocess
+
+    argv = ["gh", "api", f"repos/{repo}/issues/{number}/labels"]
+    if label is not None:
+        argv += ["-X", "POST", "-f", f"labels[]={label}"]
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False,
+                          env={**os.environ, "GH_TOKEN": token, "GITHUB_TOKEN": token})
+    return proc.returncode, proc.stdout or ""
+
+
+async def _label_canary_pull_request(skill: str, entity_id: str, repository: str,
+                                     number: int, task_snapshot) -> bool:
+    """Add the canary label to a pull request Fly just opened for a canary-lane
+    task, then read the labels back. One attempt, never a retry: any failure is
+    one WARNING and the pull request stays unlabelled, which is the safe
+    outcome. Never raises, so the delivery result is unchanged."""
+    import json
+
+    label = _canary_label_for_task(task_snapshot)
+    if not label:
+        return False
+    where = f"{repository}#{number}"
+    try:
+        token = _token_for_agent_on_repo(skill, repository)
+        if not token:
+            raise RuntimeError("no GitHub write credential for this repository")
+        code, _ = await asyncio.to_thread(_gh_pr_labels, repository, number, token, label)
+        if code != 0:
+            raise RuntimeError(f"label request exited {code}")
+        code, out = await asyncio.to_thread(_gh_pr_labels, repository, number, token)
+        if code != 0:
+            raise RuntimeError(f"label read-back exited {code}")
+        try:
+            names = _label_gate.label_names({"labels": json.loads(out)})
+        except ValueError:
+            names = []
+        if not _label_gate.carries_label(label, names):
+            raise RuntimeError("the read-back does not show the label")
+    except Exception as exc:  # noqa: BLE001 - labelling must never fail the delivery
+        log.warning(f"[{DAEMON_NAME}] {skill} task {entity_id}: could not label pull request "
+                    f"{where} with canary label {label!r} ({exc}); it stays unlabelled")
+        return False
+    log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: canary label {label!r} added to pull "
+             f"request {where}. Read-back: present.")
+    return True
 
 
 CONFIDENCE_DRIVERS_MISSING = (

@@ -240,3 +240,126 @@ def test_no_pr_opener_token_means_the_delivery_is_not_verified(
     got = asyncio.run(run_task())
     assert not got.ok and "read-back credential is unavailable" in got.error
     assert github_pr["tokens"] == []
+
+
+# ── Canary label on a pull request Fly opens for a canary-lane task ─────────
+# The task's own ``tags`` declare canary-lane work; nothing about the pull
+# request does. GitHub's label endpoint is canned through ``apis._gh_pr_labels``.
+
+CANARY = "swarm-canary"
+
+
+@pytest.fixture
+def labels(monkeypatch):
+    box = {"calls": [], "add": (0, "[]"), "read": None, "tokens": []}
+
+    def gh(repo, number, token, label=None):
+        box["calls"].append((repo, number, label))
+        box["tokens"].append(token)
+        if label is not None:
+            return box["add"]
+        if box["read"] is not None:
+            return box["read"]
+        return 0, json.dumps([{"name": lbl} for lbl in ("bug", label or CANARY)])
+
+    monkeypatch.setattr(apis, "_gh_pr_labels", gh)
+    monkeypatch.setattr(apis, "_token_for_agent_on_repo", lambda agent, repo: f"write-token-for-{repo}")
+    return box
+
+
+def run_tagged_task(tags):
+    snap = base.task_snapshot()
+    if tags is not None:
+        snap["tags"] = tags
+    return asyncio.run(apis._spawn_harness_skill(
+        "cicada", "ent_task_example", snap, "created", base._StubNotifier(), role="cicada"))
+
+
+def test_a_canary_task_gets_the_label_once_and_read_back(monkeypatch, labels, caplog):
+    monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", CANARY)
+    launch(monkeypatch)
+    with caplog.at_level(logging.INFO):
+        got = run_tagged_task(["build", CANARY])
+    assert got.ok
+    assert labels["calls"] == [(REPO, 99, CANARY), (REPO, 99, None)]
+    assert labels["tokens"] == [f"write-token-for-{REPO}"] * 2
+    assert any("Read-back: present." in r.getMessage() and f"{REPO}#99" in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.parametrize("setting,tags", [
+    (CANARY, None),                       # untagged task
+    (CANARY, ["build"]),                  # tags without the label
+    (CANARY, ["Swarm-Canary"]),           # a different value
+    (CANARY, CANARY),                     # tags not a list
+    ("", [CANARY]),                       # gate unset
+])
+def test_no_label_call_without_an_explicit_canary_declaration(monkeypatch, labels, setting, tags):
+    monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", setting)
+    launch(monkeypatch)
+    got = run_tagged_task(tags)
+    assert got.ok and labels["calls"] == []
+
+
+def test_an_unset_label_setting_makes_no_label_call(monkeypatch, labels):
+    monkeypatch.delenv("ATELES_SWARM_REQUIRE_LABEL", raising=False)
+    launch(monkeypatch)
+    assert run_tagged_task([CANARY]).ok and labels["calls"] == []
+
+
+@pytest.mark.parametrize("failure", ["add fails", "read-back lacks label", "read-back fails",
+                                     "no token", "raises"])
+def test_a_failed_label_call_warns_once_and_the_delivery_still_succeeds(
+    monkeypatch, labels, caplog, failure
+):
+    monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", CANARY)
+    if failure == "add fails":
+        labels["add"] = (1, "")
+    elif failure == "read-back lacks label":
+        labels["read"] = (0, json.dumps([{"name": "bug"}]))
+    elif failure == "read-back fails":
+        labels["read"] = (1, "")
+    elif failure == "no token":
+        monkeypatch.setattr(apis, "_token_for_agent_on_repo", lambda agent, repo: "")
+    else:
+        def boom(*a, **kw):
+            raise OSError("gh missing")
+        monkeypatch.setattr(apis, "_gh_pr_labels", boom)
+    launch(monkeypatch)
+    with caplog.at_level(logging.INFO):
+        got = run_tagged_task([CANARY])
+    assert got.ok and "pull_request_link" in got.stdout
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING and "canary label" in r.getMessage()]
+    assert len(warnings) == 1 and f"{REPO}#99" in warnings[0]
+    assert len([c for c in labels["calls"] if c[2] is not None]) <= 1  # never retried
+
+
+def test_an_existing_pr_correction_gets_no_label_call(monkeypatch, labels):
+    import contextlib
+    import types
+
+    monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", CANARY)
+    target = delivery.ExistingPRTarget(12, base.BRANCH, "main", "a" * 40)
+    plan = types.SimpleNamespace(key=KEY, target=target, spec=lambda: {})
+    monkeypatch.setattr(delivery, "plan_fly_delivery", lambda *a, **kw: plan)
+    monkeypatch.setattr(delivery, "fly_delivery_instructions", lambda p: "")
+    monkeypatch.setattr(delivery, "tracking_instructions", lambda c: "")
+    monkeypatch.setattr(delivery, "claim_build", lambda *a, **kw: contextlib.nullcontext("claim"))
+    monkeypatch.setattr(apis, "_correction_policy_reader", lambda *a, **kw: (None, None))
+
+    async def verify(*a, **kw):
+        return None
+
+    async def run(p, launch_fn, refused):
+        return result("updated", fly_pr_number=12, fly_delivery_readback="passed",
+                      fly_pr_url=f"https://github.com/{REPO}/pull/12")
+
+    monkeypatch.setattr(delivery, "verify_existing_pr_target", verify)
+    monkeypatch.setattr(delivery, "run_fly_delivery", run)
+    snap = {**base.task_snapshot(), "tags": [CANARY]}
+    got = asyncio.run(apis._run_fly_delivery_task(
+        "cicada", "prompt", entity_id="ent_task_example", role="cicada", repository=REPO,
+        key=(REPO, 123), run_agent_session_id=None, notifier=base._StubNotifier(),
+        action_class="open_or_merge_pr", target=target, task_snapshot=snap))
+    assert got.ok and labels["calls"] == []
