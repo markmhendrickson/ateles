@@ -861,6 +861,10 @@ def test_blanket_run_leaves_a_superseded_hold_retired_and_reports_it(
 
 def test_naming_a_retired_hold_with_task_refiles_it(record, monkeypatch, capsys):
     _retired_hold(record)
+    _blanket(monkeypatch, "ent_t1")
+    assert _run_cli(monkeypatch, "--apply") == 0
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "retired"
+    assert record.writes == 0
 
     assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 0
     rows = _records(capsys.readouterr().out)
