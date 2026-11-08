@@ -2100,7 +2100,7 @@ def test_non_strict_listing_without_a_total_is_unchanged(monkeypatch):
     [{"entities": [{"entity_type": "task"}], "total": 1}],
     [{"entities": _rows(""), "total": 1}],
     [{"entities": [{"entity_id": 7}], "total": 1}],
-    [{"entities": [{"entity_id": "a", "entity_type": "checkpoint_brief"}],
+    [{"entities": [{"entity_id": "a", "entity_type": "plan"}],
       "total": 1}],
 ], ids=[
     "duplicate_id_across_pages", "duplicate_id_within_page", "missing_id",

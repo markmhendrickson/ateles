@@ -25,8 +25,8 @@ What these looked like RED:
   inventory and sent nothing; ``complete`` was True in each).
 * ``test_inventory_repeating_one_id_in_place_of_another_is_incomplete``: on
   #1691's last head (row count only, no distinct-id rule) both cases read the
-  inventory as complete, examined the task and sent the per-task stranded
-  notice instead of the inventory notice.
+  inventory as complete and sent the per-task stranded notice twice, once per
+  repeated row, instead of the single inventory notice (``assert 2 == 1``).
 * ``test_dispatch_guard_holds_the_id_while_dispatching_and_releases_it``,
   checked by mutation: with ``dispatch_task`` no longer adding the id, both
   cases failed ``assert apis._tasks_in_dispatch == {TASK: 1}`` while paused;
