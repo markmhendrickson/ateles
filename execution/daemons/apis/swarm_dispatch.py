@@ -6655,6 +6655,9 @@ class SwarmDispatcher:
                 # Every seated lens is denied `correct`, not only a gate
                 # owner (dispatcher security run at e874537f, BLOCKING).
                 seated_reviewer=True,
+                # The PR's repository: a Fly job's read-only GitHub token is
+                # scoped to it, and is refused without one.
+                repository=repository,
             )
         finally:
             await cleanup_pr_worktree(worktree)
@@ -9082,6 +9085,9 @@ class SwarmDispatcher:
                     seated_reviewer=True,
                     # Read-only on Fly: a lens reviews and never delivers.
                     github_read_only=True,
+                    # The PR's repository: a Fly job's read-only GitHub token
+                    # is scoped to it, and is refused without one.
+                    repository=trigger.repository,
                     action_class=model_tiering.lens_review_class(lens.lens),
                     escalation_signals=panel_signals,
                 )
@@ -10824,6 +10830,9 @@ class SwarmDispatcher:
                 # at the lens's tier: security and arch stay top.
                 action_class=model_tiering.lens_review_class(lens),
                 escalation_signals=fix_signals,
+                # The PR's repository: a Fly job's read-only GitHub token is
+                # scoped to it, and is refused without one.
+                repository=trigger.repository,
             )
             if result.ok and result.stdout.strip():
                 guidance_blocks.append(
@@ -15873,6 +15882,7 @@ class SwarmDispatcher:
                 # The combined pass keeps the local prompt, which has the lens
                 # post its own comments: it never runs return-only on Fly.
                 runner="local",
+                repository=trigger.repository,
                 action_class=model_tiering.lens_review_class(first.lens),
                 escalation_signals=signals,
             )

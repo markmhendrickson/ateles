@@ -1536,11 +1536,14 @@ def test_key_only_neotoma_tool_loss_is_disclosed_in_result_and_log(
     assert (note in result.stdout) is disclosed
     assert (note in caplog.text) is disclosed
     launch = next(event for event in events if event[0] == "launch")
-    assert (note in launch[1]) is disclosed
-    assert (any(note in message for message in launch[2])) is disclosed
+    # Never announced before the launch: a refusal inside run() would leave a
+    # false "Ran on Fly" notice (red before: the note was in launch stderr).
+    assert note not in launch[1]
+    assert not any(note in message for message in launch[2])
+    assert (note in capsys.readouterr().err) is disclosed
     assert (any(event[0] == "notify" and event[1] == note for event in events)) is disclosed
     if disclosed:
-        assert events[0][0] == "notify"
+        assert [event[0] for event in events] == ["launch", "notify"]
 
 
 def test_seam_cap_refusal_returns_cooled_until(fly_env, seam, monkeypatch):
@@ -1609,6 +1612,37 @@ def test_key_only_local_fallback_reports_the_actual_fly_failure(
     assert other not in stderr and other not in caplog.text
     assert all(other not in message for message in notices)
     assert fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE not in result.stdout
+    # The run never happened on Fly, so no "Ran on Fly" notice went out
+    # (red before: it was sent ahead of run()).
+    assert fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE not in notices
+    assert fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE not in stderr
+
+
+def test_key_only_notice_not_sent_when_the_job_token_mint_refuses(
+        fly_env, seam, monkeypatch, caplog):
+    # The 8 Nov incident: no repository reached the job, so the read-only
+    # token mint refused inside run() and the lens went home; the operator was
+    # still told it "Ran on Fly". Red before: the note was in `notices`.
+    spawned, fake_exec = seam
+    monkeypatch.setenv("LANIUS_NEOTOMA_TOKEN", SHARED_BEARER)
+    monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", "carry_forward_check")
+    executor, _, _ = make_executor(FakeFly(), mint=fly_runner.mint_job_github_token)
+    monkeypatch.setattr(fly_runner, "get_executor", lambda: executor)
+    notices = []
+
+    class Notifier:
+        def send(self, message, **kwargs):
+            notices.append(message)
+
+    with caplog.at_level(logging.WARNING), \
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = _once(action_class="carry_forward_check", model="m",
+                       repository="", github_token="t-local",
+                       notifier=Notifier(), owns_pending_gate=True, github_read_only=True)
+    assert result.ok and result.stdout == "local output" and len(spawned) == 1
+    assert "no owner/name repository" in caplog.text
+    assert fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE not in notices
+    assert "This run was not eligible for Fly, so it ran locally with its normal tools." in notices
 
 
 @pytest.mark.parametrize("terminates", [True, False])
