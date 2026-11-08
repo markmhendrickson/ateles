@@ -2142,6 +2142,14 @@ _tasks_in_dispatch: dict[str, int] = {}
 
 
 _REPO_ROUTING_FIELDS = ("repo", "dispatch_repo", "github_repo", "repository")
+# Routing fields a task may omit, but that the routing reads when present.
+_OPTIONAL_ROUTING_FIELDS = ("owner", "action_type")
+
+
+def _exact_text(value: object) -> bool:
+    """A non-empty string equal to its own ``.strip()``: the only shape a
+    field may have to count toward a silent-case proof (nothing is stripped)."""
+    return isinstance(value, str) and bool(value) and value == value.strip()
 
 
 def _fly_routed_delivery(snapshot: object) -> tuple[bool | None, str]:
@@ -2158,14 +2166,18 @@ def _fly_routed_delivery(snapshot: object) -> tuple[bool | None, str]:
     if not isinstance(snapshot, dict):
         return None, "its task record could not be read"
     assignee = snapshot.get("assigned_to")
-    if not isinstance(assignee, str) or not assignee.strip():
+    if not _exact_text(assignee):
         return None, "its assigned_to field is missing, empty or malformed"
     present = [key for key in _REPO_ROUTING_FIELDS if key in snapshot]
     if not present:
         return None, "it has no repository field, so its routing cannot be confirmed"
     for key in present:
         value = snapshot.get(key)
-        if not isinstance(value, str) or "/" not in value.strip():
+        if not _exact_text(value) or "/" not in value:
+            return None, f"its {key} field is empty or malformed"
+    # Read by the routing below when present: each must then be exact too.
+    for key in _OPTIONAL_ROUTING_FIELDS:
+        if key in snapshot and not _exact_text(snapshot.get(key)):
             return None, f"its {key} field is empty or malformed"
     try:
         import fly_runner
@@ -2189,9 +2201,11 @@ def _fly_routed_delivery(snapshot: object) -> tuple[bool | None, str]:
 def _receipt_names_task(stored: str, entry: dict, entity_id: str) -> bool:
     """Whether a delivery receipt carries exactly this task's id: its recorded
     ``task_id``, else the single task its key (or an associated key) names."""
-    recorded = entry.get("task_id")
-    if recorded not in (None, ""):
-        return recorded == entity_id
+    if not _exact_text(entity_id):
+        return False
+    if "task_id" in entry:
+        recorded = entry.get("task_id")
+        return isinstance(recorded, str) and recorded == entity_id
     return build_delivery.receipt_source_task(stored, entry) == entity_id
 
 
@@ -2199,8 +2213,9 @@ def _fly_delivery_recorded(entity_id: str) -> tuple[bool, str]:
     """``(proven, why)``: True only when the Fly ledger proves this task's run
     launched. ``why`` names, for the notice, what the ledger showed instead.
 
-    Proof is a readable receipt carrying this task's id (``_receipt_names_task``)
-    with launch evidence, a non-empty ``run_id``, and either a settled outcome
+    Proof is a readable receipt carrying exactly this task's id
+    (``_receipt_names_task``) with launch evidence, a ``run_id`` that passes
+    ``fly_runner.is_fly_run_id`` unaltered, and either a settled status
     (allow-list case c) or that run still in the ledger's in-flight set (case b,
     a launched run the restart did not end). Anything else is not proof: an
     unreadable ledger or receipt, a ``launching`` or other reservation without
@@ -2225,13 +2240,18 @@ def _fly_delivery_recorded(entity_id: str) -> tuple[bool, str]:
            if _receipt_names_task(stored, entry, entity_id)]
     for entry in own:
         run_id = entry.get("run_id")
-        if not isinstance(run_id, str) or not run_id:
+        # Exactly the shape build_job makes, nothing stripped: any other run
+        # id (blank, padded, foreign, non-string) is no launch evidence.
+        if not fly_runner.is_fly_run_id(run_id):
             continue
+        status = entry.get("status")
         # (c) settled outcome with a run that reached launch.
-        if entry.get("status") in build_delivery._SETTLED_RECEIPT_STATUSES:
+        if isinstance(status, str) and status in build_delivery._SETTLED_RECEIPT_STATUSES:
             return True, ""
-        # (b) its launched run is still live in the ledger.
-        if run_id in in_flight:
+        # (b) its launched run is still live in the ledger, recorded under
+        # that same run id.
+        live = in_flight.get(run_id)
+        if isinstance(live, dict) and live.get("run_id") == run_id:
             return True, ""
     if own:
         statuses = sorted({str(entry.get("status")) for entry in own})
@@ -2253,8 +2273,9 @@ def _unlaunched_silence(entity_id: str, snapshot: object) -> tuple[str, str]:
       (c) a receipt carrying this task's id records a settled outcome with a
           run id that reached launch.
     """
-    # (b) a dispatch of this task is running in this process.
-    if entity_id in _tasks_in_dispatch or entity_id in _detached_runs_in_progress:
+    # (b) a dispatch of this task, by its exact id, is running in this process.
+    if _exact_text(entity_id) and (entity_id in _tasks_in_dispatch
+                                   or entity_id in _detached_runs_in_progress):
         return "recorded", ""
     routed, why = _fly_routed_delivery(snapshot)
     # (a) positively routed away from Fly.
