@@ -338,6 +338,28 @@ def test_enumeration_pages_by_offset_to_the_end_and_never_sends_a_cursor(monkeyp
     assert [p["offset"] for p in seen] == [0, 2, 4]
 
 
+def test_a_dropped_row_on_a_full_page_still_reads_the_next_page(monkeypatch):
+    """Paging counts the rows the server returned, not the ones kept: one
+    non-object row on a full page must not end paging and truncate the set for
+    a non-strict caller."""
+    monkeypatch.setattr(gating, "QUERY_PAGE_SIZE", 2)
+    pages = [
+        {"entities": [{"entity_id": "ent_a"}, "not-an-object"]},
+        {"entities": [{"entity_id": "ent_c"}]},
+    ]
+    seen: list[int] = []
+
+    def page(_type, *, snapshot_filters, offset=0, limit=None):
+        seen.append(offset)
+        return pages[len(seen) - 1]
+
+    monkeypatch.setattr(gating, "query_entities", page)
+
+    found = gating.query_all_entities("task", snapshot_filters={})
+    assert [e["entity_id"] for e in found] == ["ent_a", "ent_c"]
+    assert seen == [0, 2]
+
+
 def _run_cli(monkeypatch, *argv):
     monkeypatch.setattr(sys, "argv", ["reissue_held_checkpoints.py", *argv])
     return cli.main()

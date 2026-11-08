@@ -2029,3 +2029,109 @@ def test_envelope_binds_the_estimate_only_for_an_unscored_hold():
     scored = _envelope_for(False)
     assert "confidence" not in scored
     assert "confidence_unscored" not in scored
+
+
+def _serve_pages(monkeypatch, pages, page_size=2):
+    """Serve ``pages`` in order from ``query_entities``, with a small page size
+    so a multi-page listing needs only a few rows."""
+    monkeypatch.setattr(gating_module, "QUERY_PAGE_SIZE", page_size)
+    offsets: list[int] = []
+
+    def _page(entity_type, *, snapshot_filters, offset=0, limit=None):
+        offsets.append(offset)
+        return pages[min(len(offsets), len(pages)) - 1]
+
+    monkeypatch.setattr(gating_module, "query_entities", _page)
+    return offsets
+
+
+def _rows(*ids):
+    return [{"entity_id": i} for i in ids]
+
+
+@pytest.mark.parametrize("pages", [
+    [{"entities": _rows("a")}],
+    [{"entities": _rows("a"), "total": "1"}],
+    [{"entities": _rows("a"), "total": 1.0}],
+    [{"entities": _rows("a"), "total": True}],
+    [{"entities": _rows("a"), "total": -1}],
+    [{"entities": _rows("a", "b"), "total": 3}, {"entities": _rows("c"), "total": 4}],
+    [{"entities": _rows("a", "b"), "total": 3}, {"entities": _rows("c")}],
+    [{"entities": _rows("a"), "total": 2}],
+    [{"entities": _rows("a"), "total": 1, "has_more": True}],
+    [{"entities": _rows("a"), "total": 1, "has_more": "no"}],
+], ids=[
+    "short_page_no_total", "string_total", "float_total", "bool_total",
+    "negative_total", "total_changes_between_pages", "total_dropped_on_later_page",
+    "short_of_total", "has_more_disagrees", "has_more_not_bool",
+])
+def test_strict_listing_without_a_consistent_total_is_incomplete(monkeypatch, pages):
+    _serve_pages(monkeypatch, pages)
+    assert gating_module.query_all_entities(
+        "task", snapshot_filters={}, strict=True) is None
+
+
+@pytest.mark.parametrize("pages,expected", [
+    ([{"entities": _rows("a"), "total": 1}], ["a"]),
+    ([{"entities": [], "total": 0, "has_more": False}], []),
+    ([{"entities": _rows("a", "b"), "total": 3, "has_more": True},
+      {"entities": _rows("c"), "total": 3, "has_more": False}], ["a", "b", "c"]),
+    ([{"entities": _rows("a", "b"), "total": 2},
+      {"entities": [], "total": 2}], ["a", "b"]),
+], ids=["single_page", "empty", "two_pages_with_has_more", "exact_full_page"])
+def test_strict_listing_matching_its_total_is_complete(monkeypatch, pages, expected):
+    _serve_pages(monkeypatch, pages)
+    found = gating_module.query_all_entities("task", snapshot_filters={}, strict=True)
+    assert [row["entity_id"] for row in found] == expected
+
+
+def test_non_strict_listing_without_a_total_is_unchanged(monkeypatch):
+    offsets = _serve_pages(
+        monkeypatch,
+        [{"entities": _rows("a", "b")}, {"entities": _rows("c")}])
+    found = gating_module.query_all_entities("task", snapshot_filters={})
+    assert [row["entity_id"] for row in found] == ["a", "b", "c"]
+    assert offsets == [0, 2]
+
+
+@pytest.mark.parametrize("pages", [
+    [{"entities": _rows("a", "b"), "total": 3}, {"entities": _rows("b"), "total": 3}],
+    [{"entities": _rows("a", "a"), "total": 3}, {"entities": _rows("b"), "total": 3}],
+    [{"entities": [{"entity_type": "task"}], "total": 1}],
+    [{"entities": _rows(""), "total": 1}],
+    [{"entities": [{"entity_id": 7}], "total": 1}],
+    [{"entities": [{"entity_id": "a", "entity_type": "plan"}],
+      "total": 1}],
+    [{"entities": _rows("ent_a", " ent_a "), "total": 2},
+     {"entities": [], "total": 2}],
+    [{"entities": _rows("   "), "total": 1}],
+], ids=[
+    "duplicate_id_across_pages", "duplicate_id_within_page", "missing_id",
+    "empty_id", "non_string_id", "wrong_entity_type",
+    "same_id_with_padding", "whitespace_only_id",
+])
+def test_strict_listing_with_an_unidentifiable_row_is_incomplete(monkeypatch, pages):
+    _serve_pages(monkeypatch, pages)
+    assert gating_module.query_all_entities(
+        "task", snapshot_filters={}, strict=True) is None
+
+
+def test_strict_listing_with_distinct_typed_ids_matching_total_is_complete(
+        monkeypatch):
+    _serve_pages(monkeypatch, [
+        {"entities": [{"entity_id": "a", "entity_type": "task"},
+                      {"entity_id": "b"}], "total": 3, "has_more": True},
+        {"entities": _rows("c"), "total": 3, "has_more": False},
+    ])
+    found = gating_module.query_all_entities("task", snapshot_filters={}, strict=True)
+    assert [row["entity_id"] for row in found] == ["a", "b", "c"]
+
+
+def test_non_strict_listing_keeps_repeated_and_unidentified_rows(monkeypatch):
+    _serve_pages(monkeypatch, [
+        {"entities": _rows("a", "a")},
+        {"entities": [{"entity_type": "other"}]},
+    ])
+    found = gating_module.query_all_entities("task", snapshot_filters={})
+    assert found == [{"entity_id": "a"}, {"entity_id": "a"},
+                     {"entity_type": "other"}]
