@@ -2251,7 +2251,7 @@ def _unrecovered_notice(notifier: Notifier, entity_id: str, title: str, why: str
     launched or never finished; each asks the operator to look for an earlier
     run and its pull request before refiling."""
     notifier.send(
-        f"Fly delivery task was not recovered after an Apis restart: {title[:70]}\n"
+        f"Executing task may be stranded after an Apis restart: {title[:70]}\n"
         f"  task={entity_id} is executing, and whether its Fly run launched or finished "
         f"is not confirmed. It was not relaunched because {why}. Nothing was dispatched; "
         "check for an earlier Fly run of this task and its pull request before refiling. "
