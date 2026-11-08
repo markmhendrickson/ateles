@@ -603,3 +603,67 @@ def test_non_object_task_observation_is_unreadable_not_a_change(env, monkeypatch
     asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
     assert launches == [] and dispatched == []
     assert len(notifier.sent) == 1 and "could not be read" in notifier.sent[0]
+
+
+# ── Final round (PR #1686): no checkpoint row disappears before choosing ─────
+#
+# The rows go through the REAL ``gating.query_all_entities`` and
+# ``checkpoints_for_task``, with only ``gating.query_entities`` (one server
+# page) faked. In every case an older consumed approval is the newest row that
+# survives filtering, so a listing that silently drops rows or stops short
+# would release it with ``gate_override=True``.
+
+_PAGE = 2
+_NEWER_PENDING = {"entity_id": "ent_newer_pending", "created_at": "2026-11-07T10:00:00Z",
+                  "snapshot": {"status": "awaiting_operator"}}
+
+
+def _approval_row(**over) -> dict:
+    return {"entity_id": CHECKPOINT, "created_at": "2026-11-06T10:00:00Z",
+            "snapshot": {"status": "approved", "resolved_dispatched": True,
+                         "gate_action": apis.GateAction.CHECKPOINT.value,
+                         "blast_radius": "high"}, **over}
+
+
+def _full_first_page() -> dict:
+    return {"entities": [_approval_row(),
+                         _approval_row(entity_id="ent_older_approval",
+                                       created_at="2026-11-05T10:00:00Z")]}
+
+
+@pytest.mark.parametrize("pages", [
+    # 1. a row that is not an object
+    lambda: [{"entities": [_approval_row(), "not-a-checkpoint"]}],
+    # 2a. a later page with no ``entities``
+    lambda: [_full_first_page(), {}],
+    # 2b. a later page whose ``entities`` is not a list
+    lambda: [_full_first_page(), {"entities": {"ent_newer_pending": _NEWER_PENDING}}],
+    # 3. a dropped row on a FULL page, the newer checkpoint on the next page
+    lambda: [{"entities": [_approval_row(), None]}, {"entities": [_NEWER_PENDING]}],
+    # 4. a reported total the collected rows do not match
+    lambda: [{"entities": [_approval_row()], "total": 2}],
+], ids=["non_object_row", "entities_missing", "entities_not_a_list",
+        "dropped_row_on_full_page", "total_mismatch"])
+def test_every_dropped_checkpoint_row_reads_as_unknown(env, monkeypatch, pages):
+    from lib.daemon_runtime import gating
+
+    _, _, launches, dispatched, writes = env
+    monkeypatch.setattr(apis, "_consumed_approval", _REAL_CONSUMED_APPROVAL)
+    _approval_records(monkeypatch, later=[_handoff("executing"), _handoff("routed"),
+                                          _CLEAR_HOLD])
+    monkeypatch.setattr(apis, "checkpoints_for_task", gating.checkpoints_for_task)
+    monkeypatch.setattr(gating, "QUERY_PAGE_SIZE", _PAGE)
+    served = pages()
+    offsets: list[int] = []
+
+    def _query(entity_type, *, snapshot_filters, offset=0, limit=None):
+        assert entity_type == "checkpoint_brief" and limit == _PAGE
+        offsets.append(offset)
+        return served[len(offsets) - 1] if len(offsets) <= len(served) else {"entities": []}
+
+    monkeypatch.setattr(gating, "query_entities", _query)
+    notifier = _Notifier()
+    asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert launches == [] and dispatched == [] and writes == []
+    assert len(notifier.sent) == 1, notifier.sent
+    assert TASK in notifier.sent[0] and "could not all be read" in notifier.sent[0]
