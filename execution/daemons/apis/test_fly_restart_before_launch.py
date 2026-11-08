@@ -29,12 +29,28 @@ What these looked like RED:
   with the release moved out of the ``finally``, both cases failed
   ``assert TASK not in apis._tasks_in_dispatch``.
 
+* ``test_settled_receipt_of_an_earlier_task_on_the_same_pr_is_reported``,
+  checked by mutation: with ``_fly_delivery_recorded`` restored to accepting
+  any receipt on the task's key (round 1), it failed ``assert
+  len(notifier.sent) == 1`` with no notice sent. ``test_own_receipt_on_the_same_pr_is_silent``
+  passes either way and pins that the fix does not over-report.
+* ``test_receipt_on_the_key_with_no_owner_is_unknown``, same mutation: the
+  ownerless receipt read as recorded (True) instead of None.
+* ``test_routing_check_that_raises_is_reported_as_unknown``, checked by
+  mutation: with ``_fly_routing`` returning ``(False, "")`` on an exception
+  (round 1's ``_fly_routed_delivery`` behaviour), no notice was sent and the
+  task counted as ``not_fly``.
+* ``test_unlaunched_fly_recovery_sweep_is_scheduled_at_startup``, checked by
+  removing ``unlaunched_fly_recovery_sweep(),`` from the startup gather: the
+  gather-block assertion failed.
+
 Run: python3 -m pytest -q execution/daemons/apis/test_fly_restart_before_launch.py
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from pathlib import Path
 
@@ -118,7 +134,9 @@ def test_stranded_task_is_reported_once_and_never_relaunched(env):
     assert TASK in notice and "Build the thing" in notice
     assert "whether its Fly run launched is unknown" in notice
     assert "holds no receipt" in notice
-    assert "check for an earlier Fly run" in notice and "fresh checkpoint" in notice
+    assert "check for an earlier Fly run" in notice
+    assert "file a new task with a different title for the same work" in notice
+    assert "release its checkpoint" in notice and "fresh checkpoint" not in notice
     assert counts["complete"] is True and counts["unrecovered"] == 1
 
 
@@ -298,3 +316,90 @@ def test_dispatch_guard_holds_the_id_while_dispatching_and_releases_it(env, monk
 
     asyncio.run(scenario())
     assert effects == []
+
+
+PR = 1691
+OTHER_TASK = "ent_earlier_correction_task"
+
+
+def _pr_keyed(monkeypatch):
+    """This task is an existing-PR correction: its receipt key is the PR's."""
+    key = build_delivery.fly_delivery_key(REPO, PR, TASK)
+    monkeypatch.setattr(apis, "_fly_receipt_key", lambda snap, eid: key)
+    return key
+
+
+def test_settled_receipt_of_an_earlier_task_on_the_same_pr_is_reported(env, monkeypatch):
+    """An earlier correction's settled receipt sits on the PR key; the newer
+    correction is EXECUTING with no run (restart before its run superseded
+    that receipt). The earlier task's receipt does not clear this one."""
+    ledger, _, effects = env
+    key = _pr_keyed(monkeypatch)
+    assert fly_runner.FlyLedger(ledger).reserve_delivery(
+        key, {"status": "updated", "branch": "b", "run_id": "run-old", "token": "x",
+              "task_id": OTHER_TASK, "commit": "a" * 40})
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert effects == []
+    assert len(notifier.sent) == 1, notifier.sent
+    assert TASK in notifier.sent[0] and "holds no receipt" in notifier.sent[0]
+    assert counts["unrecovered"] == 1 and counts["recorded"] == 0
+
+
+def test_own_receipt_on_the_same_pr_is_silent(env, monkeypatch):
+    ledger, _, effects = env
+    key = _pr_keyed(monkeypatch)
+    assert fly_runner.FlyLedger(ledger).reserve_delivery(
+        key, {"status": "updated", "branch": "b", "run_id": "run-new", "token": "x",
+              "task_id": TASK, "commit": "b" * 40})
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert effects == [] and notifier.sent == []
+    assert counts["recorded"] == 1
+
+
+def test_receipt_on_the_key_with_no_owner_is_unknown(env, monkeypatch):
+    """A settled receipt on the PR key that names no task: whose it is cannot
+    be read, so the receipt state is unknown and the task is reported."""
+    ledger, _, effects = env
+    key = _pr_keyed(monkeypatch)
+    assert fly_runner.FlyLedger(ledger).reserve_delivery(
+        key, {"status": "updated", "branch": "b", "run_id": "run-old", "token": "x"})
+    assert apis._fly_delivery_recorded(_task(), TASK) is None
+    notifier = _Notifier()
+    asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert effects == []
+    assert len(notifier.sent) == 1 and "Fly receipt state is unknown" in notifier.sent[0]
+
+
+def test_routing_check_that_raises_is_reported_as_unknown(env, monkeypatch):
+    """Fault injection: the routing check raises for an executing task. That
+    is unknown routing, never "not Fly": the task is named, with the error
+    type and never the error's message."""
+    _, _, effects = env
+
+    def _boom(*a, **k):
+        raise KeyError("value-that-must-not-appear")
+
+    monkeypatch.setattr(apis, "_resolve_skill", _boom)
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert effects == []
+    assert len(notifier.sent) == 1, notifier.sent
+    notice = notifier.sent[0]
+    assert TASK in notice
+    assert "whether it routes to Fly could not be determined" in notice
+    assert "KeyError" in notice and "value-that-must-not-appear" not in notice
+    assert counts["unrecovered"] == 1 and counts["not_fly"] == 0
+
+
+def test_unlaunched_fly_recovery_sweep_is_scheduled_at_startup():
+    """Startup wiring: the sweep is defined in ``main``, calls the recovery,
+    and is a sibling in the startup gather (the pattern of
+    test_stale_inflight_markers.test_startup_gather_includes_marker_sweep_coroutine)."""
+    src = inspect.getsource(apis.main)
+    start = src.index("async def unlaunched_fly_recovery_sweep()")
+    body = src[start:src.index("async def ", start + 1)]
+    assert "await recover_unlaunched_fly_tasks(notifier)" in body
+    gather_block = src[src.rfind("await asyncio.gather("):]
+    assert "unlaunched_fly_recovery_sweep()," in gather_block
