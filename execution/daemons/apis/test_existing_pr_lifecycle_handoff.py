@@ -697,13 +697,10 @@ def _decision_queue(monkeypatch, mode, task_snapshot):
 
 
 def _assert_exhaustion(mode, briefs, task_reads, notices, task_id, saved, statuses):
-    """failure_posture.md rule 5 at the ceiling, on each branch of the record."""
-    assert 'failed' not in statuses
+    """failure_posture.md rule 5 at the ceiling: the checkpoint is the hold."""
     assert not any('marked FAILED' in n for n in notices)
-    assert saved['status'] == 'blocked'
-    assert "Neotoma's admission check did not answer" in saved['blocked_reason']
     calls = briefs.get('calls', [])
-    assert len(calls) == 1, calls  # exactly one checkpoint, through the queue
+    assert len(calls) == 1, calls  # exactly one checkpoint, never a second one
     assert calls[0]['decision'].reason == 'rounds_exhausted'
     assert calls[0]['task_entity_id'] == task_id
     assert calls[0]['idempotency_context']
@@ -714,21 +711,31 @@ def _assert_exhaustion(mode, briefs, task_reads, notices, task_id, saved, status
     (notice,) = neotoma
     assert 'nothing was launched' in notice
     if mode == 'ok':
+        assert 'failed' not in statuses
+        assert saved['status'] == 'blocked'
+        assert "Neotoma's admission check did not answer" in saved['blocked_reason']
+        assert 'rounds_exhausted checkpoint releases it again' in saved['blocked_reason']
         # Both the checkpoint and the held status were read back.
         assert task_id in task_reads
         assert 'task is held with checkpoint' in notice and 'rounds_exhausted' in notice
         # The exact action: which checkpoint to approve to release it again.
         (brief_id,) = [k for k in briefs if k != 'calls']
         assert f'Approve checkpoint {brief_id} to release the task again.' in notice
-    elif mode in ('readback_fails', 'readback_raises'):
-        assert 'hold could not be confirmed' in notice and 'task is held' not in notice
     else:
-        assert 'could not be recorded' in notice and 'task is held' not in notice
-        assert not task_reads
+        # No checkpoint read back: no held status at all, one notice naming
+        # the task and saying no checkpoint exists, and the failed-dispatch
+        # status so the existing recovery handles it.
+        assert 'blocked' not in statuses, statuses
+        assert saved['status'] == 'failed'
+        assert statuses[-1] == 'failed'
+        assert task_id in notice and 'No checkpoint exists' in notice
+        assert 'task is held' not in notice
+        assert not task_reads  # no held status was written to read back
 
 
 @pytest.mark.parametrize('mode,recovers', [('ok', False), ('ok', True),
-                                           ('write_fails', False), ('readback_fails', False)])
+                                           ('write_fails', False), ('readback_fails', False),
+                                           ('readback_raises', False)])
 def test_neotoma_unanswered_admission_is_a_bounded_deferral_never_failed(
         joined, monkeypatch, tmp_path, mode, recovers):
     # Red before the deferral (observed): the real run_skill returned
@@ -752,7 +759,9 @@ def test_neotoma_unanswered_admission_is_a_bounded_deferral_never_failed(
     # The Fly path was really taken; every assertion below depends on it.
     assert attempts, 'run_skill never reached fly_runner.build_job'
     statuses = [w.get('value') for w in joined['writes'] if w.get('field') == 'status']
-    assert 'failed' not in statuses
+    # Never FAILED while an attempt can still answer or a checkpoint holds it;
+    # without a checkpoint the failed-dispatch status is checked below.
+    assert 'failed' not in statuses or (mode != 'ok' and not recovers)
     # One first attempt plus the two bounded retries, each with its own
     # receipt that was reserved for the attempt and released after it.
     assert len(attempts) == 3
@@ -764,8 +773,7 @@ def test_neotoma_unanswered_admission_is_a_bounded_deferral_never_failed(
         assert answered and 'Neotoma' not in saved.get('blocked_reason', '')
         assert not briefs.get('calls')
         return
-    assert 'rounds_exhausted checkpoint releases it again' in saved['blocked_reason']
-    assert 're-released once Neotoma answers' not in saved['blocked_reason']
+    assert 're-released once Neotoma answers' not in saved.get('blocked_reason', '')
     _assert_exhaustion(mode, briefs, task_reads, notices, joined['task_id'], saved, statuses)
 
 
@@ -812,8 +820,7 @@ def test_first_delivery_neotoma_outage_is_bounded_then_escalated(
     assert all(r == ['owner/repo#123'] for r in attempts), attempts
     assert not delivery._delivery_ledger().delivery_receipts()
     saved = store.rows[eid]
-    assert 'rounds_exhausted checkpoint releases it again' in saved['blocked_reason']
-    assert 're-released once Neotoma answers' not in saved['blocked_reason']
+    assert 're-released once Neotoma answers' not in saved.get('blocked_reason', '')
     _assert_exhaustion(mode, briefs, task_reads, notices, eid, saved, statuses)
 
 
@@ -821,7 +828,7 @@ def test_first_delivery_neotoma_outage_is_bounded_then_escalated(
 def _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt, *,
                              retries='2', backoff='10', read=None, build=None,
                              gate_override=True, release_authorization=None,
-                             policy=None):
+                             policy=None, queue_mode='ok'):
     """The natural first-delivery entry (as in the test above), with the
     dispatcher's waits recorded instead of slept. *read* replaces the
     pre-retry task re-read (default: the stored row, unchanged).
@@ -862,7 +869,7 @@ def _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt, *,
     attempts, notices = _fly_admission_seam(
         monkeypatch, tmp_path, lambda n: on_attempt(n, store, eid),
         retries=retries, backoff=backoff, build=build)
-    briefs, _task_reads = _decision_queue(monkeypatch, 'ok', lambda: copy.deepcopy(store.rows[eid]))
+    briefs, _task_reads = _decision_queue(monkeypatch, queue_mode, lambda: copy.deepcopy(store.rows[eid]))
     sleeps = []
     real_sleep = asyncio.sleep
     async def record_sleep(delay, *a, **kw):
@@ -1156,3 +1163,92 @@ def test_an_approved_release_whose_task_revision_changed_is_not_relaunched(
     assert saved['status'] == 'blocked'
     assert 'authority it was released under changed' in saved['blocked_reason']
     assert any('retry not started' in n for n in run['notices'])
+
+
+# ── Round 4: the whole schedule is bounded; the checkpoint is the hold ──
+
+def _bounds_with(monkeypatch, caplog, retries, backoff):
+    monkeypatch.setenv('APIS_NEOTOMA_ADMISSION_RETRIES', retries)
+    monkeypatch.setenv('APIS_NEOTOMA_ADMISSION_BACKOFF_S', backoff)
+    caplog.set_level('WARNING')
+    return apis._neotoma_admission_retry_bounds(), caplog.text
+
+
+DEFAULT_BOUNDS = (apis.NEOTOMA_ADMISSION_RETRIES_DEFAULT, apis.NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT)
+
+
+def test_a_backoff_of_1e308_falls_back_to_the_defaults(monkeypatch, caplog):
+    # Red before (observed): (3, 1e308); its schedule total overflowed to inf.
+    bounds, logged = _bounds_with(monkeypatch, caplog, '3', '1e308')
+    assert bounds == DEFAULT_BOUNDS
+    assert 'APIS_NEOTOMA_ADMISSION_BACKOFF_S' in logged and '1e308' not in logged
+    assert math.isfinite(apis._neotoma_admission_wait_ceiling(*bounds))
+
+
+def test_a_retry_count_of_1000_falls_back_to_the_defaults(monkeypatch, caplog):
+    # Red before (observed): (1000, 120.0).
+    bounds, logged = _bounds_with(monkeypatch, caplog, '1000', '120')
+    assert bounds == DEFAULT_BOUNDS
+    assert 'APIS_NEOTOMA_ADMISSION_RETRIES' in logged and '1000' not in logged
+
+
+def test_settings_each_inside_their_cap_but_too_long_in_total_fall_back(monkeypatch, caplog):
+    # 3600s x (1+..+10) = 198000s, past the 6h total. Red before (observed):
+    # AttributeError, no caps existed; the old bounds returned (10, 3600.0).
+    assert apis.NEOTOMA_ADMISSION_BACKOFF_S_MAX >= 3600
+    assert apis.NEOTOMA_ADMISSION_RETRIES_MAX >= 10
+    bounds, logged = _bounds_with(monkeypatch, caplog, '10', '3600')
+    assert bounds == DEFAULT_BOUNDS
+    assert 'APIS_NEOTOMA_ADMISSION_RETRIES' in logged
+    assert 'APIS_NEOTOMA_ADMISSION_BACKOFF_S' in logged
+    assert '198000' not in logged  # names, never the values or the total
+
+
+def test_the_largest_allowed_schedule_is_kept_and_finite(monkeypatch, caplog):
+    # 392s x 55 = 21560s, just inside the 6h total. Red before: AttributeError.
+    bounds, _logged = _bounds_with(monkeypatch, caplog, '10', '392')
+    assert bounds == (10, 392.0)
+    assert apis._neotoma_admission_wait_ceiling(*bounds) <= apis.NEOTOMA_ADMISSION_TOTAL_WAIT_S_MAX
+
+
+def test_an_overflowing_schedule_runs_the_defaults_to_one_rounds_exhausted_checkpoint(
+        monkeypatch, tmp_path, dispatch_env):
+    # Red before (observed): backoff 1e308 was kept and the recorded sleeps
+    # were 1e308 and then inf; with the real asyncio.sleep the dispatch would
+    # never have reached its checkpoint.
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
+                                   lambda n, store, eid: None, retries='3', backoff='1e308')
+    default = apis.NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT
+    assert run['sleeps'] == [default, 2 * default, 3 * default]
+    assert all(math.isfinite(s) for s in run['sleeps'])
+    assert len(run['attempts']) == apis.NEOTOMA_ADMISSION_RETRIES_DEFAULT + 1
+    calls = run['briefs'].get('calls', [])
+    assert len(calls) == 1 and calls[0]['decision'].reason == 'rounds_exhausted'
+    assert run['saved']['status'] == 'blocked'
+
+
+def test_a_non_finite_stated_wait_is_never_slept(monkeypatch, tmp_path, dispatch_env):
+    # A Retry-After that is not finite never reaches asyncio.sleep. A guard:
+    # green before too (inf exceeded the old finite ceiling).
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
+                                   lambda n, store, eid: math.inf)
+    assert all(math.isfinite(s) for s in run['sleeps'])
+    calls = run['briefs'].get('calls', [])
+    assert len(calls) == 1 and calls[0]['decision'].reason == 'rounds_exhausted'
+
+
+@pytest.mark.parametrize('queue_mode', ['write_fails', 'readback_fails', 'readback_raises'])
+def test_no_checkpoint_means_no_hold(monkeypatch, tmp_path, dispatch_env, queue_mode):
+    # Red before (observed): BLOCKED was written before the checkpoint call, so
+    # the task ended 'blocked' with nothing to approve, and no notice said that
+    # no checkpoint exists.
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
+                                   lambda n, store, eid: None, queue_mode=queue_mode)
+    assert 'blocked' not in run['statuses'], run['statuses']
+    assert run['statuses'][-1] == 'failed'
+    assert run['saved']['status'] == 'failed'
+    calls = run['briefs'].get('calls', [])
+    assert len(calls) == 1, calls  # no second checkpoint in the same dispatch
+    notices = [n for n in run['notices'] if 'No checkpoint exists' in n]
+    assert len(notices) == 1, run['notices']
+    assert run['eid'] in notices[0]

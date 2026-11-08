@@ -800,8 +800,10 @@ def _dispatch_mode_from_snapshot(snapshot: dict) -> str | None:
 # A Fly launch deferred only because Neotoma did not answer the role-key
 # admission check, with its prelaunch receipt proven released: nothing ran.
 # The dispatcher retries it in process after a backoff, at most this many
-# times, then holds the task (BLOCKED) with one operator notice. Never FAILED
-# (failure_posture.md, rule 8). The build-claim deferral sweep does not fit:
+# times, then writes one rounds_exhausted checkpoint and, once it reads back,
+# holds the task (BLOCKED) with one operator notice (failure_posture.md, rule 5).
+# The checkpoint is the hold: if it cannot be written or read back, no held
+# status is written and the task takes the failed-dispatch status instead. The build-claim deferral sweep does not fit:
 # it is keyed to a running build, and an outage has no holder to wait on.
 NEOTOMA_ADMISSION_RETRIES_DEFAULT = 3
 NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT = 120.0
@@ -819,29 +821,22 @@ def _neotoma_admission_deferred(result) -> bool:
 NEOTOMA_ADMISSION_EXHAUSTED_REASON = "rounds_exhausted"
 
 
-def _escalate_neotoma_admission_exhaustion(
+def _write_neotoma_admission_checkpoint(
     entity_id: str, *, skill: str, title: str, trigger: str, reason: str,
-) -> str:
-    """Escalate an exhausted admission deferral; return the one operator notice.
+) -> tuple[str | None, str]:
+    """Write the one ``rounds_exhausted`` checkpoint and read it back.
 
-    failure_posture.md rule 5: when the record is reachable, exactly one
-    checkpoint with reason ``rounds_exhausted`` through the existing decision
-    queue, and the notice says the task is held only once both the checkpoint
-    and the held status read back. When it is not reachable, nothing can be
-    written and the notice (rule 2) says so. Never writes FAILED.
-    """
-    unrecorded = (
-        f"{skill} on {entity_id}: {reason} The exhaustion could not be recorded "
-        "(Neotoma did not take the checkpoint); nothing was launched. Reconcile the "
-        "task once Neotoma answers."
-    )
-    brief_id = checkpoint = held = None
+    failure_posture.md rule 5: the checkpoint is the hold. Returns
+    ``(brief_id, "")`` only when the checkpoint was written AND read back;
+    otherwise ``(None, why)``, and the caller writes no held status. Exactly
+    one write is attempted per call; it is never retried here."""
+    brief_id = None
     try:
         task_record = fetch_task_record(entity_id)
         tenant_id = str(fetch_entity_user_id(entity_id) or "").strip()
         task_snapshot = _record_snapshot(task_record)
         if task_snapshot is None or not tenant_id:
-            return unrecorded
+            return None, "the task record could not be read to write it"
         _gate_skill_name, action_type, policy, gate = _task_gate_context(task_snapshot)
         decision = GateDecision(
             action=GateAction.CHECKPOINT,
@@ -869,39 +864,37 @@ def _escalate_neotoma_admission_exhaustion(
             policy=policy,
         )
         if not brief_id:
-            return unrecorded
+            return None, "Neotoma did not take the checkpoint"
         checkpoint = _record_snapshot(fetch_checkpoint_record(brief_id))
-        held = fetch_task_snapshot(entity_id)
     except Exception as exc:
-        log.error(f"[{DAEMON_NAME}] task {entity_id}: admission exhaustion not recorded "
-                  f"or not read back: {type(exc).__name__}")
-        if not brief_id:
-            return unrecorded
-        # Written, but the read-back could not run: say so, not "not taken".
-    confirmed = (
-        isinstance(checkpoint, dict)
-        and checkpoint.get("reason") == NEOTOMA_ADMISSION_EXHAUSTED_REASON
-        and checkpoint.get("task_entity_id") == entity_id
-        and isinstance(held, dict)
-        and normalize_status(held.get("status")) == TaskStatus.BLOCKED.value
-        and held.get("result") == reason
-    )
-    if confirmed:
-        return (f"{skill} on {entity_id}: {reason} The task is held with checkpoint "
-                f"{brief_id} ({NEOTOMA_ADMISSION_EXHAUSTED_REASON}). Approve checkpoint "
-                f"{brief_id} to release the task again.")
-    return (f"{skill} on {entity_id}: {reason} Checkpoint {brief_id} was written but "
-            "the hold could not be confirmed; nothing was launched. Reconcile the task "
-            "record.")
+        log.error(f"[{DAEMON_NAME}] task {entity_id}: admission exhaustion checkpoint "
+                  f"not written or not read back: {type(exc).__name__}")
+        return None, ("the checkpoint write could not run" if not brief_id
+                      else f"checkpoint {brief_id} was written but could not be read back")
+    if (isinstance(checkpoint, dict)
+            and checkpoint.get("reason") == NEOTOMA_ADMISSION_EXHAUSTED_REASON
+            and checkpoint.get("task_entity_id") == entity_id):
+        return brief_id, ""
+    return None, f"checkpoint {brief_id} was written but did not read back"
+
+
+# Hard caps on the admission retry schedule (failure_posture.md: every wait
+# is bounded). A single configured backoff, the retry count, and the whole
+# schedule's total wait each have a ceiling.
+NEOTOMA_ADMISSION_BACKOFF_S_MAX = 3600.0
+NEOTOMA_ADMISSION_RETRIES_MAX = 10
+NEOTOMA_ADMISSION_TOTAL_WAIT_S_MAX = 6 * 3600.0
 
 
 def _neotoma_admission_retry_bounds() -> tuple[int, float]:
     """(retries, base backoff seconds) from the environment.
 
-    A retry count that is not a non-negative integer, or a backoff that is not
-    a finite positive number (``inf``, ``nan``, ``0``, negative), is rejected:
-    the setting's name is logged (never its value) and the finite default is
-    used, so the deferral loop always waits a finite time and always ends."""
+    A retry count that is not an integer in 0..NEOTOMA_ADMISSION_RETRIES_MAX,
+    or a backoff that is not a finite number in (0, NEOTOMA_ADMISSION_BACKOFF_S_MAX],
+    is rejected and that setting takes its default. If the resulting schedule's
+    total wait is not finite or exceeds NEOTOMA_ADMISSION_TOTAL_WAIT_S_MAX, both
+    settings take their defaults. Only setting names are logged, never values,
+    so the deferral loop always waits a finite, bounded time and always ends."""
     retries = NEOTOMA_ADMISSION_RETRIES_DEFAULT
     raw = os.environ.get("APIS_NEOTOMA_ADMISSION_RETRIES")
     if raw is not None:
@@ -909,11 +902,12 @@ def _neotoma_admission_retry_bounds() -> tuple[int, float]:
             parsed = int(raw.strip())
         except (TypeError, ValueError):
             parsed = -1
-        if parsed >= 0:
+        if 0 <= parsed <= NEOTOMA_ADMISSION_RETRIES_MAX:
             retries = parsed
         else:
             log.warning(f"[{DAEMON_NAME}] APIS_NEOTOMA_ADMISSION_RETRIES is not a "
-                        "non-negative integer; using the default")
+                        f"non-negative integer of at most {NEOTOMA_ADMISSION_RETRIES_MAX}; "
+                        "using the default")
     backoff = NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT
     raw = os.environ.get("APIS_NEOTOMA_ADMISSION_BACKOFF_S")
     if raw is not None:
@@ -921,11 +915,20 @@ def _neotoma_admission_retry_bounds() -> tuple[int, float]:
             parsed_backoff = float(raw.strip())
         except (TypeError, ValueError):
             parsed_backoff = math.nan
-        if math.isfinite(parsed_backoff) and parsed_backoff > 0:
+        if (math.isfinite(parsed_backoff)
+                and 0 < parsed_backoff <= NEOTOMA_ADMISSION_BACKOFF_S_MAX):
             backoff = parsed_backoff
         else:
             log.warning(f"[{DAEMON_NAME}] APIS_NEOTOMA_ADMISSION_BACKOFF_S is not a "
-                        "finite positive number; using the default")
+                        f"positive finite number of at most {NEOTOMA_ADMISSION_BACKOFF_S_MAX:.0f}s; "
+                        "using the default")
+    total = _neotoma_admission_wait_ceiling(retries, backoff)
+    if not (math.isfinite(total) and total <= NEOTOMA_ADMISSION_TOTAL_WAIT_S_MAX):
+        log.warning(f"[{DAEMON_NAME}] APIS_NEOTOMA_ADMISSION_RETRIES and "
+                    "APIS_NEOTOMA_ADMISSION_BACKOFF_S together exceed the retry schedule's "
+                    f"{NEOTOMA_ADMISSION_TOTAL_WAIT_S_MAX:.0f}s limit; using the defaults")
+        retries = NEOTOMA_ADMISSION_RETRIES_DEFAULT
+        backoff = NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT
     return retries, backoff
 
 
@@ -3534,7 +3537,7 @@ async def dispatch_task(
                 # outage and try again. Each retry re-reads and re-reserves.
                 delay = _neotoma_admission_wait(
                     backoff, deferrals + 1, getattr(result, "fly_retry_after_seconds", None))
-                if waited + delay > wait_ceiling:
+                if not math.isfinite(delay) or waited + delay > wait_ceiling:
                     # Neotoma asked for a wait past the schedule's limit: end as
                     # exhausted now rather than retry before it said to.
                     wait_beyond_ceiling = delay
@@ -4141,27 +4144,60 @@ async def dispatch_task(
             job.failed(f"task {entity_id} → {skill} retry not started: {revalidation_refusal}")
         elif _neotoma_admission_deferred(result):
             # The bounded retries ran out with Neotoma still not answering.
-            # Nothing launched: held, never FAILED, and one notice.
+            # Nothing launched. Held only once its checkpoint reads back; with
+            # no checkpoint, the failed-dispatch status. One notice either way.
             reason = (
                 f"Neotoma's admission check did not answer after {deferrals + 1} "
                 "attempt(s); nothing was launched and no delivery receipt is held."
                 + (f" Neotoma asked to wait {wait_beyond_ceiling:.0f}s, past the retry "
                    "schedule's limit, so no earlier attempt was made."
                    if wait_beyond_ceiling is not None else "")
-                + " Approving this task's rounds_exhausted checkpoint releases it again."
             )
             _run_stage("assistant", f"{skill}: {reason}", stage="blocked")
             if run_session:
                 update_run_session_status(run_session, status="failed")
-            set_task_status(
-                entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
-                from_status=TaskStatus.EXECUTING.value, reason=reason,
-                result=reason, key_suffix=trigger)
-            notifier.send(
-                _escalate_neotoma_admission_exhaustion(
-                    entity_id, skill=skill, title=title, trigger=trigger, reason=reason),
-                priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
-            job.failed(f"task {entity_id} → {skill} held: Neotoma admission did not answer")
+            # The checkpoint is the hold: it is written and read back first,
+            # and only then does the task take its held status.
+            brief_id, unrecorded = _write_neotoma_admission_checkpoint(
+                entity_id, skill=skill, title=title, trigger=trigger, reason=reason)
+            if brief_id:
+                reason += " Approving this task's rounds_exhausted checkpoint releases it again."
+                set_task_status(
+                    entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+                    from_status=TaskStatus.EXECUTING.value, reason=reason,
+                    result=reason, key_suffix=trigger)
+                try:
+                    saved = fetch_task_snapshot(entity_id) or {}
+                    held = (normalize_status(saved.get("status")) == TaskStatus.BLOCKED.value
+                            and saved.get("result") == reason)
+                except Exception:
+                    held = False
+                notice = (
+                    f"{skill} on {entity_id}: {reason} The task is held with checkpoint "
+                    f"{brief_id} ({NEOTOMA_ADMISSION_EXHAUSTED_REASON}). Approve checkpoint "
+                    f"{brief_id} to release the task again."
+                    if held else
+                    f"{skill} on {entity_id}: {reason} Checkpoint {brief_id} exists but the "
+                    "hold could not be confirmed; nothing was launched. Reconcile the task "
+                    "record.")
+                notifier.send(notice, priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
+                job.failed(f"task {entity_id} → {skill} held: Neotoma admission did not answer")
+            else:
+                # No checkpoint means nothing to approve: no held status. The
+                # task takes the failed-dispatch status so the existing
+                # recovery (the stall watchdog) owns it.
+                failed_reason = (f"{reason} No checkpoint exists ({unrecorded}); the task "
+                                 "is left to the failed-dispatch recovery.")
+                set_task_status(
+                    entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
+                    from_status=TaskStatus.EXECUTING.value, reason=failed_reason,
+                    key_suffix=trigger)
+                notifier.send(
+                    f"{skill} on task {entity_id}: {reason} No checkpoint exists for this "
+                    f"task ({unrecorded}), so it is not held; it was left in the "
+                    "failed-dispatch status for the existing recovery.",
+                    priority=Priority.BLOCKER, handler=DAEMON_NAME)
+                job.failed(f"task {entity_id} → {skill} admission exhausted; no checkpoint")
         elif (getattr(result, "fly_delivery_not_launched", False)
               and getattr(result, "fly_delivery_cleanup", "") in {"released", "not_reserved"}):
             reason = _redact_secrets(build_delivery.fly_prelaunch_failure_summary(result))
