@@ -51,6 +51,17 @@ What these looked like RED:
   receipt with a launched run id as proof; they pass only with that case cut.
 * ``test_in_process_dispatch_of_a_padded_id_does_not_cover_this_task`` pins
   that the in-process proof matches the exact id only.
+* Round-1 corrections of #1694, each run against the previous head d91eb39:
+  ``test_repository_not_exactly_owner_name_is_reported``: ``/``, ``a/``,
+  ``/b``, ``a/b/c``, ``a b/c``, ``../b``, ``a/..``, ``./b`` and ``a//b`` were
+  silent (no notice, counted ``not_fly``), because any exact string holding a
+  ``/`` passed; the padded cases were reported under the old wording only.
+  ``test_delivery_task_is_reported_whatever_the_current_opt_in`` (all six)
+  sent no notice: with the delivery class not opted in, the sweep returned
+  before reading the inventory. ``test_task_positively_routed_away_from_fly_is_silent``
+  failed ``not_fly == 1`` (0: the inventory was never read), and
+  ``test_sweep_never_reads_the_current_fly_opt_in`` failed on the forbidden
+  ``delivery_opted_in`` call.
 * ``test_unlaunched_fly_recovery_sweep_is_scheduled_at_startup``, checked by
   removing ``unlaunched_fly_recovery_sweep(),`` from the startup gather: the
   gather-block assertion failed.
@@ -182,28 +193,114 @@ def test_settled_own_receipt_without_a_live_run_is_reported(env, status):
     assert "launched or finished is not confirmed" in notifier.sent[0]
 
 
-@pytest.mark.parametrize("case", ["other_agent", "other_action", "fly_not_opted_in"])
-def test_task_positively_routed_away_from_fly_is_silent(env, monkeypatch, case):
+_OPT_INS = pytest.mark.parametrize(
+    "opt_in", [None, "", "task_dispatch,analysis"],
+    ids=["opt_in_unset", "opt_in_empty", "opt_in_without_delivery"])
+
+
+def _set_opt_in(monkeypatch, opt_in) -> None:
+    if opt_in is None:
+        monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES")
+    else:
+        monkeypatch.setenv("APIS_FLY_RUNNER_CLASSES", opt_in)
+
+
+@_OPT_INS
+@pytest.mark.parametrize("case", ["other_agent", "other_action"])
+def test_task_positively_routed_away_from_fly_is_silent(env, monkeypatch, case, opt_in):
     """Allow-list (a): the row's routing fields, all present and well formed,
-    name a target ``dispatch_task`` would not send to Fly."""
+    give an action class outside ``fly_runner.DELIVERY_ONLY_CLASSES``. Silent
+    whatever the current opt-in."""
     _, state, effects = env
+    _set_opt_in(monkeypatch, opt_in)
     if case == "other_agent":
         state["task"] = _task(assigned_to="pavo", action_type="analysis")
-    elif case == "other_action":
-        state["task"] = _task(action_type="analysis")
     else:
-        monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES")
+        state["task"] = _task(action_type="analysis")
     notifier = _Notifier()
     counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
     assert effects == [] and notifier.sent == []
-    assert counts["unrecovered"] == 0
+    assert counts["unrecovered"] == 0 and counts["not_fly"] == 1
+
+
+@_OPT_INS
+@pytest.mark.parametrize("explicit", [True, False], ids=["declared", "agent_prior"])
+def test_delivery_task_is_reported_whatever_the_current_opt_in(env, monkeypatch, opt_in,
+                                                               explicit):
+    """A restart into a configuration without the delivery class opted onto
+    Fly must not silence a delivery task sent to Fly under the earlier one:
+    the sweep runs and the delivery class alone makes the task Fly-routed.
+    ``agent_prior``: no declared action_type, so the class comes from the
+    builder's per-agent prior, as ``dispatch_task`` computes it."""
+    _, state, effects = env
+    _set_opt_in(monkeypatch, opt_in)
+    if not explicit:
+        task = _task()
+        task.pop("action_type")
+        state["task"] = task
+        assert apis._dispatch_action_class("cicada", task) in fly_runner.DELIVERY_ONLY_CLASSES
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    _assert_reported(effects, notifier, counts)
+    assert counts["complete"] is True and counts["not_fly"] == 0
+
+
+def test_sweep_never_reads_the_current_fly_opt_in(env, monkeypatch):
+    """No configuration a restarted process carries can make the sweep skip
+    the inventory or read a task as non-Fly: it never asks for the opt-in."""
+    def _forbidden():
+        raise AssertionError("the sweep read the current Fly opt-in")
+
+    monkeypatch.setattr(fly_runner, "delivery_opted_in", _forbidden)
+    monkeypatch.setattr(fly_runner, "runner_classes", _forbidden)
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    _assert_reported(env[2], notifier, counts)
+    source = "".join(inspect.getsource(fn) for fn in (
+        apis.recover_unlaunched_fly_tasks, apis._recover_unlaunched_fly_task,
+        apis._unlaunched_silence, apis._fly_routed_delivery))
+    for needle in ("delivery_opted_in(", "runner_classes(", "os.environ", "getenv("):
+        assert needle not in source, needle
+
+
+@pytest.mark.parametrize("repo", [
+    "/", "a/", "/b", "a/b/c", "a b/c", "a/b ", " a/b", "../b", "a/..", "./b", "a//b",
+], ids=["slash_only", "no_name", "no_owner", "two_slashes", "space_inside",
+        "padded_right", "padded_left", "dotdot_owner", "dotdot_name", "dot_owner",
+        "double_slash"])
+@pytest.mark.parametrize("field", ["repo", "repository"])
+def test_repository_not_exactly_owner_name_is_reported(env, field, repo):
+    """A repository field proves routing only when it is exactly
+    ``owner/name``. On an otherwise non-Fly task, any other shape is reported."""
+    _, state, effects = env
+    task = _task(assigned_to="pavo", action_type="analysis")
+    task.pop("repo")
+    task[field] = repo
+    state["task"] = task
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert effects == []
+    assert len(notifier.sent) == 1, notifier.sent
+    assert TASK in notifier.sent[0]
+    assert f"its {field} field is not exactly owner/name" in notifier.sent[0]
+    assert counts["unrecovered"] == 1 and counts["not_fly"] == 0
+
+
+@pytest.mark.parametrize("repo", ["owner/name", "Org-1/my.repo_2"])
+def test_repository_exactly_owner_name_on_a_non_fly_task_is_silent(env, repo):
+    _, state, effects = env
+    state["task"] = _task(assigned_to="pavo", action_type="analysis", repo=repo)
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert effects == [] and notifier.sent == []
+    assert counts["not_fly"] == 1 and counts["unrecovered"] == 0
 
 
 @pytest.mark.parametrize("drop,over,phrase", [
     ("repo", {}, "no repository field"),
-    (None, {"repo": ""}, "its repo field is empty or malformed"),
-    (None, {"repo": 7}, "its repo field is empty or malformed"),
-    (None, {"repo": "no-slash"}, "its repo field is empty or malformed"),
+    (None, {"repo": ""}, "its repo field is not exactly owner/name"),
+    (None, {"repo": 7}, "its repo field is not exactly owner/name"),
+    (None, {"repo": "no-slash"}, "its repo field is not exactly owner/name"),
     ("assigned_to", {}, "assigned_to field is missing, empty or malformed"),
     (None, {"assigned_to": "  "}, "assigned_to field is missing, empty or malformed"),
 ], ids=["repo_missing", "repo_empty", "repo_not_a_string", "repo_malformed",

@@ -118,6 +118,7 @@ import hashlib
 import logging
 import math
 import os
+import re
 import stat
 import sys
 import time
@@ -2131,8 +2132,8 @@ async def _redispatch_deferred(
 # names each to the operator. It never relaunches one: whether a stranded run
 # launched or finished is not confirmed (the sweep does not take a Fly receipt
 # as proof of a run), and resuming would reuse an approval the dispatcher
-# already consumed. It touches only
-# tasks ``dispatch_task`` would send to Fly (or whose routing it cannot
+# already consumed. It runs at every startup whatever the current Fly opt-in,
+# reports every task of a Fly delivery class (or whose routing it cannot
 # determine) and writes nothing; the operator checks for an earlier run and,
 # if none ran, files a new task with a different title for the same work and
 # releases its checkpoint.
@@ -2153,17 +2154,33 @@ def _exact_text(value: object) -> bool:
     return isinstance(value, str) and bool(value) and value == value.strip()
 
 
+_REPO_PART = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _well_formed_repository(value: object) -> bool:
+    """Exactly ``owner/name``: one ``/``, each side non-empty and made only of
+    ``[A-Za-z0-9._-]``, and neither side ``.`` or ``..``. Nothing is stripped,
+    so a padded value is not well formed."""
+    if not isinstance(value, str) or value.count("/") != 1:
+        return False
+    return all(_REPO_PART.fullmatch(part) and part not in (".", "..")
+               for part in value.split("/"))
+
+
 def _fly_routed_delivery(snapshot: object) -> tuple[bool | None, str]:
-    """``(routed, why)``: whether ``dispatch_task`` would send this task to Fly
-    (a builder of the delivery class, naming a repository, with deliveries
-    opted onto Fly).
+    """``(routed, why)``: whether this task's row names a Fly delivery, judged
+    only on code-defined facts.
 
     ``routed`` is False only on proof: the row is an object, its ``assigned_to``
-    and repository routing fields are present and well formed, and the target
-    they name is not a Fly delivery. A missing, empty or malformed routing
-    field, or a check that raises, gives None with ``why`` naming the cause
-    (an exception by type only, never its message, which can carry values).
-    True: routed to Fly. Never raises."""
+    and repository routing fields are present and well formed (a repository is
+    exactly ``owner/name``), and the action class ``dispatch_task`` computes
+    from the row is not in ``fly_runner.DELIVERY_ONLY_CLASSES``. The current
+    opt-in (``APIS_FLY_RUNNER_CLASSES``) is never read: a task sent to Fly
+    under an earlier configuration must not look non-Fly after a restart
+    without it. A missing, empty or malformed routing field, or a check that
+    raises, gives None with ``why`` naming the cause (an exception by type
+    only, never its message, which can carry values). True: a delivery-class
+    task. Never raises."""
     if not isinstance(snapshot, dict):
         return None, "its task record could not be read"
     assignee = snapshot.get("assigned_to")
@@ -2173,9 +2190,8 @@ def _fly_routed_delivery(snapshot: object) -> tuple[bool | None, str]:
     if not present:
         return None, "it has no repository field, so its routing cannot be confirmed"
     for key in present:
-        value = snapshot.get(key)
-        if not _exact_text(value) or "/" not in value:
-            return None, f"its {key} field is empty or malformed"
+        if not _well_formed_repository(snapshot.get(key)):
+            return None, f"its {key} field is not exactly owner/name"
     # Read by the routing below when present: each must then be exact too.
     for key in _OPTIONAL_ROUTING_FIELDS:
         if key in snapshot and not _exact_text(snapshot.get(key)):
@@ -2183,17 +2199,20 @@ def _fly_routed_delivery(snapshot: object) -> tuple[bool | None, str]:
     try:
         import fly_runner
 
-        if not fly_runner.delivery_opted_in():
-            return False, ""
-        skill = _resolve_skill(_routing_tags(snapshot),
-                               assigned_to=_canonical_assignee(assignee),
-                               owner=snapshot.get("owner"))
-        # A readable assignee with no agent route (None) or a person/session
-        # owner is a target dispatch_task never sends to Fly.
-        if skill is None or skill in (_HUMAN_OWNED, _SESSION_OWNED):
-            return False, ""
-        return bool(build_delivery.is_delivery_dispatch(
-            skill, _dispatch_action_class(skill, snapshot))), ""
+        tags = _routing_tags(snapshot)
+        assigned = _canonical_assignee(assignee)
+        # dispatch_task ignores ``owner`` for some lifecycles (a correction, a
+        # released build), so the class is judged both ways and the task is a
+        # delivery if either is. A person or session owner gives no agent
+        # prior, so the operator-login setting cannot change the class.
+        for owner in {snapshot.get("owner"), None}:
+            skill = _resolve_skill(tags, assigned_to=assigned, owner=owner)
+            if skill in (_HUMAN_OWNED, _SESSION_OWNED):
+                skill = None
+            action_class = _dispatch_action_class(skill, snapshot)
+            if action_class in fly_runner.DELIVERY_ONLY_CLASSES:
+                return True, ""
+        return False, ""
     except Exception as exc:  # noqa: BLE001 — unknown, and reported as unknown
         return None, ("whether it routes to Fly could not be determined (the routing "
                       f"check raised {type(exc).__name__})")
@@ -2204,8 +2223,9 @@ def _unlaunched_silence(entity_id: str, snapshot: object) -> tuple[str, str]:
     the sweep may stay silent, else ``""`` and the reason for the notice.
 
     Silent ONLY on one of these proofs; every other case is reported:
-      (a) the readable row's routing fields name a target ``dispatch_task``
-          would not send to Fly (``_fly_routed_delivery`` False);
+      (a) the readable row's routing fields are well formed and give an
+          action class that is not a Fly delivery class
+          (``_fly_routed_delivery`` False);
       (b) a Fly run for exactly this task id is live in this process.
     A Fly ledger receipt, settled or not, is never taken as proof that this
     task's run happened: tying a receipt to exactly one task needs ownership
@@ -2252,11 +2272,8 @@ async def recover_unlaunched_fly_tasks(notifier: Notifier) -> dict:
     counts = {"complete": False, "examined": 0, "not_fly": 0, "recorded": 0,
               "unrecovered": 0}
     try:
-        import fly_runner
-
-        if not fly_runner.delivery_opted_in():
-            counts["complete"] = True
-            return counts
+        # Runs whatever the current Fly opt-in: a task sent to Fly under an
+        # earlier configuration is stranded all the same.
         # strict: a dropped row, a malformed page, a short count or an id that
         # is not exactly itself could be the stranded task, so the inventory
         # is unknown rather than smaller.
