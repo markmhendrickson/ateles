@@ -4177,9 +4177,12 @@ async def _run_skill_once(
         try:
             if _fly_job is not None:
                 try:
+                    returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
+                    # Only once the run actually happened on Fly: a token mint
+                    # or other refusal inside run() raises before this, and
+                    # that run then goes home with its normal tools.
                     if _fly_job.neotoma_tools_unavailable:
                         _report_fly_capability(fly_runner.KEY_ONLY_NEOTOMA_TOOLS_NOTE)
-                    returncode, stdout, stderr = await fly_runner.get_executor().run(_fly_job)
                 except fly_runner.FlyRefusal as exc:
                     msg = f"fly runner refused: {exc}"
                     log.warning(f"[apis] {skill} dispatch deferred — {msg}")
