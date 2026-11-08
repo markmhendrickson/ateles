@@ -597,7 +597,7 @@ def test_unreachable_neotoma_makes_a_key_only_job_ineligible(fly_env):
 
 def test_unreachable_admission_check_is_a_temporary_deferral(fly_env):
     # Neotoma did not answer: the job is deferred, not refused (the caller
-    # turns `neotoma_unavailable` into a deferral the FAILED-task retry owns).
+    # turns `neotoma_unavailable` into a bounded deferral, never a FAILED task).
     _session(fly_env).fail = True
     with pytest.raises(fly_runner.FlyIneligible) as caught:
         _job(neotoma_tools_granted=True)

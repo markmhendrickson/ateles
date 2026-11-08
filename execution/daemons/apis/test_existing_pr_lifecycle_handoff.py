@@ -593,3 +593,66 @@ def test_executing_version_conflict_sends_one_blocker_and_writes_nothing(joined)
     assert 'refused' not in notice and 'changed under it' not in notice
     assert 'Nothing was started' in notice
     assert 'cannot be released again' in notice and 'refile' in notice
+
+
+@pytest.mark.parametrize('recovers', [False, True])
+def test_neotoma_unanswered_admission_is_a_bounded_deferral_never_failed(
+        joined, monkeypatch, tmp_path, recovers):
+    # Red before this fix (observed): the real run_skill returned
+    # fly_neotoma_unavailable without fly_delivery_not_launched, the general
+    # failure branch wrote status 'failed' and sent "task marked FAILED", and
+    # build_job was called once (no retry).
+    import fly_runner
+    import skill_runner
+    from lib.daemon_runtime import AgentDefinition
+    monkeypatch.setenv('APIS_NEOTOMA_ADMISSION_RETRIES', '2')
+    monkeypatch.setenv('APIS_NEOTOMA_ADMISSION_BACKOFF_S', '0')
+    skill_dir = tmp_path / '.claude' / 'skills' / 'cicada'
+    skill_dir.mkdir(parents=True)
+    (skill_dir / 'SKILL.md').write_text('# cicada\n')
+    monkeypatch.setattr(skill_runner, 'ATELES_REPO', tmp_path)
+    monkeypatch.setattr(skill_runner, '_load_agent_def', lambda role: AgentDefinition(
+        entity_id='e', name=role, prompt_markdown='You are cicada.', tool_allowlist='*',
+        aauth_sub=f'{role}@ateles-swarm'))
+    monkeypatch.setattr(skill_runner, '_load_active_policy_prompt', lambda role, **kw: '')
+    monkeypatch.setattr(skill_runner, '_write_harness_event', lambda **kw: None)
+    monkeypatch.setattr(skill_runner, 'neotoma_token_for_agent', lambda role: ('inert-role-token', 'inert'))
+    monkeypatch.setenv('NEOTOMA_BASE_URL', 'https://neotoma.example.test')
+    async def no_local(*a, **kw):
+        pytest.fail('a Neotoma deferral must never run the delivery locally')
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', no_local)
+    receipts_at_launch, answered = [], []
+    def build_job(**kw):
+        receipts_at_launch.append(list(delivery._delivery_ledger().delivery_receipts()))
+        joined['calls'].append('admission')
+        if recovers and len(receipts_at_launch) == 3:
+            answered.append(True)
+            raise fly_runner.FlyIneligible('a later, real refusal')
+        raise fly_runner.FlyIneligible('Neotoma unreachable', neotoma_unavailable=True)
+    monkeypatch.setattr(fly_runner, 'build_job', build_job)
+    monkeypatch.setattr(apis, 'run_skill', skill_runner.run_skill)
+    notices = []
+    original_send = _StubNotifier.send
+    def send(self, message, *a, **kw):
+        notices.append(message)
+        return original_send(self, message, *a, **kw)
+    monkeypatch.setattr(_StubNotifier, 'send', send)
+    release(joined)
+    statuses = [w.get('value') for w in joined['writes'] if w.get('field') == 'status']
+    assert 'failed' not in statuses
+    assert not any('marked FAILED' in n for n in notices)
+    # One first attempt plus the two bounded retries, each with its own
+    # receipt that was reserved for the attempt and released after it.
+    assert len(receipts_at_launch) == 3
+    assert all(r == ['owner/repo#12'] for r in receipts_at_launch), receipts_at_launch
+    assert not delivery._delivery_ledger().delivery_receipts()
+    saved = joined['record']['snapshot']
+    if recovers:
+        # The third attempt was no longer an outage: it is handled as before.
+        assert answered and 'Neotoma' not in saved.get('blocked_reason', '')
+        return
+    assert saved['status'] == 'blocked'
+    assert "Neotoma's admission check did not answer" in saved['blocked_reason']
+    neotoma = [n for n in notices if "Neotoma's admission check did not answer" in n]
+    assert len(neotoma) == 1
+    assert 'nothing was launched' in neotoma[0] and 're-released' in neotoma[0]

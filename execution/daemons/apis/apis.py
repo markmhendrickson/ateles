@@ -797,6 +797,40 @@ def _dispatch_mode_from_snapshot(snapshot: dict) -> str | None:
 
 
 
+# A Fly launch deferred only because Neotoma did not answer the role-key
+# admission check, with its prelaunch receipt proven released: nothing ran.
+# The dispatcher retries it in process after a backoff, at most this many
+# times, then holds the task (BLOCKED) with one operator notice. Never FAILED
+# (failure_posture.md, rule 8). The build-claim deferral sweep does not fit:
+# it is keyed to a running build, and an outage has no holder to wait on.
+NEOTOMA_ADMISSION_RETRIES_DEFAULT = 3
+NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT = 120.0
+
+
+def _neotoma_admission_deferred(result) -> bool:
+    return bool(getattr(result, "fly_neotoma_unavailable", False)
+                and getattr(result, "fly_delivery_not_launched", False)
+                and getattr(result, "fly_delivery_cleanup", "") == "released"
+                and not getattr(result, "fly_delivery_status", "")
+                and not getattr(result, "remote_run_id", "")
+                and not getattr(result, "remote_outcome_unknown", False))
+
+
+def _neotoma_admission_retry_bounds() -> tuple[int, float]:
+    """(retries, base backoff seconds) from the environment; bad values use the defaults."""
+    try:
+        retries = max(0, int(os.environ.get("APIS_NEOTOMA_ADMISSION_RETRIES",
+                                            NEOTOMA_ADMISSION_RETRIES_DEFAULT)))
+    except ValueError:
+        retries = NEOTOMA_ADMISSION_RETRIES_DEFAULT
+    try:
+        backoff = max(0.0, float(os.environ.get("APIS_NEOTOMA_ADMISSION_BACKOFF_S",
+                                                NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT)))
+    except ValueError:
+        backoff = NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT
+    return retries, backoff
+
+
 def _correction_not_started(skill: str, reason: str):
     return SkillResult(skill, False, None, "", "", error=reason,
                        fly_delivery_not_launched=True, fly_delivery_cleanup="not_reserved")
@@ -3196,17 +3230,35 @@ async def dispatch_task(
                 dispatch_snapshot = json.loads(correction_lifecycle.snapshot_json)
                 lifecycle_binding["_lifecycle_version"] = correction_lifecycle.version
                 lifecycle_binding["_lifecycle_provenance"] = correction_lifecycle
-            result = await _spawn_harness_skill(
-                skill,
-                entity_id,
-                dispatch_snapshot,
-                trigger,
-                notifier,
-                role=role,
-                run_conversation_id=run_conversation_id,
-                run_agent_session_id=run_agent_session_id,
-                **lifecycle_binding,
-            )
+            retries, backoff = _neotoma_admission_retry_bounds()
+            deferrals = 0
+            while True:
+                result = await _spawn_harness_skill(
+                    skill,
+                    entity_id,
+                    dispatch_snapshot,
+                    trigger,
+                    notifier,
+                    role=role,
+                    run_conversation_id=run_conversation_id,
+                    run_agent_session_id=run_agent_session_id,
+                    **lifecycle_binding,
+                )
+                if not _neotoma_admission_deferred(result) or deferrals >= retries:
+                    break
+                # Nothing launched and the receipt is released: wait out the
+                # outage and try again. Each retry re-reads and re-reserves.
+                deferrals += 1
+                delay = backoff * deferrals
+                log.warning(
+                    f"[{DAEMON_NAME}] {skill} task {entity_id}: Neotoma did not answer the "
+                    f"Fly admission check; nothing launched; retry {deferrals}/{retries} "
+                    f"in {delay:.0f}s")
+                _run_stage("assistant",
+                           f"{skill}: Neotoma did not answer the admission check; nothing "
+                           f"was launched; retry {deferrals}/{retries} in {delay:.0f}s",
+                           stage="deferred")
+                await asyncio.sleep(delay)
         except Exception as exc:
             # Unexpected crash in the spawn machinery itself → record as a
             # failed run.
@@ -3752,6 +3804,24 @@ async def dispatch_task(
             )
             notifier.send(notice, priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
             job.failed(f"task {entity_id} → {skill} Fly delivery ended")
+        elif _neotoma_admission_deferred(result):
+            # The bounded retries ran out with Neotoma still not answering.
+            # Nothing launched: held, never FAILED, and one notice.
+            reason = (
+                f"Neotoma's admission check did not answer after {deferrals + 1} "
+                "attempt(s); nothing was launched and no delivery receipt is held. "
+                "The task can be re-released once Neotoma answers."
+            )
+            _run_stage("assistant", f"{skill}: {reason}", stage="blocked")
+            if run_session:
+                update_run_session_status(run_session, status="failed")
+            set_task_status(
+                entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+                from_status=TaskStatus.EXECUTING.value, reason=reason,
+                result=reason, key_suffix=trigger)
+            notifier.send(f"{skill} on {entity_id}: {reason}",
+                          priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
+            job.failed(f"task {entity_id} → {skill} held: Neotoma admission did not answer")
         elif (getattr(result, "fly_delivery_not_launched", False)
               and getattr(result, "fly_delivery_cleanup", "") in {"released", "not_reserved"}):
             reason = _redact_secrets(build_delivery.fly_prelaunch_failure_summary(result))

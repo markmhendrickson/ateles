@@ -1763,12 +1763,16 @@ async def run_fly_delivery(plan: FlyDeliveryPlan, launch, blocked):
                 return blocked("the delivery record for this issue or task now belongs to "
                                "another dispatch; not starting the local path")
             return result
-        if plan.target and getattr(result, "fly_neotoma_unavailable", False):
+        if getattr(result, "fly_neotoma_unavailable", False):
             # Neotoma did not answer the admission check: a passing outage,
-            # not a technical hold. Its receipt is released, nothing ran, so
-            # it is returned as an ordinary failure the existing FAILED-task
-            # retry re-dispatches (bounded), not a held correction.
+            # not a failure and not a technical hold. Nothing launched and this
+            # dispatch's receipt is proven released, so it is marked as a known
+            # no-launch; the dispatcher retries it after a backoff (bounded) and
+            # holds the task when the retries run out (failure_posture.md,
+            # rule 8: no false terminal state).
             result.ok = False
+            result.fly_delivery_not_launched = True
+            result.fly_delivery_cleanup = "released"
             return result
         if plan.target:
             result.ok = False

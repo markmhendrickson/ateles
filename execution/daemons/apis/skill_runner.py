@@ -1890,7 +1890,9 @@ class SkillResult:
     # the role-key admission check (fly_runner.FlyIneligible.neotoma_unavailable).
     # Nothing ran; not a refusal, not a provider failure: every provider would
     # hit the same outage, so it ends the dispatch with no failover or
-    # cooldown, and the task is retried by the existing FAILED-task retry.
+    # cooldown. Once its prelaunch receipt is proven released the dispatcher
+    # retries it after a backoff, a bounded number of times, and then holds
+    # the task (apis._neotoma_admission_deferred); it is never marked FAILED.
     fly_neotoma_unavailable: bool = False
     # A single-provider dispatch (an existing-PR correction) refused that way:
     # the other Fly candidates its caller may try next, each in a fresh
