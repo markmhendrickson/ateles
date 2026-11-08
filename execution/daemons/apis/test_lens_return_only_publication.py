@@ -729,3 +729,207 @@ def test_nothing_is_posted_when_the_final_check_refuses(monkeypatch, logins, wit
     review = sd.parse_returned_lens_review(GOOD, "pavo")[0]
     monkeypatch.setattr(sd, "compose_remote_lens_comment", _changing_composer)
     assert _published(monkeypatch, with_app=with_app, text=review) == []
+
+
+# ── round 2: a return-only combined reply is validated exactly as received ──
+# Each case below went through the real splitter, the real
+# `unwrap_returned_review` and the real `sign_off_is_warranted`. Red on head
+# c5eaafa7: the combined path cleaned each block (trailing attribution lines,
+# outer blank lines, text before the first delimiter) before validating it.
+
+FOOTER = "\U0001f916 Generated with [Claude Code](https://claude.com/claude-code)"
+PM_HEADER = sd.attribution_header("pavo", "pm lens panelist")
+
+
+def _cleaning_would_have_accepted(reply):
+    """The pm block as the old cleaning split it is a clear verdict the real
+    readers accept and sign: so the rejection below is the new rule's doing."""
+    import review_carry
+    old = review_carry.split_combined_reply(reply, ["pm", "ux"])["pm"]
+    unwrapped, _ = sd.unwrap_returned_review(
+        SkillResult("pavo", True, 0, old, ""), "pavo", "pm", HEAD)
+    return unwrapped.ok and sd.sign_off_is_warranted(unwrapped.stdout, lens_agent="pavo")
+
+
+@pytest.mark.parametrize("trailing", [PM_HEADER, FOOTER], ids=["attribution", "footer"])
+def test_a_trailing_line_after_a_block_is_not_removed_and_the_lens_runs_alone(
+    monkeypatch, trailing
+):
+    reply = _ro_reply(pm_inner=f"{GOOD}\n{trailing}")
+    assert _cleaning_would_have_accepted(reply)
+    d = _combined_setup(monkeypatch, opted_in=True)
+    out, _, posted = _run_combined(monkeypatch, d, reply)
+    assert "pm" not in out and "pm" not in out.remote_lenses
+    assert "pm" not in out.expectation_updates
+    assert [lens for lens, _, _ in posted] == ["ux"]  # pm never posted or signed
+    assert out["ux"].stdout == UX_BODY
+
+
+@pytest.mark.parametrize("leading", [
+    "**APPROVE**\n",
+    f"{PM_HEADER}\n**APPROVE**\n",
+    f"{sd.attribution_header('accipiter', 'ux lens panelist')}\n",
+], ids=["verdict", "header-and-verdict", "header"])
+def test_text_before_the_first_delimiter_rejects_every_lens_of_the_pass(
+    monkeypatch, leading
+):
+    reply = leading + _ro_reply()
+    assert _cleaning_would_have_accepted(reply)
+    d = _combined_setup(monkeypatch, opted_in=True)
+    out, _, posted = _run_combined(monkeypatch, d, reply)
+    assert dict(out) == {} and out.remote_lenses == frozenset()
+    assert out.expectation_updates == {}
+    assert posted == []
+
+
+def test_whitespace_around_the_blocks_is_still_accepted(monkeypatch):
+    d = _combined_setup(monkeypatch, opted_in=True)
+    reply = f"\n  \n{_block('pm', GOOD)}\n\n{_block('ux', UX_GOOD)}\n\n\n"
+    out, _, posted = _run_combined(monkeypatch, d, reply)
+    assert sorted(out) == ["pm", "ux"] and out.remote_lenses == {"pm", "ux"}
+    assert out["pm"].stdout == BODY and out["ux"].stdout == UX_BODY
+    assert [lens for lens, _, _ in posted] == ["pm", "ux"]
+    assert sd.sign_off_is_warranted(out["pm"].stdout, lens_agent="pavo")
+
+
+def test_the_local_path_keeps_its_cleaning(monkeypatch):
+    """Not opted in: the local pass still drops a trailing footer line."""
+    d = _combined_setup(monkeypatch, opted_in=False)
+    pm_text = f"{PM_HEADER}\n**APPROVE**\nfine"
+    ux_text = f"{sd.attribution_header('accipiter', 'ux lens panelist')}\n**APPROVE**\nfine"
+    reply = f"{_block('pm', pm_text)}\n{FOOTER}\n\n{_block('ux', ux_text)}"
+    out, _, _ = _run_combined(monkeypatch, d, reply)
+    assert sorted(out) == ["pm", "ux"]
+    assert out["pm"].stdout == pm_text + "\n"
+
+
+def test_the_raw_split_returns_every_byte_in_a_block_or_the_leading_text():
+    import review_carry
+    pm_block = _block("pm", "a\n\n")
+    reply = f" x\n{pm_block}{_block('ux', 'b')}\n{FOOTER}\n"
+    blocks, leading = review_carry.split_combined_reply_raw(reply, ["pm", "ux"])
+    assert leading == " x\n"
+    assert blocks == {"pm": "a\n\n", "ux": f"b\n{FOOTER}\n"}
+    # A repeated delimiter: that lens has no block, its text stays in another.
+    twice = f"{_block('pm', 'a')}\n{_block('ux', 'b')}\n{_block('ux', 'c')}"
+    blocks, leading = review_carry.split_combined_reply_raw(twice, ["pm", "ux"])
+    assert leading == "" and set(blocks) == {"pm"}
+    # A delimiter with nothing after it is an empty block, never accepted.
+    blocks, _ = review_carry.split_combined_reply_raw(
+        f"{_block('pm', 'a')}\n{review_carry.combined_delimiter('ux')}", ["pm", "ux"])
+    assert blocks["ux"] == ""
+
+
+# ── round 2: the panel loop with a combined return-only reply ───────────────
+
+
+def test_the_panel_loop_publishes_persists_and_updates_a_combined_return_only_pass(
+    monkeypatch,
+):
+    """Drives `_handle_pr` through `_handle_pr_panel` with pm/qa/ux combined
+    and opted in. Deleting the panel-loop branch that adds combined lenses to
+    `remote_lenses` and `expectation_updates` fails assertions (c) and (d)."""
+    import asyncio
+    import review_carry
+    import skill_runner
+    from test_fly_read_only_call_sites import _async_providers
+    from test_swarm_dispatch import _pr_dispatcher_with_stubs, _trigger
+
+    calls: list = []
+    d = _pr_dispatcher_with_stubs(monkeypatch, vanellus_stdout="**APPROVE**\nlgtm", calls=calls)
+    d.config.combined_review_pass = True
+    head = "a" * 40
+    monkeypatch.setattr(skill_runner, "DISPATCHER_LENS_PUBLICATION_READY", True)
+    monkeypatch.setenv(
+        "APIS_FLY_RUNNER_CLASSES", "lens_review:pm,lens_review:qa,lens_review:ux")
+    monkeypatch.setattr(d, "_lens_agent_prompt", lambda agent: "own prompt")
+    monkeypatch.setattr(sd, "usable_providers_async", lambda: _async_providers())
+    monkeypatch.setattr(sd, "resolve_lens_provider", lambda *a, **k: "claude")
+    pm, qa, ux = (sd.lens_by_name(x) for x in ("pm", "qa", "ux"))
+    monkeypatch.setattr(sd, "select_panel", lambda **k: [pm, qa, ux])
+
+    async def not_held(*a, **k):
+        return False
+
+    monkeypatch.setattr(d, "_hold_panel_until_checks_green", not_held)
+
+    update = "**review_expectation (qa)**\n- [x] a"
+    texts = {x.lens: returned(x.lens, x.agent) for x in (pm, qa, ux)}
+    texts["qa"] = f"{texts['qa']}\n{XB}\n{update}\n{XE}"
+    reply = "\n".join(_block(lens, texts[lens]) for lens in ("pm", "qa", "ux"))
+    alone: list = []
+
+    async def fake_run_skill(skill, prompt, **kwargs):
+        if skill == "lanius":
+            return SkillResult(skill, True, 0, "GATE_INHERITANCE: clear", "")
+        if skill == "vanellus":
+            return SkillResult(skill, True, 0, "**APPROVE**\nlgtm", "")
+        if skill == pm.agent and "=====REVIEW:" in prompt:
+            return SkillResult(skill, True, 0, reply, "")
+        alone.append(skill)
+        return SkillResult(skill, True, 0, "**COMMENT**\nlgtm", "")
+
+    monkeypatch.setattr(sd, "run_skill", fake_run_skill)
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            raise AssertionError("no shared-identity post for a lens with its own App")
+
+    async def allowed(*a, **k):
+        return True
+
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _Client())
+    monkeypatch.setattr(d, "_require_github_write_credential", allowed)
+    monkeypatch.setattr(gat, "lens_has_own_app", lambda lens: True)
+    remote_posts: list = []
+
+    async def fake_remote(client, url, t, lens, agent, text, head_sha):
+        remote_posts.append((lens, agent, text, head_sha))
+        return sd.verified_remote_comment(lens, agent, text, head_sha) is not None
+
+    monkeypatch.setattr(d, "_post_remote_lens_verdict", fake_remote)
+
+    def no_local(*a, **k):
+        raise AssertionError("the local combined poster must not run")
+
+    monkeypatch.setattr(review_carry, "compose_combined_comment", no_local)
+    monkeypatch.setattr(sd, "compose_fallback_comment", no_local)
+    persisted: list = []
+    backfill: list = []
+    published: list = []
+
+    async def fake_persist(t, reviews, agents_by_lens=None, **k):
+        persisted.extend(reviews)
+        return True
+
+    async def fake_backfill(t, reviews, agents_by_lens=None, **k):
+        backfill.append(k.get("remote_lenses"))
+
+    async def fake_publish(t, parent, updates, agents_by_lens):
+        published.append(dict(updates))
+
+    monkeypatch.setattr(d, "_persist_panel_reviews", fake_persist)
+    monkeypatch.setattr(d, "_post_missing_panel_comments", fake_backfill)
+    monkeypatch.setattr(d, "_publish_expectation_updates", fake_publish)
+
+    asyncio.run(d._handle_pr(_trigger(body="Closes #80.", head_sha=head)))
+
+    bodies = {x.lens: "\n".join(returned(x.lens, x.agent).split("\n")[1:-1])
+              for x in (pm, qa, ux)}
+    # (a) each review persisted once, as the unwrapped review
+    assert sorted(persisted) == sorted(bodies.items())
+    # (b) each lens published once through the remote path, nothing run alone
+    assert sorted((lens, text) for lens, _, text, _ in remote_posts) == sorted(bodies.items())
+    assert all(h == head for *_, h in remote_posts)
+    assert not set(alone) & {pm.agent, qa.agent, ux.agent}
+    # (c) the qa block's expectation update reaches the publisher for qa
+    assert published == [{"qa": update}]
+    # (d) the combined lenses are passed as remote to the backfill step
+    assert backfill and {"pm", "qa", "ux"} <= set(backfill[0])

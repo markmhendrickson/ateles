@@ -426,15 +426,9 @@ def strip_trailing_artifact(block: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def split_combined_reply(stdout: str | None, lenses: Sequence[str]) -> dict[str, str]:
-    """Each lens's own block from a combined reply; a lens whose block is
-    missing or duplicated is absent from the result (the caller runs it alone).
-
-    A block is the text between its delimiter line and the next delimiter. It
-    is returned as written: the caller validates it with the same reader the
-    approval gate uses, and this function never repairs a block.
-    """
-    text = stdout or ""
+def _combined_positions(text: str, lenses: Sequence[str]) -> list[tuple[int, str]]:
+    """(offset, lens) of each lens's delimiter line that appears exactly once,
+    in reply order. A lens whose delimiter is missing or repeated is absent."""
     positions: list[tuple[int, str]] = []
     for lens in lenses:
         found = [m.start() for m in re.finditer(
@@ -443,6 +437,44 @@ def split_combined_reply(stdout: str | None, lenses: Sequence[str]) -> dict[str,
             continue
         positions.append((found[0], lens))
     positions.sort()
+    return positions
+
+
+def split_combined_reply_raw(
+    stdout: str | None, lenses: Sequence[str]
+) -> tuple[dict[str, str], str]:
+    """Each lens's block from a return-only combined reply exactly as received,
+    plus the text before the first delimiter.
+
+    Return-only combined replies are validated exactly as received; nothing is
+    removed before validation. So every byte of the reply is either inside a
+    lens's block (the exact text between its delimiter line and the next
+    delimiter, or the end) or in the returned leading text, which the caller
+    must check. A delimiter line with nothing after it gives that lens an
+    empty block, which no validator accepts."""
+    text = stdout or ""
+    positions = _combined_positions(text, lenses)
+    leading = text[: positions[0][0]] if positions else text
+    blocks: dict[str, str] = {}
+    for i, (start, lens) in enumerate(positions):
+        end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
+        line_end = text.find("\n", start, end)
+        blocks[lens] = "" if line_end < 0 else text[line_end + 1 : end]
+    return blocks, leading
+
+
+def split_combined_reply(stdout: str | None, lenses: Sequence[str]) -> dict[str, str]:
+    """Each lens's own block from a combined reply; a lens whose block is
+    missing or duplicated is absent from the result (the caller runs it alone).
+
+    A block is the text between its delimiter line and the next delimiter. It
+    is returned with trailing attribution lines and outer blank lines removed;
+    the caller validates it with the same reader the approval gate uses. Used
+    only for a local (not return-only) pass, whose lenses post their own
+    comments; a return-only pass uses `split_combined_reply_raw`.
+    """
+    text = stdout or ""
+    positions = _combined_positions(text, lenses)
     blocks: dict[str, str] = {}
     for i, (start, lens) in enumerate(positions):
         line_end = text.find("\n", start)

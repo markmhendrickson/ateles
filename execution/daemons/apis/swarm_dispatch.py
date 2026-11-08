@@ -15956,9 +15956,24 @@ class SwarmDispatcher:
             )
             if not result.ok:
                 return CombinedPassResults()
-            blocks = review_carry.split_combined_reply(
-                result.stdout, [item.lens for item in combinable]
-            )
+            lens_names = [item.lens for item in combinable]
+            if return_only:
+                # Return-only combined replies are validated exactly as
+                # received; nothing is removed before validation. Text outside
+                # every block must be whitespace, or no lens of the pass is
+                # accepted and each runs alone.
+                blocks, leading = review_carry.split_combined_reply_raw(
+                    result.stdout, lens_names
+                )
+                if leading.strip():
+                    log.warning(
+                        f"[{DAEMON_NAME}] {trigger.repository}#{trigger.number}: "
+                        "combined return-only reply has text outside its lens "
+                        "blocks — lenses run one by one"
+                    )
+                    return CombinedPassResults()
+            else:
+                blocks = review_carry.split_combined_reply(result.stdout, lens_names)
             accepted: dict[str, SkillResult] = {}
             updates: dict[str, str] = {}
             for item in combinable:
