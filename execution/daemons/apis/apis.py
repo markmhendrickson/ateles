@@ -2141,87 +2141,132 @@ async def _redispatch_deferred(
 _tasks_in_dispatch: dict[str, int] = {}
 
 
-def _fly_routing(snapshot: dict) -> tuple[bool | None, str]:
-    """``(routed, error)``: whether ``dispatch_task`` would send this task to
-    Fly (a builder of the delivery class, naming a repository, with deliveries
-    opted onto Fly). ``routed`` is None when the check raised: the routing is
-    unknown, never "not Fly", and ``error`` names the exception type (never its
-    message, which can carry values). Never raises."""
+_REPO_ROUTING_FIELDS = ("repo", "dispatch_repo", "github_repo", "repository")
+
+
+def _fly_routed_delivery(snapshot: object) -> tuple[bool | None, str]:
+    """``(routed, why)``: whether ``dispatch_task`` would send this task to Fly
+    (a builder of the delivery class, naming a repository, with deliveries
+    opted onto Fly).
+
+    ``routed`` is False only on proof: the row is an object, its ``assigned_to``
+    and repository routing fields are present and well formed, and the target
+    they name is not a Fly delivery. A missing, empty or malformed routing
+    field, or a check that raises, gives None with ``why`` naming the cause
+    (an exception by type only, never its message, which can carry values).
+    True: routed to Fly. Never raises."""
+    if not isinstance(snapshot, dict):
+        return None, "its task record could not be read"
+    assignee = snapshot.get("assigned_to")
+    if not isinstance(assignee, str) or not assignee.strip():
+        return None, "its assigned_to field is missing, empty or malformed"
+    present = [key for key in _REPO_ROUTING_FIELDS if key in snapshot]
+    if not present:
+        return None, "it has no repository field, so its routing cannot be confirmed"
+    for key in present:
+        value = snapshot.get(key)
+        if not isinstance(value, str) or "/" not in value.strip():
+            return None, f"its {key} field is empty or malformed"
     try:
         import fly_runner
 
-        if not fly_runner.delivery_opted_in() or not _dispatch_repo_from_snapshot(snapshot):
+        if not fly_runner.delivery_opted_in():
             return False, ""
         skill = _resolve_skill(_routing_tags(snapshot),
-                               assigned_to=_canonical_assignee(snapshot.get("assigned_to")),
+                               assigned_to=_canonical_assignee(assignee),
                                owner=snapshot.get("owner"))
-        if not isinstance(skill, str) or skill in (_HUMAN_OWNED, _SESSION_OWNED):
+        # A readable assignee with no agent route (None) or a person/session
+        # owner is a target dispatch_task never sends to Fly.
+        if skill is None or skill in (_HUMAN_OWNED, _SESSION_OWNED):
             return False, ""
         return bool(build_delivery.is_delivery_dispatch(
             skill, _dispatch_action_class(skill, snapshot))), ""
     except Exception as exc:  # noqa: BLE001 — unknown, and reported as unknown
-        return None, type(exc).__name__
+        return None, ("whether it routes to Fly could not be determined (the routing "
+                      f"check raised {type(exc).__name__})")
 
 
-def _receipt_owner(stored: object, entry: dict) -> str:
-    """The task a delivery receipt belongs to: its recorded ``task_id``, else
-    the task its key (or an associated key) names. Empty when no single task
-    can be read from it."""
-    recorded = str(entry.get("task_id") or "").strip()
-    return recorded or build_delivery.receipt_source_task(stored, entry)
+def _receipt_names_task(stored: str, entry: dict, entity_id: str) -> bool:
+    """Whether a delivery receipt carries exactly this task's id: its recorded
+    ``task_id``, else the single task its key (or an associated key) names."""
+    recorded = entry.get("task_id")
+    if recorded not in (None, ""):
+        return recorded == entity_id
+    return build_delivery.receipt_source_task(stored, entry) == entity_id
 
 
-def _fly_delivery_recorded(snapshot: dict, entity_id: str) -> bool | None:
-    """Whether the Fly ledger holds a receipt, of any status, that belongs to
-    this task: one recording this task's id, or keyed by it.
+def _fly_delivery_recorded(entity_id: str) -> tuple[bool, str]:
+    """``(proven, why)``: True only when the Fly ledger proves this task's run
+    launched. ``why`` names, for the notice, what the ledger showed instead.
 
-    A receipt on this task's delivery key (its repository or pull request)
-    counts only when it is this task's own: an existing-PR correction is
-    EXECUTING before its run replaces the earlier correction's settled
-    receipt, so a receipt from another task at the same key says nothing
-    about this one. Receipts record no run or attempt of the task they
-    belong to, so the task id is the whole ownership test.
-
-    None: unknown. The ledger could not be read, an entry could not be
-    interpreted, the receipt on this task's key names no task (its owner
-    cannot be read), or a live receipt that names no task could be this
-    task's run (``_fly_run_state``)."""
+    Proof is a readable receipt carrying this task's id (``_receipt_names_task``)
+    with launch evidence, a non-empty ``run_id``, and either a settled outcome
+    (allow-list case c) or that run still in the ledger's in-flight set (case b,
+    a launched run the restart did not end). Anything else is not proof: an
+    unreadable ledger or receipt, a ``launching`` or other reservation without
+    a run id, an unsettled receipt whose run is gone, or only receipts of other
+    tasks (an existing-PR correction is EXECUTING before its run replaces the
+    earlier correction's settled receipt on the same key). Never raises."""
     import fly_runner
 
-    in_flight, _ = _fly_run_state(snapshot, entity_id)
-    if in_flight is None:
-        return None
-    # ``in_flight`` True is not used as-is: it is also True for a live receipt
-    # of another task on this task's key. Ownership is judged below.
     try:
-        receipts = build_delivery._delivery_ledger().snapshot().get("deliveries", {})
+        doc = build_delivery._delivery_ledger().snapshot()
     except (OSError, fly_runner.FlyLedgerError):
-        return None
-    # A receipt this reader cannot interpret could be this task's: the whole
-    # ledger is unknown rather than that entry skipped.
-    if not isinstance(receipts, dict) or not all(
-            isinstance(stored, str) and isinstance(entry, dict)
-            for stored, entry in receipts.items()):
-        return None
-    task_id = str(entity_id).strip()
-    if task_id and any(_receipt_owner(stored, entry) == task_id
-                       for stored, entry in receipts.items()):
-        return True
-    key = _fly_receipt_key(snapshot, entity_id)
-    found = build_delivery._stored_receipt(build_delivery.canonical_key(key), receipts) if key else None
-    if found is not None and not _receipt_owner(*found):
-        return None  # a receipt on this task's key whose task cannot be read
-    return False
+        return False, "the Fly ledger could not be read"
+    # The validated document omits ``deliveries`` when it holds none.
+    receipts = doc.get("deliveries", {}) if isinstance(doc, dict) else None
+    in_flight = doc.get("in_flight") if isinstance(doc, dict) else None
+    # An unreadable receipt could be this task's, so it is never skipped.
+    if (not isinstance(receipts, dict) or not isinstance(in_flight, dict)
+            or not all(isinstance(stored, str) and isinstance(entry, dict)
+                       for stored, entry in receipts.items())):
+        return False, "a Fly ledger receipt could not be read, and it may be this task's"
+    own = [entry for stored, entry in receipts.items()
+           if _receipt_names_task(stored, entry, entity_id)]
+    for entry in own:
+        run_id = entry.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            continue
+        # (c) settled outcome with a run that reached launch.
+        if entry.get("status") in build_delivery._SETTLED_RECEIPT_STATUSES:
+            return True, ""
+        # (b) its launched run is still live in the ledger.
+        if run_id in in_flight:
+            return True, ""
+    if own:
+        statuses = sorted({str(entry.get("status")) for entry in own})
+        return False, (f"its Fly receipt ({', '.join(statuses)}) records no run that reached "
+                       "launch and settled, and no live run")
+    return False, ("the Fly ledger holds no receipt for it, and restart recovery never "
+                   "relaunches a delivery (a cleared receipt would leave none either)")
 
 
-_RECEIPT_UNKNOWN = ("its Fly receipt state is unknown because the Fly ledger could not be "
-                    "read (or a receipt that records no task id may be its own), so it "
-                    "needs checking or refiling")
+def _unlaunched_silence(entity_id: str, snapshot: object) -> tuple[str, str]:
+    """``(silent_count, why)`` for one EXECUTING task: the counter to bump when
+    the sweep may stay silent, else ``""`` and the reason for the notice.
 
-
-def _routing_unknown(error: str) -> str:
-    return ("whether it routes to Fly could not be determined (the routing check "
-            f"raised {error or 'an error'})")
+    Silent ONLY on one of these proofs; every other case is reported:
+      (a) the readable row's routing fields name a target ``dispatch_task``
+          would not send to Fly (``_fly_routed_delivery`` False);
+      (b) a Fly run for this task is live: being dispatched in this process,
+          or its receipt's launched run is in the ledger's in-flight set;
+      (c) a receipt carrying this task's id records a settled outcome with a
+          run id that reached launch.
+    """
+    # (b) a dispatch of this task is running in this process.
+    if entity_id in _tasks_in_dispatch or entity_id in _detached_runs_in_progress:
+        return "recorded", ""
+    routed, why = _fly_routed_delivery(snapshot)
+    # (a) positively routed away from Fly.
+    if routed is False:
+        return "not_fly", ""
+    if routed is None:
+        return "", why
+    proven, why = _fly_delivery_recorded(entity_id)
+    # (b) or (c), proven from this task's own receipt.
+    if proven:
+        return "recorded", ""
+    return "", why
 
 
 def _unrecovered_notice(notifier: Notifier, entity_id: str, title: str, why: str) -> None:
@@ -2244,13 +2289,11 @@ def _unrecovered_notice(notifier: Notifier, entity_id: str, title: str, why: str
 async def recover_unlaunched_fly_tasks(notifier: Notifier) -> dict:
     """Report Fly delivery tasks a restart left EXECUTING before launch.
 
-    Selects tasks that are EXECUTING, Fly-routed or of unknown routing
-    (``_fly_routing``), not being dispatched in this process, and with no Fly
-    receipt of their own (``_fly_delivery_recorded`` False) or an unknown
-    receipt state (None). Each is
-    named to the operator once; nothing is written and nothing is dispatched.
-    ``complete`` is False when the executing-task inventory could not be fully
-    read, in which case one notice says so and no task is judged. Never raises."""
+    Every EXECUTING task is named to the operator once unless one of the
+    proofs in ``_unlaunched_silence`` holds; nothing is written and nothing is
+    dispatched. ``complete`` is False when the executing-task inventory could
+    not be fully read, in which case one notice says so and no task is judged.
+    Never raises."""
     counts = {"complete": False, "examined": 0, "not_fly": 0, "recorded": 0,
               "unrecovered": 0}
     try:
@@ -2259,8 +2302,9 @@ async def recover_unlaunched_fly_tasks(notifier: Notifier) -> dict:
         if not fly_runner.delivery_opted_in():
             counts["complete"] = True
             return counts
-        # strict: a dropped row, a malformed page or a short count could be the
-        # stranded task, so the inventory is unknown rather than smaller.
+        # strict: a dropped row, a malformed page, a short count or an id that
+        # is not exactly itself could be the stranded task, so the inventory
+        # is unknown rather than smaller.
         rows = await asyncio.to_thread(
             query_all_entities, "task",
             snapshot_filters={"status": {"op": "eq", "value": TaskStatus.EXECUTING.value}},
@@ -2273,20 +2317,23 @@ async def recover_unlaunched_fly_tasks(notifier: Notifier) -> dict:
         log.error(f"[{DAEMON_NAME}] unlaunched Fly task recovery: {reason}")
         notifier.send(
             "Apis could not fully read the executing-task inventory after a restart, so "
-            f"a Fly delivery cut off before launch may be stranded ({reason}). Look for "
-            "executing builder tasks with no Fly receipt.",
+            f"a Fly delivery cut off before launch may be stranded ({reason}). To find "
+            "them, query Neotoma for entities of type task with status executing assigned "
+            f"to the builder ({', '.join(sorted(build_delivery.BUILDER_SKILLS))}), and "
+            "check each for a Fly run.",
             priority=Priority.WARN, handler=DAEMON_NAME)
         return counts
     for row in rows:
         entity_id = row.get("entity_id") if isinstance(row, dict) else None
-        if not isinstance(entity_id, str) or not entity_id.strip():
+        # The id is used exactly as listed, never normalized, so two listed
+        # ids can never be judged as one task.
+        if not isinstance(entity_id, str) or not entity_id or entity_id != entity_id.strip():
             # An unreadable row could be a stranded task: name it, never skip it.
             counts["examined"] += 1
             counts["unrecovered"] += 1
             _unrecovered_notice(notifier, "(unknown)", "(unreadable task row)",
                                 "its task record could not be read")
             continue
-        entity_id = entity_id.strip()
         try:
             await _recover_unlaunched_fly_task(entity_id, _record_snapshot(row) or row,
                                                notifier, counts)
@@ -2303,61 +2350,36 @@ async def recover_unlaunched_fly_tasks(notifier: Notifier) -> dict:
 
 async def _recover_unlaunched_fly_task(entity_id: str, listed: dict, notifier: Notifier,
                                        counts: dict) -> None:
-    """Judge one listed EXECUTING task and report it if stranded. Reads only."""
+    """Judge one listed EXECUTING task and report it unless a proof clears it
+    (``_unlaunched_silence``). Reads only."""
     counts["examined"] += 1
-    routed, routing_error = _fly_routing(listed)
-    if routed is False:
-        counts["not_fly"] += 1
+    silent, why = _unlaunched_silence(entity_id, listed)
+    if silent:
+        counts[silent] += 1
         return
-    if entity_id in _tasks_in_dispatch or entity_id in _detached_runs_in_progress:
-        # Being dispatched right now: that dispatch owns it.
-        counts["recorded"] += 1
-        return
-    title = str(listed.get("title") or "(untitled)")
-    if routed is None:
-        # Unknown routing is not "not Fly": it could be a stranded delivery.
-        counts["unrecovered"] += 1
-        _unrecovered_notice(notifier, entity_id, title, _routing_unknown(routing_error))
-        return
-    recorded = _fly_delivery_recorded(listed, entity_id)
-    if recorded:
-        # Launched, outcome unknown, or in flight: the existing paths own it.
-        counts["recorded"] += 1
-        return
-    if recorded is None:
-        counts["unrecovered"] += 1
-        _unrecovered_notice(notifier, entity_id, title, _RECEIPT_UNKNOWN)
-        return
-    # No receipt in the listing's view: re-read, so a task that moved on since
+    title = str(listed.get("title") or "(untitled)") if isinstance(listed, dict) else "(untitled)"
+    # Not cleared by the listing's view: re-read, so a task that moved on since
     # the listing (or started dispatching) is not reported.
     fresh = await asyncio.to_thread(fetch_task_snapshot, entity_id)
-    if fresh is None:
+    if not isinstance(fresh, dict):
         counts["unrecovered"] += 1
         _unrecovered_notice(notifier, entity_id, title, "it could not be re-read")
         return
     title = str(fresh.get("title") or title)
-    if (normalize_status(fresh.get("status")) != TaskStatus.EXECUTING.value
-            or entity_id in _tasks_in_dispatch or entity_id in _detached_runs_in_progress):
+    status = fresh.get("status")
+    # The re-read row names a recognized status other than executing: it is no
+    # longer this sweep's task. A missing or unrecognized status proves nothing.
+    if (isinstance(status, str)
+            and normalize_status(status) in {s.value for s in TaskStatus}
+            and normalize_status(status) != TaskStatus.EXECUTING.value):
         counts["recorded"] += 1
         return
-    routed, routing_error = _fly_routing(fresh)
-    if routed is False:
-        counts["not_fly"] += 1
-        return
-    if routed is None:
-        counts["unrecovered"] += 1
-        _unrecovered_notice(notifier, entity_id, title, _routing_unknown(routing_error))
-        return
-    recorded = _fly_delivery_recorded(fresh, entity_id)
-    if recorded:
-        counts["recorded"] += 1
+    silent, why = _unlaunched_silence(entity_id, fresh)
+    if silent:
+        counts[silent] += 1
         return
     counts["unrecovered"] += 1
-    _unrecovered_notice(
-        notifier, entity_id, title,
-        _RECEIPT_UNKNOWN if recorded is None else
-        "the Fly ledger holds no receipt for it, and restart recovery never relaunches "
-        "a delivery (a cleared receipt would leave none either)")
+    _unrecovered_notice(notifier, entity_id, title, why)
 
 
 @dataclasses.dataclass(frozen=True)

@@ -2102,9 +2102,13 @@ def test_non_strict_listing_without_a_total_is_unchanged(monkeypatch):
     [{"entities": [{"entity_id": 7}], "total": 1}],
     [{"entities": [{"entity_id": "a", "entity_type": "plan"}],
       "total": 1}],
+    [{"entities": _rows("ent_a", " ent_a "), "total": 2},
+     {"entities": [], "total": 2}],
+    [{"entities": _rows("   "), "total": 1}],
 ], ids=[
     "duplicate_id_across_pages", "duplicate_id_within_page", "missing_id",
     "empty_id", "non_string_id", "wrong_entity_type",
+    "same_id_with_padding", "whitespace_only_id",
 ])
 def test_strict_listing_with_an_unidentifiable_row_is_incomplete(monkeypatch, pages):
     _serve_pages(monkeypatch, pages)

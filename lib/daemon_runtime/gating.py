@@ -1774,8 +1774,9 @@ def query_all_entities(
     earlier page's), a collected row count that does not equal ``total``, or a
     ``has_more`` that disagrees with the rows still outstanding makes the whole
     read failed (``None``) instead of silently smaller.  Every row must also
-    carry a non-empty string ``entity_id`` that no other row on any page
-    repeats, and a row that names an ``entity_type`` must name the requested
+    carry a non-empty string ``entity_id``, equal to its own ``.strip()``,
+    that no other row on any page repeats (distinctness is of that exact
+    value), and a row that names an ``entity_type`` must name the requested
     one; the count compared with ``total`` is of distinct ids, so a repeated
     row can never stand in for an omitted one.  A short page alone is never
     taken as proof that the listing ended.
@@ -1819,16 +1820,19 @@ def query_all_entities(
             for row in raw:
                 row_id = row.get("entity_id")
                 row_type = row.get("entity_type", entity_type)
+                # One identity: the id exactly as listed, which must equal its
+                # own strip, so no later normalization can merge two rows.
                 if (
                     not isinstance(row_id, str)
                     or not row_id
+                    or row_id != row_id.strip()
                     or row_id in seen_ids
                     or row_type != entity_type
                 ):
                     log.warning(
                         f"[gating] entity query for {entity_type} returned a row "
                         f"with entity_id {row_id!r} and entity_type {row_type!r} "
-                        f"at offset {offset} that is missing, repeated or of the "
+                        f"at offset {offset} that is missing, padded, repeated or of the "
                         "wrong type — listing is unknown"
                     )
                     return None

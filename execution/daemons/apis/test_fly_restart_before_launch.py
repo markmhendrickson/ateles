@@ -44,6 +44,25 @@ What these looked like RED:
   mutation: with ``_fly_routing`` returning ``(False, "")`` on an exception
   (round 1's ``_fly_routed_delivery`` behaviour), no notice was sent and the
   task counted as ``not_fly``.
+* Round 2 (silent only on proof; one id identity), each checked by mutating
+  ``apis.py``/``gating.py`` and restoring it:
+  ``test_reservation_without_launch_evidence_is_reported`` (all three
+  statuses) and ``test_settled_own_receipt_without_a_run_id_is_reported``
+  failed with any own receipt accepted as proof (the previous head's
+  behaviour: ``launching``/``unknown`` were silent);
+  ``test_row_with_missing_or_malformed_routing_field_is_reported`` failed
+  (no notice, counted ``not_fly``) with a missing or malformed repository
+  read as not-Fly, as the previous head did;
+  ``test_unreadable_receipt_is_reported`` failed with uninterpretable
+  entries skipped; ``test_receipt_with_a_padded_task_id_is_not_this_tasks``
+  failed with the receipt's ``task_id`` stripped before comparing;
+  ``test_run_in_flight_is_silent`` failed with the live-run proof removed and
+  the dispatch-guard test with the in-process proof removed; the padded and
+  whitespace-only cases of
+  ``test_inventory_repeating_one_id_in_place_of_another_is_incomplete`` (and
+  of ``test_gating``'s strict-listing test) failed with the
+  ``row_id != row_id.strip()`` rule removed: the padded copy was judged as a
+  second task, the whitespace-only row as an unreadable task row.
 * ``test_unlaunched_fly_recovery_sweep_is_scheduled_at_startup``, checked by
   removing ``unlaunched_fly_recovery_sweep(),`` from the startup gather: the
   gather-block assertion failed.
@@ -165,16 +184,43 @@ def test_run_in_flight_is_silent(env):
     assert counts["recorded"] == 1
 
 
-@pytest.mark.parametrize("status", ["launching", "unknown"])
-def test_recorded_receipt_is_silent(env, status):
+@pytest.mark.parametrize("status", ["opened", "updated", "no_changes", "push_failed"])
+def test_settled_own_receipt_with_a_launched_run_is_silent(env, status):
+    """Allow-list (c): this task's receipt, a settled outcome, a run id."""
+    ledger, _, effects = env
+    _reserve(ledger, status, task_id=TASK, run_id="run-done")
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert effects == [] and notifier.sent == []
+    assert counts["recorded"] == 1
+
+
+@pytest.mark.parametrize("status", ["launching", "unknown", "unreported"])
+def test_reservation_without_launch_evidence_is_reported(env, status):
+    """A ``launching`` (or other unsettled) receipt with no run id is a
+    reservation, not proof a run launched: the restart can cut off exactly
+    between the reservation and the launch."""
     ledger, _, effects = env
     _reserve(ledger, status, task_id=TASK)
     notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert effects == []
+    assert len(notifier.sent) == 1, notifier.sent
+    assert TASK in notifier.sent[0]
+    assert f"its Fly receipt ({status}) records no run that reached launch" in notifier.sent[0]
+    assert counts["unrecovered"] == 1 and counts["recorded"] == 0
+
+
+def test_settled_own_receipt_without_a_run_id_is_reported(env):
+    ledger, _, effects = env
+    _reserve(ledger, "opened", task_id=TASK)
+    notifier = _Notifier()
     asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
-    assert effects == [] and notifier.sent == []
+    assert effects == []
+    assert len(notifier.sent) == 1 and "records no run that reached launch" in notifier.sent[0]
 
 
-def test_unreadable_ledger_is_reported_as_unknown(env, monkeypatch):
+def test_unreadable_ledger_is_reported(env, monkeypatch):
     _, _, effects = env
 
     def _broken():
@@ -185,30 +231,72 @@ def test_unreadable_ledger_is_reported_as_unknown(env, monkeypatch):
     counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
     assert effects == []
     assert len(notifier.sent) == 1 and TASK in notifier.sent[0]
-    assert "Fly receipt state is unknown" in notifier.sent[0]
+    assert "the Fly ledger could not be read" in notifier.sent[0]
     assert counts["unrecovered"] == 1 and counts["recorded"] == 0
 
 
-def test_uninterpretable_ledger_entry_makes_the_receipt_state_unknown(monkeypatch):
+@pytest.mark.parametrize("bad", ["not-an-object", None, ["a", "list"]])
+def test_unreadable_receipt_is_reported(env, monkeypatch, bad):
+    """One receipt the reader cannot interpret could be this task's, even
+    beside this task's own settled receipt: the task is reported."""
+    _, _, effects = env
+
     class _Ledger:
         def snapshot(self):
-            return {"deliveries": {"some-key": "not-an-object"}}
+            return {"in_flight": {}, "deliveries": {
+                "some-key": bad,
+                f"{REPO}#task:{TASK}": {"status": "opened", "run_id": "run-1",
+                                         "task_id": TASK}}}
 
-    monkeypatch.setattr(apis, "_fly_run_state", lambda snap, eid: (False, None))
     monkeypatch.setattr(build_delivery, "_delivery_ledger", lambda: _Ledger())
-    assert apis._fly_delivery_recorded(_task(), TASK) is None
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert effects == []
+    assert len(notifier.sent) == 1, notifier.sent
+    assert "a Fly ledger receipt could not be read" in notifier.sent[0]
+    assert counts["unrecovered"] == 1 and counts["recorded"] == 0
 
 
-@pytest.mark.parametrize("case", ["other_agent", "fly_not_opted_in"])
-def test_task_not_routed_to_fly_is_untouched(env, monkeypatch, case):
+@pytest.mark.parametrize("case", ["other_agent", "other_action", "fly_not_opted_in"])
+def test_task_positively_routed_away_from_fly_is_silent(env, monkeypatch, case):
+    """Allow-list (a): the row's routing fields, all present and well formed,
+    name a target ``dispatch_task`` would not send to Fly."""
     _, state, effects = env
     if case == "other_agent":
         state["task"] = _task(assigned_to="pavo", action_type="analysis")
+    elif case == "other_action":
+        state["task"] = _task(action_type="analysis")
     else:
         monkeypatch.delenv("APIS_FLY_RUNNER_CLASSES")
     notifier = _Notifier()
-    asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
     assert effects == [] and notifier.sent == []
+    assert counts["unrecovered"] == 0
+
+
+@pytest.mark.parametrize("drop,over,phrase", [
+    ("repo", {}, "no repository field"),
+    (None, {"repo": ""}, "its repo field is empty or malformed"),
+    (None, {"repo": 7}, "its repo field is empty or malformed"),
+    (None, {"repo": "no-slash"}, "its repo field is empty or malformed"),
+    ("assigned_to", {}, "assigned_to field is missing, empty or malformed"),
+    (None, {"assigned_to": "  "}, "assigned_to field is missing, empty or malformed"),
+], ids=["repo_missing", "repo_empty", "repo_not_a_string", "repo_malformed",
+        "assignee_missing", "assignee_blank"])
+def test_row_with_missing_or_malformed_routing_field_is_reported(env, drop, over, phrase):
+    """A routing field that is absent, empty or malformed proves nothing about
+    where the task routes, so the task is reported, never read as not-Fly."""
+    _, state, effects = env
+    task = _task(**over)
+    if drop:
+        task.pop(drop)
+    state["task"] = task
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert effects == []
+    assert len(notifier.sent) == 1, notifier.sent
+    assert TASK in notifier.sent[0] and phrase in notifier.sent[0]
+    assert counts["unrecovered"] == 1 and counts["not_fly"] == 0
 
 
 def test_task_that_moved_on_since_the_listing_is_not_reported(env, monkeypatch):
@@ -267,23 +355,28 @@ def test_partial_task_inventory_sends_one_notice_and_reports_incomplete(env, mon
     assert effects == []
     assert len(notifier.sent) == 1, notifier.sent
     assert "could not fully read the executing-task inventory" in notifier.sent[0]
+    assert ("query Neotoma for entities of type task with status executing assigned "
+            "to the builder (cicada)") in notifier.sent[0]
     assert counts["complete"] is False and counts["examined"] == 0
 
 
+@pytest.mark.parametrize("second_id", [TASK, f" {TASK} ", "   "],
+                         ids=["repeated", "padded_copy", "whitespace_only"])
 @pytest.mark.parametrize("page_size", [10, 1], ids=["same_page", "next_page"])
 def test_inventory_repeating_one_id_in_place_of_another_is_incomplete(
-        env, monkeypatch, page_size):
+        env, monkeypatch, page_size, second_id):
     """Two executing tasks exist and the listing reports ``total: 2``, but the
-    second row repeats the first id. The count matches, so only the distinct-id
-    rule catches it: the sweep must send the single inventory notice and report
-    nothing, not name the repeated task as though the inventory were whole."""
+    second row repeats the first id (exactly, or padded so a strip would merge
+    the two), or is whitespace only. The count matches, so only the one-identity
+    rule catches it: the sweep must send the single inventory notice and judge
+    no task, not name one as though the inventory were whole."""
     _, _, effects = env
     monkeypatch.setattr(apis, "query_all_entities", _REAL_QUERY_ALL_ENTITIES)
     monkeypatch.setattr(gating, "QUERY_PAGE_SIZE", page_size)
     row = {"entity_id": TASK, "snapshot": _task()}
 
     def _page(entity_type, *, snapshot_filters, offset=0, limit=None):
-        rows = [row, dict(row)][offset:offset + (limit or page_size)]
+        rows = [row, dict(row, entity_id=second_id)][offset:offset + (limit or page_size)]
         return {"entities": rows, "total": 2}
 
     monkeypatch.setattr(gating, "query_entities", _page)
@@ -389,18 +482,28 @@ def test_own_receipt_on_the_same_pr_is_silent(env, monkeypatch):
     assert counts["recorded"] == 1
 
 
-def test_receipt_on_the_key_with_no_owner_is_unknown(env, monkeypatch):
-    """A settled receipt on the PR key that names no task: whose it is cannot
-    be read, so the receipt state is unknown and the task is reported."""
+def test_receipt_on_the_key_with_no_owner_is_reported(env, monkeypatch):
+    """A settled receipt on the PR key that names no task carries no task id,
+    so it is no proof for this task: the task is reported."""
     ledger, _, effects = env
     key = _pr_keyed(monkeypatch)
     assert fly_runner.FlyLedger(ledger).reserve_delivery(
         key, {"status": "updated", "branch": "b", "run_id": "run-old", "token": "x"})
-    assert apis._fly_delivery_recorded(_task(), TASK) is None
+    notifier = _Notifier()
+    counts = asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
+    assert effects == []
+    assert len(notifier.sent) == 1 and "holds no receipt for it" in notifier.sent[0]
+    assert counts["recorded"] == 0
+
+
+def test_receipt_with_a_padded_task_id_is_not_this_tasks(env):
+    """Receipt ownership compares the id exactly, the listing's identity:
+    " <id> " is not this task's id, so it proves nothing for it."""
+    ledger, _, effects = env
+    _reserve(ledger, "opened", task_id=f" {TASK} ", run_id="run-1")
     notifier = _Notifier()
     asyncio.run(apis.recover_unlaunched_fly_tasks(notifier))
-    assert effects == []
-    assert len(notifier.sent) == 1 and "Fly receipt state is unknown" in notifier.sent[0]
+    assert effects == [] and len(notifier.sent) == 1
 
 
 def test_routing_check_that_raises_is_reported_as_unknown(env, monkeypatch):
