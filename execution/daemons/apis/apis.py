@@ -1405,40 +1405,84 @@ def _gh_pr_labels(repo: str, number: int, token: str, label: str | None = None) 
 
 
 async def _label_canary_pull_request(skill: str, entity_id: str, repository: str,
-                                     number: int, task_snapshot) -> bool:
+                                     number: int, task_snapshot) -> str:
     """Add the canary label to a pull request Fly just opened for a canary-lane
-    task, then read the labels back. One attempt, never a retry: any failure is
-    one WARNING and the pull request stays unlabelled, which is the safe
-    outcome. Never raises, so the delivery result is unchanged."""
+    task, then read the labels back. One attempt, never a retry, never a
+    removal. Returns the label state it can actually show, and logs it in one
+    line naming the pull request:
+
+    * ``"confirmed"``: the read-back lists the label.
+    * ``"absent"``: no request was sent, GitHub refused it with a 4xx, or the
+      read-back succeeded and does not list the label.
+    * ``"unknown"``: the request timed out, raised, or failed without a 4xx;
+      or it succeeded and the read-back failed, was empty or was malformed.
+      The label may or may not be on the pull request, and the label is what
+      admits it to automatic review, so this is never reported as unlabelled.
+    * ``""``: the task is not canary-lane work and nothing was attempted.
+
+    Never raises, so the delivery result is unchanged in every case."""
     import json
 
     label = _canary_label_for_task(task_snapshot)
     if not label:
-        return False
+        return ""
     where = f"{repository}#{number}"
+    head = f"[{DAEMON_NAME}] {skill} task {entity_id}:"
+
+    def absent(why: str) -> str:
+        log.warning(f"{head} canary label {label!r} is absent from pull request {where} "
+                    f"({why}); this run did not place it in the canary lane")
+        return "absent"
+
+    def unknown(why: str) -> str:
+        log.warning(f"{head} canary label {label!r} state is UNKNOWN on pull request {where} "
+                    f"({why}); it may or may not be in the canary lane. Check its labels")
+        return "unknown"
+
+    def refusal_status(out: str) -> int | None:
+        # gh api prints GitHub's error body on stdout; its "status" is the
+        # only evidence of a definite refusal. Anything else is not one.
+        try:
+            status = int(json.loads(out).get("status"))
+        except Exception:  # noqa: BLE001 - no readable status means no refusal shown
+            return None
+        return status if 400 <= status < 500 else None
+
     try:
         token = _token_for_agent_on_repo(skill, repository)
-        if not token:
-            raise RuntimeError("no GitHub write credential for this repository")
-        code, _ = await asyncio.to_thread(_gh_pr_labels, repository, number, token, label)
-        if code != 0:
-            raise RuntimeError(f"label request exited {code}")
-        code, out = await asyncio.to_thread(_gh_pr_labels, repository, number, token)
-        if code != 0:
-            raise RuntimeError(f"label read-back exited {code}")
-        try:
-            names = _label_gate.label_names({"labels": json.loads(out)})
-        except ValueError:
-            names = []
-        if not _label_gate.carries_label(label, names):
-            raise RuntimeError("the read-back does not show the label")
     except Exception as exc:  # noqa: BLE001 - labelling must never fail the delivery
-        log.warning(f"[{DAEMON_NAME}] {skill} task {entity_id}: could not label pull request "
-                    f"{where} with canary label {label!r} ({exc}); it stays unlabelled")
-        return False
-    log.info(f"[{DAEMON_NAME}] {skill} task {entity_id}: canary label {label!r} added to pull "
-             f"request {where}. Read-back: present.")
-    return True
+        return absent(f"no label request was sent: credential lookup failed ({exc})")
+    if not token:
+        return absent("no label request was sent: no GitHub write credential for this repository")
+    try:
+        code, out = await asyncio.to_thread(_gh_pr_labels, repository, number, token, label)
+    except Exception as exc:  # noqa: BLE001 - timeout or no response
+        return unknown(f"label request raised without a response: {exc!r}")
+    if code != 0:
+        status = refusal_status(out)
+        if status is not None:
+            return absent(f"label request refused with HTTP {status}")
+        return unknown(f"label request exited {code} without a refusal status")
+    try:
+        code, out = await asyncio.to_thread(_gh_pr_labels, repository, number, token)
+    except Exception as exc:  # noqa: BLE001 - labelling must never fail the delivery
+        return unknown(f"label request succeeded but the read-back raised: {exc!r}")
+    if code != 0:
+        return unknown(f"label request succeeded but the read-back exited {code}")
+    if not (out or "").strip():
+        return unknown("label request succeeded but the read-back was empty")
+    try:
+        raw = json.loads(out)
+    except ValueError:
+        raw = None
+    if not (isinstance(raw, list) and all(
+            isinstance(lbl, dict) and isinstance(lbl.get("name"), str) for lbl in raw)):
+        return unknown("label request succeeded but the read-back was malformed")
+    if not _label_gate.carries_label(label, [lbl["name"] for lbl in raw]):
+        return absent("the read-back succeeded and does not list the label")
+    log.info(f"{head} canary label {label!r} confirmed on pull request {where}. "
+             f"Read-back: present.")
+    return "confirmed"
 
 
 CONFIDENCE_DRIVERS_MISSING = (

@@ -283,7 +283,8 @@ def test_a_canary_task_gets_the_label_once_and_read_back(monkeypatch, labels, ca
     assert got.ok
     assert labels["calls"] == [(REPO, 99, CANARY), (REPO, 99, None)]
     assert labels["tokens"] == [f"write-token-for-{REPO}"] * 2
-    assert any("Read-back: present." in r.getMessage() and f"{REPO}#99" in r.getMessage()
+    assert any("confirmed on pull request" in r.getMessage()
+               and "Read-back: present." in r.getMessage() and f"{REPO}#99" in r.getMessage()
                for r in caplog.records)
 
 
@@ -307,32 +308,88 @@ def test_an_unset_label_setting_makes_no_label_call(monkeypatch, labels):
     assert run_tagged_task([CANARY]).ok and labels["calls"] == []
 
 
-@pytest.mark.parametrize("failure", ["add fails", "read-back lacks label", "read-back fails",
-                                     "no token", "raises"])
-def test_a_failed_label_call_warns_once_and_the_delivery_still_succeeds(
-    monkeypatch, labels, caplog, failure
+def _times_out():
+    import subprocess
+    raise subprocess.TimeoutExpired(["gh", "api"], 30)
+
+
+def _raises():
+    raise OSError("gh missing")
+
+
+# One row per outcome. "absent" only where GitHub gave a definite answer;
+# "unknown" wherever the label may or may not be on the pull request.
+LABEL_OUTCOMES = [
+    ("refused with a 4xx", (1, json.dumps({"message": "Validation Failed", "status": "422"})),
+     None, "absent"),
+    ("read-back succeeds without the label", None, (0, json.dumps([{"name": "bug"}])), "absent"),
+    ("no token", None, None, "absent"),
+    ("request times out", _times_out, None, "unknown"),
+    ("request raises", _raises, None, "unknown"),
+    ("request fails without a status", (1, ""), None, "unknown"),
+    ("request fails with a 5xx", (1, json.dumps({"message": "x", "status": "502"})), None,
+     "unknown"),
+    ("read-back raises", None, _times_out, "unknown"),
+    ("read-back exits non-zero", None, (1, ""), "unknown"),
+    ("read-back empty", None, (0, "  "), "unknown"),
+    ("read-back not json", None, (0, "<html>"), "unknown"),
+    ("read-back not a list", None, (0, json.dumps({"labels": [{"name": CANARY}]})), "unknown"),
+    ("read-back entry malformed", None, (0, json.dumps([{"name": CANARY}, "bug"])), "unknown"),
+]
+
+
+@pytest.mark.parametrize("case,add,read,outcome", LABEL_OUTCOMES,
+                         ids=[row[0] for row in LABEL_OUTCOMES])
+def test_label_outcome_reports_only_what_the_code_can_show(
+    monkeypatch, labels, caplog, case, add, read, outcome
 ):
     monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", CANARY)
-    if failure == "add fails":
-        labels["add"] = (1, "")
-    elif failure == "read-back lacks label":
-        labels["read"] = (0, json.dumps([{"name": "bug"}]))
-    elif failure == "read-back fails":
-        labels["read"] = (1, "")
-    elif failure == "no token":
+    if isinstance(add, tuple):
+        labels["add"] = add
+    if isinstance(read, tuple):
+        labels["read"] = read
+    if case == "no token":
         monkeypatch.setattr(apis, "_token_for_agent_on_repo", lambda agent, repo: "")
-    else:
-        def boom(*a, **kw):
-            raise OSError("gh missing")
-        monkeypatch.setattr(apis, "_gh_pr_labels", boom)
+    if callable(add) or callable(read):
+        canned = apis._gh_pr_labels
+
+        def gh(repo, number, token, label=None):
+            fn = add if label is not None else read
+            if callable(fn):
+                labels["calls"].append((repo, number, label))
+                return fn()
+            return canned(repo, number, token, label)
+        monkeypatch.setattr(apis, "_gh_pr_labels", gh)
     launch(monkeypatch)
     with caplog.at_level(logging.INFO):
         got = run_tagged_task([CANARY])
     assert got.ok and "pull_request_link" in got.stdout
-    warnings = [r.getMessage() for r in caplog.records
-                if r.levelno == logging.WARNING and "canary label" in r.getMessage()]
-    assert len(warnings) == 1 and f"{REPO}#99" in warnings[0]
+    lines = [r for r in caplog.records if "canary label" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].levelno == logging.WARNING
+    msg = lines[0].getMessage()
+    assert f"{REPO}#99" in msg and "unlabelled" not in msg
+    if outcome == "unknown":
+        assert "state is UNKNOWN" in msg and "may or may not be in the canary lane" in msg
+        assert "Check its labels" in msg
+    else:
+        assert "is absent from pull request" in msg and "UNKNOWN" not in msg
     assert len([c for c in labels["calls"] if c[2] is not None]) <= 1  # never retried
+    assert all(c[2] in (None, CANARY) for c in labels["calls"])  # never removed
+
+
+def test_label_function_returns_the_outcome(monkeypatch, labels):
+    monkeypatch.setenv("ATELES_SWARM_REQUIRE_LABEL", CANARY)
+
+    def call(snap):
+        return asyncio.run(apis._label_canary_pull_request("cicada", "ent_t", REPO, 99, snap))
+
+    tagged = {"tags": [CANARY]}
+    assert call(tagged) == "confirmed"
+    labels["read"] = (0, "")
+    assert call(tagged) == "unknown"
+    labels["read"] = (0, "[]")
+    assert call(tagged) == "absent"
+    assert call({}) == ""
 
 
 def test_an_existing_pr_correction_gets_no_label_call(monkeypatch, labels):
