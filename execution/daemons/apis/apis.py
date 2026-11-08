@@ -2129,8 +2129,9 @@ async def _redispatch_deferred(
 #
 # The startup sweep below finds exactly those tasks, once per process, and
 # names each to the operator. It never relaunches one: whether a stranded run
-# launched cannot always be told (a cleared receipt leaves none), and resuming
-# would reuse an approval the dispatcher already consumed. It touches only
+# launched or finished is not confirmed (the sweep does not take a Fly receipt
+# as proof of a run), and resuming would reuse an approval the dispatcher
+# already consumed. It touches only
 # tasks ``dispatch_task`` would send to Fly (or whose routing it cannot
 # determine) and writes nothing; the operator checks for an earlier run and,
 # if none ran, files a new task with a different title for the same work and
@@ -2198,69 +2199,6 @@ def _fly_routed_delivery(snapshot: object) -> tuple[bool | None, str]:
                       f"check raised {type(exc).__name__})")
 
 
-def _receipt_names_task(stored: str, entry: dict, entity_id: str) -> bool:
-    """Whether a delivery receipt carries exactly this task's id: its recorded
-    ``task_id``, else the single task its key (or an associated key) names."""
-    if not _exact_text(entity_id):
-        return False
-    if "task_id" in entry:
-        recorded = entry.get("task_id")
-        return isinstance(recorded, str) and recorded == entity_id
-    return build_delivery.receipt_source_task(stored, entry) == entity_id
-
-
-def _fly_delivery_recorded(entity_id: str) -> tuple[bool, str]:
-    """``(proven, why)``: True only when the Fly ledger proves this task's run
-    launched. ``why`` names, for the notice, what the ledger showed instead.
-
-    Proof is a readable receipt carrying exactly this task's id
-    (``_receipt_names_task``) with launch evidence, a ``run_id`` that passes
-    ``fly_runner.is_fly_run_id`` unaltered, and either a settled status
-    (allow-list case c) or that run still in the ledger's in-flight set (case b,
-    a launched run the restart did not end). Anything else is not proof: an
-    unreadable ledger or receipt, a ``launching`` or other reservation without
-    a run id, an unsettled receipt whose run is gone, or only receipts of other
-    tasks (an existing-PR correction is EXECUTING before its run replaces the
-    earlier correction's settled receipt on the same key). Never raises."""
-    import fly_runner
-
-    try:
-        doc = build_delivery._delivery_ledger().snapshot()
-    except (OSError, fly_runner.FlyLedgerError):
-        return False, "the Fly ledger could not be read"
-    # The validated document omits ``deliveries`` when it holds none.
-    receipts = doc.get("deliveries", {}) if isinstance(doc, dict) else None
-    in_flight = doc.get("in_flight") if isinstance(doc, dict) else None
-    # An unreadable receipt could be this task's, so it is never skipped.
-    if (not isinstance(receipts, dict) or not isinstance(in_flight, dict)
-            or not all(isinstance(stored, str) and isinstance(entry, dict)
-                       for stored, entry in receipts.items())):
-        return False, "a Fly ledger receipt could not be read, and it may be this task's"
-    own = [entry for stored, entry in receipts.items()
-           if _receipt_names_task(stored, entry, entity_id)]
-    for entry in own:
-        run_id = entry.get("run_id")
-        # Exactly the shape build_job makes, nothing stripped: any other run
-        # id (blank, padded, foreign, non-string) is no launch evidence.
-        if not fly_runner.is_fly_run_id(run_id):
-            continue
-        status = entry.get("status")
-        # (c) settled outcome with a run that reached launch.
-        if isinstance(status, str) and status in build_delivery._SETTLED_RECEIPT_STATUSES:
-            return True, ""
-        # (b) its launched run is still live in the ledger, recorded under
-        # that same run id.
-        live = in_flight.get(run_id)
-        if isinstance(live, dict) and live.get("run_id") == run_id:
-            return True, ""
-    if own:
-        statuses = sorted({str(entry.get("status")) for entry in own})
-        return False, (f"its Fly receipt ({', '.join(statuses)}) records no run that reached "
-                       "launch and settled, and no live run")
-    return False, ("the Fly ledger holds no receipt for it, and restart recovery never "
-                   "relaunches a delivery (a cleared receipt would leave none either)")
-
-
 def _unlaunched_silence(entity_id: str, snapshot: object) -> tuple[str, str]:
     """``(silent_count, why)`` for one EXECUTING task: the counter to bump when
     the sweep may stay silent, else ``""`` and the reason for the notice.
@@ -2268,10 +2206,10 @@ def _unlaunched_silence(entity_id: str, snapshot: object) -> tuple[str, str]:
     Silent ONLY on one of these proofs; every other case is reported:
       (a) the readable row's routing fields name a target ``dispatch_task``
           would not send to Fly (``_fly_routed_delivery`` False);
-      (b) a Fly run for this task is live: being dispatched in this process,
-          or its receipt's launched run is in the ledger's in-flight set;
-      (c) a receipt carrying this task's id records a settled outcome with a
-          run id that reached launch.
+      (b) a Fly run for exactly this task id is live in this process.
+    A Fly ledger receipt, settled or not, is never taken as proof that this
+    task's run happened: tying a receipt to exactly one task needs ownership
+    checks across several key formats, so a task with a receipt is reported.
     """
     # (b) a dispatch of this task, by its exact id, is running in this process.
     if _exact_text(entity_id) and (entity_id in _tasks_in_dispatch
@@ -2283,26 +2221,22 @@ def _unlaunched_silence(entity_id: str, snapshot: object) -> tuple[str, str]:
         return "not_fly", ""
     if routed is None:
         return "", why
-    proven, why = _fly_delivery_recorded(entity_id)
-    # (b) or (c), proven from this task's own receipt.
-    if proven:
-        return "recorded", ""
-    return "", why
+    return "", "no Fly run of it is live in this process"
 
 
 def _unrecovered_notice(notifier: Notifier, entity_id: str, title: str, why: str) -> None:
     """Name one task the restart sweep left executing and did not relaunch.
 
-    Every such notice says its launch is unknown: the sweep cannot always tell
-    (an unreadable ledger, a cleared receipt that leaves none, a task it
-    could not re-read), so no notice claims a run never launched, and each asks
-    the operator to look for an earlier run before refiling."""
+    The sweep does not read the Fly ledger, so no notice claims a run never
+    launched or never finished; each asks the operator to look for an earlier
+    run and its pull request before refiling."""
     notifier.send(
         f"Fly delivery task was not recovered after an Apis restart: {title[:70]}\n"
-        f"  task={entity_id} is executing, and whether its Fly run launched is unknown. "
-        f"It was not relaunched because {why}. Nothing was dispatched; check for an "
-        "earlier Fly run of this task (its branch or pull request). If none ran, file a "
-        "new task with a different title for the same work and release its checkpoint.",
+        f"  task={entity_id} is executing, and whether its Fly run launched or finished "
+        f"is not confirmed. It was not relaunched because {why}. Nothing was dispatched; "
+        "check for an earlier Fly run of this task and its pull request before refiling. "
+        "If none ran, file a new task with a different title for the same work and "
+        "release its checkpoint.",
         priority=Priority.WARN, handler=DAEMON_NAME,
     )
 

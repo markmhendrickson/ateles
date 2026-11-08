@@ -2278,16 +2278,6 @@ def _validated_role_jwk(role: str, jwk: Any) -> bool:
     return (public.x, public.y) == tuple(coordinates[:2])
 
 
-# The shape of every run id ``build_job`` makes: "fly-" and 16 lowercase hex.
-FLY_RUN_ID_RE = re.compile(r"fly-[0-9a-f]{16}", re.ASCII)
-
-
-def is_fly_run_id(value: object) -> bool:
-    """Whether ``value`` is exactly a run id ``build_job`` makes: a string of
-    the ``FLY_RUN_ID_RE`` shape, with nothing stripped or coerced."""
-    return isinstance(value, str) and FLY_RUN_ID_RE.fullmatch(value) is not None
-
-
 def build_job(
     *,
     provider: str,
@@ -2466,10 +2456,8 @@ def build_job(
     if (jwk_text and neotoma_tools_granted and provider in FLY_NEOTOMA_PROXY_PROVIDERS
             and MCP_CONFIG_PLACEHOLDER in argv):
         neotoma_mcp = "proxy"
-    run_id = f"fly-{uuid.uuid4().hex[:16]}"
-    assert is_fly_run_id(run_id), run_id
     return FlyJob(
-        run_id=run_id,
+        run_id=f"fly-{uuid.uuid4().hex[:16]}",
         role=role,
         provider=provider,
         repository=repository,
