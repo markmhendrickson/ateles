@@ -112,9 +112,13 @@ _LOGIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\[bot\])?$")
 # notice the dispatcher posts once (swarm-run confirmation, pipeline-bypass
 # notice, gate-waive result). Deliberately wide: a comment of this shape from
 # a non-swarm account is ignored by the readers, which costs nothing, while a
-# narrower pattern could let a variant shape through.
+# narrower pattern could let a variant shape through. The one exception: a
+# `review:` that continues an identifier (a letter, digit or underscore just
+# before it, as in the action class `lens_review:pm`) is not a marker, since no
+# reader reads one there; every marker form starts the line, follows
+# whitespace or punctuation, or opens `<!--`.
 _VERDICT_SHAPED_RE = re.compile(
-    r"review:[a-z0-9_-]+"
+    r"(?<![A-Za-z0-9_])review:[a-z0-9_-]+"
     r"|vanellus-aggregation"
     r"|review-deferred-until"
     r"|swarm-run-confirmation"

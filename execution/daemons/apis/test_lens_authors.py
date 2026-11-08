@@ -978,3 +978,55 @@ def test_the_guard_flags_the_shapes_it_exists_for(source, flagged):
 
 def test_the_guard_accepts_a_scoped_reader():
     assert _guard_violations(_SCOPED_OK) == []
+
+
+# ── an identifier containing `review:` is not a marker ──────────────────────
+
+_SHA40 = "c" * 40
+
+
+@pytest.mark.parametrize("text", [
+    "the class lens_review:pm runs mid tier",
+    "lens_review:arch is unchanged",
+    "LENS_REVIEW:PM",
+    "x2review:qa",
+])
+def test_an_identifier_containing_review_is_not_a_marker(text):
+    # Red on main: `review:` was matched with nothing required before it.
+    assert lens_authors._VERDICT_SHAPED_RE.search(text) is None
+    assert not lens_authors.looks_like_lens_comment(text)
+    assert lens_authors.claimed_marker(text) == ""
+
+
+@pytest.mark.parametrize("text", [
+    f"<!-- review:pm commit={_SHA40} -->",
+    f"<!--review:pm commit={_SHA40}-->",
+    f"<!-- review:pm-superseded by={_SHA40} -->",
+    "review:pm",
+    "x review:pm",
+    "(review:pm",
+    "line one\nreview:pm",
+    "REVIEW:PM",
+    "Review:Pm-Superseded",
+    f"<!-- REVIEW:ARCH commit={_SHA40} -->",
+])
+def test_every_marker_form_still_matches(text):
+    assert lens_authors._VERDICT_SHAPED_RE.search(text) is not None
+    assert lens_authors.looks_like_lens_comment(text)
+
+
+def test_a_lens_app_comment_with_another_lens_marker_is_still_refused():
+    scope = lens_authors.LensAppScope(
+        lens_logins=(("pm", "pm-app[bot]"), ("arch", "arch-app[bot]")),
+    )
+    own = f"<!-- review:pm commit={_SHA40} -->\n**APPROVE**\nfine"
+    assert scope.admits("pm-app[bot]", own)  # control
+    assert scope.admits("pm-app[bot]", own + "\nthe class lens_review:pm is mid tier")
+    for foreign in (
+        f"<!-- review:arch commit={_SHA40} -->",
+        "review:arch",
+        "x review:arch",
+        "(review:arch",
+        "lens_review:arch",
+    ):
+        assert not scope.admits("pm-app[bot]", f"{own}\n{foreign}"), foreign
