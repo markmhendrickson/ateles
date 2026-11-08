@@ -896,17 +896,36 @@ def _escalate_neotoma_admission_exhaustion(
 
 
 def _neotoma_admission_retry_bounds() -> tuple[int, float]:
-    """(retries, base backoff seconds) from the environment; bad values use the defaults."""
-    try:
-        retries = max(0, int(os.environ.get("APIS_NEOTOMA_ADMISSION_RETRIES",
-                                            NEOTOMA_ADMISSION_RETRIES_DEFAULT)))
-    except ValueError:
-        retries = NEOTOMA_ADMISSION_RETRIES_DEFAULT
-    try:
-        backoff = max(0.0, float(os.environ.get("APIS_NEOTOMA_ADMISSION_BACKOFF_S",
-                                                NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT)))
-    except ValueError:
-        backoff = NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT
+    """(retries, base backoff seconds) from the environment.
+
+    A retry count that is not a non-negative integer, or a backoff that is not
+    a finite positive number (``inf``, ``nan``, ``0``, negative), is rejected:
+    the setting's name is logged (never its value) and the finite default is
+    used, so the deferral loop always waits a finite time and always ends."""
+    retries = NEOTOMA_ADMISSION_RETRIES_DEFAULT
+    raw = os.environ.get("APIS_NEOTOMA_ADMISSION_RETRIES")
+    if raw is not None:
+        try:
+            parsed = int(raw.strip())
+        except (TypeError, ValueError):
+            parsed = -1
+        if parsed >= 0:
+            retries = parsed
+        else:
+            log.warning(f"[{DAEMON_NAME}] APIS_NEOTOMA_ADMISSION_RETRIES is not a "
+                        "non-negative integer; using the default")
+    backoff = NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT
+    raw = os.environ.get("APIS_NEOTOMA_ADMISSION_BACKOFF_S")
+    if raw is not None:
+        try:
+            parsed_backoff = float(raw.strip())
+        except (TypeError, ValueError):
+            parsed_backoff = math.nan
+        if math.isfinite(parsed_backoff) and parsed_backoff > 0:
+            backoff = parsed_backoff
+        else:
+            log.warning(f"[{DAEMON_NAME}] APIS_NEOTOMA_ADMISSION_BACKOFF_S is not a "
+                        "finite positive number; using the default")
     return retries, backoff
 
 
@@ -928,15 +947,116 @@ def _neotoma_admission_wait_ceiling(retries: int, backoff: float) -> float:
     return backoff * retries * (retries + 1) / 2
 
 
-async def _revalidate_first_delivery_retry(entity_id: str, dispatch_snapshot, dispatch_gate) -> str | None:
+@dataclasses.dataclass(frozen=True)
+class _RetryAuthority:
+    """What a dispatch's first attempt ran under, so a retry is bound to it.
+
+    ``authority`` has the shape of a release authorization (see
+    `_exact_authority_holds`): the gate action, blast radius, action type and
+    execution policy entity and revision come from the release authorization
+    when an approved checkpoint released the dispatch, else from the gate
+    decision and policy the dispatch was decided on; the task revision fields
+    are the record as read at the first attempt. ``error`` says why it could
+    not be captured; a retry is then refused."""
+    authority: dict | None = None
+    bound_confidence: float | None = None
+    error: str = ""
+
+
+def _capture_retry_authority(entity_id: str, dispatch_snapshot, *, dispatch_gate,
+                             dispatch_policy, release_authorization) -> _RetryAuthority:
+    """Read the task and policy in force at the first attempt (fail closed)."""
+    try:
+        record = fetch_task_record(entity_id)
+        user_id = str(fetch_entity_user_id(entity_id) or "").strip()
+        if not isinstance(record, dict) or not user_id:
+            return _RetryAuthority(error="the task or its tenant could not be read at the first attempt")
+        bound = (_bound_hold_confidence(release_authorization)
+                 if isinstance(release_authorization, dict)
+                 else getattr(dispatch_gate, "confidence", None))
+        _skill, action_type, policy, decision = _task_gate_context(
+            dispatch_snapshot, bound_confidence=bound)
+        if dispatch_policy is not None:
+            policy = dispatch_policy
+        if dispatch_gate is not None:
+            decision = dispatch_gate
+        authority = {
+            "task_entity_id": entity_id,
+            "user_id": user_id,
+            "task_revision": entity_record_digest(record),
+            "task_observation_count": record.get("observation_count"),
+            "task_last_observation_at": record.get("last_observation_at"),
+            "action_type": action_type,
+            "policy_entity_id": policy.entity_id,
+            "policy_revision": execution_policy_revision(policy),
+            "gate_action": decision.action.value,
+            "blast_radius": decision.blast_radius.value,
+        }
+        if isinstance(release_authorization, dict):
+            # The authority that released the dispatch, not a re-derivation.
+            for key in ("task_entity_id", "user_id", "action_type", "policy_entity_id",
+                        "policy_revision", "gate_action", "blast_radius"):
+                authority[key] = release_authorization.get(key)
+        return _RetryAuthority(authority=authority, bound_confidence=bound)
+    except Exception as exc:
+        return _RetryAuthority(error=f"the authority of the first attempt could not be "
+                                     f"recorded ({type(exc).__name__})")
+
+
+async def _revalidate_retry_authority(entity_id: str, captured: _RetryAuthority | None, *,
+                                      policy_only: bool = False) -> str | None:
+    """Why a retry may not launch under *captured*, or None when it may.
+
+    Re-reads the task and its execution policy. The policy must be the same
+    entity at the same revision as at the first attempt; unless *policy_only*
+    (an existing-PR correction, whose own pre-launch check binds the task
+    version), `_exact_authority_holds` must hold against the current records.
+    Any read failure refuses (fail closed)."""
+    if captured is None or captured.authority is None:
+        return (captured.error if captured is not None and captured.error
+                else "the authority of the first attempt was not recorded")
+    authority = captured.authority
+    try:
+        record = await asyncio.to_thread(fetch_task_record, entity_id)
+        fresh = _record_snapshot(record)
+        if not isinstance(fresh, dict):
+            return "the task could not be re-read before the retry"
+        _skill, action_type, policy, decision = await asyncio.to_thread(
+            _task_gate_context, fresh, bound_confidence=captured.bound_confidence)
+    except Exception as exc:
+        return f"the task or its execution policy could not be re-read before the retry ({type(exc).__name__})"
+    if not policy.loaded:
+        return "the execution policy could not be read before the retry"
+    if (authority.get("policy_entity_id") != policy.entity_id
+            or authority.get("policy_revision") != execution_policy_revision(policy)):
+        return "the execution policy changed since the first attempt"
+    if policy_only:
+        return None
+    try:
+        user_id = str(await asyncio.to_thread(fetch_entity_user_id, entity_id) or "").strip()
+    except Exception as exc:
+        return f"the task tenant could not be re-read before the retry ({type(exc).__name__})"
+    if not _exact_authority_holds(
+            authority, task_id=entity_id, task_record=record, user_id=user_id,
+            action_type=action_type, policy=policy, decision=decision,
+            gate_action=str(authority.get("gate_action") or ""),
+            blast_radius=str(authority.get("blast_radius") or "")):
+        return ("the task, its tenant or the authority it was released under changed "
+                f"since the first attempt (now {decision.action.value}, blast "
+                f"{decision.blast_radius.value}: {decision.reason})")
+    return None
+
+
+async def _revalidate_first_delivery_retry(entity_id: str, dispatch_snapshot,
+                                           captured: _RetryAuthority | None) -> str | None:
     """Why a first-delivery retry may not launch now, or None when it may.
 
     Re-reads the task from Neotoma and compares it with the snapshot the
     dispatch was decided on (the shape `_correction_policy_reader` compares,
-    lifecycle fields ignored), requires it still to be executing, and re-runs
-    the action gate: the decision now must be the one the dispatch was made
-    under (`_decision_consistent_with_approval`). Any read or gate failure
-    refuses (fail closed)."""
+    lifecycle fields ignored), requires it still to be executing, then
+    requires the authority of the first attempt still to hold
+    (`_revalidate_retry_authority`). Any read or gate failure refuses (fail
+    closed)."""
     try:
         fresh, _version = await asyncio.to_thread(fetch_task_snapshot_and_version, entity_id)
     except Exception as exc:
@@ -955,19 +1075,7 @@ async def _revalidate_first_delivery_retry(entity_id: str, dispatch_snapshot, di
             return "the task record changed since it was dispatched; normal re-admission is required"
     except (TypeError, ValueError):
         return "the task record could not be compared with the dispatched one"
-    if dispatch_gate is None:
-        return "the action-gate decision the dispatch was made under is unknown"
-    try:
-        _skill, _action, _policy, now_decision = await asyncio.to_thread(
-            _task_gate_context, fresh, bound_confidence=dispatch_gate.confidence)
-    except Exception as exc:
-        return f"the action gate could not be re-run ({type(exc).__name__})"
-    if not _decision_consistent_with_approval(
-            now_decision, gate_action=dispatch_gate.action.value,
-            blast_radius=dispatch_gate.blast_radius.value):
-        return (f"the action gate no longer allows it ({now_decision.action.value}, "
-                f"blast {now_decision.blast_radius.value}: {now_decision.reason})")
-    return None
+    return await _revalidate_retry_authority(entity_id, captured)
 
 
 def _correction_not_started(skill: str, reason: str):
@@ -2518,6 +2626,7 @@ async def dispatch_task(
     detach_after_accept: bool = False,
     _approved_correction_lifecycle: _ApprovedCorrectionLifecycle | None = None,
     release_key: str = "",
+    release_authorization: dict | None = None,
 ) -> bool | None:
     """
     Route a task to the appropriate T4 skill and spawn it via a bundled-plan CLI.
@@ -2548,6 +2657,9 @@ async def dispatch_task(
             re-held and released again through a NEW checkpoint really writes
             instead of replaying the first release's idempotency key, while a
             replay of the SAME checkpoint stays idempotent.
+        release_authorization: The authenticated authorization of that
+            checkpoint. A retry after a deferred first attempt must still be
+            covered by it (`_exact_authority_holds`).
     """
     title = snapshot.get("title", "(untitled)")
     current_status = snapshot.get("status")
@@ -3011,8 +3123,10 @@ async def dispatch_task(
     # gate and compares against it. An approved release records it at its first
     # deferral (`_finish_dispatch`), from the snapshot it was released on.
     dispatch_gate = None
+    dispatch_policy = None
     if not gate_override:
         policy = resolve_policy_for_agent(skill)
+        dispatch_policy = policy
         resolved_action = _resolve_gate_action_type(skill, snapshot, policy)
         action_type = resolved_action.value
         # ateles#902: populate confidence ahead of the read. When no producer
@@ -3389,10 +3503,11 @@ async def dispatch_task(
             wait_ceiling = _neotoma_admission_wait_ceiling(retries, backoff)
             wait_beyond_ceiling = None
             revalidation_refusal = None
-            retry_gate = dispatch_gate
-            # A first delivery (no existing-PR target) is re-checked before every
-            # retry here; an existing-PR correction re-checks itself
-            # (`_run_fly_delivery_task.verify_correction`).
+            # Every retry is bound to the authority of the first attempt: a
+            # first delivery re-checks the task, tenant, policy revision and
+            # (for an approved release) its authorization before each retry;
+            # an existing-PR correction re-checks the policy revision here and
+            # its task and target itself (`_run_fly_delivery_task.verify_correction`).
             first_delivery = (correction_lifecycle is None
                               and dispatch_snapshot.get("task_type") != "existing_pr_correction")
             if first_delivery:
@@ -3401,6 +3516,14 @@ async def dispatch_task(
                         dispatch_snapshot, _dispatch_repo_from_snapshot(dispatch_snapshot)) is None
                 except Exception:
                     first_delivery = True  # unknown: re-check rather than skip it
+            # Captured at the first attempt: the policy and gate the dispatch
+            # was decided on (or its release authorization), and the task
+            # revision as it stands now, before anything could launch.
+            retry_authority = (await asyncio.to_thread(
+                _capture_retry_authority, entity_id, dispatch_snapshot,
+                dispatch_gate=dispatch_gate, dispatch_policy=dispatch_policy,
+                release_authorization=release_authorization)
+                if retries > 0 else None)
             while True:
                 result = await _spawn_harness_skill(
                     skill,
@@ -3425,13 +3548,6 @@ async def dispatch_task(
                     wait_beyond_ceiling = delay
                     break
                 deferrals += 1
-                if first_delivery and retry_gate is None:
-                    try:
-                        retry_gate = (await asyncio.to_thread(
-                            _task_gate_context, dispatch_snapshot))[3]
-                    except Exception as exc:
-                        log.error(f"[{DAEMON_NAME}] task {entity_id}: action gate not "
-                                  f"recorded before the retry: {type(exc).__name__}")
                 log.warning(
                     f"[{DAEMON_NAME}] {skill} task {entity_id}: Neotoma did not answer the "
                     f"Fly admission check; nothing launched; retry {deferrals}/{retries} "
@@ -3444,9 +3560,12 @@ async def dispatch_task(
                 waited += delay
                 if first_delivery:
                     revalidation_refusal = await _revalidate_first_delivery_retry(
-                        entity_id, dispatch_snapshot, retry_gate)
-                    if revalidation_refusal:
-                        break
+                        entity_id, dispatch_snapshot, retry_authority)
+                else:
+                    revalidation_refusal = await _revalidate_retry_authority(
+                        entity_id, retry_authority, policy_only=True)
+                if revalidation_refusal:
+                    break
         except Exception as exc:
             # Unexpected crash in the spawn machinery itself → record as a
             # failed run.
@@ -4896,6 +5015,47 @@ def iter_held_task_ids(*, limit: int | None = None):
             yield task_id
 
 
+def _exact_authority_holds(
+    authority: dict,
+    *,
+    task_id: str,
+    task_record: dict,
+    user_id: str,
+    action_type: str,
+    policy,
+    decision: GateDecision,
+    gate_action: str,
+    blast_radius: str,
+) -> bool:
+    """Whether *authority* still binds exactly these current records.
+
+    The one comparison an approved release makes before it dispatches, and a
+    first-delivery retry makes before it launches again: the same task and
+    tenant, the same task revision, action type, execution policy entity and
+    revision, gate action and blast radius, and a current gate decision the
+    approval covers. Any difference, or any absent field, is False."""
+    if not isinstance(authority, dict) or not isinstance(task_record, dict):
+        return False
+    return bool(
+        authority.get("task_entity_id") == task_id
+        and user_id
+        and authority.get("user_id") == user_id
+        and authority.get("task_revision") == entity_record_digest(task_record)
+        and authority.get("task_observation_count")
+        == task_record.get("observation_count")
+        and authority.get("task_last_observation_at")
+        == task_record.get("last_observation_at")
+        and str(authority.get("action_type") or "").strip().lower() == action_type
+        and authority.get("policy_entity_id") == policy.entity_id
+        and authority.get("policy_revision") == execution_policy_revision(policy)
+        and authority.get("gate_action") == gate_action
+        and authority.get("blast_radius") == blast_radius
+        and _decision_consistent_with_approval(
+            decision, gate_action=gate_action, blast_radius=blast_radius
+        )
+    )
+
+
 def _decision_consistent_with_approval(
     current_decision: GateDecision, *, gate_action: str, blast_radius: str
 ) -> bool:
@@ -5145,7 +5305,6 @@ async def handle_checkpoint_brief(
             )
             return False
 
-        auth_action_type = str(authorization.get("action_type") or "").strip().lower()
         if not current_policy.loaded:
             _require_fresh_release_authority(
                 entity_id,
@@ -5175,23 +5334,17 @@ async def handle_checkpoint_brief(
             successful_recurrences=_successful_recurrences(task_snapshot),
             confidence_unscored=release_unscored,
         )
-        exact_authority = (
-            authorization.get("task_entity_id") == task_id
-            and authorization.get("user_id") == brief_user_id == task_user_id
-            and authorization.get("task_revision") == entity_record_digest(task_record)
-            and authorization.get("task_observation_count")
-            == task_record.get("observation_count")
-            and authorization.get("task_last_observation_at")
-            == task_record.get("last_observation_at")
-            and auth_action_type == current_action_type
-            and authorization.get("policy_entity_id") == current_policy.entity_id
-            and authorization.get("policy_revision")
-            == execution_policy_revision(current_policy)
-            and authorization.get("gate_action") == gate_action
-            and authorization.get("blast_radius") == blast_radius
-            and _decision_consistent_with_approval(
-                current_decision, gate_action=gate_action, blast_radius=blast_radius
-            )
+        # brief_user_id == task_user_id was established above.
+        exact_authority = _exact_authority_holds(
+            authorization,
+            task_id=task_id,
+            task_record=task_record,
+            user_id=task_user_id,
+            action_type=current_action_type,
+            policy=current_policy,
+            decision=current_decision,
+            gate_action=gate_action,
+            blast_radius=blast_radius,
         )
         if not exact_authority:
             _require_fresh_release_authority(
@@ -5281,6 +5434,7 @@ async def handle_checkpoint_brief(
         gate_override=True,
         detach_after_accept=detach_after_accept,
         release_key=entity_id,
+        release_authorization=authorization,
         **lifecycle_binding,
     )
     if correction_lifecycle is not None and dispatched is not True:

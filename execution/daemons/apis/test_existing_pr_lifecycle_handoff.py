@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import math
 from types import SimpleNamespace
 
 import httpx
@@ -596,13 +597,17 @@ def test_executing_version_conflict_sends_one_blocker_and_writes_nothing(joined)
     assert 'cannot be released again' in notice and 'refile' in notice
 
 
-def _fly_admission_seam(monkeypatch, tmp_path, on_attempt, *, retries='2', backoff='0'):
+def _fly_admission_seam(monkeypatch, tmp_path, on_attempt, *, retries='2', backoff='1',
+                        build=None):
     """The real run_skill Fly path, with fly_runner.build_job refusing on a
     Neotoma outage: every provider binary pinned and no local run possible.
 
     Returns (attempts, notices): the delivery receipts held at each build_job
     call, and every operator notice sent. A number *on_attempt* returns is the
-    wait Neotoma stated (Retry-After) on that refusal."""
+    wait Neotoma stated (Retry-After) on that refusal. *build*, when given,
+    replaces the refusal on an attempt: ``build(n, kw)`` returns the job or
+    raises. The dispatcher's waits are recorded in ``apis.SLEEPS`` instead of
+    slept (a zero backoff is rejected as unbounded-retry config)."""
     import fly_runner
     import skill_runner
     from lib.daemon_runtime import AgentDefinition
@@ -629,9 +634,20 @@ def _fly_admission_seam(monkeypatch, tmp_path, on_attempt, *, retries='2', backo
     async def no_local(*a, **kw):
         pytest.fail('a Neotoma deferral must never run the delivery locally')
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', no_local)
+    sleeps = []
+    real_sleep = asyncio.sleep
+    async def record_sleep(delay, *a, **kw):
+        sleeps.append(delay)
+        await real_sleep(0)
+    monkeypatch.setattr(apis.asyncio, 'sleep', record_sleep)
+    monkeypatch.setattr(apis, 'SLEEPS', sleeps, raising=False)
     attempts = []
     def build_job(**kw):
         attempts.append(list(delivery._delivery_ledger().delivery_receipts()))
+        if build is not None:
+            built = build(len(attempts), kw)
+            if built is not None:
+                return built
         stated = on_attempt(len(attempts))
         raise fly_runner.FlyIneligible('Neotoma /session answered 429', neotoma_unavailable=True,
                                        retry_after_seconds=stated)
@@ -803,7 +819,9 @@ def test_first_delivery_neotoma_outage_is_bounded_then_escalated(
 
 
 def _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt, *,
-                             retries='2', backoff='10', read=None):
+                             retries='2', backoff='10', read=None, build=None,
+                             gate_override=True, release_authorization=None,
+                             policy=None):
     """The natural first-delivery entry (as in the test above), with the
     dispatcher's waits recorded instead of slept. *read* replaces the
     pre-retry task re-read (default: the stored row, unchanged).
@@ -826,11 +844,14 @@ def _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt, *,
         return True
     monkeypatch.setattr(apis, 'set_task_status', save)
     monkeypatch.setattr(apis, '_spawn_harness_skill', dispatch._REAL_SPAWN)
-    monkeypatch.setattr(apis, 'resolve_policy_for_agent', lambda *a: ExecutionPolicy(
+    monkeypatch.setattr(apis, 'resolve_policy_for_agent', policy or (lambda *a: ExecutionPolicy(
         entity_id='inert-policy', loaded=True, low_blast_action_types=frozenset(),
-        high_blast_action_types=frozenset({'open_or_merge_pr'})))
+        high_blast_action_types=frozenset({'open_or_merge_pr'}))))
+    # observation_count stands for the task revision: a test bumps
+    # ``store.observations`` to change the revision without changing content.
     monkeypatch.setattr(apis, 'fetch_task_record', lambda key: dict(
-        entity_id=key, entity_type='task', snapshot=copy.deepcopy(store.rows[key])))
+        entity_id=key, entity_type='task', observation_count=getattr(store, 'observations', 1),
+        snapshot=copy.deepcopy(store.rows[key])))
     reads = []
     def fetch(key):
         reads.append(key)
@@ -840,7 +861,7 @@ def _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt, *,
     monkeypatch.setattr(apis, 'fetch_task_snapshot_and_version', fetch)
     attempts, notices = _fly_admission_seam(
         monkeypatch, tmp_path, lambda n: on_attempt(n, store, eid),
-        retries=retries, backoff=backoff)
+        retries=retries, backoff=backoff, build=build)
     briefs, _task_reads = _decision_queue(monkeypatch, 'ok', lambda: copy.deepcopy(store.rows[eid]))
     sleeps = []
     real_sleep = asyncio.sleep
@@ -848,7 +869,10 @@ def _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt, *,
         sleeps.append(delay)
         await real_sleep(0)
     monkeypatch.setattr(apis.asyncio, 'sleep', record_sleep)
-    asyncio.run(apis.dispatch_task(eid, snapshot, 'approved', _StubNotifier(), gate_override=True))
+    authorization = release_authorization(eid, snapshot) if release_authorization else None
+    asyncio.run(apis.dispatch_task(eid, snapshot, 'approved', _StubNotifier(),
+                                   gate_override=gate_override,
+                                   release_authorization=authorization))
     assert attempts, 'run_skill never reached fly_runner.build_job'
     return dict(attempts=attempts, notices=notices, sleeps=sleeps, saved=store.rows[eid],
                 statuses=statuses, briefs=briefs, reads=reads, eid=eid)
@@ -959,3 +983,176 @@ def test_an_unchanged_task_is_launched_again(monkeypatch, tmp_path, dispatch_env
     run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, _stated_then_refused(None))
     assert len(run['attempts']) == 2
     assert run['reads'] == [run['eid']]
+
+
+# ── Round 3: bounded settings, the delivery effect, and retry authority ──
+
+@pytest.mark.parametrize('value', ['inf', 'nan', '0', '-1', 'x'])
+def test_a_non_finite_or_non_positive_backoff_uses_the_default(monkeypatch, caplog, value):
+    # Red before (observed): 'inf' -> backoff inf, 'nan', '0' and '-1' -> 0.0, and
+    # no setting name was logged for any value.
+    monkeypatch.setenv('APIS_NEOTOMA_ADMISSION_BACKOFF_S', value)
+    # A retry count of 0 is valid (no retries); any other of these is not.
+    monkeypatch.setenv('APIS_NEOTOMA_ADMISSION_RETRIES', '1.5' if value == '0' else value)
+    caplog.set_level('WARNING')
+    retries, backoff = apis._neotoma_admission_retry_bounds()
+    assert backoff == apis.NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT
+    assert retries == apis.NEOTOMA_ADMISSION_RETRIES_DEFAULT
+    logged = caplog.text
+    assert 'APIS_NEOTOMA_ADMISSION_BACKOFF_S' in logged
+    assert 'APIS_NEOTOMA_ADMISSION_RETRIES' in logged
+    # The setting's name, never its value.
+    assert f'{value!r}' not in logged and f' {value} ' not in logged
+
+
+def test_valid_bounds_are_kept(monkeypatch):
+    monkeypatch.setenv('APIS_NEOTOMA_ADMISSION_BACKOFF_S', '7.5')
+    monkeypatch.setenv('APIS_NEOTOMA_ADMISSION_RETRIES', '0')
+    assert apis._neotoma_admission_retry_bounds() == (0, 7.5)
+
+
+def test_an_infinite_backoff_still_ends_in_one_rounds_exhausted_checkpoint(
+        monkeypatch, tmp_path, dispatch_env):
+    # Red before: the old bounds returned backoff inf for 'inf' (observed in
+    # the test above), so the first wait was asyncio.sleep(inf) and the
+    # rounds_exhausted checkpoint was never reached.
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
+                                   lambda n, store, eid: None, backoff='inf')
+    default = apis.NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT
+    assert run['sleeps'] == [default, 2 * default]
+    assert all(math.isfinite(s) for s in run['sleeps'])
+    assert len(run['attempts']) == 3
+    calls = run['briefs'].get('calls', [])
+    assert len(calls) == 1 and calls[0]['decision'].reason == 'rounds_exhausted'
+    assert run['saved']['status'] == 'blocked'
+
+
+def _admitted_job(kw):
+    """What fly_runner.build_job returns once Neotoma answers: the delivery job."""
+    import fly_runner
+    return fly_runner.FlyJob(
+        run_id='run-123', role=kw['role'], provider=kw['provider'],
+        repository=kw['repository'], argv=list(kw['cmd']), stdin=kw['stdin'],
+        timeout=int(kw['timeout']), needs_github=False,
+        github_delivery_contract=bool(kw.get('github_delivery_contract')),
+        delivery=kw['delivery'])
+
+
+def test_unanswered_then_admitted_delivers_once_and_completes(
+        monkeypatch, tmp_path, dispatch_env):
+    # The delivery effect: attempt 1 is deferred (Neotoma did not answer),
+    # attempt 2 is admitted and the launch runs once with the delivery spec and
+    # opens the PR. Red with the retry removed (observed, retries=0): one
+    # build_job call (len(attempts) == 1) and no launch.
+    import fly_runner
+    launches = []
+    class Executor:
+        async def run(self, job):
+            launches.append(job)
+            job.launch_requested = True
+            job.delivery_result = dict(
+                delivery_status='opened', delivery_branch=job.delivery['branch'],
+                delivery_commit='a' * 40, pr_number=99,
+                pr_url='https://github.com/owner/repo/pull/99')
+            return 0, b'', b''
+    monkeypatch.setattr(fly_runner, 'get_executor', lambda: Executor())
+    # The real pull request as GitHub returns it to the runner's read-back.
+    from lib import github_app_token
+    from lib.daemon_runtime import artifact_resolver
+    def view(repo, number, token=None):
+        return 0, json.dumps(dict(
+            number=99, baseRefName='main', headRefName=launches[0].delivery['branch'],
+            headRefOid='a' * 40, headRepository={'nameWithOwner': 'owner/repo'})), ''
+    monkeypatch.setattr(github_app_token, 'identity_token', lambda identity, repo=None: 'app-token')
+    monkeypatch.setattr(artifact_resolver, '_gh_pr_view', view)
+    monkeypatch.setattr(artifact_resolver.time, 'sleep', lambda s: None)
+    monkeypatch.setattr(apis, 'resolve_artifact_ref', lambda *a, **kw: 'exists')
+    monkeypatch.setattr('lib.daemon_runtime.task_lifecycle._correct', dispatch_env[2].field)
+    run = _first_delivery_dispatch(
+        monkeypatch, tmp_path, dispatch_env, lambda n, store, eid: None,
+        build=lambda n, kw: _admitted_job(kw) if n == 2 else None)
+    assert len(run['attempts']) == 2
+    assert len(launches) == 1
+    (job,) = launches
+    assert set(job.delivery) == set(fly_runner.DELIVERY_SPEC_KEYS)
+    saved = run['saved']
+    assert 'failed' not in run['statuses'] and 'blocked' not in run['statuses'], (
+        saved.get('blocked_reason'), run['notices'])
+    assert saved['status'] == 'done', saved
+    assert 'https://github.com/owner/repo/pull/99' in saved['result']
+    assert not run['briefs'].get('calls')
+
+
+def _policy(revision):
+    from lib.daemon_runtime.gating import ExecutionPolicy
+    return ExecutionPolicy(
+        entity_id='inert-policy', loaded=True, low_blast_action_types=frozenset(),
+        high_blast_action_types=frozenset({'open_or_merge_pr'}),
+        authorization_revision=revision)
+
+
+def _authorization(eid, snapshot):
+    """The authenticated release authorization an approved checkpoint carries,
+    bound to policy revision rev-1 and the gate decision for the task."""
+    from lib.daemon_runtime.gating import execution_policy_revision
+    _skill, action_type, policy, decision = apis._task_gate_context(snapshot)
+    return dict(task_entity_id=eid, user_id='inert-tenant', action_type=action_type,
+                policy_entity_id=policy.entity_id,
+                policy_revision=execution_policy_revision(_policy('rev-1')),
+                gate_action=decision.action.value, blast_radius=decision.blast_radius.value)
+
+
+def _switchable_policy():
+    box = {'revision': 'rev-1'}
+    return box, (lambda *a: _policy(box['revision']))
+
+
+def test_an_approved_release_unchanged_between_attempts_is_launched_again(
+        monkeypatch, tmp_path, dispatch_env):
+    # Positive control for the two tests below: the authority still holds.
+    _box, policy = _switchable_policy()
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env,
+                                   _stated_then_refused(None), policy=policy,
+                                   release_authorization=_authorization)
+    assert len(run['attempts']) == 2
+
+
+def test_a_policy_revision_change_between_attempts_launches_nothing_and_holds(
+        monkeypatch, tmp_path, dispatch_env):
+    # Same policy entity, same action type and blast tier; only its revision
+    # changed. Red with the authority check removed, leaving the earlier
+    # snapshot comparison (observed): every retry launched (len(attempts) == 3)
+    # and no hold was written.
+    box, policy = _switchable_policy()
+    def on_attempt(n, store, eid):
+        if n == 1:
+            box['revision'] = 'rev-2'
+        return None
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt,
+                                   policy=policy, release_authorization=_authorization)
+    assert len(run['attempts']) == 1
+    saved = run['saved']
+    assert saved['status'] == 'blocked'
+    assert 'execution policy changed since the first attempt' in saved['blocked_reason']
+    assert not run['briefs'].get('calls')
+    assert any('retry not started' in n and 'execution policy changed' in n
+               for n in run['notices'])
+
+
+def test_an_approved_release_whose_task_revision_changed_is_not_relaunched(
+        monkeypatch, tmp_path, dispatch_env):
+    # The task's content is unchanged (so the snapshot comparison passes) but
+    # its revision moved. Red with the authority check removed (observed):
+    # every retry launched (len(attempts) == 3).
+    _box, policy = _switchable_policy()
+    def on_attempt(n, store, eid):
+        if n == 1:
+            store.observations = 2
+        return None
+    run = _first_delivery_dispatch(monkeypatch, tmp_path, dispatch_env, on_attempt,
+                                   policy=policy, release_authorization=_authorization)
+    assert len(run['attempts']) == 1
+    saved = run['saved']
+    assert saved['status'] == 'blocked'
+    assert 'authority it was released under changed' in saved['blocked_reason']
+    assert any('retry not started' in n for n in run['notices'])
