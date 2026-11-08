@@ -595,6 +595,129 @@ def test_unreachable_neotoma_makes_a_key_only_job_ineligible(fly_env):
         _job(neotoma_tools_granted=True)
 
 
+def test_unreachable_admission_check_is_a_temporary_deferral(fly_env):
+    # Neotoma did not answer: the job is deferred, not refused (the caller
+    # turns `neotoma_unavailable` into a bounded deferral, never a FAILED task).
+    _session(fly_env).fail = True
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert caught.value.neotoma_unavailable is True
+    assert caught.value.provider_specific is False
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 429])
+def test_a_5xx_or_429_admission_answer_is_a_temporary_deferral(fly_env, monkeypatch, status):
+    monkeypatch.setattr(fly_runner, "_admission_http_client", lambda: httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status, text="x"))))
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert caught.value.neotoma_unavailable is True
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_a_stated_retry_after_in_seconds_rides_on_the_deferral(fly_env, monkeypatch, status):
+    # Red before (observed): FlyIneligible had no retry_after_seconds; the
+    # stated 25s was dropped at "Neotoma /session answered 429".
+    monkeypatch.setattr(fly_runner, "_admission_http_client", lambda: httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            status, headers={"Retry-After": "25"}, text="slow down"))))
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert caught.value.neotoma_unavailable is True
+    assert caught.value.retry_after_seconds == 25.0
+
+
+def test_a_stated_retry_after_http_date_rides_on_the_deferral(fly_env, monkeypatch):
+    import email.utils
+    when = email.utils.formatdate(time.time() + 90, usegmt=True)
+    monkeypatch.setattr(fly_runner, "_admission_http_client", lambda: httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            429, headers={"Retry-After": when}, text="slow down"))))
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert 80 < caught.value.retry_after_seconds <= 90
+
+
+@pytest.mark.parametrize("headers", [{}, {"Retry-After": "soon"}, {"Retry-After": "-5"}])
+def test_a_429_without_a_usable_retry_after_states_no_wait(fly_env, monkeypatch, headers):
+    monkeypatch.setattr(fly_runner, "_admission_http_client", lambda: httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            429, headers=headers, text="slow down"))))
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert caught.value.neotoma_unavailable is True
+    assert caught.value.retry_after_seconds is None
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("0", 0.0), ("120", 120.0), (" 7 ", 7.0), (None, None), ("", None), ("-1", None),
+    ("1.5", None), ("tomorrow", None), ("Wed, 21 Oct 2015 07:28:00 GMT", None),  # past
+])
+def test_parse_retry_after(value, expected):
+    assert fly_runner.parse_retry_after(value, now=time.time()) == expected
+
+
+@pytest.mark.parametrize("digits", [11, 400])
+def test_a_retry_after_delta_of_any_length_is_read(digits):
+    # Red before (observed): a delta over ten digits returned None, so the
+    # configured backoff applied instead of ending the schedule. The
+    # 400-digit case must not raise OverflowError (nor int()'s digit limit).
+    stated = fly_runner.parse_retry_after("9" * digits, now=0.0)
+    # Read, and longer than any schedule: exact when representable, else inf.
+    assert stated == (99999999999.0 if digits == 11 else math.inf)
+    assert fly_runner.parse_retry_after("0" * 400 + "25", now=0.0) == 25.0
+
+
+@pytest.mark.parametrize("value", [
+    "Sun, 06 Nov 1994 08:49:37 GMT",   # IMF-fixdate
+    "Sunday, 06-Nov-94 08:49:37 GMT",  # obsolete RFC 850
+    "Sun Nov  6 08:49:37 1994",        # asctime
+])
+def test_each_http_date_form_is_read(value):
+    # Red before (observed): the asctime form returned None (the IMF-fixdate
+    # and RFC 850 forms already parsed; kept here as guards).
+    when = 784111777.0  # 1994-11-06T08:49:37Z
+    assert fly_runner.parse_retry_after(value, now=when - 60) == 60.0
+
+
+@pytest.mark.parametrize("value", ["+25", "-25", "2.5", "1 0", "25s", "\uff12\uff15"])
+def test_a_malformed_retry_after_is_ignored(value):
+    # Ignored (None), so the configured backoff applies.
+    assert fly_runner.parse_retry_after(value, now=0.0) is None
+
+
+def test_a_timed_out_admission_check_is_a_temporary_deferral(fly_env, monkeypatch):
+    def timeout(request):
+        raise httpx.ReadTimeout("injected: Neotoma timed out")
+
+    monkeypatch.setattr(fly_runner, "_admission_http_client", lambda: httpx.Client(
+        transport=httpx.MockTransport(timeout)))
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert caught.value.neotoma_unavailable is True
+
+
+@pytest.mark.parametrize("answer", [
+    {"aauth": {"admitted": False, "admission_reason": "no_match"}},
+    {"aauth": {"admitted": "true"}},  # an unreadable 200 is still an answer
+], ids=["no_match", "unreadable-200"])
+def test_a_real_admission_refusal_stays_final(fly_env, answer):
+    _session(fly_env).answer = answer
+    with pytest.raises(fly_runner.FlyIneligible) as caught:
+        _job(neotoma_tools_granted=True)
+    assert caught.value.neotoma_unavailable is False
+
+
+@pytest.mark.parametrize("reason,temporary", [
+    ("Neotoma unreachable", True), ("Neotoma /session answered 503", True),
+    ("Neotoma /session answered 429", True), ("Neotoma /session answered 401", False),
+    ("Neotoma /session answered 404", False), ("no_match", False), ("unrecognized", False),
+    ("Neotoma /session returned no readable admission decision", False),
+])
+def test_admission_reason_is_temporary(reason, temporary):
+    assert fly_runner.admission_reason_is_temporary(reason) is temporary
+
+
 def test_no_key_and_no_token_with_neotoma_tools_is_ineligible(fly_env, monkeypatch):
     monkeypatch.delenv("ATELES_PRIVATE_KEYS_DIR")
     with pytest.raises(fly_runner.FlyIneligible):
@@ -5247,6 +5370,31 @@ def test_a_declined_lens_the_mac_may_not_run_logs_both_reasons(fly_env, seam, cl
     assert str(raised) in result.error and local in result.error
     # Handed back to the provider loop to fail over, not a dead end.
     assert not result.ok and result.fly_local_fallback_refused
+
+
+def test_a_neotoma_outage_the_mac_may_not_run_is_a_deferral_not_a_failover(
+        fly_env, seam, claude_login, monkeypatch):  # fmt: skip
+    # Neotoma did not answer the admission check, and the Mac may not run the
+    # provider either. Every provider would hit the same outage, so this ends
+    # the dispatch as the bounded deferral, never the next-provider failover a
+    # Mac refusal otherwise takes (fly_local_fallback_refused).
+    spawned, fake_exec = seam
+
+    def unanswered(**kwargs):
+        raise fly_runner.FlyIneligible(
+            "role 'lanius''s AAuth key is not admitted by Neotoma (Neotoma unreachable)",
+            neotoma_unavailable=True)
+
+    monkeypatch.setattr(fly_runner, "build_job", unanswered)
+    local = "claude is not enabled for local dispatch (APIS_HARNESS_PROVIDERS)"
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        _, raised, result = _panel_lens_dispatch(
+            "claude", monkeypatch, local_fallback_check=lambda p: local)
+    assert raised is not None and raised.neotoma_unavailable and spawned == []
+    assert not result.ok and result.fly_neotoma_unavailable
+    assert not result.fly_local_fallback_refused
+    assert not result.fly_ineligible_before_launch
+    assert "deferred" in result.error
 
 
 def test_every_lens_review_class_is_vetted_and_delivery_only_is_unchanged(monkeypatch):

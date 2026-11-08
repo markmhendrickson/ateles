@@ -797,6 +797,298 @@ def _dispatch_mode_from_snapshot(snapshot: dict) -> str | None:
 
 
 
+# A Fly launch deferred only because Neotoma did not answer the role-key
+# admission check, with its prelaunch receipt proven released: nothing ran.
+# The dispatcher retries it in process after a backoff, at most this many
+# times, then writes one rounds_exhausted checkpoint and, once it reads back,
+# holds the task (BLOCKED) with one operator notice (failure_posture.md, rule 5).
+# The checkpoint is the hold: if it cannot be written or read back, no held
+# status is written and the task takes the failed-dispatch status instead. The build-claim deferral sweep does not fit:
+# it is keyed to a running build, and an outage has no holder to wait on.
+NEOTOMA_ADMISSION_RETRIES_DEFAULT = 3
+NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT = 120.0
+
+
+def _neotoma_admission_deferred(result) -> bool:
+    return bool(getattr(result, "fly_neotoma_unavailable", False)
+                and getattr(result, "fly_delivery_not_launched", False)
+                and getattr(result, "fly_delivery_cleanup", "") == "released"
+                and not getattr(result, "fly_delivery_status", "")
+                and not getattr(result, "remote_run_id", "")
+                and not getattr(result, "remote_outcome_unknown", False))
+
+
+NEOTOMA_ADMISSION_EXHAUSTED_REASON = "rounds_exhausted"
+
+
+def _write_neotoma_admission_checkpoint(
+    entity_id: str, *, skill: str, title: str, trigger: str, reason: str,
+) -> tuple[str | None, str]:
+    """Write the one ``rounds_exhausted`` checkpoint and read it back.
+
+    failure_posture.md rule 5: the checkpoint is the hold. Returns
+    ``(brief_id, "")`` only when the checkpoint was written AND read back;
+    otherwise ``(None, why)``, and the caller writes no held status. Exactly
+    one write is attempted per call; it is never retried here."""
+    brief_id = None
+    try:
+        task_record = fetch_task_record(entity_id)
+        tenant_id = str(fetch_entity_user_id(entity_id) or "").strip()
+        task_snapshot = _record_snapshot(task_record)
+        if task_snapshot is None or not tenant_id:
+            return None, "the task record could not be read to write it"
+        _gate_skill_name, action_type, policy, gate = _task_gate_context(task_snapshot)
+        decision = GateDecision(
+            action=GateAction.CHECKPOINT,
+            blast_radius=gate.blast_radius,
+            confidence=gate.confidence,
+            threshold=gate.threshold,
+            policy_id=gate.policy_id,
+            reason=NEOTOMA_ADMISSION_EXHAUSTED_REASON,
+            confidence_unscored=gate.confidence_unscored,
+        )
+        brief_id = write_checkpoint_brief(
+            task_entity_id=entity_id,
+            decision=decision,
+            title=title,
+            plan_summary=(
+                f"Assigned to {skill}. Trigger: {trigger}. The step waited on "
+                f"Neotoma's admission check, which did not answer; the bounded "
+                f"retries ran out. Nothing was launched. {reason}"
+            ),
+            handler=DAEMON_NAME,
+            user_id=tenant_id,
+            action_type=action_type,
+            idempotency_context=f"neotoma-admission-exhausted-{trigger}",
+            task_record=task_record,
+            policy=policy,
+        )
+        if not brief_id:
+            return None, "Neotoma did not take the checkpoint"
+        checkpoint = _record_snapshot(fetch_checkpoint_record(brief_id))
+    except Exception as exc:
+        log.error(f"[{DAEMON_NAME}] task {entity_id}: admission exhaustion checkpoint "
+                  f"not written or not read back: {type(exc).__name__}")
+        return None, ("the checkpoint write could not run" if not brief_id
+                      else f"checkpoint {brief_id} was written but could not be read back")
+    if (isinstance(checkpoint, dict)
+            and checkpoint.get("reason") == NEOTOMA_ADMISSION_EXHAUSTED_REASON
+            and checkpoint.get("task_entity_id") == entity_id):
+        return brief_id, ""
+    return None, f"checkpoint {brief_id} was written but did not read back"
+
+
+# Hard caps on the admission retry schedule (failure_posture.md: every wait
+# is bounded). A single configured backoff, the retry count, and the whole
+# schedule's total wait each have a ceiling.
+NEOTOMA_ADMISSION_BACKOFF_S_MAX = 3600.0
+NEOTOMA_ADMISSION_RETRIES_MAX = 10
+NEOTOMA_ADMISSION_TOTAL_WAIT_S_MAX = 6 * 3600.0
+
+
+def _neotoma_admission_retry_bounds() -> tuple[int, float]:
+    """(retries, base backoff seconds) from the environment.
+
+    A retry count that is not an integer in 0..NEOTOMA_ADMISSION_RETRIES_MAX,
+    or a backoff that is not a finite number in (0, NEOTOMA_ADMISSION_BACKOFF_S_MAX],
+    is rejected and that setting takes its default. If the resulting schedule's
+    total wait is not finite or exceeds NEOTOMA_ADMISSION_TOTAL_WAIT_S_MAX, both
+    settings take their defaults. Only setting names are logged, never values,
+    so the deferral loop always waits a finite, bounded time and always ends."""
+    retries = NEOTOMA_ADMISSION_RETRIES_DEFAULT
+    raw = os.environ.get("APIS_NEOTOMA_ADMISSION_RETRIES")
+    if raw is not None:
+        try:
+            parsed = int(raw.strip())
+        except (TypeError, ValueError):
+            parsed = -1
+        if 0 <= parsed <= NEOTOMA_ADMISSION_RETRIES_MAX:
+            retries = parsed
+        else:
+            log.warning(f"[{DAEMON_NAME}] APIS_NEOTOMA_ADMISSION_RETRIES is not a "
+                        f"non-negative integer of at most {NEOTOMA_ADMISSION_RETRIES_MAX}; "
+                        "using the default")
+    backoff = NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT
+    raw = os.environ.get("APIS_NEOTOMA_ADMISSION_BACKOFF_S")
+    if raw is not None:
+        try:
+            parsed_backoff = float(raw.strip())
+        except (TypeError, ValueError):
+            parsed_backoff = math.nan
+        if (math.isfinite(parsed_backoff)
+                and 0 < parsed_backoff <= NEOTOMA_ADMISSION_BACKOFF_S_MAX):
+            backoff = parsed_backoff
+        else:
+            log.warning(f"[{DAEMON_NAME}] APIS_NEOTOMA_ADMISSION_BACKOFF_S is not a "
+                        f"positive finite number of at most {NEOTOMA_ADMISSION_BACKOFF_S_MAX:.0f}s; "
+                        "using the default")
+    total = _neotoma_admission_wait_ceiling(retries, backoff)
+    if not (math.isfinite(total) and total <= NEOTOMA_ADMISSION_TOTAL_WAIT_S_MAX):
+        log.warning(f"[{DAEMON_NAME}] APIS_NEOTOMA_ADMISSION_RETRIES and "
+                    "APIS_NEOTOMA_ADMISSION_BACKOFF_S together exceed the retry schedule's "
+                    f"{NEOTOMA_ADMISSION_TOTAL_WAIT_S_MAX:.0f}s limit; using the defaults")
+        retries = NEOTOMA_ADMISSION_RETRIES_DEFAULT
+        backoff = NEOTOMA_ADMISSION_BACKOFF_S_DEFAULT
+    return retries, backoff
+
+
+def _neotoma_admission_wait(backoff: float, deferrals: int, retry_after) -> float:
+    """The wait before retry *deferrals*: the configured delay, or the wait
+    Neotoma stated (Retry-After) when that is longer. Never shorter. A stated
+    wait too long to represent (``math.inf``, see `fly_runner.parse_retry_after`)
+    is returned as is, so the caller ends through exhaustion with no retry."""
+    delay = backoff * deferrals
+    if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool) \
+            and not math.isnan(retry_after) and retry_after > delay:
+        return float(retry_after)
+    return delay
+
+
+def _stated_wait_text(seconds: float) -> str:
+    """A stated wait for a notice: whole seconds, or "longer than any retry
+    schedule allows" when it was too long to represent."""
+    return f"{seconds:.0f}s" if math.isfinite(seconds) else "longer than any retry schedule allows"
+
+
+def _neotoma_admission_wait_ceiling(retries: int, backoff: float) -> float:
+    """The most the configured schedule ever waits in total (backoff x 1..retries).
+
+    A stated Retry-After that would take the waits past this ends the dispatch
+    through the exhaustion path; it is never cut short to retry early."""
+    return backoff * retries * (retries + 1) / 2
+
+
+@dataclasses.dataclass(frozen=True)
+class _RetryAuthority:
+    """What a dispatch's first attempt ran under, so a retry is bound to it.
+
+    ``authority`` has the shape of a release authorization (see
+    `_exact_authority_holds`): the gate action, blast radius, action type and
+    execution policy entity and revision come from the release authorization
+    when an approved checkpoint released the dispatch, else from the gate
+    decision and policy the dispatch was decided on; the task revision fields
+    are the record as read at the first attempt. ``error`` says why it could
+    not be captured; a retry is then refused."""
+    authority: dict | None = None
+    bound_confidence: float | None = None
+    error: str = ""
+
+
+def _capture_retry_authority(entity_id: str, dispatch_snapshot, *, dispatch_gate,
+                             dispatch_policy, release_authorization) -> _RetryAuthority:
+    """Read the task and policy in force at the first attempt (fail closed)."""
+    try:
+        record = fetch_task_record(entity_id)
+        user_id = str(fetch_entity_user_id(entity_id) or "").strip()
+        if not isinstance(record, dict) or not user_id:
+            return _RetryAuthority(error="the task or its tenant could not be read at the first attempt")
+        bound = (_bound_hold_confidence(release_authorization)
+                 if isinstance(release_authorization, dict)
+                 else getattr(dispatch_gate, "confidence", None))
+        _skill, action_type, policy, decision = _task_gate_context(
+            dispatch_snapshot, bound_confidence=bound)
+        if dispatch_policy is not None:
+            policy = dispatch_policy
+        if dispatch_gate is not None:
+            decision = dispatch_gate
+        authority = {
+            "task_entity_id": entity_id,
+            "user_id": user_id,
+            "task_revision": entity_record_digest(record),
+            "task_observation_count": record.get("observation_count"),
+            "task_last_observation_at": record.get("last_observation_at"),
+            "action_type": action_type,
+            "policy_entity_id": policy.entity_id,
+            "policy_revision": execution_policy_revision(policy),
+            "gate_action": decision.action.value,
+            "blast_radius": decision.blast_radius.value,
+        }
+        if isinstance(release_authorization, dict):
+            # The authority that released the dispatch, not a re-derivation.
+            for key in ("task_entity_id", "user_id", "action_type", "policy_entity_id",
+                        "policy_revision", "gate_action", "blast_radius"):
+                authority[key] = release_authorization.get(key)
+        return _RetryAuthority(authority=authority, bound_confidence=bound)
+    except Exception as exc:
+        return _RetryAuthority(error=f"the authority of the first attempt could not be "
+                                     f"recorded ({type(exc).__name__})")
+
+
+async def _revalidate_retry_authority(entity_id: str, captured: _RetryAuthority | None, *,
+                                      policy_only: bool = False) -> str | None:
+    """Why a retry may not launch under *captured*, or None when it may.
+
+    Re-reads the task and its execution policy. The policy must be the same
+    entity at the same revision as at the first attempt; unless *policy_only*
+    (an existing-PR correction, whose own pre-launch check binds the task
+    version), `_exact_authority_holds` must hold against the current records.
+    Any read failure refuses (fail closed)."""
+    if captured is None or captured.authority is None:
+        return (captured.error if captured is not None and captured.error
+                else "the authority of the first attempt was not recorded")
+    authority = captured.authority
+    try:
+        record = await asyncio.to_thread(fetch_task_record, entity_id)
+        fresh = _record_snapshot(record)
+        if not isinstance(fresh, dict):
+            return "the task could not be re-read before the retry"
+        _skill, action_type, policy, decision = await asyncio.to_thread(
+            _task_gate_context, fresh, bound_confidence=captured.bound_confidence)
+    except Exception as exc:
+        return f"the task or its execution policy could not be re-read before the retry ({type(exc).__name__})"
+    if not policy.loaded:
+        return "the execution policy could not be read before the retry"
+    if (authority.get("policy_entity_id") != policy.entity_id
+            or authority.get("policy_revision") != execution_policy_revision(policy)):
+        return "the execution policy changed since the first attempt"
+    if policy_only:
+        return None
+    try:
+        user_id = str(await asyncio.to_thread(fetch_entity_user_id, entity_id) or "").strip()
+    except Exception as exc:
+        return f"the task tenant could not be re-read before the retry ({type(exc).__name__})"
+    if not _exact_authority_holds(
+            authority, task_id=entity_id, task_record=record, user_id=user_id,
+            action_type=action_type, policy=policy, decision=decision,
+            gate_action=str(authority.get("gate_action") or ""),
+            blast_radius=str(authority.get("blast_radius") or "")):
+        return ("the task, its tenant or the authority it was released under changed "
+                f"since the first attempt (now {decision.action.value}, blast "
+                f"{decision.blast_radius.value}: {decision.reason})")
+    return None
+
+
+async def _revalidate_first_delivery_retry(entity_id: str, dispatch_snapshot,
+                                           captured: _RetryAuthority | None) -> str | None:
+    """Why a first-delivery retry may not launch now, or None when it may.
+
+    Re-reads the task from Neotoma and compares it with the snapshot the
+    dispatch was decided on (the shape `_correction_policy_reader` compares,
+    lifecycle fields ignored), requires it still to be executing, then
+    requires the authority of the first attempt still to hold
+    (`_revalidate_retry_authority`). Any read or gate failure refuses (fail
+    closed)."""
+    try:
+        fresh, _version = await asyncio.to_thread(fetch_task_snapshot_and_version, entity_id)
+    except Exception as exc:
+        return f"the task could not be re-read before the retry ({type(exc).__name__})"
+    if not isinstance(fresh, dict) or not isinstance(dispatch_snapshot, dict):
+        return "the task could not be re-read before the retry"
+    if normalize_status(fresh.get("status")) != TaskStatus.EXECUTING.value:
+        return "the task is no longer in its admitted executing state"
+    # `blocked_reason` is a lifecycle field too: entering executing clears it
+    # (task_lifecycle.set_task_status), so a released hold differs there alone.
+    lifecycle = {"blocked_reason"}
+    try:
+        if (_task_context_shape(fresh, lifecycle_transition=True, also_ignore=lifecycle)
+                != _task_context_shape(dispatch_snapshot, lifecycle_transition=True,
+                                       also_ignore=lifecycle)):
+            return "the task record changed since it was dispatched; normal re-admission is required"
+    except (TypeError, ValueError):
+        return "the task record could not be compared with the dispatched one"
+    return await _revalidate_retry_authority(entity_id, captured)
+
+
 def _correction_not_started(skill: str, reason: str):
     return SkillResult(skill, False, None, "", "", error=reason,
                        fly_delivery_not_launched=True, fly_delivery_cleanup="not_reserved")
@@ -1116,6 +1408,21 @@ def _watchdog_fly_guard(entity_id: str, snapshot: dict) -> bool:
     return _fly_run_refuses_dispatch(snapshot, entity_id, "watchdog")
 
 
+def _task_context_shape(row, *, lifecycle_transition=False, also_ignore=frozenset()):
+    """The complete JSON task shape, including key presence and JSON types.
+
+    Only the existing dispatch->executing lifecycle fields may differ when
+    *lifecycle_transition* is set; unknown/new scope keys must not be adopted.
+    Shared by the correction policy read and the first-delivery retry check;
+    *also_ignore* names further lifecycle fields a caller's own transition wrote."""
+    import json
+
+    ignored = ({"status", "updated_at", "updated_date", "result"} | set(also_ignore)
+               if lifecycle_transition else set())
+    return json.dumps({key: value for key, value in row.items() if key not in ignored},
+                      sort_keys=True, allow_nan=False, separators=(",", ":"))
+
+
 def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *, lifecycle_version=None,
                               lifecycle_provenance=None):
     """Bind the explicit owner policy read to this current exclusive invocation.
@@ -1141,13 +1448,7 @@ def _correction_policy_reader(entity_id, snapshot, repository, target, claim, *,
             return await asyncio.to_thread(_read_correction_lifecycle_record, lifecycle_provenance)
         return await asyncio.to_thread(fetch_task_snapshot_and_version, entity_id)
 
-    def context_shape(row, *, lifecycle_transition=False):
-        # Compare the complete JSON task shape, including key presence and
-        # JSON types. Only the existing dispatch->executing lifecycle fields
-        # may differ initially; unknown/new scope keys must not be adopted.
-        ignored = {"status", "updated_at", "updated_date", "result"} if lifecycle_transition else set()
-        return json.dumps({key: value for key, value in row.items() if key not in ignored},
-                          sort_keys=True, allow_nan=False, separators=(",", ":"))
+    context_shape = _task_context_shape
 
     async def current():
         try:
@@ -2199,6 +2500,28 @@ def _advance_correction_lifecycle(binding, status, *, clear_reason=False):
         return None
 
 
+def _executing_handoff_unverified_notice(entity_id: str, binding) -> str:
+    """The one BLOCKER notice for an approved correction whose versioned
+    executing write could not be verified. Names no cause: a refused write,
+    a lost reply and an unreadable record look the same from here. Names the
+    task and the status it was last read in, says nothing was started and that
+    the spent approval cannot be released again, so the task needs refiling."""
+    import json
+
+    status = ""
+    try:
+        status = normalize_status(json.loads(binding.snapshot_json).get("status"))
+    except Exception:  # noqa: BLE001 - an unreadable shape still gets the notice
+        pass
+    return (
+        f"Approved correction {entity_id} executing status write could not be verified; "
+        f"this attempt was not started. The task was last read as "
+        f"{status or TaskStatus.ROUTED.value}. Nothing was started and this approval "
+        "cannot be released again: refile the task for a new approval. "
+        "Reconcile current task/admission state. No automatic retry."
+    )
+
+
 # Statuses that mean "filed, nothing has happened to it yet". An allow-list: a
 # status the lifecycle does not know, or any started one (routed, executing,
 # failed, blocked, ...), keeps its normal dispatch path. `open` is what some
@@ -2314,6 +2637,7 @@ async def dispatch_task(
     detach_after_accept: bool = False,
     _approved_correction_lifecycle: _ApprovedCorrectionLifecycle | None = None,
     release_key: str = "",
+    release_authorization: dict | None = None,
 ) -> bool | None:
     """
     Route a task to the appropriate T4 skill and spawn it via a bundled-plan CLI.
@@ -2344,6 +2668,9 @@ async def dispatch_task(
             re-held and released again through a NEW checkpoint really writes
             instead of replaying the first release's idempotency key, while a
             replay of the SAME checkpoint stays idempotent.
+        release_authorization: The authenticated authorization of that
+            checkpoint. A retry after a deferred first attempt must still be
+            covered by it (`_exact_authority_holds`).
     """
     title = snapshot.get("title", "(untitled)")
     current_status = snapshot.get("status")
@@ -2803,8 +3130,14 @@ async def dispatch_task(
 
     # ── Execution gate ──────────────────────────────────────────────────────
     # Skipped when re-dispatching an operator-approved checkpoint.
+    # The decision this dispatch runs under; a first-delivery retry re-runs the
+    # gate and compares against it. An approved release records it at its first
+    # attempt (`_finish_dispatch`), from the snapshot it was released on.
+    dispatch_gate = None
+    dispatch_policy = None
     if not gate_override:
         policy = resolve_policy_for_agent(skill)
+        dispatch_policy = policy
         resolved_action = _resolve_gate_action_type(skill, snapshot, policy)
         action_type = resolved_action.value
         # ateles#902: populate confidence ahead of the read. When no producer
@@ -2946,6 +3279,7 @@ async def dispatch_task(
             f"{' (unscored)' if confidence_unscored else ''} "
             f"→ {decision.action.value} ({decision.reason})"
         )
+        dispatch_gate = decision
         if decision.action != GateAction.AUTO_EXECUTE:
             # Freeze the task before creating the authority the operator will
             # approve.  The authenticated checkpoint binds the complete
@@ -3053,13 +3387,17 @@ async def dispatch_task(
 
     # Lifecycle: about to spawn the T4 agent.
     if correction_lifecycle is not None:
+        routed_binding = correction_lifecycle
         correction_lifecycle = _advance_correction_lifecycle(
             correction_lifecycle, TaskStatus.EXECUTING)
         if correction_lifecycle is None:
             log.warning("[%s] correction %s executing lifecycle handoff could not be verified — not spawning",
                         DAEMON_NAME, entity_id)
-            notifier.send(f"Approved correction {entity_id} lifecycle handoff could not be verified; "
-                          "this attempt was not started. Reconcile current task/admission state.",
+            # The versioned executing write could not be verified (refused, lost
+            # reply or unreadable record; Apis cannot tell which). Nothing was
+            # started and the approval is spent: say so once, with no retry and
+            # no write, naming no cause.
+            notifier.send(_executing_handoff_unverified_notice(entity_id, routed_binding),
                           priority=Priority.BLOCKER, handler=DAEMON_NAME)
             job.failed(f"task {entity_id} executing handoff was not qualified")
             return
@@ -3170,17 +3508,82 @@ async def dispatch_task(
                 dispatch_snapshot = json.loads(correction_lifecycle.snapshot_json)
                 lifecycle_binding["_lifecycle_version"] = correction_lifecycle.version
                 lifecycle_binding["_lifecycle_provenance"] = correction_lifecycle
-            result = await _spawn_harness_skill(
-                skill,
-                entity_id,
-                dispatch_snapshot,
-                trigger,
-                notifier,
-                role=role,
-                run_conversation_id=run_conversation_id,
-                run_agent_session_id=run_agent_session_id,
-                **lifecycle_binding,
-            )
+            retries, backoff = _neotoma_admission_retry_bounds()
+            deferrals = 0
+            waited = 0.0
+            wait_ceiling = _neotoma_admission_wait_ceiling(retries, backoff)
+            wait_beyond_ceiling = None
+            revalidation_refusal = None
+            # Everything below is local to this dispatch's attempt loop: nothing
+            # set here outlives it, and the recheck runs only after a refusal
+            # with fly_neotoma_unavailable, before the next attempt.
+            first_delivery = None
+            # The policy and gate the dispatch was decided on (or its release
+            # authorization), and the task revision as it stands before the first
+            # attempt, so a revision that moves during it refuses the retry. A
+            # plain synchronous read: it yields nothing to the event loop and
+            # writes nothing, so an attempt that is not deferred runs as before.
+            retry_authority = (_capture_retry_authority(
+                entity_id, dispatch_snapshot, dispatch_gate=dispatch_gate,
+                dispatch_policy=dispatch_policy, release_authorization=release_authorization)
+                if retries > 0 else None)
+            while True:
+                result = await _spawn_harness_skill(
+                    skill,
+                    entity_id,
+                    dispatch_snapshot,
+                    trigger,
+                    notifier,
+                    role=role,
+                    run_conversation_id=run_conversation_id,
+                    run_agent_session_id=run_agent_session_id,
+                    **lifecycle_binding,
+                )
+                if not _neotoma_admission_deferred(result) or deferrals >= retries:
+                    break
+                # Nothing launched and the receipt is released: wait out the
+                # outage and try again. Each retry re-reads and re-reserves.
+                delay = _neotoma_admission_wait(
+                    backoff, deferrals + 1, getattr(result, "fly_retry_after_seconds", None))
+                if not math.isfinite(delay) or waited + delay > wait_ceiling:
+                    # Neotoma asked for a wait past the schedule's limit: end as
+                    # exhausted now rather than retry before it said to.
+                    wait_beyond_ceiling = delay
+                    break
+                if deferrals == 0:
+                    # Every retry is bound to the authority of the first attempt: a
+                    # first delivery re-checks the task, tenant, policy revision and
+                    # (for an approved release) its authorization before each retry;
+                    # an existing-PR correction re-checks the policy revision here and
+                    # its task and target itself (`_run_fly_delivery_task.verify_correction`).
+                    first_delivery = (correction_lifecycle is None
+                                      and dispatch_snapshot.get("task_type") != "existing_pr_correction")
+                    if first_delivery:
+                        try:
+                            first_delivery = build_delivery.existing_pr_target(
+                                dispatch_snapshot,
+                                _dispatch_repo_from_snapshot(dispatch_snapshot)) is None
+                        except Exception:
+                            first_delivery = True  # unknown: re-check rather than skip it
+                deferrals += 1
+                log.warning(
+                    f"[{DAEMON_NAME}] {skill} task {entity_id}: Neotoma did not answer the "
+                    f"Fly admission check; nothing launched; retry {deferrals}/{retries} "
+                    f"in {delay:.0f}s")
+                _run_stage("assistant",
+                           f"{skill}: Neotoma did not answer the admission check; nothing "
+                           f"was launched; retry {deferrals}/{retries} in {delay:.0f}s",
+                           stage="deferred")
+                await asyncio.sleep(delay)
+                waited += delay
+                if first_delivery:
+                    revalidation_refusal = await _revalidate_first_delivery_retry(
+                        entity_id, dispatch_snapshot, retry_authority)
+                else:
+                    revalidation_refusal = await _revalidate_retry_authority(
+                        entity_id, retry_authority, policy_only=True)
+                if revalidation_refusal:
+                    break
         except Exception as exc:
             # Unexpected crash in the spawn machinery itself → record as a
             # failed run.
@@ -3726,6 +4129,87 @@ async def dispatch_task(
             )
             notifier.send(notice, priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
             job.failed(f"task {entity_id} → {skill} Fly delivery ended")
+        elif revalidation_refusal:
+            # A first-delivery retry found the task changed, unreadable, no
+            # longer executing or no longer allowed by the gate: nothing
+            # launched on this attempt, and none will under the stale decision.
+            reason = (
+                f"{skill} retry not started on {entity_id}: {revalidation_refusal}. "
+                "Nothing was launched; the earlier attempt was deferred because "
+                "Neotoma did not answer the admission check."
+            )
+            _run_stage("assistant", reason, stage="blocked")
+            if run_session:
+                update_run_session_status(run_session, status="failed")
+            # No checkpoint is written here, so there is nothing to approve and
+            # no held status (failure_posture.md rule 5: the checkpoint is the
+            # hold). Still this dispatch's task: it takes the failed-dispatch
+            # status and the existing recovery owns it. One that left executing
+            # belongs to whoever moved it and is not written over.
+            if revalidation_refusal != "the task is no longer in its admitted executing state":
+                reason += " The task is left to the failed-dispatch recovery."
+                set_task_status(
+                    entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
+                    from_status=TaskStatus.EXECUTING.value, reason=reason,
+                    key_suffix=f"{trigger}-revalidation")
+            notifier.send(reason, priority=Priority.BLOCKER, handler=DAEMON_NAME)
+            job.failed(f"task {entity_id} → {skill} retry not started: {revalidation_refusal}")
+        elif _neotoma_admission_deferred(result):
+            # The bounded retries ran out with Neotoma still not answering.
+            # Nothing launched. Held only once its checkpoint reads back; with
+            # no checkpoint, the failed-dispatch status. One notice either way.
+            reason = (
+                f"Neotoma's admission check did not answer after {deferrals + 1} "
+                "attempt(s); nothing was launched and no delivery receipt is held."
+                + (f" Neotoma asked to wait {_stated_wait_text(wait_beyond_ceiling)}, "
+                   "past the retry schedule's limit, so no earlier attempt was made."
+                   if wait_beyond_ceiling is not None else "")
+            )
+            _run_stage("assistant", f"{skill}: {reason}", stage="blocked")
+            if run_session:
+                update_run_session_status(run_session, status="failed")
+            # The checkpoint is the hold: it is written and read back first,
+            # and only then does the task take its held status.
+            brief_id, unrecorded = _write_neotoma_admission_checkpoint(
+                entity_id, skill=skill, title=title, trigger=trigger, reason=reason)
+            if brief_id:
+                reason += " Approving this task's rounds_exhausted checkpoint releases it again."
+                set_task_status(
+                    entity_id, TaskStatus.BLOCKED, handler=DAEMON_NAME,
+                    from_status=TaskStatus.EXECUTING.value, reason=reason,
+                    result=reason, key_suffix=trigger)
+                try:
+                    saved = fetch_task_snapshot(entity_id) or {}
+                    held = (normalize_status(saved.get("status")) == TaskStatus.BLOCKED.value
+                            and saved.get("result") == reason)
+                except Exception:
+                    held = False
+                notice = (
+                    f"{skill} on {entity_id}: {reason} The task is held with checkpoint "
+                    f"{brief_id} ({NEOTOMA_ADMISSION_EXHAUSTED_REASON}). Approve checkpoint "
+                    f"{brief_id} to release the task again."
+                    if held else
+                    f"{skill} on {entity_id}: {reason} Checkpoint {brief_id} exists but the "
+                    "hold could not be confirmed; nothing was launched. Reconcile the task "
+                    "record.")
+                notifier.send(notice, priority=Priority.OPERATOR_DECISION, handler=DAEMON_NAME)
+                job.failed(f"task {entity_id} → {skill} held: Neotoma admission did not answer")
+            else:
+                # No checkpoint means nothing to approve: no held status. The
+                # task takes the failed-dispatch status so the existing
+                # recovery (the stall watchdog) owns it.
+                failed_reason = (f"{reason} No checkpoint exists ({unrecorded}); the task "
+                                 "is left to the failed-dispatch recovery.")
+                set_task_status(
+                    entity_id, TaskStatus.FAILED, handler=DAEMON_NAME,
+                    from_status=TaskStatus.EXECUTING.value, reason=failed_reason,
+                    key_suffix=trigger)
+                notifier.send(
+                    f"{skill} on task {entity_id}: {reason} No checkpoint exists for this "
+                    f"task ({unrecorded}), so it is not held; it was left in the "
+                    "failed-dispatch status for the existing recovery.",
+                    priority=Priority.BLOCKER, handler=DAEMON_NAME)
+                job.failed(f"task {entity_id} → {skill} admission exhausted; no checkpoint")
         elif (getattr(result, "fly_delivery_not_launched", False)
               and getattr(result, "fly_delivery_cleanup", "") in {"released", "not_reserved"}):
             reason = _redact_secrets(build_delivery.fly_prelaunch_failure_summary(result))
@@ -4586,6 +5070,47 @@ def iter_held_task_ids(*, limit: int | None = None):
             yield task_id
 
 
+def _exact_authority_holds(
+    authority: dict,
+    *,
+    task_id: str,
+    task_record: dict,
+    user_id: str,
+    action_type: str,
+    policy,
+    decision: GateDecision,
+    gate_action: str,
+    blast_radius: str,
+) -> bool:
+    """Whether *authority* still binds exactly these current records.
+
+    The one comparison an approved release makes before it dispatches, and a
+    first-delivery retry makes before it launches again: the same task and
+    tenant, the same task revision, action type, execution policy entity and
+    revision, gate action and blast radius, and a current gate decision the
+    approval covers. Any difference, or any absent field, is False."""
+    if not isinstance(authority, dict) or not isinstance(task_record, dict):
+        return False
+    return bool(
+        authority.get("task_entity_id") == task_id
+        and user_id
+        and authority.get("user_id") == user_id
+        and authority.get("task_revision") == entity_record_digest(task_record)
+        and authority.get("task_observation_count")
+        == task_record.get("observation_count")
+        and authority.get("task_last_observation_at")
+        == task_record.get("last_observation_at")
+        and str(authority.get("action_type") or "").strip().lower() == action_type
+        and authority.get("policy_entity_id") == policy.entity_id
+        and authority.get("policy_revision") == execution_policy_revision(policy)
+        and authority.get("gate_action") == gate_action
+        and authority.get("blast_radius") == blast_radius
+        and _decision_consistent_with_approval(
+            decision, gate_action=gate_action, blast_radius=blast_radius
+        )
+    )
+
+
 def _decision_consistent_with_approval(
     current_decision: GateDecision, *, gate_action: str, blast_radius: str
 ) -> bool:
@@ -4835,7 +5360,6 @@ async def handle_checkpoint_brief(
             )
             return False
 
-        auth_action_type = str(authorization.get("action_type") or "").strip().lower()
         if not current_policy.loaded:
             _require_fresh_release_authority(
                 entity_id,
@@ -4865,23 +5389,17 @@ async def handle_checkpoint_brief(
             successful_recurrences=_successful_recurrences(task_snapshot),
             confidence_unscored=release_unscored,
         )
-        exact_authority = (
-            authorization.get("task_entity_id") == task_id
-            and authorization.get("user_id") == brief_user_id == task_user_id
-            and authorization.get("task_revision") == entity_record_digest(task_record)
-            and authorization.get("task_observation_count")
-            == task_record.get("observation_count")
-            and authorization.get("task_last_observation_at")
-            == task_record.get("last_observation_at")
-            and auth_action_type == current_action_type
-            and authorization.get("policy_entity_id") == current_policy.entity_id
-            and authorization.get("policy_revision")
-            == execution_policy_revision(current_policy)
-            and authorization.get("gate_action") == gate_action
-            and authorization.get("blast_radius") == blast_radius
-            and _decision_consistent_with_approval(
-                current_decision, gate_action=gate_action, blast_radius=blast_radius
-            )
+        # brief_user_id == task_user_id was established above.
+        exact_authority = _exact_authority_holds(
+            authorization,
+            task_id=task_id,
+            task_record=task_record,
+            user_id=task_user_id,
+            action_type=current_action_type,
+            policy=current_policy,
+            decision=current_decision,
+            gate_action=gate_action,
+            blast_radius=blast_radius,
         )
         if not exact_authority:
             _require_fresh_release_authority(
@@ -4971,6 +5489,7 @@ async def handle_checkpoint_brief(
         gate_override=True,
         detach_after_accept=detach_after_accept,
         release_key=entity_id,
+        release_authorization=authorization,
         **lifecycle_binding,
     )
     if correction_lifecycle is not None and dispatched is not True:
