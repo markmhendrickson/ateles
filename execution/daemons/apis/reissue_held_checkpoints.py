@@ -15,13 +15,18 @@ nor superseded, exactly as before.  A task whose newest checkpoint was
 superseded on purpose (``supersede_checkpoint``) is left alone and reported as
 ``retired``, in the dry run and under ``--apply`` alike, so a clean-up is not
 silently undone.  Naming a task with ``--task`` refiles it even then: the caller
-asked for it.  When a task's checkpoints cannot be read, a blanket run files
-nothing for it and reports ``unknown``, never treating the failed read as "no
-checkpoint".
+asked for it.  A blanket run files nothing and reports ``unknown`` whenever it
+cannot tell whether a hold was retired: the checkpoints cannot be read (they
+are read strictly, so a malformed listing fails the read), a row is malformed
+(not a record, or no ``entity_id`` or status), or a checkpoint was superseded
+but the order of the checkpoints is unknown.  Order is by creation time, parsed
+as ISO 8601 with an offset (``Z`` accepted) and compared in UTC; a missing,
+unparseable or offset-less stamp makes the order unknown.  With no superseded
+checkpoint there is no retirement evidence, so the task is refiled as before.
 
 One JSON object per task on stdout, then a summary object.  Exit status is
 non-zero when any task ``failed`` (a read or the replacement write did not
-succeed), is ``unknown`` (its checkpoints could not be read) or is
+succeed), is ``unknown`` (whether its hold was retired could not be told) or is
 ``incomplete`` (a stale brief could not be retired), so an
 operator can re-run (the operation is idempotent) until it is zero.
 """

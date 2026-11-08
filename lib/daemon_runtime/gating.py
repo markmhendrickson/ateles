@@ -1885,11 +1885,20 @@ def query_all_entities(
     return found
 
 
-def checkpoints_for_task(task_entity_id: str) -> list[dict] | None:
-    """Every checkpoint_brief that names ``task_entity_id``; ``None`` on a failed read."""
+def checkpoints_for_task(
+    task_entity_id: str, *, strict: bool = False
+) -> list[dict] | None:
+    """Every checkpoint_brief that names ``task_entity_id``; ``None`` on a failed read.
+
+    ``strict`` reads the collection with ``query_all_entities(strict=True)``,
+    so a malformed row or an inconsistent listing makes the whole read
+    ``None`` rather than a silently smaller list.  The default keeps the
+    lenient read for callers that do not decide safety from the rows.
+    """
     return query_all_entities(
         "checkpoint_brief",
         snapshot_filters={"task_entity_id": {"op": "eq", "value": task_entity_id}},
+        strict=strict,
     )
 
 

@@ -4712,32 +4712,77 @@ _BLOCKER_SUMMARIES = {
 }
 
 
-def _newest_checkpoint_superseded(checkpoints: list[dict]) -> str | None:
-    """Return the id of the task's newest checkpoint when it was superseded.
+def _checkpoint_created_at(item: dict) -> datetime | None:
+    """A brief's creation time as an aware UTC datetime; ``None`` when unknown.
+
+    Only an ISO 8601 stamp that carries an offset (``Z`` accepted) is a known
+    time.  A missing, unparseable or naive stamp gives ``None``: its place in
+    the order is unknown, never guessed from string comparison.
+    """
+    raw = item.get("created_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        return None
+    return stamp.astimezone(timezone.utc)
+
+
+def _malformed_checkpoint_row(item: object) -> bool:
+    """True when a checkpoint row cannot carry evidence about retirement."""
+    if not isinstance(item, dict):
+        return True
+    checkpoint_id = item.get("entity_id")
+    if not isinstance(checkpoint_id, str) or not checkpoint_id.strip():
+        return True
+    status = (_record_snapshot(item) or {}).get("status")
+    return not isinstance(status, str) or not status.strip()
+
+
+def _newest_checkpoint_superseded(
+    checkpoints: list[dict],
+) -> tuple[str, str | None]:
+    """Whether the task's newest checkpoint was superseded on purpose.
+
+    Returns ``("retired", id)`` when the newest brief is ``superseded``,
+    ``("not_retired", None)`` when it is not (or there are no briefs), and
+    ``("unknown", None)`` when retirement cannot be decided.
 
     A hold retired on purpose with ``supersede_checkpoint`` leaves its newest
-    brief at ``superseded``.  Newest is judged by the record's creation time;
-    when any brief lacks one the order is unknown, so the hold counts as
-    retired only when every brief is superseded.
+    brief at ``superseded``.  Newest is judged by creation time, compared as
+    UTC datetimes parsed from ISO 8601 stamps with an offset.  When any stamp
+    is missing, unparseable or naive, or the newest time is shared by briefs
+    of different status, the order is unknown: if any brief is superseded the
+    result is ``unknown`` (fail closed, nothing is refiled); if none is, there
+    is no retirement evidence and the result is ``not_retired``.  Callers must
+    reject malformed rows (``_malformed_checkpoint_row``) before calling.
     """
-    rows = [c for c in checkpoints if str(c.get("entity_id") or "")]
-    if not rows:
-        return None
+    if not checkpoints:
+        return ("not_retired", None)
 
     def _status(item: dict) -> str:
         return str((_record_snapshot(item) or {}).get("status") or "").strip().lower()
 
-    def _stamp(item: dict) -> str:
-        return str(item.get("created_at") or "")
-
-    if all(_stamp(c) for c in rows):
-        newest = max(rows, key=lambda c: (_stamp(c), str(c["entity_id"])))
-        if _status(newest) == CHECKPOINT_SUPERSEDED:
-            return str(newest["entity_id"])
-        return None
-    if all(_status(c) == CHECKPOINT_SUPERSEDED for c in rows):
-        return str(max(rows, key=lambda c: str(c["entity_id"]))["entity_id"])
-    return None
+    any_superseded = any(_status(c) == CHECKPOINT_SUPERSEDED for c in checkpoints)
+    if not any_superseded:
+        return ("not_retired", None)
+    stamped = [(_checkpoint_created_at(c), c) for c in checkpoints]
+    if any(stamp is None for stamp, _ in stamped):
+        return ("unknown", None)
+    newest_at = max(stamp for stamp, _ in stamped)
+    newest = [c for stamp, c in stamped if stamp == newest_at]
+    newest_statuses = {_status(c) for c in newest}
+    if len(newest_statuses) > 1:
+        return ("unknown", None)
+    if newest_statuses == {CHECKPOINT_SUPERSEDED}:
+        return ("retired", str(max(str(c["entity_id"]) for c in newest)))
+    return ("not_retired", None)
 
 
 def reissue_held_task_checkpoint(
@@ -4776,8 +4821,13 @@ def reissue_held_task_checkpoint(
         superseded on purpose; it is not refiled, so a clean-up stays done.
         ``checkpoint_id`` is that superseded checkpoint.  Naming the task
         (``keep_retired=False``) refiles it as before;
-      * ``unknown`` - the task's checkpoints could not be read, so whether its
-        hold was retired is unknown; nothing is filed.
+      * ``unknown`` - whether the hold was retired cannot be decided, so
+        nothing is filed: the checkpoints could not be read (they are read
+        strictly), a row is malformed (not a record, no ``entity_id`` or no
+        status), or a checkpoint was superseded but the order is unknown (a
+        creation time is missing, unparseable or has no offset, or the newest
+        time is shared).  With no superseded checkpoint there is no retirement
+        evidence and the task is refiled as before.
 
     Guarantees, each pinned by a test:
       * only a task at ``awaiting_approval`` right now is touched, so a done,
@@ -4801,7 +4851,13 @@ def reissue_held_task_checkpoint(
     if status != TaskStatus.AWAITING_APPROVAL.value:
         return ReissueResult(task_id, "skipped", f"not held (status={status or 'unset'})")
 
-    existing = checkpoints_for_task(task_id)
+    # A blanket run decides "retired or lost" from these rows, so it reads them
+    # strictly: a malformed row fails the whole read instead of vanishing.
+    existing = (
+        checkpoints_for_task(task_id, strict=True)
+        if keep_retired
+        else checkpoints_for_task(task_id)
+    )
     if existing is None:
         if keep_retired:
             # A failed read is never "no checkpoint": a retired hold would be
@@ -4813,6 +4869,15 @@ def reissue_held_task_checkpoint(
                 "retired is unknown, nothing was filed",
             )
         return ReissueResult(task_id, "failed", "checkpoint list could not be read")
+    if keep_retired and any(_malformed_checkpoint_row(item) for item in existing):
+        # A row with no id or no status could be the superseded newest brief;
+        # dropping it could refile a retired hold.
+        return ReissueResult(
+            task_id,
+            "unknown",
+            "checkpoint list holds a malformed row (not a record, or no id or "
+            "status); whether the hold was retired is unknown, nothing was filed",
+        )
     current_id: str | None = None
     stale_pending: list[str] = []
     for item in existing:
@@ -4848,8 +4913,17 @@ def reissue_held_task_checkpoint(
             stale_pending.append(checkpoint_id)
 
     if keep_retired and current_id is None:
-        retired_id = _newest_checkpoint_superseded(existing)
-        if retired_id:
+        retirement, retired_id = _newest_checkpoint_superseded(existing)
+        if retirement == "unknown":
+            return ReissueResult(
+                task_id,
+                "unknown",
+                "a checkpoint was superseded but the order of the checkpoints "
+                "is unknown (a creation time is missing, unparseable, has no "
+                "offset, or is shared); whether the hold was retired is "
+                "unknown, nothing was filed",
+            )
+        if retirement == "retired":
             return ReissueResult(
                 task_id,
                 "retired",

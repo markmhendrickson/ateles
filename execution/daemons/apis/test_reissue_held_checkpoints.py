@@ -44,6 +44,7 @@ class _Record:
             entity_id="policy", loaded=True, authorization_revision="policy-v1"
         )
         self.events: list[str] = []
+        self.strict_reads: list[bool] = []
         monkeypatch.setattr(apis, "fetch_task_record", self.fetch_task)
         monkeypatch.setattr(apis, "fetch_entity_user_id", lambda _id: "tenant-a")
         monkeypatch.setattr(
@@ -84,7 +85,8 @@ class _Record:
     def fetch_task(self, task_id):
         return self.tasks.get(task_id)
 
-    def for_task(self, task_id):
+    def for_task(self, task_id, *, strict=False):
+        self.strict_reads.append(strict)
         return [
             c
             for c in self.checkpoints.values()
@@ -235,7 +237,7 @@ def test_unpersisted_replacement_fails_closed_and_retires_nothing(record):
 
 def test_unreadable_checkpoint_list_is_a_failure_not_a_skip(record, monkeypatch):
     record.add_task("ent_t1")
-    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id: None)
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id, **_kw: None)
 
     result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
 
@@ -387,7 +389,7 @@ def test_cli_read_failures_exit_nonzero_and_confirmed_skips_exit_zero(
     assert '"task_id": "ent_missing"' in out and '"outcome": "failed"' in out
 
     record.add_task("ent_t1")
-    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id: None)
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id, **_kw: None)
     assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 1
 
 
@@ -904,7 +906,7 @@ def test_blanket_run_does_not_refile_when_checkpoints_cannot_be_read(
     record, monkeypatch, capsys
 ):
     record.add_task("ent_t1")
-    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id: None)
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id, **_kw: None)
     _blanket(monkeypatch, "ent_t1")
 
     assert _run_cli(monkeypatch, "--apply") == 1
@@ -913,3 +915,176 @@ def test_blanket_run_does_not_refile_when_checkpoints_cannot_be_read(
     assert rows[0]["task_id"] == "ent_t1"
     assert rows[0]["outcome"] == "unknown"
     assert record.writes == 0
+
+
+# ── fail closed when retirement evidence is malformed or unordered (#1704) ──
+
+
+def _production_reader(monkeypatch, rows):
+    """Serve ``rows`` through the real collection reader, one consistent page."""
+    monkeypatch.setattr(apis, "checkpoints_for_task", gating.checkpoints_for_task)
+
+    def page(_type, *, snapshot_filters, offset=0, limit=None):
+        if offset:
+            return {"entities": [], "total": len(rows)}
+        return {"entities": list(rows), "total": len(rows)}
+
+    monkeypatch.setattr(gating, "query_entities", page)
+
+
+def test_blanket_apply_with_a_malformed_row_reports_unknown_and_files_nothing(
+    record, monkeypatch, capsys
+):
+    # The superseded newest brief comes back without an entity_id.  A lenient
+    # read keeps it and the reissue path drops it, leaving "no checkpoint", so
+    # the blanket run would refile a retired hold.
+    record.add_task("ent_t1")
+    _production_reader(
+        monkeypatch,
+        [
+            {
+                "entity_type": "checkpoint_brief",
+                "created_at": "2026-11-01T10:00:00Z",
+                "snapshot": {"task_entity_id": "ent_t1", "status": "superseded"},
+            }
+        ],
+    )
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["task_id"] == "ent_t1"
+    assert rows[0]["outcome"] == "unknown"
+    assert record.writes == 0
+    assert _awaiting(record) == []
+
+
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        "not-a-record",
+        {"entity_id": "", "snapshot": {"status": "superseded"}},
+        {"entity_id": "ent_x", "snapshot": {"task_entity_id": "ent_t1"}},
+    ],
+    ids=["not_a_mapping", "empty_id", "no_status"],
+)
+def test_blanket_run_treats_every_malformed_row_shape_as_unknown(
+    record, monkeypatch, capsys, bad_row
+):
+    record.add_task("ent_t1")
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id, **_kw: [bad_row])
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "unknown"
+    assert record.writes == 0
+
+
+def test_blanket_run_reads_checkpoints_strictly_and_named_run_does_not(
+    record, monkeypatch, capsys
+):
+    _retired_hold(record)
+    _blanket(monkeypatch, "ent_t1")
+    _run_cli(monkeypatch, "--apply")
+    _run_cli(monkeypatch, "--task", "ent_t1")
+    capsys.readouterr()
+
+    assert record.strict_reads == [True, False]
+
+
+def test_malformed_stamp_on_an_older_live_row_makes_order_unknown(
+    record, monkeypatch, capsys
+):
+    # "zzz" sorts after the real stamp as a string, so string comparison would
+    # call the rejected brief newest and refile the retired hold.
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_old", "ent_t1", signed=True, status="rejected")
+    record.checkpoints["ent_old"]["created_at"] = "zzz"
+    record.add_checkpoint("ent_new", "ent_t1", signed=True, status="superseded")
+    record.checkpoints["ent_new"]["created_at"] = "2026-11-02T10:00:00Z"
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["outcome"] == "unknown"
+    assert record.writes == 0
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [None, "", "not-a-date", "2026-11-03T10:00:00"],
+    ids=["missing", "empty", "unparseable", "naive"],
+)
+def test_unknown_order_with_a_superseded_brief_is_unknown(
+    record, monkeypatch, capsys, stamp
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_a", "ent_t1", signed=True, status="superseded")
+    record.checkpoints["ent_a"]["created_at"] = "2026-11-02T10:00:00Z"
+    record.add_checkpoint("ent_b", "ent_t1", signed=True, status="rejected")
+    if stamp is not None:
+        record.checkpoints["ent_b"]["created_at"] = stamp
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "unknown"
+    assert record.writes == 0
+
+
+def test_unknown_order_with_no_superseded_brief_is_refiled(
+    record, monkeypatch, capsys
+):
+    # No superseded brief means no retirement evidence: refile as before.
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_a", "ent_t1", signed=True, status="rejected")
+    record.checkpoints["ent_a"]["created_at"] = "zzz"
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 0
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "reissued"
+    assert record.writes == 1
+
+
+@pytest.mark.parametrize(
+    "superseded_at, other_at, expected",
+    [
+        # The pair from the review: 11:30+01:00 is 10:30Z, so the rejected
+        # brief is newer and the hold is refiled.
+        ("2026-11-01T10:00:00Z", "2026-11-01T11:30:00+01:00", "reissued"),
+        # 09:30-02:00 is 11:30Z, newer than 10:00Z, although as a string it
+        # sorts first: string order would refile a retired hold.
+        ("2026-11-01T09:30:00-02:00", "2026-11-01T10:00:00Z", "retired"),
+        # 10:30+01:00 is 09:30Z, older than 10:00Z, although as a string it
+        # sorts last: string order would keep a lost hold retired.
+        ("2026-11-01T10:30:00+01:00", "2026-11-01T10:00:00Z", "reissued"),
+    ],
+)
+def test_stamps_in_different_offsets_are_ordered_as_datetimes(
+    record, monkeypatch, capsys, superseded_at, other_at, expected
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_sup", "ent_t1", signed=True, status="superseded")
+    record.checkpoints["ent_sup"]["created_at"] = superseded_at
+    record.add_checkpoint("ent_rej", "ent_t1", signed=True, status="rejected")
+    record.checkpoints["ent_rej"]["created_at"] = other_at
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 0
+    assert _records(capsys.readouterr().out)[0]["outcome"] == expected
+
+
+def test_named_task_run_ignores_retirement_evidence_and_refiles(
+    record, monkeypatch, capsys
+):
+    # Unknown order and a superseded brief: --task still refiles, unchanged.
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_a", "ent_t1", signed=True, status="superseded")
+    record.checkpoints["ent_a"]["created_at"] = "zzz"
+
+    assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 0
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["outcome"] == "reissued"
+    assert record.writes == 1

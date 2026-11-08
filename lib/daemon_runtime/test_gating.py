@@ -2137,6 +2137,16 @@ def test_non_strict_listing_keeps_repeated_and_unidentified_rows(monkeypatch):
                      {"entity_type": "other"}]
 
 
+def test_checkpoints_for_task_is_non_strict_by_default_and_strict_on_request(
+        monkeypatch):
+    pages = [{"entities": [{"entity_type": "checkpoint_brief"}]}]
+    _serve_pages(monkeypatch, pages)
+    assert gating_module.checkpoints_for_task("ent_t") == [
+        {"entity_type": "checkpoint_brief"}]
+    _serve_pages(monkeypatch, pages)
+    assert gating_module.checkpoints_for_task("ent_t", strict=True) is None
+
+
 # ── never-tier hold reasons: reserved vs unclassified (ateles#1599) ──────────
 OPERATOR_ONLY_REASON_TEXT = (
     "operator-only action — never auto-executable at any confidence or "
