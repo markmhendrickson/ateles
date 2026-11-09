@@ -1001,26 +1001,27 @@ CHECKPOINT_PAGE_SIZE = 50
 # filtered queue cannot be walked by a stable keyset cursor and is walked by
 # `offset` instead (see `query_entities` in lib/daemon_runtime/gating.py). The
 # `next_cursor` this tool hands out is its own opaque encoding, never the
-# server's: besides the next offset it carries what the walk needs to prove
-# continuity across calls (the queue's total when the walk began, the first
-# page's ids as a digest, and the last id handed out).
+# server's: it carries only the next offset and the filter it belongs to.
+#
+# Offset paging over a queue that can change between calls cannot prove that a
+# walk across calls skipped nothing (one record resolved on a page already
+# read and one appended at the end leave the total and page one unchanged), and
+# a well-formed cursor the tool never issued can skip pages. So no page reached
+# through a cursor ever claims the queue was read in full: only a read that
+# fits on one page, with no cursor, may say `complete: true`.
 _CHECKPOINT_CURSOR_PREFIX = "list_checkpoints:walk:"
 
 _CHECKPOINT_QUEUE_FILTER = {"status": {"op": "eq", "value": "awaiting_operator"}}
 
-_QUEUE_CHANGED = "queue changed while it was read"
+_MULTI_PAGE_NOT_PROVEN = (
+    "this listing was read across pages while the queue could change; offset "
+    "paging cannot prove no record was skipped. List again without a cursor, "
+    "with a larger limit if needed, to confirm"
+)
 
 
-def _encode_checkpoint_cursor(
-    offset: int, *, total: int, page_size: int, first_digest: str, last_id: str
-) -> str:
-    state = {
-        "offset": offset,
-        "total": total,
-        "page_size": page_size,
-        "first_digest": first_digest,
-        "last_id": last_id,
-    }
+def _encode_checkpoint_cursor(offset: int) -> str:
+    state = {"offset": offset, "filter": _CHECKPOINT_QUEUE_FILTER}
     raw = (_CHECKPOINT_CURSOR_PREFIX + json.dumps(state, sort_keys=True)).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
@@ -1031,7 +1032,12 @@ def _is_count(value: Any) -> bool:
 
 
 def _decode_checkpoint_cursor(cursor: str) -> dict | None:
-    """The walk state a cursor this tool issued carries; None for any other."""
+    """The walk state a well-formed cursor for this queue carries; None otherwise.
+
+    A cursor whose filter is not this request's queue filter is rejected. A
+    well-formed cursor cannot be told apart from one this tool issued; that is
+    safe because a page read through any cursor reports `complete: false`.
+    """
     text = str(cursor or "").strip()
     try:
         raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode()
@@ -1045,24 +1051,11 @@ def _decode_checkpoint_cursor(cursor: str) -> dict | None:
         return None
     if not isinstance(state, dict):
         return None
-    if not all(_is_count(state.get(k)) for k in ("offset", "total", "page_size")):
+    if not _is_count(state.get("offset")) or state["offset"] < 1:
         return None
-    if state["offset"] < 1 or state["page_size"] < 1:
-        return None
-    if not all(
-        isinstance(state.get(k), str) and state[k]
-        for k in ("first_digest", "last_id")
-    ):
+    if state.get("filter") != _CHECKPOINT_QUEUE_FILTER:
         return None
     return state
-
-
-def _checkpoint_page_ids(data: dict) -> list[str]:
-    return [str(ent.get("entity_id") or ent.get("id")) for ent in data["entities"]]
-
-
-def _checkpoint_ids_digest(ids: list[str]) -> str:
-    return hmac.new(b"list_checkpoints", "\n".join(ids).encode(), "sha256").hexdigest()
 
 
 def _checkpoint_page_problem(data: Any, offset: int) -> str | None:
@@ -1151,14 +1144,13 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
     `truncated` is stated explicitly rather than left to be inferred from
     comparing two numbers.
 
-    A walk that spans more than one call is reported complete only when its
-    continuity is shown: every page reported the walk's starting `total`, no
-    page repeats the id the previous page ended on, the ids handed out add up to
-    that `total`, and a re-read of the first page at the end returns the same
-    `total` and the same ids in the same order. Otherwise the result carries
-    `incomplete: true` and `incomplete_reason`, never a smaller success: offset
-    paging over a queue that changed between calls can skip a record without
-    any page looking wrong.
+    `complete` is the only field that says the queue was read in full. It is
+    true only when the call took no cursor and the whole filtered queue fit on
+    that one page. Every page read through a cursor, and any first page with
+    more after it, reports `complete: false`: offset paging over a queue that
+    can change between calls cannot prove a walk skipped nothing, so a
+    multi-page walk returns the records it read and says plainly that its
+    completeness is not proven (`completeness_reason` on its last page).
     """
     page_size = limit or CHECKPOINT_PAGE_SIZE
     offset = 0
@@ -1195,7 +1187,7 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
     entities = data["entities"]
     total = data["total"]
     next_cursor = data.get("next_cursor")
-    ids = _checkpoint_page_ids(data)
+    ids = [str(ent.get("entity_id") or ent.get("id")) for ent in entities]
 
     checkpoints = []
     for ent, eid in zip(entities, ids):
@@ -1243,10 +1235,6 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
         "checkpoints": checkpoints,
     }
 
-    reason = _walk_discontinuity(walk, total, ids, offset, returned, has_more)
-    if reason:
-        return _mark_incomplete(result, reason)
-
     if has_more and returned == 0:
         # More is claimed but this page moved nothing: a cursor for the same
         # offset would loop forever, and no cursor would read as the end.
@@ -1255,76 +1243,30 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
             "but returned none; the queue could not be listed to the end"
         )
         result["truncated"] = True
+        result["complete"] = False
     elif has_more:
-        first_digest = walk["first_digest"] if walk else _checkpoint_ids_digest(ids)
-        first_size = walk["page_size"] if walk else page_size
         result["truncated"] = True
-        result["next_cursor"] = _encode_checkpoint_cursor(
-            offset + returned,
-            total=walk["total"] if walk else total,
-            page_size=first_size,
-            first_digest=first_digest,
-            last_id=ids[-1],
-        )
+        result["complete"] = False
+        result["next_cursor"] = _encode_checkpoint_cursor(offset + returned)
         result["note"] = (
             f"Showing {returned} of {total} pending checkpoints. Pass `cursor` "
             "to retrieve the next page."
         )
     elif walk is not None:
-        # The last page of a walk that spanned calls: re-read the first page
-        # and confirm the queue's head did not move under the walk.
-        first, failure = _read_checkpoint_page(0, walk["page_size"])
-        if failure is not None:
-            return _mark_incomplete(
-                result,
-                "the first page could not be re-read to confirm the walk: "
-                + failure["error"],
-            )
-        if first["total"] != walk["total"] or _checkpoint_ids_digest(
-            _checkpoint_page_ids(first)
-        ) != walk["first_digest"]:
-            return _mark_incomplete(result, _QUEUE_CHANGED)
-    return result
-
-
-def _walk_discontinuity(
-    walk: dict | None,
-    total: int,
-    ids: list[str],
-    offset: int,
-    returned: int,
-    has_more: bool,
-) -> str | None:
-    """Why this page cannot continue the walk the cursor describes, if it cannot."""
-    if len(set(ids)) != len(ids):
-        return "the page repeats a checkpoint id"
-    if walk is None:
-        return None
-    if total != walk["total"]:
-        return (
-            f"{_QUEUE_CHANGED} (total was {walk['total']} when the walk began, "
-            f"{total} at offset {offset})"
+        # The last page of a walk across calls, or a page reached through a
+        # cursor the tool may never have issued: neither proves the walk saw
+        # every record.
+        result["complete"] = False
+        result["completeness_reason"] = _MULTI_PAGE_NOT_PROVEN
+    elif returned != total:
+        result["complete"] = False
+        result["completeness_reason"] = (
+            f"Neotoma reported {total} pending checkpoints but returned "
+            f"{returned} with no further page; list again to confirm"
         )
-    if walk["last_id"] in ids:
-        return f"{_QUEUE_CHANGED} (a checkpoint from the previous page reappeared)"
-    if not has_more and offset + returned != total:
-        return (
-            f"{_QUEUE_CHANGED} ({offset + returned} checkpoints handed out "
-            f"against a total of {total})"
-        )
-    return None
-
-
-def _mark_incomplete(result: dict, reason: str) -> dict:
-    """The records collected, stated as a partial walk with no way to continue it."""
-    result["truncated"] = True
-    result["incomplete"] = True
-    result["incomplete_reason"] = reason
-    result.pop("next_cursor", None)
-    result["note"] = (
-        "This listing is incomplete: "
-        f"{reason}. Call without a cursor to walk the queue again from the start."
-    )
+    else:
+        # One page, no cursor, and it carries the whole filtered queue.
+        result["complete"] = True
     return result
 
 
@@ -3664,9 +3606,13 @@ TOOLS = [
             "and reason pre-joined. These are the operator's decision queue. "
             "`total` is the queue's real depth and `returned` is how many this page "
             "carries; when `truncated` is true, pass `next_cursor` back as `cursor` "
-            "to reach the rest. When `incomplete` is true the queue changed while "
-            "it was read (`incomplete_reason` says how) and records may be missing; "
-            "call again without a cursor. Never treat one page as the whole queue — it "
+            "to reach the rest. Only `complete: true` means the queue was read in "
+            "full; it is set only when a call without a cursor fits the whole queue "
+            "on one page. Every page read through a cursor reports `complete: false`, "
+            "because offset paging over a changing queue cannot prove no record was "
+            "skipped (`completeness_reason` says so on the last page); to confirm, "
+            "list again without a cursor and a larger `limit`. Never treat one page "
+            "as the whole queue — it "
             "used to say it returned 'all' while showing 50 of 372 (ateles#1037)."
         ),
         inputSchema={
@@ -3674,7 +3620,10 @@ TOOLS = [
             "properties": {
                 "cursor": {
                     "type": "string",
-                    "description": "Opaque cursor from a previous response's `next_cursor`.",
+                    "description": (
+                        "Opaque cursor from a previous response's `next_cursor`. "
+                        "A page read through a cursor never reports `complete: true`."
+                    ),
                 },
                 "limit": {
                     "type": "integer",
