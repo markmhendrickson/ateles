@@ -38,6 +38,7 @@ Run: pytest execution/mcp/ateles/test_list_checkpoints_pagination.py -v
 
 from __future__ import annotations
 
+import base64
 import sys
 from pathlib import Path
 
@@ -46,6 +47,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import server  # noqa: E402
+from lib.daemon_runtime.gating import MAX_QUERY_OFFSET  # noqa: E402
 
 
 TOTAL = 372  # the live queue depth measured on 2026-09-16
@@ -68,31 +70,50 @@ def _brief(i: int) -> dict:
     }
 
 
-@pytest.fixture
-def prod_like_queue(monkeypatch):
-    """A transport holding TOTAL pending briefs, paged the way Neotoma pages.
+def _neotoma_like_post(briefs: list[dict], calls: list[dict]):
+    """A `_post` that pages the way Neotoma's `POST /entities/query` does.
 
-    Honours `limit` and `cursor` and returns `total` and `next_cursor`, so a
-    caller that ignores any of those is caught here rather than in production.
+    Honours `limit` and `offset`, returns `total` and a `next_cursor` on a full
+    page — and, like the real server, refuses a `cursor` sent beside
+    `snapshot_filters` with HTTP 400 (ERR_CURSOR_COMBINATION) and an `offset`
+    past the limit with HTTP 400 (ERR_OFFSET_TOO_DEEP). `_request` turns a 400
+    into None after recording the transport error, so this fake does the same.
     """
-    briefs = [_brief(i) for i in range(TOTAL)]
-    calls: list[dict] = []
 
     def _fake_post(path: str, body: dict):
         if path != "/entities/query":
             return None
         calls.append(dict(body))
+        if body.get("cursor") and body.get("snapshot_filters"):
+            server._record_transport_error(
+                "request_failed", "POST", path, "HTTP 400 ERR_CURSOR_COMBINATION"
+            )
+            return None
+        offset = int(body.get("offset") or 0)
+        if offset > MAX_QUERY_OFFSET:
+            server._record_transport_error(
+                "request_failed", "POST", path, "HTTP 400 ERR_OFFSET_TOO_DEEP"
+            )
+            return None
         limit = int(body.get("limit") or 100)
-        start = int(body.get("cursor") or 0)
-        page = briefs[start : start + limit]
-        nxt = start + limit
+        page = briefs[offset : offset + limit]
+        nxt = offset + limit
         return {
             "entities": page,
             "total": len(briefs),
-            "next_cursor": str(nxt) if nxt < len(briefs) else None,
+            # An opaque server cursor the next filtered request cannot use.
+            "next_cursor": f"srv-{nxt}" if nxt < len(briefs) else None,
         }
 
-    monkeypatch.setattr(server, "_post", _fake_post)
+    return _fake_post
+
+
+@pytest.fixture
+def prod_like_queue(monkeypatch):
+    """A transport holding TOTAL pending briefs, paged the way Neotoma pages."""
+    briefs = [_brief(i) for i in range(TOTAL)]
+    calls: list[dict] = []
+    monkeypatch.setattr(server, "_post", _neotoma_like_post(briefs, calls))
     # Task-title hydration is a per-brief GET; keep it off the network.
     monkeypatch.setattr(server, "_get", lambda path, params=None: None)
     return calls
@@ -205,3 +226,90 @@ def test_transport_failure_does_not_report_an_empty_queue(monkeypatch):
     assert result.get("error") or result.get("total") is None, (
         "a failed read reported as an empty queue"
     )
+
+
+# ── Paging a FILTERED queue (ateles#1598) ────────────────────────────────────
+
+
+def _walk(max_pages: int = 50, **kwargs) -> tuple[list[str], list[dict]]:
+    seen: list[str] = []
+    pages: list[dict] = []
+    cursor = None
+    for _ in range(max_pages):  # bounded: a paging bug must fail, not hang
+        result = server._list_checkpoints(cursor=cursor, **kwargs)
+        pages.append(result)
+        assert not result.get("error"), f"page {len(pages)} failed: {result}"
+        seen.extend(c["checkpoint_id"] for c in result["checkpoints"])
+        cursor = result.get("next_cursor")
+        if not cursor:
+            break
+    return seen, pages
+
+
+def test_two_page_filtered_queue_is_walked_to_the_end(monkeypatch):
+    """A queue one brief deeper than a page is reached in full via the cursor."""
+    briefs = [_brief(i) for i in range(server.CHECKPOINT_PAGE_SIZE + 1)]
+    calls: list[dict] = []
+    monkeypatch.setattr(server, "_post", _neotoma_like_post(briefs, calls))
+    monkeypatch.setattr(server, "_get", lambda path, params=None: None)
+
+    seen, pages = _walk()
+
+    assert len(pages) == 2
+    assert pages[0]["truncated"] is True
+    assert not pages[1].get("truncated")
+    assert seen == [b["entity_id"] for b in briefs], "pages missing or repeated"
+    for body in calls:
+        assert "snapshot_filters" in body
+        assert "cursor" not in body, "cursor sent beside snapshot_filters"
+
+
+def test_fake_server_refuses_a_cursor_beside_a_filter(monkeypatch):
+    """The fake's refusal is real: the request shape the old code sent fails."""
+    calls: list[dict] = []
+    post = _neotoma_like_post([_brief(i) for i in range(3)], calls)
+    refused = post(
+        "/entities/query",
+        {
+            "entity_type": "checkpoint_brief",
+            "snapshot_filters": {"status": {"op": "eq", "value": "awaiting_operator"}},
+            "cursor": "srv-50",
+            "limit": 50,
+        },
+    )
+    assert refused is None
+
+
+def test_the_server_cursor_is_never_handed_to_the_caller(prod_like_queue):
+    """The tool's cursor is its own; the server's cannot be sent back."""
+    result = server._list_checkpoints()
+    assert result["next_cursor"] != f"srv-{server.CHECKPOINT_PAGE_SIZE}"
+    second = server._list_checkpoints(cursor=result["next_cursor"])
+    assert not second.get("error"), second
+    assert second["checkpoints"][0]["checkpoint_id"] == _brief(
+        server.CHECKPOINT_PAGE_SIZE
+    )["entity_id"]
+
+
+@pytest.mark.parametrize("foreign", ["srv-50", "50", "not-a-cursor", "eyJ4IjoxfQ"])
+def test_a_cursor_the_tool_did_not_issue_is_rejected(prod_like_queue, foreign):
+    """A foreign cursor is an error, never silently read as page one."""
+    result = server._list_checkpoints(cursor=foreign)
+    assert result.get("error"), f"foreign cursor {foreign!r} was accepted: {result}"
+    assert "cursor" in result["error"]
+    assert result["checkpoints"] == []
+    assert prod_like_queue == [], "a foreign cursor still reached the server"
+
+
+def test_an_offset_past_the_server_limit_is_an_error(prod_like_queue):
+    """A page Neotoma would refuse as too deep is reported, naming the limit."""
+    # Built the way the tool builds its cursor, so on code that reads no
+    # cursor of its own this is a cursor that cannot fail for being foreign.
+    too_deep = base64.urlsafe_b64encode(
+        f"list_checkpoints:offset:{MAX_QUERY_OFFSET + 1}".encode()
+    ).decode().rstrip("=")
+    result = server._list_checkpoints(cursor=too_deep)
+    assert result.get("error"), result
+    assert str(MAX_QUERY_OFFSET) in result["error"]
+    assert result.get("total") is None and not result.get("count")
+    assert prod_like_queue == [], "a too-deep page was still requested"

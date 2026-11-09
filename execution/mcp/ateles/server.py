@@ -89,7 +89,7 @@ from lib.daemon_runtime.action_type import (  # noqa: E402
     resolve_gate_action_type,
 )
 
-from lib.daemon_runtime.gating import _parse_policy  # noqa: E402
+from lib.daemon_runtime.gating import MAX_QUERY_OFFSET, _parse_policy  # noqa: E402
 
 log = logging.getLogger("ateles")
 
@@ -398,6 +398,7 @@ def _retrieve_page(
     limit: int = 100,
     include_snapshots: bool = True,
     cursor: str | None = None,
+    offset: int = 0,
 ) -> dict | None:
     """One page, WITH the response's own `total` and `next_cursor` preserved.
 
@@ -422,6 +423,8 @@ def _retrieve_page(
         body["snapshot_filters"] = snapshot_filters
     if cursor:
         body["cursor"] = cursor
+    if offset > 0:
+        body["offset"] = offset
     # POST /entities/query — NOT /retrieve, which 404s. The GET /entities list
     # endpoint does not exist either; see lib/daemon_runtime/agent_loader.py.
     return _post("/entities/query", body)
@@ -993,6 +996,33 @@ def _action_blast_radius(action_type: str, policy: dict) -> str:
 #: as the queue.
 CHECKPOINT_PAGE_SIZE = 50
 
+# Neotoma refuses a `cursor` beside `snapshot_filters` (ERR_CURSOR_COMBINATION,
+# HTTP 400) yet still returns a `next_cursor` on a full filtered page, so the
+# filtered queue is walked by `offset` (see `query_entities` in
+# lib/daemon_runtime/gating.py). The `next_cursor` this tool hands out is its
+# own opaque encoding of the next offset, never the server's.
+_CHECKPOINT_CURSOR_PREFIX = "list_checkpoints:offset:"
+
+
+def _encode_checkpoint_cursor(offset: int) -> str:
+    raw = f"{_CHECKPOINT_CURSOR_PREFIX}{offset}".encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_checkpoint_cursor(cursor: str) -> int | None:
+    """The offset a cursor this tool issued stands for; None for any other."""
+    text = str(cursor or "").strip()
+    try:
+        raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode()
+    except Exception:
+        return None
+    if not raw.startswith(_CHECKPOINT_CURSOR_PREFIX):
+        return None
+    digits = raw[len(_CHECKPOINT_CURSOR_PREFIX):]
+    if not digits.isdigit():
+        return None
+    return int(digits)
+
 
 def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> dict:
     """Pending checkpoint briefs — the operator's decision queue.
@@ -1014,11 +1044,37 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
     comparing two numbers.
     """
     page_size = limit or CHECKPOINT_PAGE_SIZE
+    offset = 0
+    if cursor:
+        decoded = _decode_checkpoint_cursor(cursor)
+        if decoded is None:
+            # Read as page one, a foreign cursor would silently restart the
+            # walk and repeat the first page as if it were the next one.
+            return {
+                "error": (
+                    "cursor is not one list_checkpoints issued; call without a "
+                    "cursor to start from the first page"
+                ),
+                "checkpoints": [],
+            }
+        offset = decoded
+    if offset > MAX_QUERY_OFFSET:
+        # The server refuses this page (ERR_OFFSET_TOO_DEEP). Say so, rather
+        # than report a short or empty page as the end of the queue.
+        return {
+            "error": (
+                f"the next page starts at offset {offset}, past the "
+                f"{MAX_QUERY_OFFSET} Neotoma accepts; the rest of the queue "
+                "cannot be listed through this tool"
+            ),
+            "offset_limit": MAX_QUERY_OFFSET,
+            "checkpoints": [],
+        }
     data = _retrieve_page(
         "checkpoint_brief",
         snapshot_filters={"status": {"op": "eq", "value": "awaiting_operator"}},
         limit=page_size,
-        cursor=cursor,
+        offset=offset,
     )
 
     # A failed read must NOT be spelled the same way as an empty queue. Reported
@@ -1064,10 +1120,15 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
         })
 
     returned = len(checkpoints)
+    # The server's `next_cursor` only signals that more exists; it cannot be
+    # sent back beside the filter, so it is never passed to the caller.
+    has_more = bool(next_cursor) or (
+        isinstance(total, int) and offset + returned < total
+    )
     if total is None:
         # The endpoint did not report a total. Say so rather than substituting
         # the page size, which is the exact conflation this fix exists to end.
-        total = returned if next_cursor is None else None
+        total = offset + returned if not has_more else None
 
     result: dict[str, Any] = {
         # The queue's real depth. Named `total` so a caller reading one field
@@ -1082,9 +1143,17 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
         "count": total if total is not None else returned,
         "checkpoints": checkpoints,
     }
-    if next_cursor:
+    if has_more and returned == 0:
+        # More is claimed but this page moved nothing: a cursor for the same
+        # offset would loop forever, and no cursor would read as the end.
+        result["error"] = (
+            f"Neotoma reported more pending checkpoints past offset {offset} "
+            "but returned none; the queue could not be listed to the end"
+        )
         result["truncated"] = True
-        result["next_cursor"] = next_cursor
+    elif has_more:
+        result["truncated"] = True
+        result["next_cursor"] = _encode_checkpoint_cursor(offset + returned)
         result["note"] = (
             f"Showing {returned} of {total if total is not None else 'an unknown number of'} "
             "pending checkpoints. Pass `cursor` to retrieve the next page."
