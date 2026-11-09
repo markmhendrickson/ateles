@@ -2499,14 +2499,17 @@ def _read_error(what: str) -> str:
     return f"{what}: {_describe_transport_error() or 'request failed'}"
 
 
-def _observation_page_problem(data: Any, offset: int) -> str | None:
+def _observation_page_problem(data: Any, offset: int, limit: int) -> str | None:
     """The field that makes an observation page unreadable; None when it is sound.
 
-    A page whose `observations` is missing or not a list of objects, or whose
-    `total` is present but not a count, is a failed read, never an empty batch.
-    So is a page that claims rows it does not return: an empty batch while
-    `total` reports rows past the requested *offset*, or a `total` smaller than
-    the rows this page returned, mirroring `_checkpoint_page_problem`.
+    A page read at *offset* with *limit* is sound only when `observations` is a
+    list of objects; `total`, when present, is a count no smaller than
+    `offset + len(observations)`; and a short page (fewer rows than *limit*)
+    reports no rows beyond it, so its `total`, when present, equals
+    `offset + len(observations)`. Callers treat a short page as the end of the
+    read, so a short page claiming more rows would end it early and report an
+    incomplete read as complete. Anything else is a failed read, never an empty
+    or final batch. A page with no `total` is still accepted.
     """
     if not isinstance(data, dict):
         return "response"
@@ -2517,10 +2520,10 @@ def _observation_page_problem(data: Any, offset: int) -> str | None:
         total = data["total"]
         if not _is_count(total):
             return "total"
-        if not batch and total > offset:
-            return "observations (empty while total reports more)"
         if total < offset + len(batch):
             return "total (smaller than the rows returned)"
+        if len(batch) < limit and total > offset + len(batch):
+            return "observations (short page while total reports more)"
     return None
 
 
@@ -2550,7 +2553,7 @@ def _observations_of(
         data = _obs_query(body)
         if data is None:
             return None, _read_error(f"observations of {entity_id}"), False
-        problem = _observation_page_problem(data, offset)
+        problem = _observation_page_problem(data, offset, _ENTITY_OBS_PAGE)
         if problem:
             return None, _malformed_error(f"observations of {entity_id}", problem), False
         batch = data["observations"]
@@ -2569,7 +2572,7 @@ def _observations_of(
 
 def _obs_count(entity_type: str, since: str) -> int | None:
     data = _obs_query({"entity_type": entity_type, "created_since": since, "limit": 1})
-    if data is None or _observation_page_problem(data, 0):
+    if data is None or _observation_page_problem(data, 0, 1):
         return None
     total = data.get("total")
     return total if _is_count(total) else None
@@ -2611,7 +2614,7 @@ def _scan_type_window(
                 "rows": rows,
                 "error": _read_error(f"{entity_type} scan at offset {offset}"),
             }
-        problem = _observation_page_problem(data, offset)
+        problem = _observation_page_problem(data, offset, limit)
         if problem:
             return {
                 "rows": rows,
@@ -3353,7 +3356,7 @@ def _scan_since(entity_type: str, since: str, max_scan: int) -> tuple[list[dict]
         )
         if data is None:
             return None, _read_error(f"{entity_type} since {since}"), False
-        problem = _observation_page_problem(data, offset)
+        problem = _observation_page_problem(data, offset, limit)
         if problem:
             return None, _malformed_error(f"{entity_type} since {since}", problem), False
         batch = data["observations"]
@@ -3472,7 +3475,7 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
     newest = _obs_query({"limit": 1})
     if newest is None:
         return {"error": _read_error("could not read the record's newest observation")}
-    problem = _observation_page_problem(newest, 0)
+    problem = _observation_page_problem(newest, 0, 1)
     if problem:
         return {
             "error": _malformed_error("could not read the record's newest observation", problem)

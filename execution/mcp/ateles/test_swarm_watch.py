@@ -596,7 +596,7 @@ def test_watch_runner_scan_empty_page_claiming_rows_is_an_error_not_no_changes(r
     _mangle_query(routed, "harness_event", _claims(3), path_="/observations/query")
     out = srv._watch_swarm(cursor, [TASK], False, 0)
     assert "error" in out and "changes" not in out, out
-    assert any("empty while total reports more" in d for d in out["detail"]), out
+    assert any("short page while total reports more" in d for d in out["detail"]), out
     assert out["cursor"] == cursor
 
 
@@ -607,7 +607,7 @@ def test_timeline_task_observation_page_claiming_rows_is_a_read_error(routed):
     )
     out = srv._get_task_timeline(TASK)
     assert "error" in out and "timeline" not in out, out
-    assert "empty while total reports more" in str(out["error"])
+    assert "short page while total reports more" in str(out["error"])
 
 
 def test_baseline_newest_observation_page_claiming_rows_is_an_error_not_a_cursor(routed):
@@ -618,7 +618,7 @@ def test_baseline_newest_observation_page_claiming_rows_is_an_error_not_a_cursor
     )
     out = srv._watch_swarm(None, [TASK], False, 0)
     assert "error" in out and "cursor" not in out, out
-    assert "empty while total reports more" in str(out["error"])
+    assert "short page while total reports more" in str(out["error"])
 
 
 def test_timeline_observation_page_with_total_below_its_rows_is_a_read_error(routed):
@@ -632,9 +632,115 @@ def test_timeline_observation_page_with_total_below_its_rows_is_a_read_error(rou
 
 
 def test_observation_page_check_accepts_a_well_formed_last_page():
-    assert srv._observation_page_problem({"observations": [], "total": 4}, 4) is None
-    assert srv._observation_page_problem({"observations": [{}], "total": 5}, 4) is None
-    assert srv._observation_page_problem({"observations": []}, 0) is None
+    assert srv._observation_page_problem({"observations": [], "total": 4}, 4, 500) is None
+    assert srv._observation_page_problem({"observations": [{}], "total": 5}, 4, 500) is None
+    assert srv._observation_page_problem({"observations": []}, 0, 500) is None
+
+
+# ── short pages that report rows beyond themselves ──────────────────────────
+
+
+def _short_claiming_more(extra: int = 3):
+    """A non-empty short page whose `total` reports *extra* rows past it."""
+
+    def edit(page: dict) -> dict:
+        rows = page["observations"][:1]
+        assert rows, "the fixture page must hold a row for this mangle to mean anything"
+        return {**page, "observations": rows, "total": page["offset"] + len(rows) + extra}
+
+    return edit
+
+
+def _runner_window_scan(body: dict) -> bool:
+    return body.get("entity_type") == "harness_event" and body.get("limit", 0) > 1
+
+
+def test_timeline_malformed_runner_window_page_is_an_error(routed):
+    _mangle_query(
+        routed, "harness_event", _drop_observations,
+        only=lambda body: body.get("limit", 0) > 1, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["harness_event"]["status"] == "error", by_source
+    assert "malformed response (observations)" in by_source["harness_event"]["detail"]
+    assert any("runner events could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_timeline_task_short_page_claiming_more_is_a_read_error(routed):
+    _mangle_query(
+        routed, None, _short_claiming_more(),
+        only=lambda body: body.get("entity_id") == TASK, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" in out and "timeline" not in out, out
+    assert "short page while total reports more" in str(out["error"])
+
+
+def test_watch_runner_scan_short_page_claiming_more_is_an_error_not_no_changes(routed, clock):
+    cursor = _baseline()["cursor"]
+    routed.add_observation(
+        "ent_7ec2df67ca3af97138398109", "harness_event", "2026-09-26T09:00:00.000Z",
+        {"event_type": "subprocess", "tool_name": "codex:corvus", "success": "true",
+         "task_entity_id": TASK, "output_summary": "ok", "duration_ms": 5},
+    )
+    _mangle_query(routed, "harness_event", _short_claiming_more(), path_="/observations/query")
+    out = srv._watch_swarm(cursor, [TASK], False, 0)
+    assert "error" in out and "changes" not in out, out
+    assert any("short page while total reports more" in d for d in out["detail"]), out
+    assert out["cursor"] == cursor
+
+
+def test_timeline_runner_window_short_page_claiming_more_is_an_error_not_complete(routed):
+    _mangle_query(
+        routed, None, _short_claiming_more(), only=_runner_window_scan,
+        path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["harness_event"]["status"] == "error", by_source
+    assert "short page while total reports more" in by_source["harness_event"]["detail"]
+    assert (out.get("window") or {}).get("complete") is not True, out.get("window")
+    assert any("runner events could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_short_page_whose_total_matches_its_rows_is_a_complete_read(routed):
+    def exact(page: dict) -> dict:
+        rows = page["observations"][:1]
+        return {**page, "observations": rows, "total": page["offset"] + len(rows)}
+
+    _mangle_query(routed, None, exact, only=_runner_window_scan, path_="/observations/query")
+    out = srv._get_task_timeline(TASK)
+    assert "error" not in out, out
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert "harness_event" not in by_source, by_source
+    assert out["window"]["complete"] is True
+    assert srv._observation_page_problem({"observations": [{}], "total": 5}, 4, 500) is None
+
+
+def test_pages_without_total_still_read_as_before(routed):
+    _mangle_query(
+        routed, None, _drop_total,
+        only=lambda body: body.get("limit", 0) > 1, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" not in out, out
+    assert out["window"]["complete"] is True
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["harness_event runner events"]["count"] == 2
+    assert srv._observation_page_problem({"observations": [{}]}, 3, 500) is None
+
+
+def test_observation_page_check_states_the_complete_rule():
+    page = srv._observation_page_problem
+    short_more = "observations (short page while total reports more)"
+    assert page({"observations": [{}], "total": 9}, 4, 500) == short_more
+    assert page({"observations": [], "total": 5}, 4, 500) == short_more
+    assert page({"observations": [{}, {}], "total": 5}, 4, 500) == (
+        "total (smaller than the rows returned)"
+    )
+    # A full page may report more rows; they are the next page.
+    assert page({"observations": [{}, {}], "total": 9}, 4, 2) is None
 
 
 def _participation_source(out: dict) -> dict:
