@@ -743,6 +743,62 @@ def test_observation_page_check_states_the_complete_rule():
     assert page({"observations": [{}, {}], "total": 9}, 4, 2) is None
 
 
+# ── pages for the wrong position, or with a cursor that is not a string ─────
+
+
+def _shift_offset(page: dict) -> dict:
+    """A page that answers for a position other than the one requested."""
+    return {**page, "offset": page["offset"] + 1}
+
+
+def _numeric_cursor(page: dict) -> dict:
+    return {**page, "next_cursor": 7}
+
+
+def test_timeline_task_observation_page_for_the_wrong_offset_is_a_read_error(routed):
+    _mangle_query(
+        routed, None, _shift_offset,
+        only=lambda body: body.get("entity_id") == TASK, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" in out and "timeline" not in out, out
+    assert "offset (not the requested 0)" in str(out["error"])
+
+
+def test_watch_runner_scan_page_for_the_wrong_offset_is_an_error_not_no_changes(routed, clock):
+    cursor = _baseline()["cursor"]
+    _mangle_query(routed, "harness_event", _shift_offset, path_="/observations/query")
+    out = srv._watch_swarm(cursor, [TASK], False, 0)
+    assert "error" in out and "changes" not in out, out
+    assert any("offset (not the requested 0)" in d for d in out["detail"]), out
+    assert out["cursor"] == cursor
+
+
+def test_timeline_task_observation_page_with_a_non_string_cursor_is_a_read_error(routed):
+    _mangle_query(
+        routed, None, _numeric_cursor,
+        only=lambda body: body.get("entity_id") == TASK, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" in out and "timeline" not in out, out
+    assert "next_cursor (not a string)" in str(out["error"])
+
+
+def test_observation_page_whose_offset_matches_still_reads_as_before(routed):
+    def echo_offset(page: dict) -> dict:
+        return {**page, "offset": page["offset"], "next_cursor": None}
+
+    _mangle_query(routed, None, echo_offset, path_="/observations/query")
+    out = srv._get_task_timeline(TASK)
+    assert "error" not in out, out
+    assert out["window"]["complete"] is True
+    page = srv._observation_page_problem
+    assert page({"observations": [{}], "offset": 4, "next_cursor": "c"}, 4, 500) is None
+    assert page({"observations": [{}], "offset": 3}, 4, 500) == "offset (not the requested 4)"
+    assert page({"observations": [{}], "offset": -1}, 0, 500) == "offset (not the requested 0)"
+    assert page({"observations": [{}], "next_cursor": 1}, 0, 500) == "next_cursor (not a string)"
+
+
 def _participation_source(out: dict) -> dict:
     by_source = {s["source"]: s for s in out["sources"]}
     return by_source["participation_record"]

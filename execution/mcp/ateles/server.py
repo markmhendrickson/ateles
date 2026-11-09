@@ -1176,8 +1176,10 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
     queue larger than the largest allowed `limit` (500) therefore can never
     return `complete: true` from this tool.
 
-    Every error response carries the same fields: `error`, `total: None` and
-    `checkpoints: []`, plus `detail` or `malformed_field` where they apply.
+    Every error response carries `error` and `checkpoints: []`, plus `detail`
+    or `malformed_field` where they apply. `total` is `None` in every error
+    except one: when Neotoma reports more checkpoints past the offset but
+    returns none, `total` is the total Neotoma reported.
     """
     page_size = limit or CHECKPOINT_PAGE_SIZE
     offset = 0
@@ -2509,7 +2511,11 @@ def _observation_page_problem(data: Any, offset: int, limit: int) -> str | None:
     `offset + len(observations)`. Callers treat a short page as the end of the
     read, so a short page claiming more rows would end it early and report an
     incomplete read as complete. Anything else is a failed read, never an empty
-    or final batch. A page with no `total` is still accepted.
+    or final batch. `next_cursor`, when present and not null, must be a string,
+    and `offset`, when present and not null, must equal the requested offset, so
+    a page for the wrong position is never read as the next one; these are the
+    fields `_checkpoint_page_problem` validates too. A page with no `total`,
+    `offset` or `next_cursor` is still accepted.
     """
     if not isinstance(data, dict):
         return "response"
@@ -2524,6 +2530,14 @@ def _observation_page_problem(data: Any, offset: int, limit: int) -> str | None:
             return "total (smaller than the rows returned)"
         if len(batch) < limit and total > offset + len(batch):
             return "observations (short page while total reports more)"
+    if "next_cursor" in data and data["next_cursor"] is not None and not isinstance(
+        data["next_cursor"], str
+    ):
+        return "next_cursor (not a string)"
+    if "offset" in data and data["offset"] is not None and (
+        not _is_count(data["offset"]) or data["offset"] != offset
+    ):
+        return f"offset (not the requested {offset})"
     return None
 
 
@@ -3744,7 +3758,10 @@ TOOLS = [
             "skipped (`completeness_reason` says so on the last page); to confirm, "
             "list again without a cursor and a larger `limit`. A queue larger than "
             "the largest allowed `limit` (500) can never return `complete: true` "
-            "from this tool. Never treat one page as the whole queue — it "
+            "from this tool. Every error carries `error` and `checkpoints: []`; "
+            "`total` is null except when Neotoma reports more checkpoints past "
+            "the offset but returns none, where `total` is the total Neotoma "
+            "reported. Never treat one page as the whole queue — it "
             "used to say it returned 'all' while showing 50 of 372 (ateles#1037)."
         ),
         inputSchema={
