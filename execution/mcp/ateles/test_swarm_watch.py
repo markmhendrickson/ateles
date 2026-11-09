@@ -422,6 +422,226 @@ def test_baseline_pending_checkpoints_are_ordered_by_raised_time(fake):
     ]
 
 
+# ── filtered reads presented as complete only when read in full ─────────────
+
+
+@pytest.fixture
+def routed(fake, monkeypatch):
+    """Route srv._post through `fake.post` late, so a test can wrap it."""
+    monkeypatch.setattr(srv, "_post", lambda path, body, **kw: fake.post(path, body, **kw))
+    return fake
+
+
+def _mangle_query(
+    fake, entity_type: str | None, edit, only=lambda body: True, path_: str = "/entities/query"
+) -> None:
+    """Pass `path_` answers for `entity_type` (and `only`) through `edit`.
+
+    `entity_type=None` matches a query of any type.
+    """
+    post = fake.post
+
+    def mangled(path, body, **kw):
+        out = post(path, body, **kw)
+        if (
+            path == path_
+            and (entity_type is None or body.get("entity_type") == entity_type)
+            and out is not None
+            and only(body)
+        ):
+            out = edit(out)
+        return out
+
+    fake.post = mangled
+
+
+def _drop_total(page: dict) -> dict:
+    page.pop("total", None)
+    return page
+
+
+def _drop_observations(page: dict) -> dict:
+    page.pop("observations", None)
+    return page
+
+
+def test_watch_malformed_checkpoint_observation_page_is_an_error_not_no_changes(routed, clock):
+    cursor = _baseline(include_checkpoints=True)["cursor"]
+    _mangle_query(routed, "checkpoint_brief", _drop_observations, path_="/observations/query")
+    out = srv._watch_swarm(cursor, [TASK], True, 0)
+    assert "error" in out and "changes" not in out, out
+    assert any("malformed response (observations)" in d for d in out["detail"]), out
+    assert out["cursor"] == cursor
+
+
+def test_watch_malformed_runner_event_page_is_an_error_not_no_changes(routed, clock):
+    cursor = _baseline()["cursor"]
+    _mangle_query(routed, "harness_event", _drop_observations, path_="/observations/query")
+    out = srv._watch_swarm(cursor, [TASK], False, 0)
+    assert "error" in out and "changes" not in out, out
+    assert any("malformed response (observations)" in d for d in out["detail"]), out
+
+
+def test_timeline_malformed_task_observation_page_is_a_read_error(routed):
+    _mangle_query(
+        routed, None, _drop_observations,
+        only=lambda body: body.get("entity_id") == TASK, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" in out and "timeline" not in out, out
+    assert "observations" in str(out["error"])
+
+
+def test_baseline_malformed_newest_observation_page_is_an_error_not_a_cursor(routed):
+    _mangle_query(
+        routed, None, _drop_observations,
+        only=lambda body: body.get("limit") == 1 and not body.get("entity_type"),
+        path_="/observations/query",
+    )
+    out = srv._watch_swarm(None, [TASK], False, 0)
+    assert "error" in out and "cursor" not in out, out
+    assert "observations" in str(out["error"])
+
+
+@pytest.mark.parametrize("bad_total", [3.0, 2.5, True, False, -1, "3"])
+def test_obs_count_rejects_a_total_that_is_not_a_count(routed, bad_total):
+    _mangle_query(
+        routed, "harness_event", lambda page: {**page, "total": bad_total},
+        path_="/observations/query",
+    )
+    assert srv._obs_count("harness_event", "2026-09-01T00:00:00.000Z") is None
+
+
+def test_obs_count_reports_a_readable_total(routed):
+    n = srv._obs_count("harness_event", "2026-09-01T00:00:00.000Z")
+    assert isinstance(n, int) and not isinstance(n, bool) and n > 0
+
+
+def _add_rows(fake, entity_type: str, n: int, fields: dict) -> None:
+    for i in range(n):
+        fake.add_observation(
+            f"ent_{i:024x}", entity_type, f"2026-09-26T10:{i // 60:02d}:{i % 60:02d}.000Z", dict(fields)
+        )
+
+
+def test_timeline_with_more_checkpoints_than_one_page_says_so(routed):
+    _add_rows(routed, "checkpoint_brief", 60, {"task_entity_id": TASK, "status": "resolved"})
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["checkpoint_brief"]["status"] == "partial"
+    gap = [g for g in out["gaps"] if "checkpoints were read" in g]
+    assert gap and "of 61" in gap[0] and "may be holding this task" in gap[0], out["gaps"]
+
+
+def test_timeline_malformed_checkpoint_page_is_an_error_not_none_found(routed):
+    _mangle_query(routed, "checkpoint_brief", _drop_total)
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["checkpoint_brief"]["status"] == "error"
+    assert "total" in by_source["checkpoint_brief"]["detail"]
+    assert any("checkpoints could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_timeline_with_more_escalations_than_one_page_says_so(routed):
+    _add_rows(routed, "escalation", 55, {"source_entity_id": TASK, "title": "stuck"})
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["escalation"]["status"] == "partial"
+    assert by_source["escalation"]["count"] == 50
+    assert any("50 of 55" in g and "escalation" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_timeline_malformed_escalation_page_is_an_error_not_none_found(routed):
+    _mangle_query(routed, "escalation", lambda page: {"entities": "nope", "total": 3})
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["escalation"]["status"] == "error"
+    assert any("escalations could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def _undercount(page: dict) -> dict:
+    page["total"] = 0
+    return page
+
+
+def test_timeline_checkpoint_page_with_total_below_its_rows_is_an_error(routed):
+    _add_rows(routed, "checkpoint_brief", 3, {"task_entity_id": TASK, "status": "resolved"})
+    _mangle_query(routed, "checkpoint_brief", _undercount)
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["checkpoint_brief"]["status"] == "error", by_source
+    assert "smaller than the rows returned" in by_source["checkpoint_brief"]["detail"]
+    assert any("checkpoints could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_timeline_escalation_page_with_total_below_its_rows_is_an_error(routed):
+    _add_rows(routed, "escalation", 3, {"source_entity_id": TASK, "title": "stuck"})
+    _mangle_query(routed, "escalation", _undercount)
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["escalation"]["status"] == "error", by_source
+    assert any("escalations could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_baseline_reports_a_partial_per_task_checkpoint_read(routed):
+    _add_rows(routed, "checkpoint_brief", 25, {"task_entity_id": TASK, "status": "awaiting_operator"})
+    out = _baseline()
+    assert len(out["pending_checkpoints"]) == 20
+    assert any(TASK in g and "incomplete" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_baseline_reports_a_malformed_per_task_checkpoint_page(routed):
+    _mangle_query(routed, "checkpoint_brief", _drop_total)
+    out = srv._watch_swarm(None, [TASK], False, 0)
+    assert "error" in out and "malformed" in out["error"] and TASK in out["error"], out
+
+
+@pytest.mark.parametrize("bad_total", ["missing", "7", 2.5, -1, True, "read_failed"])
+def test_baseline_unreadable_total_is_null_with_a_gap(routed, bad_total):
+    def edit(page):
+        if bad_total == "missing":
+            page.pop("total", None)
+            return page
+        if bad_total == "read_failed":
+            return None
+        page["total"] = bad_total
+        return page
+
+    # Only the queue-wide count read (no task filter) is mangled.
+    _mangle_query(
+        routed, "checkpoint_brief", edit,
+        only=lambda body: "task_entity_id" not in (body.get("snapshot_filters") or {}),
+    )
+    out = _baseline(include_checkpoints=True)
+    assert out["pending_checkpoints_total"] is None
+    assert any("count could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+@pytest.mark.parametrize("bad_entities", ["missing", "not_a_list"])
+def test_baseline_count_page_with_unreadable_entities_is_null_with_a_gap(routed, bad_entities):
+    def edit(page):
+        if bad_entities == "missing":
+            page.pop("entities", None)
+        else:
+            page["entities"] = "nope"
+        page["total"] = 4
+        return page
+
+    _mangle_query(
+        routed, "checkpoint_brief", edit,
+        only=lambda body: "task_entity_id" not in (body.get("snapshot_filters") or {}),
+    )
+    out = _baseline(include_checkpoints=True)
+    assert out["pending_checkpoints_total"] is None
+    assert any("count could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_baseline_readable_total_is_reported(routed):
+    out = _baseline(include_checkpoints=True)
+    assert isinstance(out["pending_checkpoints_total"], int)
+    assert not any("count could not be read" in g for g in out["gaps"])
+
+
 # ── watch.py ─────────────────────────────────────────────────────────────────
 
 
