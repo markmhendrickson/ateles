@@ -1232,7 +1232,9 @@ class RecordingWatcher:
             "--capture-method", self._capture_method,
         ]
         if self._capture_method == "voice_memo":
-            cmd.extend(["--backend", "local"])
+            # Let the CLI probe the audio and choose the local backend. Empty
+            # values also prevent its dotenv load from supplying overrides.
+            transcription_env.update(TRANSCRIBE_BACKEND="", RECORD_MEETING_DIARIZE="")
             log.info(f"[{DAEMON_NAME}] Voice Memo local transcription mode.")
         elif not backend_override and diarization_override != "0":
             cmd.append("--diarize")
@@ -1248,10 +1250,9 @@ class RecordingWatcher:
             "fluid": "local_fluid_audio",
             "elevenlabs": "elevenlabs_stt",
             "openai": "openai_whisper_api",
-        }.get(
-            backend_override,
-            "local_whisper_cpp" if self._capture_method == "voice_memo" else "local_fluid_audio",
-        )
+        }.get(backend_override, "local_fluid_audio")
+        if self._capture_method == "voice_memo":
+            fallback = "unknown"
         result = _run_command(cmd, fallback)
         if result.returncode != 0:
             log.warning(

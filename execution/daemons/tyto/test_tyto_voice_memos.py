@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import time
+import wave
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -918,23 +919,70 @@ def test_failed_memo_backoff_starts_after_transcription_finishes(tmp_path):
     assert watcher._pending_retries[memo] >= time.time() + 0.8
 
 
-def test_voice_memo_uses_local_backend_even_when_elevenlabs_key_exists(tmp_path, monkeypatch):
-    """Single-speaker memos honor the operator's local-STT selection."""
-    memo = _write(tmp_path, "20260908 101500-NEW0001.m4a", age_secs=FRESH)
+@pytest.mark.parametrize("channels", [1, 2])
+def test_voice_memo_uses_channel_appropriate_local_backend(
+    tmp_path, monkeypatch, capsys, channels
+):
+    """Run the CLI with Tyto's actual arguments and routing environment."""
+    from execution.scripts import transcribe_audio as cli
+
+    memo = tmp_path / "20260908 101500-NEW0001.wav"
+    with wave.open(str(memo), "wb") as audio:
+        audio.setparams((channels, 2, 16000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"\0" * 16000 * channels * 2)
+    original = memo.read_bytes()
     watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False)
     monkeypatch.setenv("ELEVENLABS_API_KEY", "configured-but-not-used")
-    completed = MagicMock(
-        returncode=0,
-        stdout="NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_test_local\n",
-        stderr="",
-    )
+    monkeypatch.setenv("TRANSCRIBE_BACKEND", "elevenlabs")
+    monkeypatch.setenv("RECORD_MEETING_DIARIZE", "0")
+    monkeypatch.setenv("TRANSCRIBE_DISABLE_NEOTOMA_VOCAB", "1")
+    whisper = MagicMock(return_value={"transcription_text": "Synthetic memo.", "language": "en"})
+    fluid = MagicMock(return_value={
+        "transcription_text": "[Channel_0/S1] First channel.\n[Channel_1/S1] Second channel.",
+        "transcription_engine": "local_fluid_audio",
+        "language": "en",
+    })
+    monkeypatch.setattr(cli, "transcribe_local", whisper)
+    monkeypatch.setattr(cli, "transcribe_fluid", fluid)
+    monkeypatch.setattr(cli, "get_audio_duration", lambda _path: 1.0)
+    cloud = MagicMock(side_effect=AssertionError("Voice Memos must stay local"))
+    monkeypatch.setattr(cli, "transcribe_with_elevenlabs_speech_to_text", cloud)
+    monkeypatch.setattr(cli, "OpenAI", cloud)
 
-    with patch.object(tyto.subprocess, "run", return_value=completed) as run:
+    def save(path, result, *, extra_entity_fields, **_kwargs):
+        assert path == memo
+        assert extra_entity_fields["capture_method"] == "voice_memo"
+        print("NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_test_local")
+        return {**result, "entity_id": "ent_test_local"}
+
+    monkeypatch.setattr(cli, "save_transcription", save)
+
+    def run_cli(command, *, env, **_kwargs):
+        with monkeypatch.context() as child:
+            child.setattr(sys, "argv", command[1:])
+            for variable in ("TRANSCRIBE_BACKEND", "RECORD_MEETING_DIARIZE"):
+                child.setenv(variable, env[variable])
+            try:
+                cli.main()
+                status = 0
+            except SystemExit as exc:
+                status = exc.code
+        captured = capsys.readouterr()
+        return tyto.subprocess.CompletedProcess(
+            command, status, stdout=captured.out, stderr=captured.err
+        )
+
+    with patch.object(tyto.subprocess, "run", side_effect=run_cli):
         assert watcher._run_transcription(memo, None) == "ent_test_local"
 
-    command = run.call_args.args[0]
-    assert command[-2:] == ["--backend", "local"]
-    assert "--diarize" not in command
+    if channels == 2:
+        fluid.assert_called_once_with(memo, language=None, verbose=True, channel_count=2)
+        whisper.assert_not_called()
+    else:
+        whisper.assert_called_once_with(memo, language=None, verbose=True)
+        fluid.assert_not_called()
+    cloud.assert_not_called()
+    assert memo.read_bytes() == original
 
 
 def test_single_file_meeting_requests_local_diarization(tmp_path, monkeypatch):
