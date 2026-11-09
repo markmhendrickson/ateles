@@ -89,7 +89,7 @@ from lib.daemon_runtime.action_type import (  # noqa: E402
     resolve_gate_action_type,
 )
 
-from lib.daemon_runtime.gating import _parse_policy  # noqa: E402
+from lib.daemon_runtime.gating import MAX_QUERY_OFFSET, _parse_policy  # noqa: E402
 
 log = logging.getLogger("ateles")
 
@@ -398,6 +398,7 @@ def _retrieve_page(
     limit: int = 100,
     include_snapshots: bool = True,
     cursor: str | None = None,
+    offset: int = 0,
 ) -> dict | None:
     """One page, WITH the response's own `total` and `next_cursor` preserved.
 
@@ -422,6 +423,8 @@ def _retrieve_page(
         body["snapshot_filters"] = snapshot_filters
     if cursor:
         body["cursor"] = cursor
+    if offset > 0:
+        body["offset"] = offset
     # POST /entities/query — NOT /retrieve, which 404s. The GET /entities list
     # endpoint does not exist either; see lib/daemon_runtime/agent_loader.py.
     return _post("/entities/query", body)
@@ -993,6 +996,134 @@ def _action_blast_radius(action_type: str, policy: dict) -> str:
 #: as the queue.
 CHECKPOINT_PAGE_SIZE = 50
 
+# Neotoma refuses a `cursor` beside `snapshot_filters` (ERR_CURSOR_COMBINATION,
+# HTTP 400) yet still returns a `next_cursor` on a full filtered page, so the
+# filtered queue cannot be walked by a stable keyset cursor and is walked by
+# `offset` instead (see `query_entities` in lib/daemon_runtime/gating.py). The
+# `next_cursor` this tool hands out is its own opaque encoding, never the
+# server's: it carries only the next offset and the filter it belongs to.
+#
+# Offset paging over a queue that can change between calls cannot prove that a
+# walk across calls skipped nothing (one record resolved on a page already
+# read and one appended at the end leave the total and page one unchanged), and
+# a well-formed cursor the tool never issued can skip pages. So no page reached
+# through a cursor ever claims the queue was read in full: only a read that
+# fits on one page, with no cursor, may say `complete: true`.
+_CHECKPOINT_CURSOR_PREFIX = "list_checkpoints:walk:"
+
+_CHECKPOINT_QUEUE_FILTER = {"status": {"op": "eq", "value": "awaiting_operator"}}
+
+_MULTI_PAGE_NOT_PROVEN = (
+    "this listing was read across pages while the queue could change; offset "
+    "paging cannot prove no record was skipped. List again without a cursor, "
+    "with a larger limit if needed, to confirm"
+)
+
+
+def _encode_checkpoint_cursor(offset: int) -> str:
+    state = {"offset": offset, "filter": _CHECKPOINT_QUEUE_FILTER}
+    raw = (_CHECKPOINT_CURSOR_PREFIX + json.dumps(state, sort_keys=True)).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _is_count(value: Any) -> bool:
+    """A non-negative int that is not a bool posing as one."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _decode_checkpoint_cursor(cursor: str) -> dict | None:
+    """The walk state a well-formed cursor for this queue carries; None otherwise.
+
+    A cursor whose filter is not this request's queue filter is rejected. A
+    well-formed cursor cannot be told apart from one this tool issued; that is
+    safe because a page read through any cursor reports `complete: false`.
+    """
+    text = str(cursor or "").strip()
+    try:
+        raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode()
+    except Exception:
+        return None
+    if not raw.startswith(_CHECKPOINT_CURSOR_PREFIX):
+        return None
+    try:
+        state = json.loads(raw[len(_CHECKPOINT_CURSOR_PREFIX):])
+    except ValueError:
+        return None
+    if not isinstance(state, dict):
+        return None
+    if not _is_count(state.get("offset")) or state["offset"] < 1:
+        return None
+    if state.get("filter") != _CHECKPOINT_QUEUE_FILTER:
+        return None
+    return state
+
+
+def _checkpoint_page_problem(data: Any, offset: int) -> str | None:
+    """Name the field that makes a page unusable for judging completeness.
+
+    Every field the walk reads to decide whether it has seen the whole queue is
+    checked here. A page missing `entities` or `total` must not read as an
+    empty, complete queue: that is a malformed answer, not an all-clear.
+    """
+    if not isinstance(data, dict):
+        return "response (not an object)"
+    entities = data.get("entities")
+    if not isinstance(entities, list):
+        return "entities (missing or not a list)"
+    for i, ent in enumerate(entities):
+        if not isinstance(ent, dict):
+            return f"entities[{i}] (not an object)"
+        eid = ent.get("entity_id") or ent.get("id")
+        if not isinstance(eid, str) or not eid.strip():
+            return f"entities[{i}].entity_id (missing)"
+    if not _is_count(data.get("total")):
+        return "total (missing, not an integer, or negative)"
+    if "next_cursor" in data and data["next_cursor"] is not None and not isinstance(
+        data["next_cursor"], str
+    ):
+        return "next_cursor (not a string)"
+    if "offset" in data and data["offset"] is not None and (
+        not _is_count(data["offset"]) or data["offset"] != offset
+    ):
+        return f"offset (not the requested {offset})"
+    return None
+
+
+def _malformed_checkpoint_page(field: str) -> dict:
+    return {
+        "error": (
+            f"Neotoma returned a malformed checkpoint page: {field}; the queue "
+            "could not be read, which is not the same as an empty queue"
+        ),
+        "malformed_field": field,
+        "total": None,
+        "checkpoints": [],
+    }
+
+
+def _read_checkpoint_page(offset: int, page_size: int) -> tuple[dict | None, dict | None]:
+    """One validated page, or the error result that replaces the listing."""
+    data = _retrieve_page(
+        "checkpoint_brief",
+        snapshot_filters=_CHECKPOINT_QUEUE_FILTER,
+        limit=page_size,
+        offset=offset,
+    )
+    # A failed read must NOT be spelled the same way as an empty queue. Reported
+    # as `count: 0` it would tell the operator they have nothing to decide,
+    # which is the most dangerous output this tool can produce.
+    if data is None:
+        return None, {
+            "error": "could not read the checkpoint queue from Neotoma",
+            "detail": _describe_transport_error(),
+            "total": None,
+            "checkpoints": [],
+        }
+    problem = _checkpoint_page_problem(data, offset)
+    if problem:
+        return None, _malformed_checkpoint_page(problem)
+    return data, None
+
 
 def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> dict:
     """Pending checkpoint briefs — the operator's decision queue.
@@ -1012,33 +1143,55 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
     than no list, because it is acted on with confidence. That is why
     `truncated` is stated explicitly rather than left to be inferred from
     comparing two numbers.
+
+    `complete` is the only field that says the queue was read in full. It is
+    true only when the call took no cursor and the whole filtered queue fit on
+    that one page. Every page read through a cursor, and any first page with
+    more after it, reports `complete: false`: offset paging over a queue that
+    can change between calls cannot prove a walk skipped nothing, so a
+    multi-page walk returns the records it read and says plainly that its
+    completeness is not proven (`completeness_reason` on its last page).
     """
     page_size = limit or CHECKPOINT_PAGE_SIZE
-    data = _retrieve_page(
-        "checkpoint_brief",
-        snapshot_filters={"status": {"op": "eq", "value": "awaiting_operator"}},
-        limit=page_size,
-        cursor=cursor,
-    )
-
-    # A failed read must NOT be spelled the same way as an empty queue. Reported
-    # as `count: 0` it would tell the operator they have nothing to decide,
-    # which is the most dangerous output this tool can produce.
-    if data is None:
+    offset = 0
+    walk: dict | None = None
+    if cursor:
+        walk = _decode_checkpoint_cursor(cursor)
+        if walk is None:
+            # Read as page one, a foreign cursor would silently restart the
+            # walk and repeat the first page as if it were the next one.
+            return {
+                "error": (
+                    "cursor is not one list_checkpoints issued; call without a "
+                    "cursor to start from the first page"
+                ),
+                "checkpoints": [],
+            }
+        offset = walk["offset"]
+    if offset > MAX_QUERY_OFFSET:
+        # The server refuses this page (ERR_OFFSET_TOO_DEEP). Say so, rather
+        # than report a short or empty page as the end of the queue.
         return {
-            "error": "could not read the checkpoint queue from Neotoma",
-            "detail": _describe_transport_error(),
+            "error": (
+                f"the next page starts at offset {offset}, past the "
+                f"{MAX_QUERY_OFFSET} Neotoma accepts; the rest of the queue "
+                "cannot be listed through this tool"
+            ),
+            "offset_limit": MAX_QUERY_OFFSET,
             "checkpoints": [],
         }
+    data, failure = _read_checkpoint_page(offset, page_size)
+    if failure is not None:
+        return failure
 
-    entities = data.get("entities", [])
-    total = data.get("total")
+    entities = data["entities"]
+    total = data["total"]
     next_cursor = data.get("next_cursor")
+    ids = [str(ent.get("entity_id") or ent.get("id")) for ent in entities]
 
     checkpoints = []
-    for ent in entities:
+    for ent, eid in zip(entities, ids):
         snap = _snapshot_of(ent)
-        eid = ent.get("entity_id", ent.get("id", ""))
 
         task_id = snap.get("task_entity_id")
         task_title = None
@@ -1064,10 +1217,9 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
         })
 
     returned = len(checkpoints)
-    if total is None:
-        # The endpoint did not report a total. Say so rather than substituting
-        # the page size, which is the exact conflation this fix exists to end.
-        total = returned if next_cursor is None else None
+    # The server's `next_cursor` only signals that more exists; it cannot be
+    # sent back beside the filter, so it is never passed to the caller.
+    has_more = bool(next_cursor) or offset + returned < total
 
     result: dict[str, Any] = {
         # The queue's real depth. Named `total` so a caller reading one field
@@ -1079,16 +1231,42 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
         # rather than to the page: `count` read as the queue size for months,
         # and leaving it meaning the page would preserve the defect under its
         # original name.
-        "count": total if total is not None else returned,
+        "count": total,
         "checkpoints": checkpoints,
     }
-    if next_cursor:
-        result["truncated"] = True
-        result["next_cursor"] = next_cursor
-        result["note"] = (
-            f"Showing {returned} of {total if total is not None else 'an unknown number of'} "
-            "pending checkpoints. Pass `cursor` to retrieve the next page."
+
+    if has_more and returned == 0:
+        # More is claimed but this page moved nothing: a cursor for the same
+        # offset would loop forever, and no cursor would read as the end.
+        result["error"] = (
+            f"Neotoma reported more pending checkpoints past offset {offset} "
+            "but returned none; the queue could not be listed to the end"
         )
+        result["truncated"] = True
+        result["complete"] = False
+    elif has_more:
+        result["truncated"] = True
+        result["complete"] = False
+        result["next_cursor"] = _encode_checkpoint_cursor(offset + returned)
+        result["note"] = (
+            f"Showing {returned} of {total} pending checkpoints. Pass `cursor` "
+            "to retrieve the next page."
+        )
+    elif walk is not None:
+        # The last page of a walk across calls, or a page reached through a
+        # cursor the tool may never have issued: neither proves the walk saw
+        # every record.
+        result["complete"] = False
+        result["completeness_reason"] = _MULTI_PAGE_NOT_PROVEN
+    elif returned != total:
+        result["complete"] = False
+        result["completeness_reason"] = (
+            f"Neotoma reported {total} pending checkpoints but returned "
+            f"{returned} with no further page; list again to confirm"
+        )
+    else:
+        # One page, no cursor, and it carries the whole filtered queue.
+        result["complete"] = True
     return result
 
 
@@ -3428,15 +3606,24 @@ TOOLS = [
             "and reason pre-joined. These are the operator's decision queue. "
             "`total` is the queue's real depth and `returned` is how many this page "
             "carries; when `truncated` is true, pass `next_cursor` back as `cursor` "
-            "to reach the rest. Never treat one page as the whole queue — it used to "
-            "say it returned 'all' while showing 50 of 372 (ateles#1037)."
+            "to reach the rest. Only `complete: true` means the queue was read in "
+            "full; it is set only when a call without a cursor fits the whole queue "
+            "on one page. Every page read through a cursor reports `complete: false`, "
+            "because offset paging over a changing queue cannot prove no record was "
+            "skipped (`completeness_reason` says so on the last page); to confirm, "
+            "list again without a cursor and a larger `limit`. Never treat one page "
+            "as the whole queue — it "
+            "used to say it returned 'all' while showing 50 of 372 (ateles#1037)."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "cursor": {
                     "type": "string",
-                    "description": "Opaque cursor from a previous response's `next_cursor`.",
+                    "description": (
+                        "Opaque cursor from a previous response's `next_cursor`. "
+                        "A page read through a cursor never reports `complete: true`."
+                    ),
                 },
                 "limit": {
                     "type": "integer",
