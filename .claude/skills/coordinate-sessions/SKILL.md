@@ -45,6 +45,7 @@ If the coordinator role record cannot be found, stop and ask the coordinator for
 Use each harness's own store, and open every database read-only (`file:<path>?mode=ro`). Never write to a harness's state directory.
 
 - **Claude Code**: `mcp__ccd_session_mgmt__list_sessions` with `limit` ≥ 100 (all sessions, not only linked ones). For state, call `list_events` with a small `limit` and page back with `before_uuid` until the last real assistant message. `isRunning` is not evidence of work; read the last turn.
+  - `list_sessions` returns **local sessions only**. Cloud (claude.ai/code) sessions still appear in the app sidebar but not in it. List them separately: ask the coordinator for a sidebar screenshot, or read the sidebar with app screenshots. Inventory them by title. Report any you could not read as "cloud, not inventoried", and never leave them out silently.
 - **Codex**: `~/.codex/state_*.sqlite`, table `threads`, where `archived = 0`. Split rows by `thread_source`:
   - `subagent`: children of a parent thread. Count them; do not inventory them.
   - Named `user` / `agent_created_thread` rows: the operator-facing sessions. Inventory each one.
@@ -132,10 +133,11 @@ After approval, and for every approved session, before archiving it:
 3. **Keep the owner pointer valid.** When the session is the recorded owner or executor of a task, append a note to that task (merge, then read back). The note says the session was archived, cites the approval, and gives the exact unarchive command or how to resume from the task.
 4. **Archive and read back.**
    - Claude Code: archive through the session tools once `/end` has finished.
-   - Codex: `codex archive <thread-id>`.
+   - Codex: archive from the Codex desktop app's own sidebar (hover the row, click its archive icon) whenever the app is running. `codex archive <thread-id>` changes only the on-disk state. A running app keeps its in-memory list, so the chat stays visible, and its own archive then fails on that already-archived thread. If a thread was archived through the CLI, run `codex unarchive <thread-id>`, then archive it in the app. Use the CLI alone only when the app is not running.
    - Cursor: its UI.
+   - Claude cloud sessions: the app's sidebar UI, with the same approval and capture steps.
 
-   Read the harness's own record afterwards to confirm the session is archived. A session the harness refuses to archive stays held, with the error. Do not retry it in a loop or work around the refusal; report it for archiving through the harness's own app.
+   Read the harness's own record afterwards to confirm the session is archived, **and** check that it is gone from the app the operator looks at. The database flag alone is not what the operator sees. A session the harness refuses to archive stays held, with the error. Do not retry it in a loop or work around the refusal; report it for archiving through the harness's own app.
 
 Report the archived sessions, the held ones and why, and the tasks you annotated or filed.
 
@@ -154,7 +156,7 @@ Leave mechanism (ids, paths) to the stored record and the notes file. Then close
 
 ## Constraints
 
-- Read-only everywhere except Neotoma planning records, the coordination analysis, and the notes folder. The one exception is archiving operator-approved sessions through each harness's own archive command after the capture step. Never delete.
+- Read-only everywhere except Neotoma planning records, the coordination analysis, and the notes folder. The one exception is archiving operator-approved sessions through each harness's own archive command or app UI after the capture step. Never delete.
 - No sends, payments, publication, or messages to sessions other than the coordinator.
 - Never read credential files into context. For REST, write a script and run it with the environment sourced; never print a token.
 - Never `git stash`. Never `--no-verify`.
