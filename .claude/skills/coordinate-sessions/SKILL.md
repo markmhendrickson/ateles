@@ -58,6 +58,18 @@ Use each harness's own store, and open every database read-only (`file:<path>?mo
 
 Write the raw lists to the scratchpad. Report counts per harness and class.
 
+### 1a. Recently archived sessions (read-only)
+
+Open sessions alone miss live work. A session archived by an earlier audit, by the operator, or by mistake can still be the only executor of a dated workstream. On 9 Nov 2026 a review built from open sessions left out a family trip three weeks away, because its Codex thread had been archived three days before.
+
+- List every session archived in the last 14 days, or since the previous coordination run if that is longer ago: Claude `list_sessions` with `include_archived: true`, Codex `archived = 1` with `archived_at` in the window, and Cursor `isArchived` rows with a recent `lastUpdatedAt`. Leave out the ones this run archived itself, since those already passed step 6.
+- Read each one's last real assistant turn. Flag it when the turn names remaining work, a pending operator choice, an unbooked dated item, an open PR, or an interrupted run.
+- For each flagged session, confirm a live task carries the remaining work (step 3). If none does, file one. When the archived session is the work's only executor, propose unarchiving it (the operator approves).
+
+### 1b. Live plans without an open session
+
+Cross-check from the other side. List Neotoma plans with a live status (`active`, `executing`, `in_progress`, `blocked`, `awaiting_input`) that changed in the last 30 days, plus any plan holding a dated item within the next 30 days. Each one either maps to an inventoried session, or it gets a row in the report as "live plan, no open session", with its next dated item and the state of its tasks. A plan with a `failed` or ownerless task and a near date goes into the priority list, not a footnote.
+
 ## 2. Disposition per session
 
 For every operator-facing session, record:
