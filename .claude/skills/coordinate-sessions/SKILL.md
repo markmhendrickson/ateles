@@ -134,8 +134,8 @@ After approval, and for every approved session, before archiving it:
 4. **Archive and read back.**
    - Claude Code: archive through the session tools once `/end` has finished.
    - Codex: archive from the Codex desktop app's own sidebar (hover the row, click its archive icon) whenever the app is running. `codex archive <thread-id>` changes only the on-disk state. A running app keeps its in-memory list, so the chat stays visible, and its own archive then fails on that already-archived thread. If a thread was archived through the CLI, run `codex unarchive <thread-id>`, then archive it in the app. Use the CLI alone only when the app is not running.
-   - Cursor: its UI.
-   - Claude cloud sessions: the app's sidebar UI, with the same approval and capture steps.
+   - Cursor: hover the row in Cursor's sidebar and click its archive icon. Afterwards, `composerHeaders.isArchived` should read 1. An empty draft row ("New Agent") offers only a close (X), which discards it. That is not an archive, so leave it for the operator.
+   - Claude cloud sessions: an agent cannot control the Claude app, and the session tools cannot reach these sessions. List them for the operator to archive from the Claude sidebar, and say that this run did not check their contents.
 
    Read the harness's own record afterwards to confirm the session is archived, **and** check that it is gone from the app the operator looks at. The database flag alone is not what the operator sees. A session the harness refuses to archive stays held, with the error. Do not retry it in a loop or work around the refusal; report it for archiving through the harness's own app.
 
