@@ -38,7 +38,6 @@ Run: pytest execution/mcp/ateles/test_list_checkpoints_pagination.py -v
 
 from __future__ import annotations
 
-import base64
 import sys
 from pathlib import Path
 
@@ -305,11 +304,153 @@ def test_an_offset_past_the_server_limit_is_an_error(prod_like_queue):
     """A page Neotoma would refuse as too deep is reported, naming the limit."""
     # Built the way the tool builds its cursor, so on code that reads no
     # cursor of its own this is a cursor that cannot fail for being foreign.
-    too_deep = base64.urlsafe_b64encode(
-        f"list_checkpoints:offset:{MAX_QUERY_OFFSET + 1}".encode()
-    ).decode().rstrip("=")
+    too_deep = server._encode_checkpoint_cursor(
+        MAX_QUERY_OFFSET + 1,
+        total=MAX_QUERY_OFFSET + 10,
+        page_size=server.CHECKPOINT_PAGE_SIZE,
+        first_digest="d",
+        last_id="ent_x",
+    )
     result = server._list_checkpoints(cursor=too_deep)
     assert result.get("error"), result
     assert str(MAX_QUERY_OFFSET) in result["error"]
     assert result.get("total") is None and not result.get("count")
     assert prod_like_queue == [], "a too-deep page was still requested"
+
+
+# ── A queue that changes while it is walked (PR #1706 security review) ───────
+#
+# Neotoma refuses a cursor beside a filter, so the queue is walked by offset,
+# and offset paging over a queue that changes between calls can skip a record
+# with no page looking wrong. A walk across calls may claim completeness only
+# when continuity is shown. Before this round each of these returned a clean,
+# complete-looking last page (no `incomplete`, no `truncated`, no error).
+
+
+def _mutable_queue(monkeypatch, size: int) -> list[dict]:
+    """A queue the test can change between calls, paged like Neotoma."""
+    briefs = [_brief(i) for i in range(size)]
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        server, "_post", lambda path, body: _neotoma_like_post(briefs, calls)(path, body)
+    )
+    monkeypatch.setattr(server, "_get", lambda path, params=None: None)
+    return briefs
+
+
+def test_a_record_resolved_between_pages_is_not_reported_complete(monkeypatch):
+    """Security's scenario: 50 of 51, one resolved, page two empty with total 50.
+
+    Red before this round: page two reported total 50, returned 0, no
+    `truncated` and no error, so the walk read as the complete queue while the
+    51st brief was never shown.
+    """
+    size = server.CHECKPOINT_PAGE_SIZE + 1
+    briefs = _mutable_queue(monkeypatch, size)
+    first = server._list_checkpoints()
+    assert first["truncated"] is True and first["returned"] == size - 1
+    del briefs[10]  # resolved before page two is read
+    second = server._list_checkpoints(cursor=first["next_cursor"])
+    assert second.get("incomplete") is True, second
+    assert second.get("truncated") is True
+    assert "queue changed while it was read" in second["incomplete_reason"]
+    assert not second.get("next_cursor")
+
+
+def test_a_shift_with_an_unchanged_total_is_not_reported_complete(monkeypatch):
+    """One resolved and one added between pages: the total holds, a record is skipped.
+
+    Red before this round: page two returned the new brief, the totals agreed,
+    and the walk ended clean although the brief that slid onto page one was
+    never handed out.
+    """
+    size = server.CHECKPOINT_PAGE_SIZE + 1
+    briefs = _mutable_queue(monkeypatch, size)
+    first = server._list_checkpoints()
+    del briefs[10]
+    briefs.append(_brief(size + 100))  # sorts last
+    second = server._list_checkpoints(cursor=first["next_cursor"])
+    seen = {c["checkpoint_id"] for c in first["checkpoints"] + second["checkpoints"]}
+    assert _brief(server.CHECKPOINT_PAGE_SIZE)["entity_id"] not in seen  # the skip
+    assert second.get("incomplete") is True, second
+    assert "queue changed while it was read" in second["incomplete_reason"]
+
+
+def test_a_record_added_mid_walk_that_repeats_one_is_not_complete(monkeypatch):
+    """A record added ahead of the offset shifts a seen brief onto the next page."""
+    size = 2 * server.CHECKPOINT_PAGE_SIZE + 1
+    briefs = _mutable_queue(monkeypatch, size)
+    first = server._list_checkpoints()
+    briefs.insert(0, {**_brief(0), "entity_id": "ent_" + "0" * 23 + "_"})
+    second = server._list_checkpoints(cursor=first["next_cursor"])
+    assert second.get("incomplete") is True, second
+
+
+def test_a_stable_multi_page_queue_is_still_complete(monkeypatch):
+    """With nothing changing, a three-page walk ends clean, every brief once."""
+    size = 2 * server.CHECKPOINT_PAGE_SIZE + 7
+    briefs = _mutable_queue(monkeypatch, size)
+    seen, pages = _walk()
+    assert len(pages) == 3
+    assert seen == [b["entity_id"] for b in briefs]
+    assert not pages[-1].get("incomplete")
+    assert not pages[-1].get("truncated")
+
+
+# ── A malformed page never reads as a complete queue ─────────────────────────
+
+
+def _one_page(monkeypatch, page: object):
+    monkeypatch.setattr(server, "_post", lambda path, body: page)
+    monkeypatch.setattr(server, "_get", lambda path, params=None: None)
+    return server._list_checkpoints()
+
+
+@pytest.mark.parametrize(
+    "page, field",
+    [
+        ({"total": 0}, "entities"),
+        ({"entities": None, "total": 0}, "entities"),
+        ({"entities": {"a": 1}, "total": 0}, "entities"),
+        ({"entities": []}, "total"),
+        ({"entities": [], "total": "0"}, "total"),
+        ({"entities": [], "total": 1.0}, "total"),
+        ({"entities": [], "total": -1}, "total"),
+        ({"entities": [], "total": False}, "total"),
+        ({"entities": [], "total": 0, "next_cursor": 5}, "next_cursor"),
+        ({"entities": [], "total": 0, "offset": "0"}, "offset"),
+        ({"entities": [], "total": 0, "offset": 7}, "offset"),
+        ({"entities": [{"snapshot": {}}], "total": 1}, "entities[0].entity_id"),
+        ({"entities": [{"entity_id": ""}], "total": 1}, "entities[0].entity_id"),
+        ({"entities": ["ent_x"], "total": 1}, "entities[0]"),
+        (["not", "an", "object"], "response"),
+    ],
+)
+def test_a_malformed_page_is_an_error_naming_the_field(monkeypatch, page, field):
+    """Red before this round: each of these read as a complete queue
+    (`data.get("entities", [])`, a tolerated missing total), mostly `total: 0`."""
+    result = _one_page(monkeypatch, page)
+    assert result.get("error"), f"malformed page read as a listing: {result}"
+    assert result.get("malformed_field", "").startswith(field), result
+    assert field.split("[")[0] in result["error"]
+    assert result["checkpoints"] == []
+    assert result.get("total") is None and not result.get("count")
+
+
+def test_a_malformed_first_page_reread_leaves_the_walk_incomplete(monkeypatch):
+    """The end-of-walk re-read is validated like any page."""
+    size = server.CHECKPOINT_PAGE_SIZE + 1
+    briefs = _mutable_queue(monkeypatch, size)
+    first = server._list_checkpoints()
+    real_post = server._post
+
+    def _post(path, body):
+        if not body.get("offset"):
+            return {"entities": [], "total": "51"}
+        return real_post(path, body)
+
+    monkeypatch.setattr(server, "_post", _post)
+    second = server._list_checkpoints(cursor=first["next_cursor"])
+    assert second.get("incomplete") is True, second
+    assert "total" in second["incomplete_reason"]
+    assert len(briefs) == size

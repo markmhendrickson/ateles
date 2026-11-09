@@ -998,19 +998,40 @@ CHECKPOINT_PAGE_SIZE = 50
 
 # Neotoma refuses a `cursor` beside `snapshot_filters` (ERR_CURSOR_COMBINATION,
 # HTTP 400) yet still returns a `next_cursor` on a full filtered page, so the
-# filtered queue is walked by `offset` (see `query_entities` in
-# lib/daemon_runtime/gating.py). The `next_cursor` this tool hands out is its
-# own opaque encoding of the next offset, never the server's.
-_CHECKPOINT_CURSOR_PREFIX = "list_checkpoints:offset:"
+# filtered queue cannot be walked by a stable keyset cursor and is walked by
+# `offset` instead (see `query_entities` in lib/daemon_runtime/gating.py). The
+# `next_cursor` this tool hands out is its own opaque encoding, never the
+# server's: besides the next offset it carries what the walk needs to prove
+# continuity across calls (the queue's total when the walk began, the first
+# page's ids as a digest, and the last id handed out).
+_CHECKPOINT_CURSOR_PREFIX = "list_checkpoints:walk:"
+
+_CHECKPOINT_QUEUE_FILTER = {"status": {"op": "eq", "value": "awaiting_operator"}}
+
+_QUEUE_CHANGED = "queue changed while it was read"
 
 
-def _encode_checkpoint_cursor(offset: int) -> str:
-    raw = f"{_CHECKPOINT_CURSOR_PREFIX}{offset}".encode()
+def _encode_checkpoint_cursor(
+    offset: int, *, total: int, page_size: int, first_digest: str, last_id: str
+) -> str:
+    state = {
+        "offset": offset,
+        "total": total,
+        "page_size": page_size,
+        "first_digest": first_digest,
+        "last_id": last_id,
+    }
+    raw = (_CHECKPOINT_CURSOR_PREFIX + json.dumps(state, sort_keys=True)).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def _decode_checkpoint_cursor(cursor: str) -> int | None:
-    """The offset a cursor this tool issued stands for; None for any other."""
+def _is_count(value: Any) -> bool:
+    """A non-negative int that is not a bool posing as one."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _decode_checkpoint_cursor(cursor: str) -> dict | None:
+    """The walk state a cursor this tool issued carries; None for any other."""
     text = str(cursor or "").strip()
     try:
         raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode()
@@ -1018,10 +1039,97 @@ def _decode_checkpoint_cursor(cursor: str) -> int | None:
         return None
     if not raw.startswith(_CHECKPOINT_CURSOR_PREFIX):
         return None
-    digits = raw[len(_CHECKPOINT_CURSOR_PREFIX):]
-    if not digits.isdigit():
+    try:
+        state = json.loads(raw[len(_CHECKPOINT_CURSOR_PREFIX):])
+    except ValueError:
         return None
-    return int(digits)
+    if not isinstance(state, dict):
+        return None
+    if not all(_is_count(state.get(k)) for k in ("offset", "total", "page_size")):
+        return None
+    if state["offset"] < 1 or state["page_size"] < 1:
+        return None
+    if not all(
+        isinstance(state.get(k), str) and state[k]
+        for k in ("first_digest", "last_id")
+    ):
+        return None
+    return state
+
+
+def _checkpoint_page_ids(data: dict) -> list[str]:
+    return [str(ent.get("entity_id") or ent.get("id")) for ent in data["entities"]]
+
+
+def _checkpoint_ids_digest(ids: list[str]) -> str:
+    return hmac.new(b"list_checkpoints", "\n".join(ids).encode(), "sha256").hexdigest()
+
+
+def _checkpoint_page_problem(data: Any, offset: int) -> str | None:
+    """Name the field that makes a page unusable for judging completeness.
+
+    Every field the walk reads to decide whether it has seen the whole queue is
+    checked here. A page missing `entities` or `total` must not read as an
+    empty, complete queue: that is a malformed answer, not an all-clear.
+    """
+    if not isinstance(data, dict):
+        return "response (not an object)"
+    entities = data.get("entities")
+    if not isinstance(entities, list):
+        return "entities (missing or not a list)"
+    for i, ent in enumerate(entities):
+        if not isinstance(ent, dict):
+            return f"entities[{i}] (not an object)"
+        eid = ent.get("entity_id") or ent.get("id")
+        if not isinstance(eid, str) or not eid.strip():
+            return f"entities[{i}].entity_id (missing)"
+    if not _is_count(data.get("total")):
+        return "total (missing, not an integer, or negative)"
+    if "next_cursor" in data and data["next_cursor"] is not None and not isinstance(
+        data["next_cursor"], str
+    ):
+        return "next_cursor (not a string)"
+    if "offset" in data and data["offset"] is not None and (
+        not _is_count(data["offset"]) or data["offset"] != offset
+    ):
+        return f"offset (not the requested {offset})"
+    return None
+
+
+def _malformed_checkpoint_page(field: str) -> dict:
+    return {
+        "error": (
+            f"Neotoma returned a malformed checkpoint page: {field}; the queue "
+            "could not be read, which is not the same as an empty queue"
+        ),
+        "malformed_field": field,
+        "total": None,
+        "checkpoints": [],
+    }
+
+
+def _read_checkpoint_page(offset: int, page_size: int) -> tuple[dict | None, dict | None]:
+    """One validated page, or the error result that replaces the listing."""
+    data = _retrieve_page(
+        "checkpoint_brief",
+        snapshot_filters=_CHECKPOINT_QUEUE_FILTER,
+        limit=page_size,
+        offset=offset,
+    )
+    # A failed read must NOT be spelled the same way as an empty queue. Reported
+    # as `count: 0` it would tell the operator they have nothing to decide,
+    # which is the most dangerous output this tool can produce.
+    if data is None:
+        return None, {
+            "error": "could not read the checkpoint queue from Neotoma",
+            "detail": _describe_transport_error(),
+            "total": None,
+            "checkpoints": [],
+        }
+    problem = _checkpoint_page_problem(data, offset)
+    if problem:
+        return None, _malformed_checkpoint_page(problem)
+    return data, None
 
 
 def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> dict:
@@ -1042,12 +1150,22 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
     than no list, because it is acted on with confidence. That is why
     `truncated` is stated explicitly rather than left to be inferred from
     comparing two numbers.
+
+    A walk that spans more than one call is reported complete only when its
+    continuity is shown: every page reported the walk's starting `total`, no
+    page repeats the id the previous page ended on, the ids handed out add up to
+    that `total`, and a re-read of the first page at the end returns the same
+    `total` and the same ids in the same order. Otherwise the result carries
+    `incomplete: true` and `incomplete_reason`, never a smaller success: offset
+    paging over a queue that changed between calls can skip a record without
+    any page looking wrong.
     """
     page_size = limit or CHECKPOINT_PAGE_SIZE
     offset = 0
+    walk: dict | None = None
     if cursor:
-        decoded = _decode_checkpoint_cursor(cursor)
-        if decoded is None:
+        walk = _decode_checkpoint_cursor(cursor)
+        if walk is None:
             # Read as page one, a foreign cursor would silently restart the
             # walk and repeat the first page as if it were the next one.
             return {
@@ -1057,7 +1175,7 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
                 ),
                 "checkpoints": [],
             }
-        offset = decoded
+        offset = walk["offset"]
     if offset > MAX_QUERY_OFFSET:
         # The server refuses this page (ERR_OFFSET_TOO_DEEP). Say so, rather
         # than report a short or empty page as the end of the queue.
@@ -1070,31 +1188,18 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
             "offset_limit": MAX_QUERY_OFFSET,
             "checkpoints": [],
         }
-    data = _retrieve_page(
-        "checkpoint_brief",
-        snapshot_filters={"status": {"op": "eq", "value": "awaiting_operator"}},
-        limit=page_size,
-        offset=offset,
-    )
+    data, failure = _read_checkpoint_page(offset, page_size)
+    if failure is not None:
+        return failure
 
-    # A failed read must NOT be spelled the same way as an empty queue. Reported
-    # as `count: 0` it would tell the operator they have nothing to decide,
-    # which is the most dangerous output this tool can produce.
-    if data is None:
-        return {
-            "error": "could not read the checkpoint queue from Neotoma",
-            "detail": _describe_transport_error(),
-            "checkpoints": [],
-        }
-
-    entities = data.get("entities", [])
-    total = data.get("total")
+    entities = data["entities"]
+    total = data["total"]
     next_cursor = data.get("next_cursor")
+    ids = _checkpoint_page_ids(data)
 
     checkpoints = []
-    for ent in entities:
+    for ent, eid in zip(entities, ids):
         snap = _snapshot_of(ent)
-        eid = ent.get("entity_id", ent.get("id", ""))
 
         task_id = snap.get("task_entity_id")
         task_title = None
@@ -1122,13 +1227,7 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
     returned = len(checkpoints)
     # The server's `next_cursor` only signals that more exists; it cannot be
     # sent back beside the filter, so it is never passed to the caller.
-    has_more = bool(next_cursor) or (
-        isinstance(total, int) and offset + returned < total
-    )
-    if total is None:
-        # The endpoint did not report a total. Say so rather than substituting
-        # the page size, which is the exact conflation this fix exists to end.
-        total = offset + returned if not has_more else None
+    has_more = bool(next_cursor) or offset + returned < total
 
     result: dict[str, Any] = {
         # The queue's real depth. Named `total` so a caller reading one field
@@ -1140,9 +1239,14 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
         # rather than to the page: `count` read as the queue size for months,
         # and leaving it meaning the page would preserve the defect under its
         # original name.
-        "count": total if total is not None else returned,
+        "count": total,
         "checkpoints": checkpoints,
     }
+
+    reason = _walk_discontinuity(walk, total, ids, offset, returned, has_more)
+    if reason:
+        return _mark_incomplete(result, reason)
+
     if has_more and returned == 0:
         # More is claimed but this page moved nothing: a cursor for the same
         # offset would loop forever, and no cursor would read as the end.
@@ -1152,12 +1256,75 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
         )
         result["truncated"] = True
     elif has_more:
+        first_digest = walk["first_digest"] if walk else _checkpoint_ids_digest(ids)
+        first_size = walk["page_size"] if walk else page_size
         result["truncated"] = True
-        result["next_cursor"] = _encode_checkpoint_cursor(offset + returned)
-        result["note"] = (
-            f"Showing {returned} of {total if total is not None else 'an unknown number of'} "
-            "pending checkpoints. Pass `cursor` to retrieve the next page."
+        result["next_cursor"] = _encode_checkpoint_cursor(
+            offset + returned,
+            total=walk["total"] if walk else total,
+            page_size=first_size,
+            first_digest=first_digest,
+            last_id=ids[-1],
         )
+        result["note"] = (
+            f"Showing {returned} of {total} pending checkpoints. Pass `cursor` "
+            "to retrieve the next page."
+        )
+    elif walk is not None:
+        # The last page of a walk that spanned calls: re-read the first page
+        # and confirm the queue's head did not move under the walk.
+        first, failure = _read_checkpoint_page(0, walk["page_size"])
+        if failure is not None:
+            return _mark_incomplete(
+                result,
+                "the first page could not be re-read to confirm the walk: "
+                + failure["error"],
+            )
+        if first["total"] != walk["total"] or _checkpoint_ids_digest(
+            _checkpoint_page_ids(first)
+        ) != walk["first_digest"]:
+            return _mark_incomplete(result, _QUEUE_CHANGED)
+    return result
+
+
+def _walk_discontinuity(
+    walk: dict | None,
+    total: int,
+    ids: list[str],
+    offset: int,
+    returned: int,
+    has_more: bool,
+) -> str | None:
+    """Why this page cannot continue the walk the cursor describes, if it cannot."""
+    if len(set(ids)) != len(ids):
+        return "the page repeats a checkpoint id"
+    if walk is None:
+        return None
+    if total != walk["total"]:
+        return (
+            f"{_QUEUE_CHANGED} (total was {walk['total']} when the walk began, "
+            f"{total} at offset {offset})"
+        )
+    if walk["last_id"] in ids:
+        return f"{_QUEUE_CHANGED} (a checkpoint from the previous page reappeared)"
+    if not has_more and offset + returned != total:
+        return (
+            f"{_QUEUE_CHANGED} ({offset + returned} checkpoints handed out "
+            f"against a total of {total})"
+        )
+    return None
+
+
+def _mark_incomplete(result: dict, reason: str) -> dict:
+    """The records collected, stated as a partial walk with no way to continue it."""
+    result["truncated"] = True
+    result["incomplete"] = True
+    result["incomplete_reason"] = reason
+    result.pop("next_cursor", None)
+    result["note"] = (
+        "This listing is incomplete: "
+        f"{reason}. Call without a cursor to walk the queue again from the start."
+    )
     return result
 
 
@@ -3497,8 +3664,10 @@ TOOLS = [
             "and reason pre-joined. These are the operator's decision queue. "
             "`total` is the queue's real depth and `returned` is how many this page "
             "carries; when `truncated` is true, pass `next_cursor` back as `cursor` "
-            "to reach the rest. Never treat one page as the whole queue — it used to "
-            "say it returned 'all' while showing 50 of 372 (ateles#1037)."
+            "to reach the rest. When `incomplete` is true the queue changed while "
+            "it was read (`incomplete_reason` says how) and records may be missing; "
+            "call again without a cursor. Never treat one page as the whole queue — it "
+            "used to say it returned 'all' while showing 50 of 372 (ateles#1037)."
         ),
         inputSchema={
             "type": "object",
