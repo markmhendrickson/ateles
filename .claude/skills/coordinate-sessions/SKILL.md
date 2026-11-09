@@ -47,7 +47,9 @@ Use each harness's own store, and open every database read-only (`file:<path>?mo
 - **Claude Code**: `mcp__ccd_session_mgmt__list_sessions` with `limit` ≥ 100 (all sessions, not only linked ones). For state, call `list_events` with a small `limit` and page back with `before_uuid` until the last real assistant message. `isRunning` is not evidence of work; read the last turn.
   - `list_sessions` returns **local sessions only**. Cloud (claude.ai/code) sessions still appear in the app sidebar but not in it. List them separately: ask the coordinator for a sidebar screenshot, or read the sidebar with app screenshots. Inventory them by title. Report any you could not read as "cloud, not inventoried", and never leave them out silently.
 - **Codex**: `~/.codex/state_*.sqlite`, table `threads`, where `archived = 0`. Split rows by `thread_source`:
-  - `subagent`: children of a parent thread. Count them; do not inventory them.
+  - `subagent`: children of a parent thread. Count them; do not inventory them one by one. Treat them as a class.
+    - A child whose parent is open stays as long as its parent does, and is archived with it.
+    - A child with no parent reference, or whose parent is archived, is an orphan. Orphans form one bulk archive candidate. They go through the same check as any other archive: confirm in bulk that none names open work missing from Neotoma, file what is missing, and hold any orphan with an interrupted last turn.
   - Named `user` / `agent_created_thread` rows: the operator-facing sessions. Inventory each one.
   - Unnamed top-level rows are usually one-shot `exec` runs (lens reviews, builders, probes) whose parent already consumed the result. Count them, record their last-activity range, and treat them as one bulk archive candidate.
   - For last state, read `~/.codex/thread_history_*.sqlite`. Read `thread_turns` (latest `status`) and `thread_items` (`item_json` with `type` `userMessage` / `agentMessage`), and **always filter on `thread_id`**. A turn status of `interrupted` matters: it can mean lost operator input or a half-finished run.
