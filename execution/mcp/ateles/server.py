@@ -1089,6 +1089,26 @@ def _checkpoint_page_problem(data: Any, offset: int) -> str | None:
     return None
 
 
+def _filtered_read_problem(page: Any, read_what: str) -> tuple[str | None, str | None]:
+    """Judge a single first-page filtered read: (malformed field, partial-read gap).
+
+    The rule `list_checkpoints` follows applies to every filtered read: it may
+    be presented as complete only when its page was well formed and it carried
+    the whole filtered set. A malformed page returns its field (the read must be
+    reported as an error, never as an empty set); a well-formed page with more
+    after it returns a gap naming how much was read.
+    """
+    problem = _checkpoint_page_problem(page, 0)
+    if problem:
+        return problem, None
+    read = len(page["entities"])
+    total = page["total"]
+    if total > read or page.get("next_cursor"):
+        shown_total = total if total > read else f"more than {read}"
+        return None, f"only {read} of {shown_total} {read_what} were read"
+    return None, None
+
+
 def _malformed_checkpoint_page(field: str) -> dict:
     return {
         "error": (
@@ -1150,7 +1170,12 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
     more after it, reports `complete: false`: offset paging over a queue that
     can change between calls cannot prove a walk skipped nothing, so a
     multi-page walk returns the records it read and says plainly that its
-    completeness is not proven (`completeness_reason` on its last page).
+    completeness is not proven (`completeness_reason` on its last page). A
+    queue larger than the largest allowed `limit` (500) therefore can never
+    return `complete: true` from this tool.
+
+    Every error response carries the same fields: `error`, `total: None` and
+    `checkpoints: []`, plus `detail` or `malformed_field` where they apply.
     """
     page_size = limit or CHECKPOINT_PAGE_SIZE
     offset = 0
@@ -1165,6 +1190,7 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
                     "cursor is not one list_checkpoints issued; call without a "
                     "cursor to start from the first page"
                 ),
+                "total": None,
                 "checkpoints": [],
             }
         offset = walk["offset"]
@@ -1178,6 +1204,7 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
                 "cannot be listed through this tool"
             ),
             "offset_limit": MAX_QUERY_OFFSET,
+            "total": None,
             "checkpoints": [],
         }
     data, failure = _read_checkpoint_page(offset, page_size)
@@ -2799,7 +2826,16 @@ class _TimelineBuilder:
             self.source("checkpoint_brief", "error", detail=_read_error("checkpoint_brief"))
             self.gaps.append("checkpoints could not be read; an open checkpoint may be holding this task")
             return
-        entities = list(page.get("entities") or [])
+        malformed, partial = _filtered_read_problem(page, "this task's checkpoints")
+        if malformed:
+            self.source(
+                "checkpoint_brief", "error", detail=f"malformed checkpoint page: {malformed}"
+            )
+            self.gaps.append("checkpoints could not be read; an open checkpoint may be holding this task")
+            return
+        if partial:
+            self.gaps.append(f"{partial}; an unread checkpoint may be holding this task")
+        entities = list(page["entities"])
         listed = {e.get("entity_id") for e in entities}
         # A checkpoint linked by edge but missing its task_entity_id field.
         for cid in sorted(self.rel_checkpoint_ids - listed):
@@ -2830,7 +2866,9 @@ class _TimelineBuilder:
                 }
             )
         status = "error" if errors else ("joined" if self.checkpoints else "none_found")
-        self.source("checkpoint_brief", status, len(self.checkpoints))
+        if partial and not errors:
+            status = "partial"
+        self.source("checkpoint_brief", status, len(self.checkpoints), detail=partial)
 
     def _scan_bounds(self) -> tuple[datetime, datetime] | None:
         created = _parse_ts(self.task.get("created_at")) or (
@@ -3030,8 +3068,16 @@ class _TimelineBuilder:
         )
         if page is None:
             self.source("escalation", "error", detail=_read_error("escalation"))
+            self.gaps.append("escalations could not be read; an escalation about this task may be missing")
             return
-        rows = page.get("entities") or []
+        malformed, partial = _filtered_read_problem(page, "this task's escalations")
+        if malformed:
+            self.source("escalation", "error", detail=f"malformed escalation page: {malformed}")
+            self.gaps.append("escalations could not be read; an escalation about this task may be missing")
+            return
+        if partial:
+            self.gaps.append(f"{partial}; an unread escalation about this task may be missing")
+        rows = page["entities"]
         for ent in rows:
             esnap = _snapshot_of(ent)
             self.timeline.append(
@@ -3043,7 +3089,8 @@ class _TimelineBuilder:
                     "source": {"type": "escalation", "entity_id": ent.get("entity_id")},
                 }
             )
-        self.source("escalation", "joined" if rows else "none_found", len(rows))
+        status = "partial" if partial else ("joined" if rows else "none_found")
+        self.source("escalation", status, len(rows), detail=partial)
 
     def current(self) -> dict:
         """What is happening now, derived from the joined records."""
@@ -3375,6 +3422,7 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
     tasks: list[dict] = []
     pending: list[dict] = []
     errors: list[str] = []
+    read_gaps: list[str] = []
     for tid in task_ids:
         ent = _get(f"/entities/{tid}")
         if ent is None:
@@ -3403,7 +3451,14 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
         if page is None:
             errors.append(_read_error(f"checkpoints of {tid}"))
             continue
-        for cp in page.get("entities") or []:
+        malformed, partial = _filtered_read_problem(page, f"pending checkpoints of {tid}")
+        if malformed:
+            # A malformed page is a failed read, never an empty pending list.
+            errors.append(f"checkpoints of {tid}: malformed checkpoint page: {malformed}")
+            continue
+        if partial:
+            read_gaps.append(f"{partial}; pending_checkpoints is incomplete for that task")
+        for cp in page["entities"]:
             cid = cp.get("entity_id", "")
             full = _get(f"/entities/{cid}") or cp
             csnap = _snapshot_of(full)
@@ -3428,7 +3483,7 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
         "checkpoints": [],
         "terminal_subjects": sorted(t["id"] for t in tasks if t["terminal"]),
         "cursor": cursor,
-        "gaps": [_WITHHELD_FIELDS_GAP] if tasks else [],
+        "gaps": ([_WITHHELD_FIELDS_GAP] if tasks else []) + read_gaps,
     }
     if include_checkpoints:
         total_page = _retrieve_page(
@@ -3437,7 +3492,17 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
             limit=1,
             include_snapshots=False,
         )
-        result["pending_checkpoints_total"] = (total_page or {}).get("total")
+        total = total_page.get("total") if isinstance(total_page, dict) else None
+        if _is_count(total):
+            result["pending_checkpoints_total"] = total
+        else:
+            # A failed or malformed count read must not be spelled as a count.
+            result["pending_checkpoints_total"] = None
+            result["gaps"].append(
+                "the pending checkpoint count could not be read"
+                + (f" ({_read_error('checkpoint count')})" if total_page is None else "")
+                + "; pending_checkpoints_total is unknown, not zero"
+            )
         result["note"] = (
             "Every checkpoint raised or resolved after this cursor is reported by the next "
             "call, ordered by when it was raised. The existing queue is list_checkpoints'."
@@ -3611,8 +3676,9 @@ TOOLS = [
             "on one page. Every page read through a cursor reports `complete: false`, "
             "because offset paging over a changing queue cannot prove no record was "
             "skipped (`completeness_reason` says so on the last page); to confirm, "
-            "list again without a cursor and a larger `limit`. Never treat one page "
-            "as the whole queue — it "
+            "list again without a cursor and a larger `limit`. A queue larger than "
+            "the largest allowed `limit` (500) can never return `complete: true` "
+            "from this tool. Never treat one page as the whole queue — it "
             "used to say it returned 'all' while showing 50 of 372 (ateles#1037)."
         ),
         inputSchema={
