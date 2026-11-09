@@ -1293,6 +1293,28 @@ class TestListCheckpoints(unittest.TestCase):
         self.assertEqual(result["total"], 0)
         self.assertNotIn("error", result)
 
+    @patch("server._retrieve_page")
+    def test_every_error_response_carries_the_same_fields(self, mock_retrieve):
+        """Every error spells the queue as unknown (`total: None`), never as a count."""
+        mock_retrieve.return_value = None
+        failures = {
+            "foreign cursor": srv._list_checkpoints(cursor="not-a-cursor"),
+            "too deep": srv._list_checkpoints(
+                cursor=srv._encode_checkpoint_cursor(srv.MAX_QUERY_OFFSET + 1)
+            ),
+            "read failed": srv._list_checkpoints(),
+        }
+        mock_retrieve.return_value = {"entities": []}
+        failures["malformed"] = srv._list_checkpoints()
+        for name, result in failures.items():
+            with self.subTest(name):
+                self.assertTrue(result.get("error"), result)
+                self.assertIn("total", result)
+                self.assertIsNone(result["total"])
+                self.assertEqual(result["checkpoints"], [])
+        self.assertIn("detail", failures["read failed"])
+        self.assertIn("malformed_field", failures["malformed"])
+
 
 class TestToolSchemas(unittest.TestCase):
 
