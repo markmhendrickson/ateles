@@ -583,6 +583,88 @@ def test_timeline_escalation_page_with_total_below_its_rows_is_an_error(routed):
     assert any("escalations could not be read" in g for g in out["gaps"]), out["gaps"]
 
 
+# ── pages that claim rows they do not return ────────────────────────────────
+
+
+def _claims(total: int):
+    """An observation page that returns no rows but reports *total* of them."""
+    return lambda page: {**page, "observations": [], "total": total}
+
+
+def test_watch_runner_scan_empty_page_claiming_rows_is_an_error_not_no_changes(routed, clock):
+    cursor = _baseline()["cursor"]
+    _mangle_query(routed, "harness_event", _claims(3), path_="/observations/query")
+    out = srv._watch_swarm(cursor, [TASK], False, 0)
+    assert "error" in out and "changes" not in out, out
+    assert any("empty while total reports more" in d for d in out["detail"]), out
+    assert out["cursor"] == cursor
+
+
+def test_timeline_task_observation_page_claiming_rows_is_a_read_error(routed):
+    _mangle_query(
+        routed, None, _claims(5),
+        only=lambda body: body.get("entity_id") == TASK, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" in out and "timeline" not in out, out
+    assert "empty while total reports more" in str(out["error"])
+
+
+def test_baseline_newest_observation_page_claiming_rows_is_an_error_not_a_cursor(routed):
+    _mangle_query(
+        routed, None, _claims(1),
+        only=lambda body: body.get("limit") == 1 and not body.get("entity_type"),
+        path_="/observations/query",
+    )
+    out = srv._watch_swarm(None, [TASK], False, 0)
+    assert "error" in out and "cursor" not in out, out
+    assert "empty while total reports more" in str(out["error"])
+
+
+def test_timeline_observation_page_with_total_below_its_rows_is_a_read_error(routed):
+    _mangle_query(
+        routed, None, _undercount,
+        only=lambda body: body.get("entity_id") == TASK, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" in out and "timeline" not in out, out
+    assert "smaller than the rows returned" in str(out["error"])
+
+
+def test_observation_page_check_accepts_a_well_formed_last_page():
+    assert srv._observation_page_problem({"observations": [], "total": 4}, 4) is None
+    assert srv._observation_page_problem({"observations": [{}], "total": 5}, 4) is None
+    assert srv._observation_page_problem({"observations": []}, 0) is None
+
+
+def _participation_source(out: dict) -> dict:
+    by_source = {s["source"]: s for s in out["sources"]}
+    return by_source["participation_record"]
+
+
+def test_timeline_participation_page_without_entities_is_an_error_not_none_found(routed):
+    _mangle_query(routed, "participation_record", lambda page: {"total": 2})
+    out = srv._get_task_timeline(TASK)
+    source = _participation_source(out)
+    assert source["status"] == "error", source
+    assert "entities" in source["detail"]
+    assert any(
+        "participation records could not be read; this task's gate steps may be missing" in g
+        for g in out["gaps"]
+    ), out["gaps"]
+
+
+def test_timeline_with_more_participation_records_than_one_page_says_so(routed):
+    _add_rows(routed, "participation_record", 105, {"work_entity_id": TASK, "gate_name": "pm"})
+    out = srv._get_task_timeline(TASK)
+    source = _participation_source(out)
+    assert source["status"] == "partial", source
+    assert source["count"] == 100
+    assert any(
+        "100 of 105" in g and "participation records were read" in g for g in out["gaps"]
+    ), out["gaps"]
+
+
 def test_baseline_reports_a_partial_per_task_checkpoint_read(routed):
     _add_rows(routed, "checkpoint_brief", 25, {"task_entity_id": TASK, "status": "awaiting_operator"})
     out = _baseline()

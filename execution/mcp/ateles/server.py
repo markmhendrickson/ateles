@@ -2499,20 +2499,34 @@ def _read_error(what: str) -> str:
     return f"{what}: {_describe_transport_error() or 'request failed'}"
 
 
-def _observation_page_problem(data: Any) -> str | None:
+def _observation_page_problem(data: Any, offset: int) -> str | None:
     """The field that makes an observation page unreadable; None when it is sound.
 
     A page whose `observations` is missing or not a list of objects, or whose
     `total` is present but not a count, is a failed read, never an empty batch.
+    So is a page that claims rows it does not return: an empty batch while
+    `total` reports rows past the requested *offset*, or a `total` smaller than
+    the rows this page returned, mirroring `_checkpoint_page_problem`.
     """
     if not isinstance(data, dict):
         return "response"
     batch = data.get("observations")
     if not isinstance(batch, list) or any(not isinstance(o, dict) for o in batch):
         return "observations"
-    if "total" in data and not _is_count(data["total"]):
-        return "total"
+    if "total" in data:
+        total = data["total"]
+        if not _is_count(total):
+            return "total"
+        if not batch and total > offset:
+            return "observations (empty while total reports more)"
+        if total < offset + len(batch):
+            return "total (smaller than the rows returned)"
     return None
+
+
+_PARTICIPATION_UNREAD_GAP = (
+    "participation records could not be read; this task's gate steps may be missing"
+)
 
 
 def _malformed_error(what: str, field: str) -> str:
@@ -2536,7 +2550,7 @@ def _observations_of(
         data = _obs_query(body)
         if data is None:
             return None, _read_error(f"observations of {entity_id}"), False
-        problem = _observation_page_problem(data)
+        problem = _observation_page_problem(data, offset)
         if problem:
             return None, _malformed_error(f"observations of {entity_id}", problem), False
         batch = data["observations"]
@@ -2555,7 +2569,7 @@ def _observations_of(
 
 def _obs_count(entity_type: str, since: str) -> int | None:
     data = _obs_query({"entity_type": entity_type, "created_since": since, "limit": 1})
-    if data is None or _observation_page_problem(data):
+    if data is None or _observation_page_problem(data, 0):
         return None
     total = data.get("total")
     return total if _is_count(total) else None
@@ -2597,7 +2611,7 @@ def _scan_type_window(
                 "rows": rows,
                 "error": _read_error(f"{entity_type} scan at offset {offset}"),
             }
-        problem = _observation_page_problem(data)
+        problem = _observation_page_problem(data, offset)
         if problem:
             return {
                 "rows": rows,
@@ -3021,8 +3035,18 @@ class _TimelineBuilder:
         )
         if page is None:
             self.source("participation_record", "error", detail=_read_error("participation_record"))
+            self.gaps.append(_PARTICIPATION_UNREAD_GAP)
             return
-        rows = page.get("entities") or []
+        malformed, partial = _filtered_read_problem(page, "this task's participation records")
+        if malformed:
+            self.source(
+                "participation_record", "error", detail=f"malformed participation page: {malformed}"
+            )
+            self.gaps.append(_PARTICIPATION_UNREAD_GAP)
+            return
+        if partial:
+            self.gaps.append(f"{partial}; this task's gate steps may be missing")
+        rows = page["entities"]
         for ent in rows:
             psnap = _snapshot_of(ent)
             gate = psnap.get("gate_name")
@@ -3050,7 +3074,8 @@ class _TimelineBuilder:
                             "source": {"type": "participation_record", "entity_id": ent.get("entity_id")},
                         }
                     )
-        self.source("participation_record", "joined" if rows else "none_found", len(rows))
+        status = "partial" if partial else ("joined" if rows else "none_found")
+        self.source("participation_record", status, len(rows), detail=partial)
 
     def join_gate_status(self) -> None:
         if not self.refs:
@@ -3328,7 +3353,7 @@ def _scan_since(entity_type: str, since: str, max_scan: int) -> tuple[list[dict]
         )
         if data is None:
             return None, _read_error(f"{entity_type} since {since}"), False
-        problem = _observation_page_problem(data)
+        problem = _observation_page_problem(data, offset)
         if problem:
             return None, _malformed_error(f"{entity_type} since {since}", problem), False
         batch = data["observations"]
@@ -3447,7 +3472,7 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
     newest = _obs_query({"limit": 1})
     if newest is None:
         return {"error": _read_error("could not read the record's newest observation")}
-    problem = _observation_page_problem(newest)
+    problem = _observation_page_problem(newest, 0)
     if problem:
         return {
             "error": _malformed_error("could not read the record's newest observation", problem)
