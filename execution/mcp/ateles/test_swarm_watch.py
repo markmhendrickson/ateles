@@ -422,6 +422,596 @@ def test_baseline_pending_checkpoints_are_ordered_by_raised_time(fake):
     ]
 
 
+# ── filtered reads presented as complete only when read in full ─────────────
+
+
+@pytest.fixture
+def routed(fake, monkeypatch):
+    """Route srv._post through `fake.post` late, so a test can wrap it."""
+    monkeypatch.setattr(srv, "_post", lambda path, body, **kw: fake.post(path, body, **kw))
+    return fake
+
+
+def _mangle_query(
+    fake, entity_type: str | None, edit, only=lambda body: True, path_: str = "/entities/query"
+) -> None:
+    """Pass `path_` answers for `entity_type` (and `only`) through `edit`.
+
+    `entity_type=None` matches a query of any type.
+    """
+    post = fake.post
+
+    def mangled(path, body, **kw):
+        out = post(path, body, **kw)
+        if (
+            path == path_
+            and (entity_type is None or body.get("entity_type") == entity_type)
+            and out is not None
+            and only(body)
+        ):
+            out = edit(out)
+        return out
+
+    fake.post = mangled
+
+
+def _drop_total(page: dict) -> dict:
+    page.pop("total", None)
+    return page
+
+
+def _drop_observations(page: dict) -> dict:
+    page.pop("observations", None)
+    return page
+
+
+def test_watch_malformed_checkpoint_observation_page_is_an_error_not_no_changes(routed, clock):
+    cursor = _baseline(include_checkpoints=True)["cursor"]
+    _mangle_query(routed, "checkpoint_brief", _drop_observations, path_="/observations/query")
+    out = srv._watch_swarm(cursor, [TASK], True, 0)
+    assert "error" in out and "changes" not in out, out
+    assert any("malformed response (observations)" in d for d in out["detail"]), out
+    assert out["cursor"] == cursor
+
+
+def test_watch_malformed_runner_event_page_is_an_error_not_no_changes(routed, clock):
+    cursor = _baseline()["cursor"]
+    _mangle_query(routed, "harness_event", _drop_observations, path_="/observations/query")
+    out = srv._watch_swarm(cursor, [TASK], False, 0)
+    assert "error" in out and "changes" not in out, out
+    assert any("malformed response (observations)" in d for d in out["detail"]), out
+
+
+def test_timeline_malformed_task_observation_page_is_a_read_error(routed):
+    _mangle_query(
+        routed, None, _drop_observations,
+        only=lambda body: body.get("entity_id") == TASK, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" in out and "timeline" not in out, out
+    assert "observations" in str(out["error"])
+
+
+def test_baseline_malformed_newest_observation_page_is_an_error_not_a_cursor(routed):
+    _mangle_query(
+        routed, None, _drop_observations,
+        only=lambda body: body.get("limit") == 1 and not body.get("entity_type"),
+        path_="/observations/query",
+    )
+    out = srv._watch_swarm(None, [TASK], False, 0)
+    assert "error" in out and "cursor" not in out, out
+    assert "observations" in str(out["error"])
+
+
+@pytest.mark.parametrize("bad_total", [3.0, 2.5, True, False, -1, "3"])
+def test_obs_count_rejects_a_total_that_is_not_a_count(routed, bad_total):
+    _mangle_query(
+        routed, "harness_event", lambda page: {**page, "total": bad_total},
+        path_="/observations/query",
+    )
+    assert srv._obs_count("harness_event", "2026-09-01T00:00:00.000Z") is None
+
+
+def test_obs_count_reports_a_readable_total(routed):
+    n = srv._obs_count("harness_event", "2026-09-01T00:00:00.000Z")
+    assert isinstance(n, int) and not isinstance(n, bool) and n > 0
+
+
+def _add_rows(fake, entity_type: str, n: int, fields: dict) -> None:
+    for i in range(n):
+        fake.add_observation(
+            f"ent_{i:024x}", entity_type, f"2026-09-26T10:{i // 60:02d}:{i % 60:02d}.000Z", dict(fields)
+        )
+
+
+def test_timeline_with_more_checkpoints_than_one_page_says_so(routed):
+    _add_rows(routed, "checkpoint_brief", 60, {"task_entity_id": TASK, "status": "resolved"})
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["checkpoint_brief"]["status"] == "partial"
+    gap = [g for g in out["gaps"] if "checkpoints were read" in g]
+    assert gap and "of 61" in gap[0] and "may be holding this task" in gap[0], out["gaps"]
+
+
+def test_timeline_malformed_checkpoint_page_is_an_error_not_none_found(routed):
+    _mangle_query(routed, "checkpoint_brief", _drop_total)
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["checkpoint_brief"]["status"] == "error"
+    assert "total" in by_source["checkpoint_brief"]["detail"]
+    assert any("checkpoints could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_timeline_with_more_escalations_than_one_page_says_so(routed):
+    _add_rows(routed, "escalation", 55, {"source_entity_id": TASK, "title": "stuck"})
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["escalation"]["status"] == "partial"
+    assert by_source["escalation"]["count"] == 50
+    assert any("50 of 55" in g and "escalation" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_timeline_malformed_escalation_page_is_an_error_not_none_found(routed):
+    _mangle_query(routed, "escalation", lambda page: {"entities": "nope", "total": 3})
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["escalation"]["status"] == "error"
+    assert any("escalations could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def _undercount(page: dict) -> dict:
+    page["total"] = 0
+    return page
+
+
+def test_timeline_checkpoint_page_with_total_below_its_rows_is_an_error(routed):
+    _add_rows(routed, "checkpoint_brief", 3, {"task_entity_id": TASK, "status": "resolved"})
+    _mangle_query(routed, "checkpoint_brief", _undercount)
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["checkpoint_brief"]["status"] == "error", by_source
+    assert "smaller than the rows returned" in by_source["checkpoint_brief"]["detail"]
+    assert any("checkpoints could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_timeline_escalation_page_with_total_below_its_rows_is_an_error(routed):
+    _add_rows(routed, "escalation", 3, {"source_entity_id": TASK, "title": "stuck"})
+    _mangle_query(routed, "escalation", _undercount)
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["escalation"]["status"] == "error", by_source
+    assert any("escalations could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+# ── pages that claim rows they do not return ────────────────────────────────
+
+
+def _claims(total: int):
+    """An observation page that returns no rows but reports *total* of them."""
+    return lambda page: {**page, "observations": [], "total": total}
+
+
+def test_watch_runner_scan_empty_page_claiming_rows_is_an_error_not_no_changes(routed, clock):
+    cursor = _baseline()["cursor"]
+    _mangle_query(routed, "harness_event", _claims(3), path_="/observations/query")
+    out = srv._watch_swarm(cursor, [TASK], False, 0)
+    assert "error" in out and "changes" not in out, out
+    assert any("short page while total reports more" in d for d in out["detail"]), out
+    assert out["cursor"] == cursor
+
+
+def test_timeline_task_observation_page_claiming_rows_is_a_read_error(routed):
+    _mangle_query(
+        routed, None, _claims(5),
+        only=lambda body: body.get("entity_id") == TASK, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" in out and "timeline" not in out, out
+    assert "short page while total reports more" in str(out["error"])
+
+
+def test_baseline_newest_observation_page_claiming_rows_is_an_error_not_a_cursor(routed):
+    _mangle_query(
+        routed, None, _claims(1),
+        only=lambda body: body.get("limit") == 1 and not body.get("entity_type"),
+        path_="/observations/query",
+    )
+    out = srv._watch_swarm(None, [TASK], False, 0)
+    assert "error" in out and "cursor" not in out, out
+    assert "short page while total reports more" in str(out["error"])
+
+
+def test_timeline_observation_page_with_total_below_its_rows_is_a_read_error(routed):
+    _mangle_query(
+        routed, None, _undercount,
+        only=lambda body: body.get("entity_id") == TASK, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" in out and "timeline" not in out, out
+    assert "smaller than the rows returned" in str(out["error"])
+
+
+def test_observation_page_check_accepts_a_well_formed_last_page():
+    assert srv._observation_page_problem({"observations": [], "total": 4}, 4, 500) is None
+    assert srv._observation_page_problem({"observations": [{}], "total": 5}, 4, 500) is None
+    assert srv._observation_page_problem({"observations": []}, 0, 500) is None
+
+
+# ── short pages that report rows beyond themselves ──────────────────────────
+
+
+def _short_claiming_more(extra: int = 3):
+    """A non-empty short page whose `total` reports *extra* rows past it."""
+
+    def edit(page: dict) -> dict:
+        rows = page["observations"][:1]
+        assert rows, "the fixture page must hold a row for this mangle to mean anything"
+        return {**page, "observations": rows, "total": page["offset"] + len(rows) + extra}
+
+    return edit
+
+
+def _runner_window_scan(body: dict) -> bool:
+    return body.get("entity_type") == "harness_event" and body.get("limit", 0) > 1
+
+
+def test_timeline_malformed_runner_window_page_is_an_error(routed):
+    _mangle_query(
+        routed, "harness_event", _drop_observations,
+        only=lambda body: body.get("limit", 0) > 1, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["harness_event"]["status"] == "error", by_source
+    assert "malformed response (observations)" in by_source["harness_event"]["detail"]
+    assert any("runner events could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_timeline_task_short_page_claiming_more_is_a_read_error(routed):
+    _mangle_query(
+        routed, None, _short_claiming_more(),
+        only=lambda body: body.get("entity_id") == TASK, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" in out and "timeline" not in out, out
+    assert "short page while total reports more" in str(out["error"])
+
+
+def test_watch_runner_scan_short_page_claiming_more_is_an_error_not_no_changes(routed, clock):
+    cursor = _baseline()["cursor"]
+    routed.add_observation(
+        "ent_7ec2df67ca3af97138398109", "harness_event", "2026-09-26T09:00:00.000Z",
+        {"event_type": "subprocess", "tool_name": "codex:corvus", "success": "true",
+         "task_entity_id": TASK, "output_summary": "ok", "duration_ms": 5},
+    )
+    _mangle_query(routed, "harness_event", _short_claiming_more(), path_="/observations/query")
+    out = srv._watch_swarm(cursor, [TASK], False, 0)
+    assert "error" in out and "changes" not in out, out
+    assert any("short page while total reports more" in d for d in out["detail"]), out
+    assert out["cursor"] == cursor
+
+
+def test_timeline_runner_window_short_page_claiming_more_is_an_error_not_complete(routed):
+    _mangle_query(
+        routed, None, _short_claiming_more(), only=_runner_window_scan,
+        path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["harness_event"]["status"] == "error", by_source
+    assert "short page while total reports more" in by_source["harness_event"]["detail"]
+    assert (out.get("window") or {}).get("complete") is not True, out.get("window")
+    assert any("runner events could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_short_page_whose_total_matches_its_rows_is_a_complete_read(routed):
+    def exact(page: dict) -> dict:
+        rows = page["observations"][:1]
+        return {**page, "observations": rows, "total": page["offset"] + len(rows)}
+
+    _mangle_query(routed, None, exact, only=_runner_window_scan, path_="/observations/query")
+    out = srv._get_task_timeline(TASK)
+    assert "error" not in out, out
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert "harness_event" not in by_source, by_source
+    assert out["window"]["complete"] is True
+    assert srv._observation_page_problem({"observations": [{}], "total": 5}, 4, 500) is None
+
+
+def test_pages_without_total_still_read_as_before(routed):
+    _mangle_query(
+        routed, None, _drop_total,
+        only=lambda body: body.get("limit", 0) > 1, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" not in out, out
+    assert out["window"]["complete"] is True
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["harness_event runner events"]["count"] == 2
+    assert srv._observation_page_problem({"observations": [{}]}, 3, 500) is None
+
+
+def test_observation_page_check_states_the_complete_rule():
+    page = srv._observation_page_problem
+    short_more = "observations (short page while total reports more)"
+    assert page({"observations": [{}], "total": 9}, 4, 500) == short_more
+    assert page({"observations": [], "total": 5}, 4, 500) == short_more
+    assert page({"observations": [{}, {}], "total": 5}, 4, 500) == (
+        "total (smaller than the rows returned)"
+    )
+    # A full page may report more rows; they are the next page.
+    assert page({"observations": [{}, {}], "total": 9}, 4, 2) is None
+
+
+# ── the end of an observation read is decided in one place ──────────────────
+
+_RUNNER_TYPE = "harness_event"
+_SCAN_SINCE = "2026-09-01T00:00:00.000Z"
+_SCAN_START = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+
+def _paged_read(body: dict) -> bool:
+    """A paging read, not a `limit: 1` count."""
+    return body.get("limit", 0) > 1
+
+
+def _short_page_with_cursor(page: dict) -> dict:
+    """A short page with no `total` that still signals more rows by its cursor."""
+    rows = page["observations"]
+    assert 0 < len(rows) < page["limit"], "the page must be short and non-empty"
+    out = {k: v for k, v in page.items() if k != "total"}
+    out["next_cursor"] = "more-rows"
+    return out
+
+
+def _short_page_without_cursor(page: dict) -> dict:
+    assert len(page["observations"]) < page["limit"], "the page must be short"
+    return {k: v for k, v in page.items() if k != "total"}
+
+
+def _paged_calls(fake, **match) -> list[dict]:
+    return [
+        body for _method, path, body in fake.calls
+        if path == "/observations/query" and _paged_read(body)
+        and all(body.get(k) == v for k, v in match.items())
+    ]
+
+
+def test_short_page_with_a_cursor_and_no_total_is_a_read_error_in_every_reader(routed):
+    _mangle_query(
+        routed, None, _short_page_with_cursor, only=_paged_read, path_="/observations/query",
+    )
+    want = "next_cursor (present on a short page)"
+
+    rows, err, _ = srv._observations_of(TASK)
+    assert rows is None and want in str(err), err
+
+    rows, err, _ = srv._scan_since(_RUNNER_TYPE, _SCAN_SINCE, 2000)
+    assert rows is None and want in str(err), err
+
+    out = srv._scan_type_window(_RUNNER_TYPE, _SCAN_START, FIXED_NOW, 2000)
+    assert want in str(out["error"]), out
+    assert out.get("complete") is not True, out
+
+
+def test_short_page_without_total_or_cursor_still_ends_the_read(routed):
+    _mangle_query(
+        routed, None, _short_page_without_cursor, only=_paged_read,
+        path_="/observations/query",
+    )
+    rows, err, truncated = srv._observations_of(TASK)
+    assert err is None and not truncated and len(rows) == 10, (rows, err)
+
+    rows, err, truncated = srv._scan_since(_RUNNER_TYPE, _SCAN_SINCE, 2000)
+    assert err is None and not truncated and len(rows) == 47, err
+
+    out = srv._scan_type_window(_RUNNER_TYPE, _SCAN_START, FIXED_NOW, 2000)
+    assert out["error"] is None and out["complete"] is True, out
+    assert out["scanned"] == 47
+
+
+def test_full_page_reaching_total_ends_the_read_without_another_request(routed):
+    # Fill the runner type to exactly one scan page, and the task to exactly one
+    # entity page, so each first page is full and `offset + len == total`.
+    _add_rows(routed, _RUNNER_TYPE, srv._OBS_PAGE - 47, {"event_type": "subprocess"})
+    for i in range(srv._ENTITY_OBS_PAGE - 10):
+        routed.add_observation(
+            TASK, "task", f"2026-09-26T11:{i // 60:02d}:{i % 60:02d}.000Z", {"status": "pending"}
+        )
+
+    routed.calls.clear()
+    rows, err, truncated = srv._scan_since(_RUNNER_TYPE, _SCAN_SINCE, 5 * srv._OBS_PAGE)
+    assert err is None and not truncated and len(rows) == srv._OBS_PAGE, err
+    assert len(_paged_calls(routed, entity_type=_RUNNER_TYPE)) == 1, routed.calls
+
+    routed.calls.clear()
+    out = srv._scan_type_window(_RUNNER_TYPE, _SCAN_START, FIXED_NOW, 5 * srv._OBS_PAGE)
+    assert out["error"] is None and out["complete"] is True, out
+    assert out["scanned"] == srv._OBS_PAGE
+    assert len(_paged_calls(routed, entity_type=_RUNNER_TYPE)) == 1, routed.calls
+
+    routed.calls.clear()
+    rows, err, truncated = srv._observations_of(TASK, max_rows=5 * srv._ENTITY_OBS_PAGE)
+    assert err is None and not truncated and len(rows) == srv._ENTITY_OBS_PAGE, err
+    assert len(_paged_calls(routed, entity_id=TASK)) == 1, routed.calls
+
+
+def test_obs_count_reads_a_page_shaped_like_the_live_endpoint(routed):
+    """The live answer carries `limit`, `observations`, `offset` and `total`, no cursor."""
+
+    def live_shape(page: dict) -> dict:
+        return {
+            "limit": page["limit"],
+            "observations": page["observations"],
+            "offset": page["offset"],
+            "total": page["total"],
+        }
+
+    _mangle_query(
+        routed, _RUNNER_TYPE, live_shape,
+        only=lambda body: body.get("limit") == 1, path_="/observations/query",
+    )
+    assert srv._obs_count(_RUNNER_TYPE, _SCAN_SINCE) == 47
+    assert srv._obs_count(_RUNNER_TYPE, "2026-09-27T00:00:00.000Z") == 0
+    page = {"limit": 1, "observations": [{}], "offset": 0, "total": 47}
+    assert srv._observation_page_problem(page, 0, 1) is None
+
+
+def test_observation_read_ends_states_the_single_rule():
+    ends = srv._observation_read_ends
+    assert ends({"observations": [{}, {}], "total": 6}, 4, 2) is True
+    assert ends({"observations": [{}, {}], "total": 9}, 4, 2) is False
+    assert ends({"observations": [{}]}, 4, 2) is True
+    assert ends({"observations": [{}, {}]}, 4, 2) is False
+    assert ends({"observations": [{}, {}], "next_cursor": "c"}, 4, 2) is False
+    assert srv._observation_page_problem({"observations": [{}], "next_cursor": "c"}, 4, 2) == (
+        "next_cursor (present on a short page)"
+    )
+
+
+# ── pages for the wrong position, or with a cursor that is not a string ─────
+
+
+def _shift_offset(page: dict) -> dict:
+    """A page that answers for a position other than the one requested."""
+    return {**page, "offset": page["offset"] + 1}
+
+
+def _numeric_cursor(page: dict) -> dict:
+    return {**page, "next_cursor": 7}
+
+
+def test_timeline_task_observation_page_for_the_wrong_offset_is_a_read_error(routed):
+    _mangle_query(
+        routed, None, _shift_offset,
+        only=lambda body: body.get("entity_id") == TASK, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" in out and "timeline" not in out, out
+    assert "offset (not the requested 0)" in str(out["error"])
+
+
+def test_watch_runner_scan_page_for_the_wrong_offset_is_an_error_not_no_changes(routed, clock):
+    cursor = _baseline()["cursor"]
+    _mangle_query(routed, "harness_event", _shift_offset, path_="/observations/query")
+    out = srv._watch_swarm(cursor, [TASK], False, 0)
+    assert "error" in out and "changes" not in out, out
+    assert any("offset (not the requested 0)" in d for d in out["detail"]), out
+    assert out["cursor"] == cursor
+
+
+def test_timeline_task_observation_page_with_a_non_string_cursor_is_a_read_error(routed):
+    _mangle_query(
+        routed, None, _numeric_cursor,
+        only=lambda body: body.get("entity_id") == TASK, path_="/observations/query",
+    )
+    out = srv._get_task_timeline(TASK)
+    assert "error" in out and "timeline" not in out, out
+    assert "next_cursor (not a string)" in str(out["error"])
+
+
+def test_observation_page_whose_offset_matches_still_reads_as_before(routed):
+    def echo_offset(page: dict) -> dict:
+        return {**page, "offset": page["offset"], "next_cursor": None}
+
+    _mangle_query(routed, None, echo_offset, path_="/observations/query")
+    out = srv._get_task_timeline(TASK)
+    assert "error" not in out, out
+    assert out["window"]["complete"] is True
+    page = srv._observation_page_problem
+    assert page({"observations": [{}], "offset": 4, "next_cursor": "c"}, 4, 1) is None
+    assert page({"observations": [{}], "offset": 3}, 4, 500) == "offset (not the requested 4)"
+    assert page({"observations": [{}], "offset": -1}, 0, 500) == "offset (not the requested 0)"
+    assert page({"observations": [{}], "next_cursor": 1}, 0, 500) == "next_cursor (not a string)"
+
+
+def _participation_source(out: dict) -> dict:
+    by_source = {s["source"]: s for s in out["sources"]}
+    return by_source["participation_record"]
+
+
+def test_timeline_participation_page_without_entities_is_an_error_not_none_found(routed):
+    _mangle_query(routed, "participation_record", lambda page: {"total": 2})
+    out = srv._get_task_timeline(TASK)
+    source = _participation_source(out)
+    assert source["status"] == "error", source
+    assert "entities" in source["detail"]
+    assert any(
+        "participation records could not be read; this task's gate steps may be missing" in g
+        for g in out["gaps"]
+    ), out["gaps"]
+
+
+def test_timeline_with_more_participation_records_than_one_page_says_so(routed):
+    _add_rows(routed, "participation_record", 105, {"work_entity_id": TASK, "gate_name": "pm"})
+    out = srv._get_task_timeline(TASK)
+    source = _participation_source(out)
+    assert source["status"] == "partial", source
+    assert source["count"] == 100
+    assert any(
+        "100 of 105" in g and "participation records were read" in g for g in out["gaps"]
+    ), out["gaps"]
+
+
+def test_baseline_reports_a_partial_per_task_checkpoint_read(routed):
+    _add_rows(routed, "checkpoint_brief", 25, {"task_entity_id": TASK, "status": "awaiting_operator"})
+    out = _baseline()
+    assert len(out["pending_checkpoints"]) == 20
+    assert any(TASK in g and "incomplete" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_baseline_reports_a_malformed_per_task_checkpoint_page(routed):
+    _mangle_query(routed, "checkpoint_brief", _drop_total)
+    out = srv._watch_swarm(None, [TASK], False, 0)
+    assert "error" in out and "malformed" in out["error"] and TASK in out["error"], out
+
+
+@pytest.mark.parametrize("bad_total", ["missing", "7", 2.5, -1, True, "read_failed"])
+def test_baseline_unreadable_total_is_null_with_a_gap(routed, bad_total):
+    def edit(page):
+        if bad_total == "missing":
+            page.pop("total", None)
+            return page
+        if bad_total == "read_failed":
+            return None
+        page["total"] = bad_total
+        return page
+
+    # Only the queue-wide count read (no task filter) is mangled.
+    _mangle_query(
+        routed, "checkpoint_brief", edit,
+        only=lambda body: "task_entity_id" not in (body.get("snapshot_filters") or {}),
+    )
+    out = _baseline(include_checkpoints=True)
+    assert out["pending_checkpoints_total"] is None
+    assert any("count could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+@pytest.mark.parametrize("bad_entities", ["missing", "not_a_list"])
+def test_baseline_count_page_with_unreadable_entities_is_null_with_a_gap(routed, bad_entities):
+    def edit(page):
+        if bad_entities == "missing":
+            page.pop("entities", None)
+        else:
+            page["entities"] = "nope"
+        page["total"] = 4
+        return page
+
+    _mangle_query(
+        routed, "checkpoint_brief", edit,
+        only=lambda body: "task_entity_id" not in (body.get("snapshot_filters") or {}),
+    )
+    out = _baseline(include_checkpoints=True)
+    assert out["pending_checkpoints_total"] is None
+    assert any("count could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_baseline_readable_total_is_reported(routed):
+    out = _baseline(include_checkpoints=True)
+    assert isinstance(out["pending_checkpoints_total"], int)
+    assert not any("count could not be read" in g for g in out["gaps"])
+
+
 # ── watch.py ─────────────────────────────────────────────────────────────────
 
 
