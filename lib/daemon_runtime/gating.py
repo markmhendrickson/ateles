@@ -1090,7 +1090,7 @@ def write_checkpoint_brief(
                 "reason": decision.reason,
                 "policy_entity_id": decision.policy_id,
                 "proposed_alternatives": alternatives or [],
-                "status": "awaiting_operator",
+                "status": CHECKPOINT_AWAITING_OPERATOR,
                 "handler": handler,
             }
         ],
@@ -1400,6 +1400,9 @@ def write_producer_assessment(
 #   rejected  → mark the task declined; do not execute.
 #
 # Any other status (awaiting_operator, or an unknown value) is a no-op.
+
+# The status a brief carries while it waits for the operator.
+CHECKPOINT_AWAITING_OPERATOR = "awaiting_operator"
 
 # Statuses that resolve a checkpoint, and how the dispatcher should treat them.
 CHECKPOINT_APPROVED_STATES = frozenset({"approved", "approve", "accepted"})

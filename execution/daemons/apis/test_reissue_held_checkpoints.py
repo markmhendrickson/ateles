@@ -1089,3 +1089,87 @@ def test_named_task_run_ignores_retirement_evidence_and_refiles(
 
     assert rows[0]["outcome"] == "reissued"
     assert record.writes == 1
+
+
+# ── present but unrecognized values are unknown, never evidence (#1705) ──
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["unexpected", 7, ["superseded"], {"value": "superseded"}],
+    ids=["unrecognized_string", "integer", "list", "mapping"],
+)
+def test_blanket_run_treats_an_unrecognized_status_as_unknown(
+    record, monkeypatch, capsys, status
+):
+    # A lone checkpoint whose status is not one the code writes or reads is not
+    # evidence the hold was not retired: file nothing.
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_x", "ent_t1", signed=True, status=status)
+    record.checkpoints["ent_x"]["created_at"] = "2026-11-02T10:00:00Z"
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    rows = _records(capsys.readouterr().out)
+
+    assert rows[0]["task_id"] == "ent_t1"
+    assert rows[0]["outcome"] == "unknown"
+    assert record.writes == 0
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        gating.CHECKPOINT_AWAITING_OPERATOR,
+        gating.CHECKPOINT_APPROVED_NO_RELEASE,
+        gating.CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+        " Rejected ",
+    ],
+)
+def test_blanket_run_still_refiles_on_every_recognized_non_retired_status(
+    record, monkeypatch, capsys, status
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_x", "ent_t1", signed=False, status=status)
+    record.checkpoints["ent_x"]["created_at"] = "2026-11-02T10:00:00Z"
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 0
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "reissued"
+    assert record.writes == 1
+
+
+@pytest.mark.parametrize(
+    "linked_task",
+    ["ent_other", None, 42],
+    ids=["another_task", "missing", "not_a_string"],
+)
+def test_blanket_run_treats_a_row_linked_to_another_task_as_unknown(
+    record, monkeypatch, capsys, linked_task
+):
+    # The read filters on the task; a row naming another task (or none) means
+    # the listing cannot be trusted as this task's retirement evidence.
+    record.add_task("ent_t1")
+    row = {
+        "entity_id": "ent_x",
+        "entity_type": CHECKPOINT_TYPE,
+        "created_at": "2026-11-02T10:00:00Z",
+        "snapshot": {"task_entity_id": linked_task, "status": "rejected"},
+    }
+    monkeypatch.setattr(apis, "checkpoints_for_task", lambda _id, **_kw: [row])
+    _blanket(monkeypatch, "ent_t1")
+
+    assert _run_cli(monkeypatch, "--apply") == 1
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "unknown"
+    assert record.writes == 0
+
+
+def test_named_task_run_still_refiles_with_an_unrecognized_status(
+    record, monkeypatch, capsys
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_x", "ent_t1", signed=True, status="unexpected")
+
+    assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 0
+    assert _records(capsys.readouterr().out)[0]["outcome"] == "reissued"
+    assert record.writes == 1
