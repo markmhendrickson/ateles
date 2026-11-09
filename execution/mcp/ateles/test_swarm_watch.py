@@ -1305,3 +1305,158 @@ def test_within_one_call_the_error_behaves_as_before(monkeypatch):
     assert "request_failed" in (srv._describe_transport_error() or "")
     srv._get("/ok")
     assert srv._describe_transport_error() is None
+
+
+# ── the page rule: every signal a page carries agrees with every other ──────
+# Stated once in server.py above `_checkpoint_page_problem`. Each page below
+# breaks one rule this round added or extended for observation pages, and was
+# read as a sound page at f51d680.
+
+
+def _obs_rows(n: int) -> list[dict]:
+    return [{"id": f"o{i}"} for i in range(n)]
+
+
+_ENTITY_PAGE = srv._ENTITY_OBS_PAGE
+
+
+@pytest.mark.parametrize(
+    "rule, page, field",
+    [
+        (
+            "c",
+            {"observations": [{"id": "o1"}, {"id": "o1"}], "total": 2},
+            "observations (duplicate id)",
+        ),
+        (
+            "d",
+            {"observations": _obs_rows(_ENTITY_PAGE + 1), "total": _ENTITY_PAGE + 1},
+            "observations (more rows than the limit)",
+        ),
+        (
+            "f",
+            {"observations": [{"id": "o1"}], "total": 4},
+            "observations (short page while total reports more)",
+        ),
+        (
+            "h",
+            {"observations": [{"id": "o1"}], "next_cursor": "c"},
+            "next_cursor (present on a short page)",
+        ),
+        (
+            "i",
+            {
+                "observations": _obs_rows(_ENTITY_PAGE),
+                "total": _ENTITY_PAGE,
+                "next_cursor": "c",
+            },
+            "next_cursor (present when total says the read ended)",
+        ),
+    ],
+)
+def test_the_page_rule_refuses_every_contradicting_observation_page(routed, rule, page, field):
+    """Each page is the first page of a task read (offset 0, the entity page size)."""
+    assert srv._observation_page_problem(page, 0, _ENTITY_PAGE) == field, rule
+
+    def replace(_page: dict) -> dict:
+        return copy.deepcopy(page)
+
+    _mangle_query(
+        routed, None, replace, only=lambda body: body.get("entity_id") == TASK,
+        path_="/observations/query",
+    )
+    rows, err, _ = srv._observations_of(TASK)
+    assert rows is None and field in str(err), (rule, err)
+
+
+def test_rows_without_a_string_id_are_not_compared_for_duplicates():
+    page = {"observations": [{}, {}, {"id": 3}, {"id": 3}], "total": 4}
+    assert srv._observation_page_problem(page, 0, 5) is None
+
+
+def _fill_one_full_page(fake) -> None:
+    """Make the runner scan and the task read each exactly one full page."""
+    _add_rows(fake, _RUNNER_TYPE, srv._OBS_PAGE - 47, {"event_type": "subprocess"})
+    for i in range(srv._ENTITY_OBS_PAGE - 10):
+        fake.add_observation(
+            TASK, "task", f"2026-09-26T11:{i // 60:02d}:{i % 60:02d}.000Z", {"status": "pending"}
+        )
+
+
+def test_securitys_full_page_with_a_cursor_past_total_is_a_read_error_in_every_reader(routed):
+    """Security's case at f51d680: a full page whose `total` equals the rows
+    reached but which carries a non-null `next_cursor` ended the read on
+    `total` alone, reading contradicting signals as a sound last page."""
+    _fill_one_full_page(routed)
+
+    def cursor_past_total(page: dict) -> dict:
+        assert page["offset"] + len(page["observations"]) == page["total"]
+        return {**page, "next_cursor": "more-rows"}
+
+    _mangle_query(
+        routed, None, cursor_past_total, only=_paged_read, path_="/observations/query",
+    )
+    want = "next_cursor (present when total says the read ended)"
+
+    rows, err, _ = srv._observations_of(TASK, max_rows=5 * srv._ENTITY_OBS_PAGE)
+    assert rows is None and want in str(err), err
+
+    rows, err, _ = srv._scan_since(_RUNNER_TYPE, _SCAN_SINCE, 5 * srv._OBS_PAGE)
+    assert rows is None and want in str(err), err
+
+    out = srv._scan_type_window(_RUNNER_TYPE, _SCAN_START, FIXED_NOW, 5 * srv._OBS_PAGE)
+    assert want in str(out["error"]), out
+    assert out.get("complete") is not True, out
+
+
+def test_an_id_repeated_across_pages_is_a_read_error_in_every_reader(routed):
+    """The window shifted under the read: a later page repeats a row already
+    read, so the rows counted are not the rows that exist."""
+    _add_rows(routed, _RUNNER_TYPE, srv._OBS_PAGE, {"event_type": "subprocess"})
+    for i in range(srv._ENTITY_OBS_PAGE):
+        routed.add_observation(
+            TASK, "task", f"2026-09-26T11:{i // 60:02d}:{i % 60:02d}.000Z", {"status": "pending"}
+        )
+    first_ids: dict[tuple, str] = {}
+
+    def repeat_an_earlier_row(page: dict) -> dict:
+        rows = page["observations"]
+        key = tuple(sorted({o["entity_type"] for o in rows}))
+        if page["offset"] == 0:
+            first_ids[key] = rows[-1]["id"]
+        elif rows and key in first_ids:
+            rows[0]["id"] = first_ids[key]
+        return page
+
+    _mangle_query(
+        routed, None, repeat_an_earlier_row, only=_paged_read, path_="/observations/query",
+    )
+    want = "observations (id repeated across pages)"
+
+    rows, err, _ = srv._observations_of(TASK, max_rows=5 * srv._ENTITY_OBS_PAGE)
+    assert rows is None and want in str(err), err
+
+    rows, err, _ = srv._scan_since(_RUNNER_TYPE, _SCAN_SINCE, 5 * srv._OBS_PAGE)
+    assert rows is None and want in str(err), err
+
+    out = srv._scan_type_window(_RUNNER_TYPE, _SCAN_START, FIXED_NOW, 5 * srv._OBS_PAGE)
+    assert want in str(out["error"]), out
+    assert out.get("complete") is not True, out
+
+
+def test_a_sound_page_shaped_like_the_live_endpoint_still_reads(routed):
+    """`limit`, `observations`, `offset`, `total`, distinct ids, no cursor."""
+
+    def live_shape(page: dict) -> dict:
+        return {k: page[k] for k in ("limit", "observations", "offset", "total")}
+
+    _mangle_query(routed, None, live_shape, path_="/observations/query")
+    rows, err, truncated = srv._observations_of(TASK)
+    assert err is None and not truncated and len(rows) == 10, err
+    assert len({o["id"] for o in rows}) == 10
+
+    rows, err, truncated = srv._scan_since(_RUNNER_TYPE, _SCAN_SINCE, 2000)
+    assert err is None and not truncated and len(rows) == 47, err
+
+    out = srv._scan_type_window(_RUNNER_TYPE, _SCAN_START, FIXED_NOW, 2000)
+    assert out["error"] is None and out["complete"] is True, out

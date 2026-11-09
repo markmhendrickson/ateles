@@ -1058,32 +1058,68 @@ def _decode_checkpoint_cursor(cursor: str) -> dict | None:
     return state
 
 
-def _checkpoint_page_problem(data: Any, offset: int) -> str | None:
+# The page rule. A page read at a requested `offset` with a requested `limit`
+# is sound only when every signal it carries (the rows, their ids, `total`,
+# `next_cursor`, `offset` and the requested `limit`) agrees with every other.
+# It is malformed, and the read is reported as an error (never as empty, never
+# as complete), when any of these holds:
+#   a. the rows are not a list of objects;
+#   b. a row lacks its id (checkpoint pages);
+#   c. two rows on the page carry the same id (checkpoint: `entity_id` or `id`;
+#      observation: `id`, among rows that carry a string `id`);
+#   d. there are more rows than the requested `limit`;
+#   e. `total` is not a count, or is smaller than `offset + rows`;
+#   f. a short page (rows < `limit`) has a `total` reporting more;
+#   g. `next_cursor` is present and not a string;
+#   h. a short page carries a non-null `next_cursor`;
+#   i. a non-null `next_cursor` sits on a page where `total` is present and
+#      `offset + rows >= total`: the cursor says more and the total says none;
+#   j. `offset` is present and is not the requested offset.
+# Across pages: a reader that accumulates rows over several pages treats a row
+# id already seen on an earlier page of the same read as a malformed read
+# ("observations (id repeated across pages)"): the window shifted under it.
+
+
+def _checkpoint_page_problem(data: Any, offset: int, limit: int) -> str | None:
     """Name the field that makes a page unusable for judging completeness.
 
-    Every field the walk reads to decide whether it has seen the whole queue is
-    checked here. A page missing `entities` or `total` must not read as an
-    empty, complete queue: that is a malformed answer, not an all-clear.
+    Applies the page rule stated above (a to j) to a checkpoint-style entity
+    page read at *offset* with *limit*. A page missing `entities` or `total`
+    must not read as an empty, complete queue: that is a malformed answer, not
+    an all-clear.
     """
     if not isinstance(data, dict):
         return "response (not an object)"
     entities = data.get("entities")
     if not isinstance(entities, list):
         return "entities (missing or not a list)"
+    seen: set[str] = set()
     for i, ent in enumerate(entities):
         if not isinstance(ent, dict):
             return f"entities[{i}] (not an object)"
         eid = ent.get("entity_id") or ent.get("id")
         if not isinstance(eid, str) or not eid.strip():
             return f"entities[{i}].entity_id (missing)"
+        if eid in seen:
+            return "entities (duplicate entity_id)"
+        seen.add(eid)
+    rows = len(entities)
+    if rows > limit:
+        return "entities (more rows than the limit)"
     if not _is_count(data.get("total")):
         return "total (missing, not an integer, or negative)"
-    if data["total"] < offset + len(entities):
+    total = data["total"]
+    if total < offset + rows:
         return "total (smaller than the rows returned)"
-    if "next_cursor" in data and data["next_cursor"] is not None and not isinstance(
-        data["next_cursor"], str
-    ):
+    if rows < limit and total > offset + rows:
+        return "entities (short page while total reports more)"
+    next_cursor = data.get("next_cursor")
+    if next_cursor is not None and not isinstance(next_cursor, str):
         return "next_cursor (not a string)"
+    if rows < limit and next_cursor is not None:
+        return "next_cursor (present on a short page)"
+    if next_cursor is not None and offset + rows >= total:
+        return "next_cursor (present when total says the read ended)"
     if "offset" in data and data["offset"] is not None and (
         not _is_count(data["offset"]) or data["offset"] != offset
     ):
@@ -1091,7 +1127,9 @@ def _checkpoint_page_problem(data: Any, offset: int) -> str | None:
     return None
 
 
-def _filtered_read_problem(page: Any, read_what: str) -> tuple[str | None, str | None]:
+def _filtered_read_problem(
+    page: Any, read_what: str, limit: int
+) -> tuple[str | None, str | None]:
     """Judge a single first-page filtered read: (malformed field, partial-read gap).
 
     The rule `list_checkpoints` follows applies to every filtered read: it may
@@ -1100,7 +1138,7 @@ def _filtered_read_problem(page: Any, read_what: str) -> tuple[str | None, str |
     reported as an error, never as an empty set); a well-formed page with more
     after it returns a gap naming how much was read.
     """
-    problem = _checkpoint_page_problem(page, 0)
+    problem = _checkpoint_page_problem(page, 0, limit)
     if problem:
         return problem, None
     read = len(page["entities"])
@@ -1141,7 +1179,7 @@ def _read_checkpoint_page(offset: int, page_size: int) -> tuple[dict | None, dic
             "total": None,
             "checkpoints": [],
         }
-    problem = _checkpoint_page_problem(data, offset)
+    problem = _checkpoint_page_problem(data, offset, page_size)
     if problem:
         return None, _malformed_checkpoint_page(problem)
     return data, None
@@ -1177,9 +1215,8 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
     return `complete: true` from this tool.
 
     Every error response carries `error` and `checkpoints: []`, plus `detail`
-    or `malformed_field` where they apply. `total` is `None` in every error
-    except one: when Neotoma reports more checkpoints past the offset but
-    returns none, `total` is the total Neotoma reported.
+    or `malformed_field` where they apply, and `total` is `None` in every
+    error.
     """
     page_size = limit or CHECKPOINT_PAGE_SIZE
     offset = 0
@@ -1266,16 +1303,10 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
         "checkpoints": checkpoints,
     }
 
-    if has_more and returned == 0:
-        # More is claimed but this page moved nothing: a cursor for the same
-        # offset would loop forever, and no cursor would read as the end.
-        result["error"] = (
-            f"Neotoma reported more pending checkpoints past offset {offset} "
-            "but returned none; the queue could not be listed to the end"
-        )
-        result["truncated"] = True
-        result["complete"] = False
-    elif has_more:
+    # An empty page that claims more is a short page whose `total` or
+    # `next_cursor` reports more rows, so the page rule has already refused it
+    # as malformed: `has_more` here always comes with rows to move past.
+    if has_more:
         result["truncated"] = True
         result["complete"] = False
         result["next_cursor"] = _encode_checkpoint_cursor(offset + returned)
@@ -2504,45 +2535,58 @@ def _read_error(what: str) -> str:
 def _observation_page_problem(data: Any, offset: int, limit: int) -> str | None:
     """The field that makes an observation page unreadable; None when it is sound.
 
-    A page read at *offset* with *limit* is sound only when `observations` is a
-    list of objects; `total`, when present, is a count no smaller than
-    `offset + len(observations)`; and a short page (fewer rows than *limit*)
-    reports no rows beyond it, so its `total`, when present, equals
-    `offset + len(observations)`. Callers treat a short page as the end of the
-    read, so a short page claiming more rows would end it early and report an
-    incomplete read as complete. Anything else is a failed read, never an empty
-    or final batch. `next_cursor`, when present and not null, must be a string,
-    and `offset`, when present and not null, must equal the requested offset, so
-    a page for the wrong position is never read as the next one; these are the
-    fields `_checkpoint_page_problem` validates too. A short page that carries a
-    non-null `next_cursor` signals more rows than it returned, so it is
-    malformed too. A page with no `total`, `offset` or `next_cursor` is still
-    accepted.
+    Applies the page rule stated above `_checkpoint_page_problem` (a and c to
+    j) to an observation page read at *offset* with *limit*. `total`, `offset`
+    and `next_cursor` are optional here: a page with none of them is still
+    accepted, and the rules that compare one of them apply only when it is
+    present. Callers treat a short page as the end of the read, so a short page
+    claiming more rows would end it early and report an incomplete read as
+    complete; anything malformed is a failed read, never an empty or final
+    batch.
     """
     if not isinstance(data, dict):
         return "response"
     batch = data.get("observations")
     if not isinstance(batch, list) or any(not isinstance(o, dict) for o in batch):
         return "observations"
+    ids = [o["id"] for o in batch if isinstance(o.get("id"), str)]
+    if len(set(ids)) != len(ids):
+        return "observations (duplicate id)"
+    rows = len(batch)
+    if rows > limit:
+        return "observations (more rows than the limit)"
+    total = data.get("total") if "total" in data else None
     if "total" in data:
-        total = data["total"]
         if not _is_count(total):
             return "total"
-        if total < offset + len(batch):
+        if total < offset + rows:
             return "total (smaller than the rows returned)"
-        if len(batch) < limit and total > offset + len(batch):
+        if rows < limit and total > offset + rows:
             return "observations (short page while total reports more)"
-    if "next_cursor" in data and data["next_cursor"] is not None and not isinstance(
-        data["next_cursor"], str
-    ):
+    next_cursor = data.get("next_cursor")
+    if next_cursor is not None and not isinstance(next_cursor, str):
         return "next_cursor (not a string)"
-    if len(batch) < limit and data.get("next_cursor") is not None:
+    if rows < limit and next_cursor is not None:
         return "next_cursor (present on a short page)"
+    if next_cursor is not None and total is not None and offset + rows >= total:
+        return "next_cursor (present when total says the read ended)"
     if "offset" in data and data["offset"] is not None and (
         not _is_count(data["offset"]) or data["offset"] != offset
     ):
         return f"offset (not the requested {offset})"
     return None
+
+
+_REPEATED_ACROSS_PAGES = "observations (id repeated across pages)"
+
+
+def _repeats_seen_id(batch: list[dict], seen: set[str]) -> bool:
+    """Whether *batch* repeats a row id seen on an earlier page; records its ids."""
+    ids = {o["id"] for o in batch if isinstance(o.get("id"), str)}
+    if ids & seen:
+        return True
+    seen.update(ids)
+    return False
 
 
 def _observation_read_ends(data: dict, offset: int, limit: int) -> bool:
@@ -2552,7 +2596,8 @@ def _observation_read_ends(data: dict, offset: int, limit: int) -> bool:
     only after `_observation_page_problem` has passed. With `total`, the read
     ends exactly when `offset + len(observations) >= total`. Without it, the
     read ends only on a short page (fewer rows than *limit*) that carries no
-    `next_cursor`.
+    `next_cursor`. Rule (i) of the page rule guarantees it is never reached with
+    a `total` and a `next_cursor` that contradict each other.
     """
     batch = data["observations"]
     total = data.get("total")
@@ -2575,6 +2620,7 @@ def _observations_of(
 ) -> tuple[list[dict] | None, str | None, bool]:
     """Observations of one entity. Returns (rows, error, truncated)."""
     rows: list[dict] = []
+    seen: set[str] = set()
     offset = 0
     while True:
         body: dict[str, Any] = {
@@ -2591,6 +2637,12 @@ def _observations_of(
         if problem:
             return None, _malformed_error(f"observations of {entity_id}", problem), False
         batch = data["observations"]
+        if _repeats_seen_id(batch, seen):
+            return (
+                None,
+                _malformed_error(f"observations of {entity_id}", _REPEATED_ACROSS_PAGES),
+                False,
+            )
         rows.extend(batch)
         ended = _observation_read_ends(data, offset, _ENTITY_OBS_PAGE)
         offset += len(batch)
@@ -2627,6 +2679,7 @@ def _scan_type_window(
         return {"rows": [], "error": _read_error(f"{entity_type} count since {_iso(end)}")}
     offset = max(0, n_end - _SCAN_OFFSET_MARGIN)
     rows: list[dict] = []
+    seen: set[str] = set()
     scanned = 0
     complete = False
     while scanned < max_scan:
@@ -2651,6 +2704,13 @@ def _scan_type_window(
                 "error": _malformed_error(f"{entity_type} scan at offset {offset}", problem),
             }
         batch = data["observations"]
+        if _repeats_seen_id(batch, seen):
+            return {
+                "rows": rows,
+                "error": _malformed_error(
+                    f"{entity_type} scan at offset {offset}", _REPEATED_ACROSS_PAGES
+                ),
+            }
         ended = _observation_read_ends(data, offset, limit)
         scanned += len(batch)
         offset += len(batch)
@@ -2905,7 +2965,7 @@ class _TimelineBuilder:
             self.source("checkpoint_brief", "error", detail=_read_error("checkpoint_brief"))
             self.gaps.append("checkpoints could not be read; an open checkpoint may be holding this task")
             return
-        malformed, partial = _filtered_read_problem(page, "this task's checkpoints")
+        malformed, partial = _filtered_read_problem(page, "this task's checkpoints", 50)
         if malformed:
             self.source(
                 "checkpoint_brief", "error", detail=f"malformed checkpoint page: {malformed}"
@@ -3071,7 +3131,7 @@ class _TimelineBuilder:
             self.source("participation_record", "error", detail=_read_error("participation_record"))
             self.gaps.append(_PARTICIPATION_UNREAD_GAP)
             return
-        malformed, partial = _filtered_read_problem(page, "this task's participation records")
+        malformed, partial = _filtered_read_problem(page, "this task's participation records", 100)
         if malformed:
             self.source(
                 "participation_record", "error", detail=f"malformed participation page: {malformed}"
@@ -3160,7 +3220,7 @@ class _TimelineBuilder:
             self.source("escalation", "error", detail=_read_error("escalation"))
             self.gaps.append("escalations could not be read; an escalation about this task may be missing")
             return
-        malformed, partial = _filtered_read_problem(page, "this task's escalations")
+        malformed, partial = _filtered_read_problem(page, "this task's escalations", 50)
         if malformed:
             self.source("escalation", "error", detail=f"malformed escalation page: {malformed}")
             self.gaps.append("escalations could not be read; an escalation about this task may be missing")
@@ -3379,6 +3439,7 @@ def _advance_cursor(since: str, seen: set[str], rows: list[dict]) -> str:
 
 def _scan_since(entity_type: str, since: str, max_scan: int) -> tuple[list[dict] | None, str | None, bool]:
     rows: list[dict] = []
+    seen: set[str] = set()
     offset = 0
     while offset < max_scan:
         limit = min(_OBS_PAGE, max_scan - offset)
@@ -3391,6 +3452,12 @@ def _scan_since(entity_type: str, since: str, max_scan: int) -> tuple[list[dict]
         if problem:
             return None, _malformed_error(f"{entity_type} since {since}", problem), False
         batch = data["observations"]
+        if _repeats_seen_id(batch, seen):
+            return (
+                None,
+                _malformed_error(f"{entity_type} since {since}", _REPEATED_ACROSS_PAGES),
+                False,
+            )
         rows.extend(batch)
         ended = _observation_read_ends(data, offset, limit)
         offset += len(batch)
@@ -3550,7 +3617,7 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
         if page is None:
             errors.append(_read_error(f"checkpoints of {tid}"))
             continue
-        malformed, partial = _filtered_read_problem(page, f"pending checkpoints of {tid}")
+        malformed, partial = _filtered_read_problem(page, f"pending checkpoints of {tid}", 20)
         if malformed:
             # A malformed page is a failed read, never an empty pending list.
             errors.append(f"checkpoints of {tid}: malformed checkpoint page: {malformed}")
@@ -3591,7 +3658,7 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
             limit=1,
             include_snapshots=False,
         )
-        if total_page is not None and _checkpoint_page_problem(total_page, 0) is None:
+        if total_page is not None and _checkpoint_page_problem(total_page, 0, 1) is None:
             result["pending_checkpoints_total"] = total_page["total"]
         else:
             # A failed or malformed count read must not be spelled as a count.
@@ -3777,9 +3844,7 @@ TOOLS = [
             "list again without a cursor and a larger `limit`. A queue larger than "
             "the largest allowed `limit` (500) can never return `complete: true` "
             "from this tool. Every error carries `error` and `checkpoints: []`; "
-            "`total` is null except when Neotoma reports more checkpoints past "
-            "the offset but returns none, where `total` is the total Neotoma "
-            "reported. Never treat one page as the whole queue — it "
+            "`total` is null in every error. Never treat one page as the whole queue — it "
             "used to say it returned 'all' while showing 50 of 372 (ateles#1037)."
         ),
         inputSchema={

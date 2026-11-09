@@ -468,13 +468,101 @@ def test_a_total_smaller_than_the_rows_returned_is_malformed(monkeypatch):
 
 
 def test_empty_page_with_more_reported_is_an_error(monkeypatch):
-    """Red without the `has_more and returned == 0` branch: the empty page fell
-    through to the `has_more` branch and handed back a cursor for the same
-    offset, so a caller walking it would loop forever with no error."""
+    """An empty page claiming more is a short page whose `total` and
+    `next_cursor` both report more rows, so the page rule refuses it as
+    malformed. A cursor for the same offset would loop forever, and no cursor
+    would read as the end."""
     result = _one_page(
         monkeypatch, {"entities": [], "total": 1, "next_cursor": "srv_more"}
     )
     assert result.get("error"), result
-    assert result["complete"] is False
-    assert result["truncated"] is True
+    assert result.get("malformed_field"), result
+    assert result.get("complete") is not True
     assert "next_cursor" not in result
+    assert result["checkpoints"] == [] and result.get("total") is None
+
+# The page rule (server.py, above `_checkpoint_page_problem`): every signal a
+# page carries must agree with every other. One malformed page per rule this
+# round added or extended for checkpoint pages; each was read as a sound page
+# at f51d680. `_one_page` reads with the default page size.
+_LIMIT = server.CHECKPOINT_PAGE_SIZE
+
+
+@pytest.mark.parametrize(
+    "rule, page, field",
+    [
+        (
+            "c",
+            {"entities": [_brief(1), _brief(1)], "total": 2},
+            "entities (duplicate entity_id)",
+        ),
+        (
+            "c (id key)",
+            {"entities": [{"id": "ent_a"}, {"entity_id": "ent_a"}], "total": 2},
+            "entities (duplicate entity_id)",
+        ),
+        (
+            "d",
+            {"entities": [_brief(i) for i in range(_LIMIT + 1)], "total": _LIMIT + 1},
+            "entities (more rows than the limit)",
+        ),
+        (
+            "f",
+            {"entities": [_brief(1)], "total": 5},
+            "entities (short page while total reports more)",
+        ),
+        (
+            "h",
+            {"entities": [_brief(1)], "total": 1, "next_cursor": "srv-1"},
+            "next_cursor (present on a short page)",
+        ),
+        (
+            "i",
+            {
+                "entities": [_brief(i) for i in range(_LIMIT)],
+                "total": _LIMIT,
+                "next_cursor": "srv-more",
+            },
+            "next_cursor (present when total says the read ended)",
+        ),
+    ],
+)
+def test_the_page_rule_refuses_every_contradicting_checkpoint_page(
+    monkeypatch, rule, page, field
+):
+    result = _one_page(monkeypatch, page)
+    assert result.get("error"), f"rule {rule}: malformed page read as a listing: {result}"
+    assert result.get("malformed_field") == field, result
+    assert result.get("complete") is not True
+    assert result["checkpoints"] == [] and result.get("total") is None
+
+
+def test_securitys_duplicate_id_page_is_not_reported_complete(monkeypatch):
+    """Security's case at f51d680: two rows for one checkpoint under `total: 2`
+    were counted as two and the queue reported `complete: true`."""
+    result = _one_page(monkeypatch, {"entities": [_brief(7), _brief(7)], "total": 2})
+    assert result.get("error"), result
+    assert result.get("complete") is not True
+    assert result.get("malformed_field") == "entities (duplicate entity_id)"
+
+
+def test_a_sound_single_page_with_distinct_ids_is_still_complete(monkeypatch):
+    page = {"entities": [_brief(1), _brief(2), _brief(3)], "total": 3, "offset": 0}
+    result = _one_page(monkeypatch, page)
+    assert not result.get("error"), result
+    assert result["complete"] is True
+    assert result["returned"] == 3 and result["total"] == 3
+
+
+def test_a_filtered_read_with_a_contradicting_cursor_is_malformed():
+    """`_filtered_read_problem` applies the same rule at the limit its caller
+    sent: a full page with a cursor and a total that says it ended is malformed,
+    not a partial read."""
+    page = {"entities": [_brief(1), _brief(2)], "total": 2, "next_cursor": "srv"}
+    malformed, partial = server._filtered_read_problem(page, "briefs", 2)
+    assert malformed == "next_cursor (present when total says the read ended)"
+    assert partial is None
+    malformed, partial = server._filtered_read_problem(
+        {"entities": [_brief(1), _brief(1)], "total": 2}, "briefs", 50
+    )
+    assert malformed == "entities (duplicate entity_id)"
