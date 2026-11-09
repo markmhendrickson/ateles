@@ -9,9 +9,25 @@ repairing the policy: the checkpoints it filed under the old policy are replaced
 releases, approves, or dispatches a task, and never touches a task that is not
 at ``awaiting_approval`` right now.
 
+A lost hold and a retired one are told apart.  A blanket run (no ``--task``)
+refiles a task with no checkpoint, or whose newest checkpoint is neither live
+nor superseded, exactly as before.  A task whose newest checkpoint was
+superseded on purpose (``supersede_checkpoint``) is left alone and reported as
+``retired``, in the dry run and under ``--apply`` alike, so a clean-up is not
+silently undone.  Naming a task with ``--task`` refiles it even then: the caller
+asked for it.  A blanket run files nothing and reports ``unknown`` whenever it
+cannot tell whether a hold was retired: the checkpoints cannot be read (they
+are read strictly, so a malformed listing fails the read), a row is malformed
+(not a record, or no ``entity_id`` or status), or a checkpoint was superseded
+but the order of the checkpoints is unknown.  Order is by creation time, parsed
+as ISO 8601 with an offset (``Z`` accepted) and compared in UTC; a missing,
+unparseable or offset-less stamp makes the order unknown.  With no superseded
+checkpoint there is no retirement evidence, so the task is refiled as before.
+
 One JSON object per task on stdout, then a summary object.  Exit status is
 non-zero when any task ``failed`` (a read or the replacement write did not
-succeed) or is ``incomplete`` (a stale brief could not be retired), so an
+succeed), is ``unknown`` (whether its hold was retired could not be told) or is
+``incomplete`` (a stale brief could not be retired), so an
 operator can re-run (the operation is idempotent) until it is zero.
 """
 
@@ -92,7 +108,11 @@ def main() -> int:
             )
             break
         try:
-            result = reissue_held_task_checkpoint(task_id, apply=args.apply)
+            # Only a blanket run keeps a deliberately retired hold retired; a
+            # task the caller named is refiled as asked.
+            result = reissue_held_task_checkpoint(
+                task_id, apply=args.apply, keep_retired=not args.task
+            )
             record = {
                 "task_id": result.task_id,
                 "outcome": result.outcome,
@@ -120,9 +140,14 @@ def main() -> int:
             sort_keys=True,
         )
     )
-    # A read or write failure, or a partial retirement, means recovery is not
+    # A read or write failure, an unreadable checkpoint list, or a partial
+    # retirement means recovery is not
     # complete: exit non-zero so "rerun until zero" is a reliable contract.
-    return 1 if counts.get("failed") or counts.get("incomplete") else 0
+    return (
+        1
+        if counts.get("failed") or counts.get("unknown") or counts.get("incomplete")
+        else 0
+    )
 
 
 if __name__ == "__main__":

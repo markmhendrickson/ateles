@@ -288,6 +288,12 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     query_all_entities,
     require_fresh_checkpoint_approval,
     stamp_checkpoint_dispatched,
+    CHECKPOINT_APPROVED_NO_RELEASE,
+    CHECKPOINT_APPROVED_STATES,
+    CHECKPOINT_AWAITING_OPERATOR,
+    CHECKPOINT_REJECTED_STATES,
+    CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+    CHECKPOINT_SUPERSEDED,
     supersede_checkpoint,
 )
 from lib.daemon_runtime.task_lifecycle import (  # noqa: E402
@@ -4711,7 +4717,112 @@ _BLOCKER_SUMMARIES = {
 }
 
 
-def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
+def _checkpoint_created_at(item: dict) -> datetime | None:
+    """A brief's creation time as an aware UTC datetime; ``None`` when unknown.
+
+    Only an ISO 8601 stamp that carries an offset (``Z`` accepted) is a known
+    time.  A missing, unparseable or naive stamp gives ``None``: its place in
+    the order is unknown, never guessed from string comparison.
+    """
+    raw = item.get("created_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        return None
+    return stamp.astimezone(timezone.utc)
+
+
+# Every status a checkpoint_brief is written with or read as, normalized
+# (stripped, lower case).  A status outside this set is unrecognized: it is not
+# evidence either way about whether a hold was retired.
+_RECOGNIZED_CHECKPOINT_STATUSES = frozenset(
+    {
+        CHECKPOINT_AWAITING_OPERATOR,
+        CHECKPOINT_SUPERSEDED,
+        CHECKPOINT_APPROVED_NO_RELEASE,
+        CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+    }
+    | CHECKPOINT_APPROVED_STATES
+    | CHECKPOINT_REJECTED_STATES
+)
+
+
+def _malformed_checkpoint_row(item: object, task_id: str) -> bool:
+    """True when a checkpoint row cannot carry evidence about retirement.
+
+    A row is malformed when it is not a record, has no string ``entity_id``,
+    has no snapshot, names a task other than ``task_id`` (the read filters on
+    the task, so a foreign row means the listing cannot be trusted), or has a
+    status that is not a string or not one of the recognized checkpoint
+    statuses.  A present but unrecognized value is unknown, never evidence.
+    """
+    if not isinstance(item, dict):
+        return True
+    checkpoint_id = item.get("entity_id")
+    if not isinstance(checkpoint_id, str) or not checkpoint_id.strip():
+        return True
+    snapshot = _record_snapshot(item)
+    if snapshot is None:
+        return True
+    linked_task = snapshot.get("task_entity_id")
+    if not isinstance(linked_task, str) or linked_task.strip() != task_id:
+        return True
+    status = snapshot.get("status")
+    if not isinstance(status, str):
+        return True
+    return status.strip().lower() not in _RECOGNIZED_CHECKPOINT_STATUSES
+
+
+def _newest_checkpoint_superseded(
+    checkpoints: list[dict],
+) -> tuple[str, str | None]:
+    """Whether the task's newest checkpoint was superseded on purpose.
+
+    Returns ``("retired", id)`` when the newest brief is ``superseded``,
+    ``("not_retired", None)`` when it is not (or there are no briefs), and
+    ``("unknown", None)`` when retirement cannot be decided.
+
+    A hold retired on purpose with ``supersede_checkpoint`` leaves its newest
+    brief at ``superseded``.  Newest is judged by creation time, compared as
+    UTC datetimes parsed from ISO 8601 stamps with an offset.  When any stamp
+    is missing, unparseable or naive, or the newest time is shared by briefs
+    of different status, the order is unknown: if any brief is superseded the
+    result is ``unknown`` (fail closed, nothing is refiled); if none is, there
+    is no retirement evidence and the result is ``not_retired``.  Callers must
+    reject malformed rows (``_malformed_checkpoint_row``) before calling.
+    """
+    if not checkpoints:
+        return ("not_retired", None)
+
+    def _status(item: dict) -> str:
+        return str((_record_snapshot(item) or {}).get("status") or "").strip().lower()
+
+    any_superseded = any(_status(c) == CHECKPOINT_SUPERSEDED for c in checkpoints)
+    if not any_superseded:
+        return ("not_retired", None)
+    stamped = [(_checkpoint_created_at(c), c) for c in checkpoints]
+    if any(stamp is None for stamp, _ in stamped):
+        return ("unknown", None)
+    newest_at = max(stamp for stamp, _ in stamped)
+    newest = [c for stamp, c in stamped if stamp == newest_at]
+    newest_statuses = {_status(c) for c in newest}
+    if len(newest_statuses) > 1:
+        return ("unknown", None)
+    if newest_statuses == {CHECKPOINT_SUPERSEDED}:
+        return ("retired", str(max(str(c["entity_id"]) for c in newest)))
+    return ("not_retired", None)
+
+
+def reissue_held_task_checkpoint(
+    task_id: str, *, apply: bool, keep_retired: bool = False
+) -> ReissueResult:
     """Give one still-held task a fresh, signed, resolvable checkpoint.
 
     The recovery for tasks that were left at ``awaiting_approval`` with no
@@ -4740,6 +4851,20 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
         be assessed or fixed.  A checkpoint or authorization read that fails is
         reported here and never treated as proof a brief is stale.
 
+    With ``keep_retired`` (a blanket run that did not name the task):
+      * ``retired`` - the task has no live checkpoint and its newest one was
+        superseded on purpose; it is not refiled, so a clean-up stays done.
+        ``checkpoint_id`` is that superseded checkpoint.  Naming the task
+        (``keep_retired=False``) refiles it as before;
+      * ``unknown`` - whether the hold was retired cannot be decided, so
+        nothing is filed: the checkpoints could not be read (they are read
+        strictly), a row is malformed (not a record, no ``entity_id``, a
+        status that is missing, not a string or not a recognized checkpoint
+        status, or a ``task_entity_id`` naming another task), or a checkpoint was superseded but the order is unknown (a
+        creation time is missing, unparseable or has no offset, or the newest
+        time is shared).  With no superseded checkpoint there is no retirement
+        evidence and the task is refiled as before.
+
     Guarantees, each pinned by a test:
       * only a task at ``awaiting_approval`` right now is touched, so a done,
         declined, superseded, blocked, or running task is never re-issued;
@@ -4762,9 +4887,37 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
     if status != TaskStatus.AWAITING_APPROVAL.value:
         return ReissueResult(task_id, "skipped", f"not held (status={status or 'unset'})")
 
-    existing = checkpoints_for_task(task_id)
+    # A blanket run decides "retired or lost" from these rows, so it reads them
+    # strictly: a malformed row fails the whole read instead of vanishing.
+    existing = (
+        checkpoints_for_task(task_id, strict=True)
+        if keep_retired
+        else checkpoints_for_task(task_id)
+    )
     if existing is None:
+        if keep_retired:
+            # A failed read is never "no checkpoint": a retired hold would be
+            # refiled.  Report it as unknown and file nothing.
+            return ReissueResult(
+                task_id,
+                "unknown",
+                "checkpoint list could not be read; whether the hold was "
+                "retired is unknown, nothing was filed",
+            )
         return ReissueResult(task_id, "failed", "checkpoint list could not be read")
+    if keep_retired and any(
+        _malformed_checkpoint_row(item, task_id) for item in existing
+    ):
+        # A row with no id, an unrecognized status or a foreign task link could
+        # hide the superseded newest brief; counting it could refile a retired
+        # hold.
+        return ReissueResult(
+            task_id,
+            "unknown",
+            "checkpoint list holds a malformed row (not a record, no id, a "
+            "missing or unrecognized status, or a different task); whether the "
+            "hold was retired is unknown, nothing was filed",
+        )
     current_id: str | None = None
     stale_pending: list[str] = []
     for item in existing:
@@ -4782,7 +4935,7 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
                 "skipped",
                 f"approved checkpoint {checkpoint_id} is awaiting release",
             )
-        if item_status != "awaiting_operator":
+        if item_status != CHECKPOINT_AWAITING_OPERATOR:
             continue
         state = _checkpoint_authority_state(checkpoint_id, record)
         if state == "unreadable":
@@ -4798,6 +4951,26 @@ def reissue_held_task_checkpoint(task_id: str, *, apply: bool) -> ReissueResult:
             current_id = checkpoint_id
         else:
             stale_pending.append(checkpoint_id)
+
+    if keep_retired and current_id is None:
+        retirement, retired_id = _newest_checkpoint_superseded(existing)
+        if retirement == "unknown":
+            return ReissueResult(
+                task_id,
+                "unknown",
+                "a checkpoint was superseded but the order of the checkpoints "
+                "is unknown (a creation time is missing, unparseable, has no "
+                "offset, or is shared); whether the hold was retired is "
+                "unknown, nothing was filed",
+            )
+        if retirement == "retired":
+            return ReissueResult(
+                task_id,
+                "retired",
+                f"newest checkpoint {retired_id} was superseded on purpose; "
+                "not refiled (name the task with --task to refile it)",
+                checkpoint_id=retired_id,
+            )
 
     blocker = _approval_cannot_release(snapshot)
     blocker_outcome = _BLOCKER_OUTCOMES.get(blocker or "")

@@ -323,6 +323,11 @@ class FakeNeotoma:
                 # As the server does: a full page always carries a cursor, even
                 # for a filtered listing where it can never be used.
                 "next_cursor": page[-1] if len(page) >= limit else None,
+                # As the server does: the size of the whole matching listing,
+                # which a strict read checks its rows against.
+                "total": len(matching),
+                "limit": limit,
+                "offset": offset,
             },
             url,
         )

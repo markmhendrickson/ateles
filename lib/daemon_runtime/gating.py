@@ -1090,7 +1090,7 @@ def write_checkpoint_brief(
                 "reason": decision.reason,
                 "policy_entity_id": decision.policy_id,
                 "proposed_alternatives": alternatives or [],
-                "status": "awaiting_operator",
+                "status": CHECKPOINT_AWAITING_OPERATOR,
                 "handler": handler,
             }
         ],
@@ -1400,6 +1400,9 @@ def write_producer_assessment(
 #   rejected  → mark the task declined; do not execute.
 #
 # Any other status (awaiting_operator, or an unknown value) is a no-op.
+
+# The status a brief carries while it waits for the operator.
+CHECKPOINT_AWAITING_OPERATOR = "awaiting_operator"
 
 # Statuses that resolve a checkpoint, and how the dispatcher should treat them.
 CHECKPOINT_APPROVED_STATES = frozenset({"approved", "approve", "accepted"})
@@ -1885,11 +1888,20 @@ def query_all_entities(
     return found
 
 
-def checkpoints_for_task(task_entity_id: str) -> list[dict] | None:
-    """Every checkpoint_brief that names ``task_entity_id``; ``None`` on a failed read."""
+def checkpoints_for_task(
+    task_entity_id: str, *, strict: bool = False
+) -> list[dict] | None:
+    """Every checkpoint_brief that names ``task_entity_id``; ``None`` on a failed read.
+
+    ``strict`` reads the collection with ``query_all_entities(strict=True)``,
+    so a malformed row or an inconsistent listing makes the whole read
+    ``None`` rather than a silently smaller list.  The default keeps the
+    lenient read for callers that do not decide safety from the rows.
+    """
     return query_all_entities(
         "checkpoint_brief",
         snapshot_filters={"task_entity_id": {"op": "eq", "value": task_entity_id}},
+        strict=strict,
     )
 
 
