@@ -497,6 +497,30 @@ def test_timeline_malformed_escalation_page_is_an_error_not_none_found(routed):
     assert any("escalations could not be read" in g for g in out["gaps"]), out["gaps"]
 
 
+def _undercount(page: dict) -> dict:
+    page["total"] = 0
+    return page
+
+
+def test_timeline_checkpoint_page_with_total_below_its_rows_is_an_error(routed):
+    _add_rows(routed, "checkpoint_brief", 3, {"task_entity_id": TASK, "status": "resolved"})
+    _mangle_query(routed, "checkpoint_brief", _undercount)
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["checkpoint_brief"]["status"] == "error", by_source
+    assert "smaller than the rows returned" in by_source["checkpoint_brief"]["detail"]
+    assert any("checkpoints could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+def test_timeline_escalation_page_with_total_below_its_rows_is_an_error(routed):
+    _add_rows(routed, "escalation", 3, {"source_entity_id": TASK, "title": "stuck"})
+    _mangle_query(routed, "escalation", _undercount)
+    out = srv._get_task_timeline(TASK)
+    by_source = {s["source"]: s for s in out["sources"]}
+    assert by_source["escalation"]["status"] == "error", by_source
+    assert any("escalations could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
 def test_baseline_reports_a_partial_per_task_checkpoint_read(routed):
     _add_rows(routed, "checkpoint_brief", 25, {"task_entity_id": TASK, "status": "awaiting_operator"})
     out = _baseline()
@@ -522,6 +546,25 @@ def test_baseline_unreadable_total_is_null_with_a_gap(routed, bad_total):
         return page
 
     # Only the queue-wide count read (no task filter) is mangled.
+    _mangle_query(
+        routed, "checkpoint_brief", edit,
+        only=lambda body: "task_entity_id" not in (body.get("snapshot_filters") or {}),
+    )
+    out = _baseline(include_checkpoints=True)
+    assert out["pending_checkpoints_total"] is None
+    assert any("count could not be read" in g for g in out["gaps"]), out["gaps"]
+
+
+@pytest.mark.parametrize("bad_entities", ["missing", "not_a_list"])
+def test_baseline_count_page_with_unreadable_entities_is_null_with_a_gap(routed, bad_entities):
+    def edit(page):
+        if bad_entities == "missing":
+            page.pop("entities", None)
+        else:
+            page["entities"] = "nope"
+        page["total"] = 4
+        return page
+
     _mangle_query(
         routed, "checkpoint_brief", edit,
         only=lambda body: "task_entity_id" not in (body.get("snapshot_filters") or {}),

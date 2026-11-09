@@ -1078,6 +1078,8 @@ def _checkpoint_page_problem(data: Any, offset: int) -> str | None:
             return f"entities[{i}].entity_id (missing)"
     if not _is_count(data.get("total")):
         return "total (missing, not an integer, or negative)"
+    if data["total"] < offset + len(entities):
+        return "total (smaller than the rows returned)"
     if "next_cursor" in data and data["next_cursor"] is not None and not isinstance(
         data["next_cursor"], str
     ):
@@ -3492,9 +3494,8 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
             limit=1,
             include_snapshots=False,
         )
-        total = total_page.get("total") if isinstance(total_page, dict) else None
-        if _is_count(total):
-            result["pending_checkpoints_total"] = total
+        if total_page is not None and _checkpoint_page_problem(total_page, 0) is None:
+            result["pending_checkpoints_total"] = total_page["total"]
         else:
             # A failed or malformed count read must not be spelled as a count.
             result["pending_checkpoints_total"] = None

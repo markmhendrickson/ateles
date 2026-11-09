@@ -454,6 +454,19 @@ def test_a_malformed_page_is_an_error_naming_the_field(monkeypatch, page, field)
     assert result.get("total") is None and not result.get("count")
 
 
+def test_a_total_smaller_than_the_rows_returned_is_malformed(monkeypatch):
+    """Red without the `total < offset + len(entities)` check: two rows under
+    `total: 1` read as `complete: true`, a page contradicting itself counted."""
+    result = _one_page(
+        monkeypatch,
+        {"entities": [{"entity_id": "ent_a"}, {"entity_id": "ent_b"}], "total": 1},
+    )
+    assert result.get("error"), result
+    assert result.get("malformed_field") == "total (smaller than the rows returned)"
+    assert result.get("complete") is not True
+    assert result["checkpoints"] == [] and result.get("total") is None
+
+
 def test_empty_page_with_more_reported_is_an_error(monkeypatch):
     """Red without the `has_more and returned == 0` branch: the empty page fell
     through to the `has_more` branch and handed back a cursor for the same
