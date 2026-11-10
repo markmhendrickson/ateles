@@ -1042,9 +1042,55 @@ def _parse_elevenlabs_stt_response(
     return _postprocess_transcript(text), lang
 
 
+def _validate_elevenlabs_raw_body(body: object) -> None:
+    """Check the synchronous parser's consumed structure, including silent parts.
+
+    Text-only bodies and optional/null word metadata are supported. A body must
+    still retain an explicit content field; an absent body is not silence.
+    """
+    if not isinstance(body, dict):
+        raise ValueError("ElevenLabs body must be an object")
+    if "transcripts" in body:
+        transcripts = body["transcripts"]
+        if not isinstance(transcripts, list):
+            raise ValueError("ElevenLabs transcripts must be a list")
+        for transcript in transcripts:
+            if not isinstance(transcript, dict) or "transcripts" in transcript:
+                raise ValueError("ElevenLabs channel must be a content body")
+            _validate_elevenlabs_raw_body(transcript)
+        return
+    if not ({"text", "words"} & body.keys()):
+        raise ValueError("ElevenLabs body lacks text/words")
+    for field in ("text", "language_code"):
+        if body.get(field) is not None and not isinstance(body[field], str):
+            raise ValueError(f"ElevenLabs {field} must be a string or null")
+    words = body.get("words")
+    if words is None:
+        return
+    if not isinstance(words, list):
+        raise ValueError("ElevenLabs words must be a list or null")
+    for word in words:
+        if not isinstance(word, dict):
+            raise ValueError("ElevenLabs word must be an object")
+        for field in ("text", "type"):
+            if word.get(field) is not None and not isinstance(word[field], str):
+                raise ValueError(f"ElevenLabs word {field} must be a string or null")
+        # Both existing event parsers consume timestamps with float(). Keep
+        # numeric strings supported, but refuse malformed/nonfinite timing.
+        for field in ("start", "end"):
+            if word.get(field) is not None:
+                value = word[field]
+                if not isinstance(value, (str, int, float)) or not math.isfinite(float(value)):
+                    raise ValueError("ElevenLabs word has invalid timing")
+        if word.get("start") is not None and word.get("end") is not None:
+            if float(word["end"]) < float(word["start"]):
+                raise ValueError("ElevenLabs word ends before it starts")
+
+
 def _parse_elevenlabs_stt_response_raw(
     body: object, language: str | None
 ) -> tuple[str, str]:
+    _validate_elevenlabs_raw_body(body)
     if isinstance(body, dict) and "message" in body and "request_id" in body:
         if "text" not in body and "transcripts" not in body:
             raise RuntimeError(
@@ -1260,6 +1306,7 @@ def transcribe_with_elevenlabs_speech_to_text(
                         shutil.rmtree(up_dir, ignore_errors=True)
                 raw_segments.append(body)
                 if isinstance(body, dict) and "transcripts" in body:
+                    _validate_elevenlabs_raw_body(body)
                     all_events.extend(
                         _multichannel_words_to_events(
                             body["transcripts"], time_offset=offset
@@ -2466,11 +2513,20 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
                     and all(text(speaker) for speaker in word["speaker_candidates"]), field + ".speaker_candidates")
             require("confidence" in word, field + ".confidence")
 
+    def alignment_matches(actual, expected):
+        # Confidence is backend passthrough, not a newly constrained vocabulary.
+        fields = ("start", "end", "text", "speaker", "speaker_candidates")
+        return len(actual) == len(expected) and all(
+            all(left[field] == right[field] for field in fields)
+            for left, right in zip(actual, expected)
+        )
+
     def fluid_raw(raw, *, two_tracks=False):
         require(isinstance(raw, dict), "raw_response")
         require(isinstance(raw.get("tracks"), list) and bool(raw["tracks"]), "raw_response.tracks")
         require("aligned_words" in raw, "raw_response.aligned_words")
         words(raw["aligned_words"], "raw_response.aligned_words")
+        expected_events = []
         if two_tracks:
             require(len(raw["tracks"]) == 2 and all(isinstance(track, dict) for track in raw["tracks"]),
                     "raw_response.tracks paired originals")
@@ -2478,8 +2534,11 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
             require({track.get("channel") for track in raw["tracks"]} == {"System", "Mic"},
                     "raw_response.tracks channels")
             for track in raw["tracks"]:
-                fluid_raw(track.get("result"))
-            return
+                child_events = fluid_raw(track.get("result"))
+                expected_events.extend({**event, "speaker": f"{track['channel']}/{event['speaker']}"}
+                                       for event in child_events)
+            require(alignment_matches(raw["aligned_words"], expected_events), "raw_response.aligned_words consistency")
+            return expected_events
         for track in raw["tracks"]:
             require(isinstance(track, dict), "raw_response.tracks[]")
             require("channel" in track and (track["channel"] is None or text(track["channel"])), "raw_response.channel")
@@ -2497,6 +2556,17 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
                 require(isinstance(word, dict), "raw_response.wordTiming")
                 require(number(word.get("startTime")) and number(word.get("endTime"))
                         and word["endTime"] >= word["startTime"] and text(word.get("word")), "raw_response.wordTiming")
+            # Reuse the producer's actual no-word/speech and overlap rules;
+            # presence of arrays alone cannot prove retained inference evidence.
+            from local_fluid import LocalFluidUnavailable, align_words
+            try:
+                expected_events.extend(align_words(asr, diar, channel=track["channel"]))
+            except LocalFluidUnavailable as exc:
+                raise IncompleteTranscriptionResult(
+                    "ERR_INCOMPLETE_TRANSCRIPTION_RESULT: inconsistent Fluid raw evidence"
+                ) from exc
+        require(alignment_matches(raw["aligned_words"], expected_events), "raw_response.aligned_words consistency")
+        return expected_events
 
     require(isinstance(result, dict), "result")
     backend = result.get("backend")
@@ -2519,15 +2589,30 @@ def _validate_transcription_result(result: object, *, paired: bool) -> None:
         require("rms_db" in result and number(result["rms_db"], nullable=True, nonnegative=False), "rms_db")
         require(type(result.get("silence")) is bool, "silence")
     elif backend == BACKEND_FLUID:
-        fluid_raw(result.get("raw_response"), two_tracks=paired)
+        events = fluid_raw(result.get("raw_response"), two_tracks=paired)
+        if not events:
+            require(result["transcription_text"] == format_events([]), "silent Fluid transcription_text")
         if not paired:
-            require(type(result.get("silence")) is bool, "silence")
+            require(type(result.get("silence")) is bool and result["silence"] == (not events), "silence")
     elif backend == BACKEND_ELEVENLABS:
         require(isinstance(result.get("raw_response"), dict), "raw_response")
         raw = result["raw_response"]
-        if "segments" in raw:
-            require(isinstance(raw["segments"], list) and all(isinstance(item, dict) for item in raw["segments"]),
-                    "raw_response.segments")
+        try:
+            if "segments" in raw:
+                require(isinstance(raw["segments"], list) and bool(raw["segments"]), "raw_response.segments")
+                events = []
+                for segment in raw["segments"]:
+                    _validate_elevenlabs_raw_body(segment)
+                    require("transcripts" in segment, "raw_response.segment.transcripts")
+                    events.extend(_multichannel_words_to_events(segment["transcripts"]))
+                require(bool(events), "raw_response.segments content")
+            else:
+                parsed, _language = _parse_elevenlabs_stt_response_raw(raw, result["language"])
+                require(text(parsed), "raw_response content")
+        except (ValueError, TypeError, OverflowError, RuntimeError) as exc:
+            raise IncompleteTranscriptionResult(
+                "ERR_INCOMPLETE_TRANSCRIPTION_RESULT: invalid ElevenLabs raw evidence"
+            ) from exc
     try:
         json.dumps(result, allow_nan=False)
     except (TypeError, ValueError) as exc:
