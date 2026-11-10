@@ -1,0 +1,28 @@
+{
+  "scope": {"instance": "fixture-production", "audience": "personal", "page_size": 2},
+  "tasks": [
+    {"id":"task-a","title":"Choose a date for the documentation pass","status":"open","priority":"medium","due_date":"2026-11-01","notes":"Existing context must survive.","parent":"plan-platform","owner":"lead-platform"},
+    {"id":"task-b","title":"Respond to the supplier's revised offer","status":"open","priority":"medium","notes":"Old question Q-old asked; answer msg-answer kept the existing offer.","parent":"plan-personal","owner":"lead-personal","gates":["send-per-message"],"sources":["mail-1","digest-1"]},
+    {"id":"task-c","title":"Recurring therapy payment","status":"open","priority":"medium","due_date":"2026-11-01","notes":"Continuing obligation.","parent":"plan-personal","owner":"lead-personal","recurrence":"weekly","gates":["payment"]},
+    {"id":"task-d","title":"Repair already owned by another writer","status":"in_progress","priority":"high","notes":"Current writer owns correction.","parent":"plan-platform","owner":"lead-platform","checkpoint":"hold-live","lease":{"holder":"writer-original","held":true},"activity":{"at":"2026-11-10T10:00:00Z","kind":"tests"},"gates":["checkpoint","review"]},
+    {"id":"task-e","title":"Old delivery with missing acceptance","status":"open","priority":"low","notes":"A child reported success but its PR does not resolve.","parent":"plan-platform","owner":"lead-platform","artifact":"missing-pr"},
+    {"id":"task-f","title":"An interrupted decision","status":"open","priority":"medium","notes":"No prior disposition.","parent":"plan-platform","owner":"lead-platform"}
+  ],
+  "sources": [
+    {"id":"mail-1","task":"task-b","kind":"mail","thread":"thread-1","event":"original","at":"2026-11-08T09:00:00Z"},
+    {"id":"digest-1","task":"task-b","kind":"digest","question":"Q-old","at":"2026-11-08T10:00:00Z"},
+    {"id":"msg-answer","task":"task-b","kind":"human_reply","answers":"Q-old","choice":"keep existing offer","at":"2026-11-08T11:00:00Z"},
+    {"id":"mail-2","task":"task-b","kind":"mail","thread":"thread-1","event":"re-inboxed","new_content":"Supplier changed the delivery date.","at":"2026-11-10T09:00:00Z"},
+    {"id":"checkpoint-1","task":"task-d","kind":"checkpoint","status":"open","at":"2026-11-10T09:05:00Z"}
+  ],
+  "coverage": {"tasks":"available","mail":"available","digests":"available","checkpoints":"available","client-instance":"unavailable"},
+  "human_answers": {
+    "defer-a":[null,{"choice":"defer","date":"2026-11-20","source":"human-2"}],
+    "offer-new":[{"choice":"keep pending","source":"human-3"}],
+    "recurrence":[{"choice":"next occurrence","date":"2026-11-17","source":"human-4"}],
+    "hold":[{"choice":"keep existing owner and hold","source":"human-5"}],
+    "interrupt":[null,{"choice":"retain medium priority","source":"human-6"}]
+  },
+  "artifacts": {"missing-pr":{"exists":false}},
+  "digest": {"history":["Earlier session history"],"tasks_claimed":["historical-task"],"artifacts":["historical-artifact"]}
+}
