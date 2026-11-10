@@ -124,13 +124,18 @@ def test_receipt_read_permission_error_refuses_completion(
 
     monkeypatch.setattr(Path, 'read_text', fail_read)
     if selected:
+        save_journal = MagicMock(wraps=watcher._save_retry_state)
+        monkeypatch.setattr(watcher, '_save_retry_state', save_journal)
         with pytest.raises(RuntimeError, match='verified transcription receipt') as refused:
             tyto.cli()
         assert refused.value.__cause__ is fault
         assert audio in watcher._hard_failed
         assert journal.read_bytes() == before
+        save_journal.assert_not_called()
     else:
         asyncio.run(watcher.poll_once())
+        assert audio not in watcher._transcribed
+        analysis.assert_not_called()
         assert 'synthetic receipt evidence read failure' in caplog.text
         assert 'Missing or invalid verified transcription receipt' in caplog.text
         persisted = json.loads(journal.read_text())
