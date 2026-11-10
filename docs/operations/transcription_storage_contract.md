@@ -108,3 +108,36 @@ entries keeps the strictest conflicting hold, highest attempt count and latest
 retry time. Distinct files stay distinct even when their bytes match; no blanket
 case folding or Unicode normalization is used. Missing legacy paths retain their
 recorded spelling and do not establish filesystem equivalence.
+
+## Exact-result proof for supervised recovery
+
+A supervising `--receipt-file` request selects strict persistence verification
+for both fresh stores and idempotent prior writes. The receipt is version 2 and
+requires `exact_result_verified: true`, plus a SHA-256 of the actual persisted
+transcript. Its capture method and engine come from the verified snapshot.
+Tyto rejects older/weaker receipts before any selected hold is cleared.
+
+Strict verification compares the actual persisted transcript, original source
+name, audio hash/path/size, capture method, engine, consent basis and language.
+A supplied model or duration must also match. Missing fields fail even when the
+live schema does not declare them; schema compatibility is not evidence that a
+particular requested result persisted. Attached audio requires a separately read
+source with the exact content hash. A date-only retry may resolve an equivalent
+older record without inference because import/transcription dates are not result
+identity. Different or missing result/context fields fail closed with
+`ERR_PERSISTED_RESULT_MISMATCH`; no strong receipt or selected hold clearance is
+produced. A same-remote-file prior result with different microphone-derived text
+is therefore not accepted as the current paired result.
+
+Standalone historical import callers retain the prior weaker lookup by default.
+That behavior can recognize an earlier nonempty transcript by hash or path and
+must not be represented as exact current-result persistence. It cannot satisfy a
+supervisor receipt. This separation introduces no schema, grant or principal
+change and does not silently correct or replace an incompatible prior entity.
+
+The strong receipt proves stored transcript/context and main-track audio custody.
+Both original tracks are hash-bound locally and retained with the complete raw
+pending result; it does not claim that a second microphone asset or raw timing
+JSON was uploaded when the underlying storage contract uploads only the main
+track. Model quality, coverage and real hardware behavior retain their separate
+runtime acceptance checks.

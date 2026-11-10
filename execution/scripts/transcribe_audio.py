@@ -2599,6 +2599,39 @@ def _verify_transcription_storage(entity_id, expected, source_id=None, declared_
             raise RuntimeError("Transcription ingestion incomplete: audio source hash mismatch")
 
 
+def _verify_exact_transcription_storage(entity_id, expected, source_id, *, attachment_expected):
+    """Prove current-result equivalence independently of historical import lookup.
+
+    Dates are intentionally excluded: a later retry can resolve the same result.
+    Required identity/context fields cannot be waived by schema declarations.
+    The returned receipt values come from the actual persisted snapshot.
+    """
+    result = _neotoma_cli_json(["entities", "get", entity_id]) or {}
+    record = result.get("entity", result)
+    snapshot = record.get("snapshot") or {}
+    fields = [*_TRANSCRIPTION_REQUIRED_FIELDS, "audio_file_path", "language"]
+    fields += [field for field in ("transcription_model", "audio_duration_seconds", *_ATTACHMENT_STATUS_FIELDS)
+               if field in expected and expected[field] is not None]
+    missing = [field for field in fields
+               if field not in snapshot or snapshot[field] != expected[field]]
+    if missing:
+        raise RuntimeError("ERR_PERSISTED_RESULT_MISMATCH: persisted read-back mismatch for "
+                           + ", ".join(missing))
+    if attachment_expected:
+        if not source_id:
+            raise RuntimeError("ERR_PERSISTED_RESULT_MISMATCH: required audio source missing")
+        result = _neotoma_cli_json(["sources", "get", source_id]) or {}
+        source = result.get("source", result)
+        if source.get("content_hash") != expected["audio_content_sha256"]:
+            raise RuntimeError("ERR_PERSISTED_RESULT_MISMATCH: audio source hash mismatch")
+    return {
+        "exact_result_verified": True,
+        "capture_method": snapshot["capture_method"],
+        "engine": snapshot["transcription_engine"],
+        "transcription_text_sha256": hashlib.sha256(snapshot["transcription_text"].encode()).hexdigest(),
+    }
+
+
 def _find_existing_transcription(content_hash: str | None, resolved_audio: Path) -> str | None:
     """Entity id of a ``transcription`` already stored for these bytes, or None.
 
@@ -2741,6 +2774,7 @@ def save_transcription(
     file_idempotency_key: str | None = None,
     attach_audio_file: bool = True,
     require_audio_attachment: bool = False,
+    require_exact_result: bool = False,
     extra_entity_fields: dict | None = None,
     relate_contact_entity_ids: list[str] | None = None,
     relate_feedback_analysis_entity_id: str | None = None,
@@ -2998,11 +3032,14 @@ def save_transcription(
         err = (proc.stderr or "").strip() or raw or f"exit {proc.returncode}"
         if "ERR_IDEMPOTENCY_MISMATCH" not in err:
             raise RuntimeError(f"Neotoma store failed: {err}")
-        entity_id = _recover_prior_transcription_write(
-            entity,
-            resolved_audio,
-            attachment_expected=attach_wav,
-        )
+        if require_exact_result:
+            entity_id = _find_existing_transcription(entity["audio_content_sha256"], resolved_audio)
+            if not entity_id:
+                raise RuntimeError("ERR_PERSISTED_RESULT_MISMATCH: prior transcription cannot be resolved")
+        else:
+            entity_id = _recover_prior_transcription_write(
+                entity, resolved_audio, attachment_expected=attach_wav,
+            )
         if attach_wav:
             source_id = _find_audio_source(resolved_audio.name, entity["audio_content_sha256"])
     else:
@@ -3023,11 +3060,15 @@ def save_transcription(
         source_id = (payload.get("unstructured") or {}).get("source_id")
         if attachment_requested and (not attach_wav or not source_id):
             raise RuntimeError("Transcription ingestion incomplete: audio attachment missing")
-        _verify_transcription_storage(
-            entity_id,
-            entity,
-            source_id if attach_wav else None,
-            declared_fields=_declared_transcription_fields(),
+        if not require_exact_result:
+            _verify_transcription_storage(
+                entity_id, entity, source_id if attach_wav else None,
+                declared_fields=_declared_transcription_fields(),
+            )
+    verified_result = None
+    if require_exact_result:
+        verified_result = _verify_exact_transcription_storage(
+            entity_id, entity, source_id, attachment_expected=attach_wav,
         )
     print(f"NEOTOMA_TRANSCRIPTION_ENTITY_ID={entity_id}", flush=True)
 
@@ -3051,6 +3092,7 @@ def save_transcription(
         "entity_id": entity_id,
         "audio_source_id": source_id,
         "audio_attachment_verified": bool(attach_wav and source_id),
+        "verified_result": verified_result,
         "audio_file_path": audio_file_path_rel,
         "audio_file_name": audio_path.name,
         "source_directory": source_directory,
@@ -3278,15 +3320,18 @@ def main():
             original_source_file=args.original_source_file or None,
             extra_entity_fields=extra_fields,
             require_audio_attachment=args.require_audio_attachment,
+            require_exact_result=bool(args.receipt_file),
         )
 
         if args.receipt_file:
             if _pending_store_identity(audio_path, mic_path) != identity:
                 raise RuntimeError("Audio changed during store; verified receipt refused")
+            proof = transcription_record.get("verified_result") or {}
+            if proof.get("exact_result_verified") is not True:
+                raise RuntimeError("Verified receipt requires exact persisted-result proof")
             receipt = {
-                "version": 1, "entity_id": transcription_record["entity_id"],
-                "identity": identity, "capture_method": extra_fields["capture_method"],
-                "engine": engine,
+                "version": 2, "entity_id": transcription_record["entity_id"],
+                "identity": identity, **proof,
                 "audio_attachment_verified": transcription_record.get("audio_attachment_verified") is True,
                 "audio_source_id": transcription_record.get("audio_source_id"),
             }

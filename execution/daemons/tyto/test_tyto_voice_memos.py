@@ -21,6 +21,7 @@ Run with: pytest execution/daemons/tyto/test_tyto_voice_memos.py -v
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -101,7 +102,9 @@ def _fake_verified_cli(completed):
         audio = Path(command[2])
         mic = Path(command[command.index('--mic-file') + 1]) if '--mic-file' in command else None
         receipt = {
-            'version': 1, 'entity_id': 'ent_test_auto' if 'ent_test_auto' in completed.stdout else (
+            'version': 2, 'exact_result_verified': True,
+            'transcription_text_sha256': hashlib.sha256(b'synthetic').hexdigest(),
+            'entity_id': 'ent_test_auto' if 'ent_test_auto' in completed.stdout else (
                 'ent_test_local' if 'ent_test_local' in completed.stdout else 'ent_test'),
             'identity': tyto.RecordingWatcher._source_receipt_identity(audio, mic),
             'capture_method': command[command.index('--capture-method') + 1],
@@ -971,7 +974,10 @@ def test_voice_memo_uses_channel_appropriate_local_backend(
         assert path == memo
         assert extra_entity_fields["capture_method"] == "voice_memo"
         print("NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_test_local")
-        return {**result, "entity_id": "ent_test_local", "audio_source_id": "src_synthetic", "audio_attachment_verified": True}
+        return {**result, "entity_id": "ent_test_local", "audio_source_id": "src_synthetic", "audio_attachment_verified": True,
+                "verified_result": {"exact_result_verified": True, "capture_method": "voice_memo",
+                                    "engine": result.get("transcription_engine") or "unknown",
+                                    "transcription_text_sha256": hashlib.sha256(result["transcription_text"].encode()).hexdigest()}}
 
     monkeypatch.setattr(cli, "save_transcription", save)
 

@@ -607,6 +607,7 @@ class ScreenshotWatcher:
 SOURCE_REJECTION_ERROR_CODE = "ERR_RECORDING_SOURCE_REJECTED"
 PERMANENT_STORE_ERROR_CODES = (
     SOURCE_REJECTION_ERROR_CODE,
+    "ERR_PERSISTED_RESULT_MISMATCH",
     "ERR_AUDIO_ATTACHMENT_REQUIRED",
     "ERR_FILE_PATH_IS_SERVER_LOCAL",
     "ERR_IDEMPOTENCY_MISMATCH",
@@ -1375,12 +1376,16 @@ class RecordingWatcher:
                         try:
                             receipt = json.loads(receipt_path.read_text())
                             entity_id = receipt.get("entity_id")
-                            if (receipt.get("version") != 1 or not isinstance(entity_id, str)
+                            text_hash = receipt.get("transcription_text_sha256")
+                            if (receipt.get("version") != 2 or not isinstance(entity_id, str)
                                     or not entity_id.startswith("ent_")
                                     or any(c.isspace() for c in entity_id)
                                     or receipt.get("identity") != identity
                                     or self._source_receipt_identity(remote_path, mic_path) != identity
                                     or receipt.get("capture_method") != self._capture_method
+                                    or receipt.get("exact_result_verified") is not True
+                                    or not isinstance(text_hash, str) or len(text_hash) != 64
+                                    or any(c not in "0123456789abcdef" for c in text_hash)
                                     or receipt.get("audio_attachment_verified") is not True
                                     or not isinstance(receipt.get("audio_source_id"), str)
                                     or not receipt["audio_source_id"].strip()):
