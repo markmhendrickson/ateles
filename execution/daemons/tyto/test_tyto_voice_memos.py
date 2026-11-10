@@ -21,6 +21,7 @@ Run with: pytest execution/daemons/tyto/test_tyto_voice_memos.py -v
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -94,11 +95,31 @@ def test_deployed_signer_selects_synthetic_daemon_key(tmp_path):
     assert completed.returncode == 0, completed.stderr
 
 
+
+def _fake_verified_cli(completed):
+    """Synthetic child transport supplies the private receipt protocol."""
+    def run(command, **kwargs):
+        audio = Path(command[2])
+        mic = Path(command[command.index('--mic-file') + 1]) if '--mic-file' in command else None
+        receipt = {
+            'version': 2, 'exact_result_verified': True,
+            'transcription_text_sha256': hashlib.sha256(b'synthetic').hexdigest(),
+            'entity_id': 'ent_test_auto' if 'ent_test_auto' in completed.stdout else (
+                'ent_test_local' if 'ent_test_local' in completed.stdout else 'ent_test'),
+            'identity': tyto.RecordingWatcher._source_receipt_identity(audio, mic),
+            'capture_method': command[command.index('--capture-method') + 1],
+            'audio_source_id': 'src_synthetic', 'audio_attachment_verified': True,
+            'engine': 'local_whisper_cpp',
+        }
+        Path(command[command.index('--receipt-file') + 1]).write_text(json.dumps(receipt))
+        return completed
+    return run
+
 def test_transcription_uses_daemon_identity_instead_of_shared_cli_default(tmp_path):
     watcher = _make_watcher(tmp_path, capture_method="voice_memo", paired=False)
     memo = _write(tmp_path, "memo.m4a")
     completed = MagicMock(returncode=0, stdout="NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_test\n", stderr="")
-    with patch.object(tyto.subprocess, "run", return_value=completed) as run:
+    with patch.object(tyto.subprocess, "run", side_effect=_fake_verified_cli(completed)) as run:
         watcher._run_transcription(memo, None)
     env = run.call_args.kwargs["env"]
     assert env["NEOTOMA_AAUTH_SUB"] == "tyto@ateles-swarm"
@@ -937,11 +958,9 @@ def test_voice_memo_uses_channel_appropriate_local_backend(
     monkeypatch.setenv("RECORD_MEETING_DIARIZE", "0")
     monkeypatch.setenv("TRANSCRIBE_DISABLE_NEOTOMA_VOCAB", "1")
     whisper = MagicMock(return_value={"transcription_text": "Synthetic memo.", "language": "en"})
-    fluid = MagicMock(return_value={
-        "transcription_text": "[Channel_0/S1] First channel.\n[Channel_1/S1] Second channel.",
-        "transcription_engine": "local_fluid_audio",
-        "language": "en",
-    })
+    from test_transcription_results import complete_result
+    fluid = MagicMock(return_value=complete_result(memo, backend='fluid',
+        text='[Channel_0/S1] First channel.\n[Channel_1/S1] Second channel.'))
     monkeypatch.setattr(cli, "transcribe_local", whisper)
     monkeypatch.setattr(cli, "transcribe_fluid", fluid)
     monkeypatch.setattr(cli, "get_audio_duration", lambda _path: 1.0)
@@ -953,7 +972,10 @@ def test_voice_memo_uses_channel_appropriate_local_backend(
         assert path == memo
         assert extra_entity_fields["capture_method"] == "voice_memo"
         print("NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_test_local")
-        return {**result, "entity_id": "ent_test_local"}
+        return {**result, "entity_id": "ent_test_local", "audio_source_id": "src_synthetic", "audio_attachment_verified": True,
+                "verified_result": {"exact_result_verified": True, "capture_method": "voice_memo",
+                                    "engine": result.get("transcription_engine") or "unknown",
+                                    "transcription_text_sha256": hashlib.sha256(result["transcription_text"].encode()).hexdigest()}}
 
     monkeypatch.setattr(cli, "save_transcription", save)
 
@@ -997,7 +1019,7 @@ def test_single_file_meeting_requests_local_diarization(tmp_path, monkeypatch):
         stderr="",
     )
 
-    with patch.object(tyto.subprocess, "run", return_value=completed) as run:
+    with patch.object(tyto.subprocess, "run", side_effect=_fake_verified_cli(completed)) as run:
         assert watcher._run_transcription(recording, None) == "ent_test_auto"
 
     command = run.call_args.args[0]
@@ -1083,7 +1105,7 @@ def test_completion_notification_names_actual_backend(tmp_path):
         stderr="",
     )
 
-    with patch.object(tyto.subprocess, "run", return_value=completed):
+    with patch.object(tyto.subprocess, "run", side_effect=_fake_verified_cli(completed)):
         watcher._run_transcription(memo, None)
 
     messages = [call.args[0] for call in watcher._notifier.send.call_args_list]
@@ -1339,3 +1361,266 @@ def test_error_code_past_the_stderr_cut_is_still_classified(tmp_path):
 
     assert outcome == "permanent"
     assert error_code == "ERR_IDEMPOTENCY_MISMATCH"
+
+
+@pytest.mark.parametrize("paired", [False, True])
+def test_capability_denial_is_preserved_and_stops_expensive_retry(tmp_path, paired):
+    remote = _write(tmp_path, "fixture-system.mp4" if paired else "fixture.m4a", age_secs=FRESH)
+    mic = _write(tmp_path, "fixture-mic.mp4", age_secs=FRESH) if paired else None
+    watcher = _make_watcher(tmp_path, paired=paired, capture_method="audio_hijack_system" if paired else "voice_memo")
+    failed = MagicMock(returncode=1, stdout="TRANSCRIPTION_ENGINE=local_fluid_audio\n",
+                       stderr="sidecar diagnostic " + "x" * 400 +
+                       ' Neotoma store failed: {"error_code":"capability_denied"}')
+    with patch.object(tyto.subprocess, "run", return_value=failed) as run:
+        outcome, code = asyncio.run(watcher._handle_recording(remote, mic))
+    assert (outcome, code) == ("permanent", "capability_denied")
+    assert run.call_count == 1
+    assert remote.read_bytes() == b"\0" * 2048
+    if mic is not None:
+        assert mic.read_bytes() == b"\0" * 2048
+
+
+def test_meeting_capability_denial_is_durable_across_restart(tmp_path, monkeypatch):
+    remote = _write(tmp_path, "fixture system.mp4", age_secs=FRESH)
+    mic = _write(tmp_path, "fixture mic.mp4", age_secs=FRESH)
+    journal = tmp_path / "retry.json"
+    watcher = _make_watcher(tmp_path, paired=True, retry_state_path=journal, retry_secs=0)
+    _settled(watcher)
+    failed = MagicMock(returncode=1, stdout="",
+                       stderr='Neotoma store failed: {"error_code":"capability_denied"}')
+    monkeypatch.setattr(tyto, "ANALYZE_ENABLED", False)
+    with patch.object(tyto.subprocess, "run", return_value=failed) as run:
+        for _ in range(3):
+            asyncio.run(watcher.poll_once())
+        restarted = _make_watcher(tmp_path, paired=True, retry_state_path=journal, retry_secs=0)
+        _settled(restarted)
+        asyncio.run(restarted.poll_once())
+    assert run.call_count == 1
+    state = json.loads(journal.read_text())
+    assert state["hard_failed"][0]["error_code"] == "capability_denied"
+    assert state["pending"] == []
+    assert remote.exists() and mic.exists()
+
+
+def test_runtime_recording_watchers_persist_meeting_failures(tmp_path, monkeypatch):
+    monkeypatch.setattr(tyto, "TRANSCRIBE_ENABLED", True)
+    monkeypatch.setattr(tyto, "RECORDINGS_DIR", tmp_path / "meetings")
+    monkeypatch.setattr(tyto, "NATIVE_RECORDINGS_DIR", tmp_path / "native")
+    monkeypatch.setattr(tyto, "VOICE_MEMOS_DIR", None)
+    monkeypatch.setattr(tyto, "RECORDING_RETRY_STATE", tmp_path / "meeting-retries.json")
+    monkeypatch.setattr(tyto, "NATIVE_RECORDING_RETRY_STATE", tmp_path / "native-retries.json")
+    watchers = tyto._recording_watchers(MagicMock())
+    assert len(watchers) == 2
+    assert [w._retry_state_path for w in watchers] == [
+        tmp_path / "meeting-retries.json", tmp_path / "native-retries.json"]
+
+
+def test_selected_recovery_only_touches_named_denied_recording(tmp_path):
+    selected = tmp_path / 'selected remote.wav'
+    other = tmp_path / 'other remote.wav'
+    mic = tmp_path / 'selected mic.wav'
+    for path in (selected, other, mic):
+        _write(path.parent, path.name)
+        os.utime(path, (time.time() - 100, time.time() - 100))
+    journal = tmp_path / 'retries.json'
+    watcher = tyto.RecordingWatcher(tmp_path, MagicMock(), retry_state_path=journal)
+    watcher._mark_hard_failed(selected, 'capability_denied')
+    watcher._mark_hard_failed(other, 'capability_denied')
+    with patch.object(watcher, '_run_transcription', return_value='ent_synthetic') as run, patch.object(
+        tyto, '_run_analysis', side_effect=AssertionError('unexpected analysis')
+    ):
+        assert watcher.process_selected_recording(selected, store_only=True, recover_held=True) == 'ent_synthetic'
+    run.assert_called_once_with(selected, mic, store_only=True)
+    payload = json.loads(journal.read_text())
+    assert [row['path'] for row in payload['hard_failed']] == [str(other)]
+    assert selected.read_bytes() == b'\0' * selected.stat().st_size
+    assert mic.exists()
+
+
+def test_selected_recovery_retains_hold_on_missing_pending_cache(tmp_path):
+    audio = tmp_path / 'sample.m4a'
+    _write(audio.parent, audio.name)
+    os.utime(audio, (time.time() - 100, time.time() - 100))
+    journal = tmp_path / 'retries.json'
+    watcher = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False, retry_state_path=journal)
+    watcher._mark_hard_failed(audio, 'capability_denied')
+    with patch.object(watcher, '_run_transcription', side_effect=RuntimeError('Missing pending store')) as run:
+        with pytest.raises(RuntimeError, match='Missing pending store'):
+            watcher.process_selected_recording(audio, store_only=True, recover_held=True)
+    run.assert_called_once()
+    assert json.loads(journal.read_text())['hard_failed'][0]['path'] == str(audio)
+    with patch.object(watcher, '_run_transcription') as run:
+        with pytest.raises(RuntimeError, match='recover-held'):
+            watcher.process_selected_recording(audio, store_only=False, recover_held=False)
+        run.assert_not_called()
+
+
+def test_selected_cli_does_not_start_daemon_or_other_effects(tmp_path, monkeypatch, capsys):
+    selected = tmp_path / 'sample.m4a'
+    _write(tmp_path, selected.name)
+    watcher = MagicMock()
+    watcher._dir = tmp_path
+    watcher.process_selected_recording.return_value = 'ent_synthetic'
+    monkeypatch.setenv('TYTO_RUNTIME_LOCK', str(tmp_path / 'tyto.lock'))
+    monkeypatch.setattr(sys, 'argv', ['tyto.py', '--recording-file', str(selected), '--store-only', '--recover-held'])
+    with patch.object(tyto, 'load_agent_definition_or_exit'), patch.object(tyto, 'enforce_status_or_exit'), patch.object(
+        tyto, '_recording_watchers', return_value=[watcher]
+    ), patch.object(tyto, 'main', side_effect=AssertionError('daemon started')), patch.object(
+        tyto.Notifier, 'from_neotoma', side_effect=AssertionError('notification transport created')
+    ), patch.object(tyto, '_run_analysis', side_effect=AssertionError('analysis started')):
+        tyto.cli()
+    watcher.process_selected_recording.assert_called_once_with(selected, store_only=True, recover_held=True)
+    assert 'NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_synthetic' in capsys.readouterr().out
+
+
+def test_selected_runtime_refuses_competing_journal_writer(tmp_path, monkeypatch):
+    monkeypatch.setenv('TYTO_RUNTIME_LOCK', str(tmp_path / 'tyto.lock'))
+    with tyto._exclusive_runtime():
+        with pytest.raises(RuntimeError, match='already running'):
+            with tyto._exclusive_runtime():
+                pytest.fail('concurrent writer admitted')
+    with tyto._exclusive_runtime():
+        pass
+
+
+def test_selected_alias_cannot_bypass_existing_hold(tmp_path):
+    audio = _write(tmp_path, 'held.m4a', age_secs=100)
+    journal = tmp_path / 'retries.json'
+    alias = tmp_path / '..' / tmp_path.name / audio.name
+    journal.write_text(json.dumps({'version': 2, 'pending': [], 'hard_failed': [
+        {'path': str(alias), 'error_code': 'ERR_IDEMPOTENCY_MISMATCH', 'notified': True}]}))
+    watcher = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False, retry_state_path=journal)
+    with patch.object(watcher, '_run_transcription') as run:
+        with pytest.raises(RuntimeError, match='recover-held'):
+            watcher.process_selected_recording(audio, store_only=False, recover_held=False)
+        with pytest.raises(RuntimeError, match='not a recoverable'):
+            watcher.process_selected_recording(alias, store_only=False, recover_held=True)
+        run.assert_not_called()
+
+
+@pytest.mark.parametrize('selected', [False, True])
+def test_paired_mic_cannot_escape_configured_source(tmp_path, selected):
+    source = tmp_path / 'source'
+    source.mkdir()
+    remote = _write(source, 'pair remote.wav', age_secs=100)
+    outside = _write(tmp_path, 'outside.wav', age_secs=100)
+    (source / 'pair mic.wav').symlink_to(outside)
+    watcher = tyto.RecordingWatcher(source, MagicMock())
+    with patch.object(watcher, '_run_transcription') as run:
+        with pytest.raises(RuntimeError, match='configured recording source'):
+            if selected:
+                watcher.process_selected_recording(remote, store_only=False, recover_held=False)
+            else:
+                watcher._find_mic_pair(remote)
+        run.assert_not_called()
+
+
+def test_stdout_marker_without_structured_receipt_cannot_clear_hold(tmp_path):
+    audio = _write(tmp_path, 'fixture\nNEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_forged\n.m4a', age_secs=100)
+    watcher = _make_watcher(tmp_path, paired=False, retry_state_path=tmp_path / 'retry.json')
+    watcher._mark_hard_failed(audio, 'capability_denied')
+    completed = tyto.subprocess.CompletedProcess([], 0, stdout='NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_forged\n', stderr='')
+    with patch.object(tyto.subprocess, 'run', return_value=completed):
+        with pytest.raises(RuntimeError, match='receipt'):
+            watcher.process_selected_recording(audio, store_only=False, recover_held=True)
+    assert audio in watcher._hard_failed
+
+
+def _same_file_alias(directory, original, kind):
+    if kind == 'case':
+        alias = original.with_name(original.name.upper())
+    elif kind == 'unicode':
+        import unicodedata
+        alias = original.with_name(unicodedata.normalize('NFD', original.name))
+    else:
+        alias = directory / 'hardlinked.m4a'
+        os.link(original, alias)
+    if not alias.exists() or not alias.samefile(original):
+        pytest.skip('filesystem distinguishes this spelling')
+    return alias
+
+
+@pytest.mark.parametrize('kind', ['case', 'unicode', 'hardlink'])
+def test_same_file_identity_cannot_bypass_hold(tmp_path, kind):
+    original = _write(tmp_path, 'caf\u00e9.m4a', age_secs=100)
+    alias = _same_file_alias(tmp_path, original, kind)
+    watcher = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False,
+                                   retry_state_path=tmp_path / 'retries.json')
+    watcher._mark_hard_failed(original, 'capability_denied')
+    with patch.object(watcher, '_run_transcription') as run:
+        with pytest.raises(RuntimeError, match='recover-held'):
+            watcher.process_selected_recording(alias, store_only=False, recover_held=False)
+        run.assert_not_called()
+
+
+def test_same_file_legacy_conflicts_stay_restrictive_and_pending_is_unified(tmp_path):
+    original = _write(tmp_path, 'held.m4a', age_secs=100)
+    alias = _same_file_alias(tmp_path, original, 'hardlink')
+    journal = tmp_path / 'retries.json'
+    journal.write_text(json.dumps({'version': 2, 'pending': [
+        {'path': str(original), 'retry_after': 100, 'attempts': 2},
+        {'path': str(alias), 'retry_after': 200, 'attempts': 5}], 'hard_failed': [
+        {'path': str(original), 'error_code': 'capability_denied'},
+        {'path': str(alias), 'error_code': 'ERR_IDEMPOTENCY_MISMATCH'}]}))
+    watcher = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False, retry_state_path=journal)
+    assert len(watcher._pending_retries) == len(watcher._hard_failed) == 1
+    assert list(watcher._pending_retries.values()) == [200]
+    assert list(watcher._attempts.values()) == [5]
+    with patch.object(watcher, '_run_transcription') as run:
+        with pytest.raises(RuntimeError, match='not a recoverable'):
+            watcher.process_selected_recording(alias, store_only=False, recover_held=True)
+        run.assert_not_called()
+
+
+def test_same_file_recovery_clears_aliases_and_preserves_recorded_source(tmp_path):
+    original = _write(tmp_path, 'held.m4a', age_secs=100)
+    alias = _same_file_alias(tmp_path, original, 'hardlink')
+    journal = tmp_path / 'retries.json'
+    watcher = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False, retry_state_path=journal)
+    watcher._mark_pending(original)
+    watcher._mark_pending(alias)
+    watcher._mark_hard_failed(original, 'capability_denied')
+    watcher._mark_hard_failed(alias, 'capability_denied')
+    with patch.object(watcher, '_run_transcription', return_value='ent_synthetic') as run:
+        watcher.process_selected_recording(alias, store_only=True, recover_held=True)
+    run.assert_called_once_with(original, None, store_only=True)
+    assert json.loads(journal.read_text())['hard_failed'] == []
+    assert json.loads(journal.read_text())['pending'] == []
+
+
+def test_distinct_files_with_same_bytes_remain_distinct(tmp_path):
+    held = _write(tmp_path, 'held.m4a', age_secs=100)
+    separate = _write(tmp_path, 'separate.m4a', age_secs=100)
+    watcher = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False)
+    watcher._mark_hard_failed(held, 'capability_denied')
+    assert not held.samefile(separate)
+    with patch.object(watcher, '_run_transcription', return_value='ent_separate') as run:
+        watcher.process_selected_recording(separate, store_only=False, recover_held=False)
+    run.assert_called_once_with(separate, None, store_only=False)
+    assert held in watcher._hard_failed
+
+
+def test_case_sensitive_distinct_files_remain_distinct(tmp_path):
+    held = _write(tmp_path, 'held.m4a', age_secs=100)
+    separate = tmp_path / 'HELD.m4a'
+    if separate.exists():
+        pytest.skip('filesystem folds case')
+    _write(tmp_path, separate.name, age_secs=100)
+    watcher = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False)
+    watcher._mark_hard_failed(held, 'capability_denied')
+    with patch.object(watcher, '_run_transcription', return_value='ent_separate') as run:
+        watcher.process_selected_recording(separate, store_only=False, recover_held=False)
+    run.assert_called_once_with(separate, None, store_only=False)
+
+
+def test_normal_poll_cannot_retry_same_file_alias_of_hold(tmp_path):
+    original = _write(tmp_path, 'held.m4a', age_secs=100)
+    _same_file_alias(tmp_path, original, 'hardlink')
+    watcher = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False,
+                                   retry_state_path=tmp_path / 'retries.json')
+    watcher._mark_hard_failed(original, 'capability_denied')
+    with patch.object(watcher, '_is_settled', return_value=True), patch.object(
+        watcher, '_handle_recording', return_value=('success', None)
+    ) as run:
+        asyncio.run(watcher.poll_once())
+        run.assert_not_called()

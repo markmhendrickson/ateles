@@ -442,3 +442,24 @@ def test_the_scrub_and_the_renderer_use_the_same_list():
 
     assert root_conftest.plan_env_scrub is allow.plan_env_scrub
     assert rdp.is_allowed_environment_name is allow.is_allowed_environment_name
+
+
+@pytest.mark.parametrize("name", [
+    "TYTO_NATIVE_RECORDING_RETRY_STATE",
+    "TYTO_RECORDING_RETRY_STATE",
+    "TYTO_RUNTIME_LOCK",
+])
+def test_recording_state_paths_survive_scrubbing_but_not_runner_inheritance(name):
+    path = "/synthetic/recording-runtime-state"
+    environment = {
+        name: path,
+        "TYTO_RUNTIME_SECRET": "synthetic-credential-marker",
+        "TYTO_UNDECLARED_STATE": "synthetic-undeclared-marker",
+    }
+
+    removed = root_conftest.scrub_credential_env(environment)
+
+    assert environment == {name: path}
+    assert set(removed) == {"TYTO_RUNTIME_SECRET", "TYTO_UNDECLARED_STATE"}
+    # A daemon setting does not belong in an unrelated Fly CLI job.
+    assert name not in allow.runner_child_environment({name: path}, {})
