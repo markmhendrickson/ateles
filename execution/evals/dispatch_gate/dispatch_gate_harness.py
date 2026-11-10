@@ -217,12 +217,16 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
                         self.__dict__.update(kwargs)
 
                 sdk = {name: types.ModuleType(name) for name in (
-                    "mcp", "mcp.server", "mcp.server.stdio", "mcp.types"
+                    "mcp", "mcp.server", "mcp.server.stdio", "mcp.types",
+                    "mcp.server.lowlevel", "mcp.server.lowlevel.helper_types"
                 )}
                 sdk["mcp.server"].Server = _Shape
                 sdk["mcp.server.stdio"].stdio_server = None
                 sdk["mcp.types"].Tool = _Shape
                 sdk["mcp.types"].TextContent = _Shape
+                sdk["mcp.types"].CallToolResult = _Shape
+                sdk["mcp.types"].Resource = _Shape
+                sdk["mcp.server.lowlevel.helper_types"].ReadResourceContents = _Shape
                 for name, module in sdk.items():
                     mp.setitem(sys.modules, name, module)
             spec.loader.exec_module(preview)
