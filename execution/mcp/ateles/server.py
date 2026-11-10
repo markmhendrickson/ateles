@@ -797,11 +797,14 @@ def _live_execution_evidence(
     refs = board.get("live_execution_evidence")
     locator = refs.get("activity_ref") if isinstance(refs, dict) else None
     if locator is not None and (
-        not isinstance(locator, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", locator)
+        not isinstance(locator, str)
+        or not re.fullmatch(r"ent_[A-Za-z0-9_]+", locator)
+        or locator not in candidates
     ):
-        return unknown("The recorded activity locator is malformed")
-    if locator and locator not in candidates:
-        return unknown("The recorded activity has no task relationship")
+        # Digest locators are history, never a veto on current canonical facts.
+        warning = "Historical activity locator cannot be used; current execution is derived independently"
+        if read_gaps is not None and warning not in read_gaps:
+            read_gaps.append(warning)
     if (
         any(
             not isinstance(ref, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", ref)
@@ -1107,7 +1110,7 @@ def _claim_row(claim: dict, planning_cache: dict | None = None) -> dict | None:
     refs = board.get("live_execution_evidence")
     if refs is not None and not isinstance(refs, dict):
         read_gaps.append(
-            "The activity evidence metadata is malformed; execution coverage is unknown"
+            "Historical activity metadata is malformed; its recorded evidence cannot be verified"
         )
     elif (
         isinstance(refs, dict)
@@ -1118,7 +1121,7 @@ def _claim_row(claim: dict, planning_cache: dict | None = None) -> dict | None:
         )
     ):
         read_gaps.append(
-            "The recorded activity locator is malformed; execution coverage is unknown"
+            "Historical activity locator cannot be used; current execution is derived independently"
         )
     task_id: str | None = None
     for entity_id in evidence:

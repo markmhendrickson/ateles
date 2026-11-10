@@ -549,7 +549,8 @@ def test_checkpoint_semantic_coverage_is_unknown(fields):
     assert any("unknown" in gap for gap in gaps)
 
 
-def test_producer_session_is_discovered_without_digest_locator():
+@pytest.mark.parametrize("locator", [None, "ent_activity", "ent_previous", "invalid"])
+def test_producer_session_is_discovered_without_digest_locator(locator):
     from lib.daemon_runtime.session_finalize import build_run_session_payload
 
     payload = build_run_session_payload(task_id="ent_task", agent="role", run_key="run")
@@ -575,10 +576,18 @@ def test_producer_session_is_discovered_without_digest_locator():
             "snapshot": session,
         },
     }
+    gaps = []
     with patch.object(srv, "_get", side_effect=records.get):
-        evidence = srv._live_execution_evidence({}, "ent_task")
+        evidence = srv._live_execution_evidence(
+            {"live_execution_evidence": {"activity_ref": locator}}
+            if locator is not None
+            else {},
+            "ent_task",
+            read_gaps=gaps,
+        )
     assert evidence["runner"] == session["native_session_id"]
     assert "task_id" not in session and "task_entity_id" not in session
+    assert bool(gaps) == (locator in {"ent_previous", "invalid"})
 
 
 def test_fallback_preserves_coverage_and_requested_history():
