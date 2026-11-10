@@ -141,3 +141,13 @@ pending result; it does not claim that a second microphone asset or raw timing
 JSON was uploaded when the underlying storage contract uploads only the main
 track. Model quality, coverage and real hardware behavior retain their separate
 runtime acceptance checks.
+
+Selected recovery also understands the normal watcher's
+`ERR_RECORDING_SOURCE_REJECTED` quarantine. It still validates both original
+tracks before inference or storage, so an unsafe/missing/nonregular mic cannot
+be bypassed by the recovery flag. After its owner repairs the physical source,
+a matching cached result can retry without inference. Likewise a
+`ERR_PERSISTED_RESULT_MISMATCH` hold can be explicitly retried after its owning
+storage/evidence prerequisite is repaired; the exact persisted-result comparison
+still runs and an incompatible result remains held. Neither retry flag waives
+source confinement, consent, authority, attachment or persistence predicates.

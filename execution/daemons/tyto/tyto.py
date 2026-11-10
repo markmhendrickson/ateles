@@ -1279,9 +1279,11 @@ class RecordingWatcher:
         if held is not None and not recover_held:
             raise RuntimeError("Selected file is held; explicit --recover-held is required")
         code = str(held.get("error_code", "")) if held else ""
-        if (held is not None and code not in ("capability_denied", "ERR_AUDIO_ATTACHMENT_REQUIRED")
+        if (held is not None and code not in (
+                "capability_denied", "ERR_AUDIO_ATTACHMENT_REQUIRED",
+                "ERR_PERSISTED_RESULT_MISMATCH", SOURCE_REJECTION_ERROR_CODE)
                 and not code.startswith(RETRY_LIMIT_ERROR_CODE)):
-            raise RuntimeError("Selected hold is not a recoverable denied/exhausted store")
+            raise RuntimeError("Selected hold is not a recoverable store/source disposition")
         mic = self._find_mic_pair(path) if self._paired else None
         for source in (path, mic):
             if source is not None and time.time() - source.stat().st_mtime < self.SETTLE_SECS:
@@ -1737,7 +1739,7 @@ def _cli() -> None:
     parser.add_argument("--store-only", action="store_true",
                         help="Require source-bound pending results; never run ASR.")
     parser.add_argument("--recover-held", action="store_true",
-                        help="Retry a named denied/exhausted recording; clear its hold only after readback.")
+                        help="Retry a named repaired recording; clear its hold only after exact readback.")
     args = parser.parse_args()
     if not args.recording_file:
         if args.store_only or args.recover_held:

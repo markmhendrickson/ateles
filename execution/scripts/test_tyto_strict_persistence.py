@@ -157,3 +157,38 @@ def test_strict_fresh_write_cannot_skip_missing_fields_via_schema(selected_flow,
     assert receipts == [] and audio in watcher._hard_failed
     assert json.loads(journal.read_text())['hard_failed']
     inference.assert_not_called()
+
+
+def test_repaired_persistence_hold_still_requires_exact_evidence(selected_flow):
+    _state, phase, watcher, journal, audio, _mic, inference, receipts, _text = selected_flow(False)
+    watcher._hard_failed[audio]['error_code'] = 'ERR_PERSISTED_RESULT_MISMATCH'
+    watcher._save_retry_state()
+    phase.update(mode='prior', field='capture_method', change='different')
+    with pytest.raises(RuntimeError):
+        tyto.cli()
+    assert receipts == [] and audio in watcher._hard_failed
+    phase.update(field=None)
+    tyto.cli()
+    assert json.loads(journal.read_text())['hard_failed'] == []
+    inference.assert_not_called()
+
+
+def test_source_recovery_checks_both_tracks_before_store_only(selected_flow, tmp_path):
+    _state, phase, watcher, journal, audio, mic, inference, receipts, _text = selected_flow(True)
+    watcher._hard_failed[audio]['error_code'] = tyto.SOURCE_REJECTION_ERROR_CODE
+    watcher._save_retry_state()
+    original_mic = mic.read_bytes()
+    mic.unlink()
+    outside = tmp_path / 'outside.wav'
+    outside.write_bytes(b'outside synthetic')
+    mic.symlink_to(outside)
+    phase.update(mode='prior')
+    with pytest.raises(RuntimeError, match='configured recording source'):
+        tyto.cli()
+    assert receipts == [] and audio in watcher._hard_failed
+    mic.unlink()
+    mic.write_bytes(original_mic)
+    os.utime(mic, (time.time() - 100, time.time() - 100))
+    tyto.cli()
+    assert json.loads(journal.read_text())['hard_failed'] == []
+    inference.assert_not_called()
