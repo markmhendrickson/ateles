@@ -9,3 +9,102 @@ The store payload is stable under the content-keyed idempotency key (`data_sourc
 The compatible Neotoma schema declares all these fields and preserves case and whitespace for text and names. Existing deployments require separate schema review and activation before this caller can complete successfully. Remote attachment support must also be active. Keep Tyto activation and retry draining behind both dependencies; do not treat local tests as production verification.
 
 Legacy path lookup and explicit `attach_audio_file=False` callers remain supported. Historical observations are not rewritten. The recording/transcript identity redesign is tracked separately in issue #953.
+
+## Denied stores and selective recovery
+
+A deterministic `capability_denied` stops automatic retries and remains in the
+source's durable retry journal. This is a recoverable hold, not permission to
+change a grant. Meeting, platform-native and Voice Memo watchers have separate
+journals. Their existing retry cap/backoff still bounds other failures.
+
+Before storing, the transcription CLI writes `<audio>.pending-store.json`
+atomically with mode `0600`. It contains the complete transcription result,
+including raw timing/separation output, the resolved path and SHA-256 of each
+original track, and the capture/consent/backend/relationship context. Existing
+text/raw sidecars and audio are retained. A matching retry reuses this result
+without ASR; changed audio or context fails closed. The pending result is retained
+after success so an interrupted recovery does not force another ASR run. It is
+sensitive local transcript data, subject to the same retention as its sidecars.
+No pending result or transcript text is included in recovery status output.
+
+Keep the normal daemon stopped during acceptance and backfill. After the normal
+review, deployment and permission gates, invoke the deployed Tyto entry point
+with the same configured source directories, journals, identity and CLI runtime.
+Replace the example path with one explicitly selected, settled file:
+
+```sh
+python execution/daemons/tyto/tyto.py --recording-file /configured/source/selected.m4a
+```
+
+This is a single canary, not a daemon start: it never polls directories, constructs
+screenshot intake or analysis loops, or creates notification transports. It uses
+Tyto's own signer and the normal transcription-plus-audio store/readback path.
+An entity receipt is required; verify it against the canonical stored entity and
+its expected audio provenance before proceeding. A receipt alone does not prove
+model quality, a working hardware backend, or permission for the next recording.
+
+For a named failed recording whose prerequisite has been repaired:
+
+```sh
+python execution/daemons/tyto/tyto.py --recording-file /configured/source/failed.m4a --recover-held --store-only
+```
+
+`--store-only` requires the matching pending result and cannot run ASR. A missing
+or mismatched cache leaves the hold intact. Failures that predate this format
+cannot safely reconstruct a complete source-bound result from text alone. For
+such a legacy item, omit `--store-only` to authorize one explicit transcription
+attempt through the same normal path. Repeat `--recording-file` only for an
+individually checked selection; do not supply an archive-wide generated list.
+Exclude recordings already owned by another intake process. The selected file's
+hold clears only after verified store success and a successful journal save;
+other pending/held entries are preserved. No manual journal deletion is needed.
+
+Both entry-point modes share an exclusive host lock (`TYTO_RUNTIME_LOCK`, default
+`~/.local/state/ateles/tyto.lock`); a competing process fails before processing.
+A pre-upgrade daemon does not honor this new lock and must be confirmed stopped
+independently. Normal daemon startup resumes screenshots, enabled analysis and
+existing pending recordings; it is broader than these canary/backfill commands.
+Source approval and synthetic tests are not evidence that it is safe to resume.
+
+Local FluidAudio diarization defaults to `--compute-units cpu-only`, avoiding
+Metal command-buffer timeouts in the offline diarization stage while preserving
+speaker separation. `TRANSCRIBE_FLUID_COMPUTE_UNITS=ane` is another supported
+off-GPU selection; `all` explicitly permits GPU use. ASR is still local. Errors
+name the failed CLI stage and retain both the beginning and end of long stderr
+so profiling output cannot conceal an earlier Metal failure. A real supported
+hardware run remains required after review; no cloud or undiarized fallback is
+introduced by this repair.
+
+The selected and normal Tyto subprocess routes now require an attached-audio
+outcome explicitly. Audio over the remote upload limit raises
+`ERR_AUDIO_ATTACHMENT_REQUIRED` before any metadata-only write. That hold can be
+retried explicitly after its transport prerequisite is repaired; no attachment
+omission clears it. Standalone metadata-only import callers retain their
+existing explicit behavior.
+
+Tyto accepts a private JSON receipt file, created in its own temporary directory,
+rather than parsing diagnostic stdout. The receipt is written only after the
+normal storage readback, binds the original track hashes/paths and capture method,
+and distinguishes verified audio custody with its stored source ID. Tyto checks
+that binding and unchanged local originals before clearing any hold. Filenames
+and transcript text can contain marker-looking lines without affecting this
+channel. Source files and paired microphones must be regular files within the
+resolved configured directory; escaping symlinks are rejected. Journal paths
+are normalized on read, with conflicting alias holds kept restrictive.
+
+Pending-result identity also includes a hash of the effective vocabulary and
+processing controls (cleanup, labels, language, segmentation, model selection,
+placement and backend setup). Vocabulary from environment, file and Neotoma is
+resolved once per CLI operation and used consistently by postprocessing. Local
+model/binary metadata and processing source revisions participate without loading
+models. A changed setting or resolved vocabulary rejects reuse before ASR/store;
+return to the original processing context to recover that immutable result. No
+model inference, credential value or vocabulary text is included in the receipt.
+
+Filesystem-equivalent case/Unicode spellings and hard links share an existing
+recording's journal and watcher identity through `samefile` evidence, preserving
+its recorded source name for recovery and receipt binding. Loading legacy alias
+entries keeps the strictest conflicting hold, highest attempt count and latest
+retry time. Distinct files stay distinct even when their bytes match; no blanket
+case folding or Unicode normalization is used. Missing legacy paths retain their
+recorded spelling and do not establish filesystem equivalence.

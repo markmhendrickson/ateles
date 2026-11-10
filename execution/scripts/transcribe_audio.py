@@ -82,6 +82,7 @@ try:
         TRANSCRIPTION_ENGINE_LOCAL,
         VALID_BACKENDS,
         resolve_backend,
+        resolve_model_path as _resolve_local_model_path,
         transcribe_local,
     )
 except ImportError:  # pragma: no cover - path-dependent import
@@ -93,6 +94,7 @@ except ImportError:  # pragma: no cover - path-dependent import
         TRANSCRIPTION_ENGINE_LOCAL,
         VALID_BACKENDS,
         resolve_backend,
+        resolve_model_path as _resolve_local_model_path,
         transcribe_local,
     )
 
@@ -475,8 +477,13 @@ def _coerce_correction_pairs(data: object) -> list[tuple[str, str]]:
     return pairs
 
 
+_ACTIVE_CORRECTIONS: list[tuple[str, str]] | None = None
+
+
 def _proper_noun_corrections() -> list[tuple[str, str]]:
     """Merge the operator vocabulary from env + file + Neotoma (all optional)."""
+    if _ACTIVE_CORRECTIONS is not None:
+        return _ACTIVE_CORRECTIONS
     return (
         _proper_nouns_from_env()
         + _proper_nouns_from_file()
@@ -2360,6 +2367,108 @@ def is_already_transcribed(audio_path: Path) -> bool:
     return _hit(str(audio_path.resolve()), "audio_file_path")
 
 
+def _pending_store_identity(audio_path: Path, mic_path: Path | None) -> dict:
+    identity = {}
+    for name, path in (("audio", audio_path), ("mic", mic_path)):
+        if path is not None:
+            digest = _audio_content_hash(path)
+            if digest is None:
+                raise RuntimeError("Cannot bind pending store to unreadable audio")
+            identity[name] = {"path": str(path.resolve()), "sha256": digest}
+    return identity
+
+
+def _processing_fingerprint() -> str:
+    """Bind cached output to resolved vocabulary, processing controls and setup.
+
+    Only non-secret processing settings are selected. Values/vocabulary are
+    hashed rather than copied into the pending result's context. Model/binary
+    metadata is inspected without loading a model or invoking a backend.
+    """
+    names = (
+        "TRANSCRIBE_BACKEND", "RECORD_MEETING_DIARIZE", "TRANSCRIBE_DEFAULT_LANGUAGE",
+        "TRANSCRIBE_CLEAN_STUTTERS", "TRANSCRIBE_LABEL_SYSTEM", "TRANSCRIBE_LABEL_MIC",
+        "TRANSCRIBE_UTTERANCE_GAP_SECONDS", "TRANSCRIBE_UTTERANCE_STITCH_SECONDS",
+        "TRANSCRIBE_TAG_AUDIO_EVENTS", "TRANSCRIBE_NUM_SPEAKERS",
+        "TRANSCRIBE_WHISPER_MODEL", "TRANSCRIBE_WHISPER_MODEL_NAME", "TRANSCRIBE_WHISPER_CLI",
+        "TRANSCRIBE_FLUID_CLI", "TRANSCRIBE_FLUID_COMPUTE_UNITS", "TRANSCRIBE_FFMPEG",
+        "ELEVENLABS_STT_MODEL_ID", "ELEVENLABS_STT_COMPRESS_THRESHOLD_MB",
+        "ELEVENLABS_STT_UPLOAD_MP3_BITRATE", "ELEVENLABS_STT_MULTICHANNEL_MAX_SECONDS",
+        "LIVE_TRANSCRIPT_SILENCE_THRESHOLD_DB",
+    )
+    def metadata(path: Path) -> dict:
+        try:
+            stat = path.stat()
+            return {"path": str(path.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        except OSError:
+            return {"path": str(path), "unavailable": True}
+
+    try:
+        model = metadata(_resolve_local_model_path())
+    except RuntimeError:
+        model = {"unavailable": True}
+    binaries = {}
+    for variable, default in (("TRANSCRIBE_WHISPER_CLI", "whisper-cli"),
+                              ("TRANSCRIBE_FLUID_CLI", "fluidaudiocli"),
+                              ("TRANSCRIBE_FFMPEG", "ffmpeg")):
+        configured = os.environ.get(variable, "").strip() or default
+        binaries[variable] = metadata(Path(shutil.which(configured) or configured))
+    payload = {
+        "settings": {name: os.environ.get(name) for name in names},
+        "vocabulary": _proper_noun_corrections(), "labels": _channel_labels(),
+        "gap": _utterance_gap_seconds(), "stitch": _utterance_stitch_seconds(),
+        "model": model, "binaries": binaries,
+        "source": {name: _audio_content_hash(Path(__file__).with_name(name)) for name in (
+            "transcribe_audio.py", "local_whisper.py", "local_fluid.py",
+            "transcript_utterances.py", "hallucination_filter.py", "silence_gate.py",
+        )},
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def _write_pending_store(
+    audio_path: Path, mic_path: Path | None, context: dict, result: dict,
+    *, identity: dict | None = None,
+) -> None:
+    """Durably retain the complete result before any store; never log its text."""
+    current = _pending_store_identity(audio_path, mic_path)
+    if identity is not None and current != identity:
+        raise RuntimeError("Audio changed during transcription; refusing pending store")
+    target = audio_path.with_suffix(audio_path.suffix + ".pending-store.json")
+    payload = {"version": 1, "identity": current, "context": context, "result": result}
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=target.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            os.chmod(temporary, 0o600)
+            json.dump(payload, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _read_pending_store(
+    audio_path: Path, mic_path: Path | None, context: dict, *, required: bool = False,
+) -> dict | None:
+    target = audio_path.with_suffix(audio_path.suffix + ".pending-store.json")
+    if not target.exists() and not required:
+        return None
+    try:
+        payload = json.loads(target.read_text())
+        if (payload.get("version") != 1
+                or payload.get("identity") != _pending_store_identity(audio_path, mic_path)
+                or payload.get("context") != context
+                or not isinstance(payload.get("result"), dict)
+                or not payload["result"].get("transcription_text")):
+            raise ValueError("source or context mismatch")
+        return payload["result"]
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError("Missing, malformed or mismatched pending store; no ASR was run") from exc
+
+
 def _write_transcript_sidecars(
     audio_path: Path, result: dict, verbose: bool = False
 ) -> None:
@@ -2631,6 +2740,7 @@ def save_transcription(
     idempotency_key: str | None = None,
     file_idempotency_key: str | None = None,
     attach_audio_file: bool = True,
+    require_audio_attachment: bool = False,
     extra_entity_fields: dict | None = None,
     relate_contact_entity_ids: list[str] | None = None,
     relate_feedback_analysis_entity_id: str | None = None,
@@ -2700,6 +2810,8 @@ def save_transcription(
     # imports (attach_audio_file=False) may supply size/hash from the result.
     if attach_audio_file and not file_present:
         raise RuntimeError("Transcription ingestion incomplete: audio file missing")
+    if require_audio_attachment and not attach_audio_file:
+        raise RuntimeError("ERR_AUDIO_ATTACHMENT_REQUIRED: metadata-only storage is not accepted")
 
     content_hash = _audio_content_hash(audio_path) if file_present else None
     if not content_hash:
@@ -2792,6 +2904,11 @@ def save_transcription(
                 )
             remote_limit = _remote_upload_max_bytes()
             if wav_bytes > remote_limit and not _neotoma_target_is_localhost():
+                if require_audio_attachment:
+                    raise RuntimeError(
+                        "ERR_AUDIO_ATTACHMENT_REQUIRED: audio exceeds the remote upload limit; "
+                        "no metadata-only store was attempted"
+                    )
                 # The hosted transport cannot carry these bytes (the CLI
                 # refuses before any HTTP call), and it never will on retry.
                 # Store the transcript without the audio and record why, so
@@ -2876,6 +2993,7 @@ def save_transcription(
             pass
 
     raw = (proc.stdout or "").strip()
+    source_id = None
     if proc.returncode != 0 or not raw:
         err = (proc.stderr or "").strip() or raw or f"exit {proc.returncode}"
         if "ERR_IDEMPOTENCY_MISMATCH" not in err:
@@ -2885,6 +3003,8 @@ def save_transcription(
             resolved_audio,
             attachment_expected=attach_wav,
         )
+        if attach_wav:
+            source_id = _find_audio_source(resolved_audio.name, entity["audio_content_sha256"])
     else:
         try:
             payload = json.loads(raw)
@@ -2929,6 +3049,8 @@ def save_transcription(
     return {
         "transcription_id": entity_id,
         "entity_id": entity_id,
+        "audio_source_id": source_id,
+        "audio_attachment_verified": bool(attach_wav and source_id),
         "audio_file_path": audio_file_path_rel,
         "audio_file_name": audio_path.name,
         "source_directory": source_directory,
@@ -2943,6 +3065,7 @@ def save_transcription(
 
 
 def main():
+    global _ACTIVE_CORRECTIONS
     parser = argparse.ArgumentParser(
         description="Transcribe locally with Whisper or FluidAudio speaker diarization"
     )
@@ -3035,7 +3158,20 @@ def main():
         "disclosure), voice_memo, import, unknown.",
     )
 
+    parser.add_argument(
+        "--store-only", action="store_true",
+        help="Store a source-bound pending result without running transcription. "
+        "Missing or changed source/context fails closed; there is no ASR fallback.",
+    )
+    parser.add_argument("--require-audio-attachment", action="store_true",
+                        help="Fail before storage if requested audio cannot be attached.")
+    parser.add_argument("--receipt-file", type=Path, default=None,
+                        help="Write a private structured verified storage receipt for a supervising caller.")
     args = parser.parse_args()
+    if args.store_only and args.no_store:
+        parser.error("--store-only cannot be combined with --no-store")
+    if args.receipt_file and args.no_store:
+        parser.error("--receipt-file requires storage")
 
     if args.no_diarize:
         use_diarization = False
@@ -3057,9 +3193,41 @@ def main():
             f"Warning: File extension {audio_path.suffix} may not be supported. Processing anyway..."
         )
 
+    previous_corrections = _ACTIVE_CORRECTIONS
     try:
+        _ACTIVE_CORRECTIONS = (
+            _proper_nouns_from_env() + _proper_nouns_from_file() + _proper_nouns_from_neotoma()
+        )
+        mic_path = Path(args.mic_file) if args.mic_file else None
+        if mic_path is not None and args.no_diarize:
+            parser.error("--mic-file requires speaker separation; remove --no-diarize")
+        relate_c, relate_fba = _merge_transcription_relate_targets(
+            audio_path, args.relate_contact_entity_id or None,
+            args.relate_feedback_analysis_entity_id,
+        ) if not args.no_store else ([], None)
+        extra_fields = {
+            "capture_method": (args.capture_method or "unknown").strip(),
+            "consent_basis": (args.consent_basis or "unknown").strip(),
+        }
+        context = {
+            "processing_fingerprint": _processing_fingerprint(),
+            "language": args.language, "backend": args.backend,
+            "diarization": use_diarization,
+            "backend_env": os.environ.get("TRANSCRIBE_BACKEND", ""),
+            "diarization_env": os.environ.get("RECORD_MEETING_DIARIZE", ""),
+            "original_source_file": args.original_source_file,
+            "extra_fields": extra_fields, "relate_contacts": relate_c,
+            "relate_feedback": relate_fba,
+        }
+        identity = _pending_store_identity(audio_path, mic_path) if not args.no_store else None
+        transcription_result = _read_pending_store(
+            audio_path, mic_path, context, required=args.store_only,
+        ) if not args.no_store else None
+        # Reuse a pending result only against both unchanged tracks and context.
+        if transcription_result is not None:
+            print("Reusing source-bound pending transcription; ASR skipped")
         # Two-file merge path (mic + remote)
-        if args.mic_file:
+        elif args.mic_file:
             if args.no_diarize:
                 parser.error("--mic-file requires speaker separation; remove --no-diarize")
             mic_path = Path(args.mic_file)
@@ -3100,15 +3268,7 @@ def main():
                 print(text)
             return
 
-        relate_c, relate_fba = _merge_transcription_relate_targets(
-            audio_path,
-            args.relate_contact_entity_id or None,
-            args.relate_feedback_analysis_entity_id,
-        )
-        extra_fields = {
-            "capture_method": (args.capture_method or "unknown").strip(),
-            "consent_basis": (args.consent_basis or "unknown").strip(),
-        }
+        _write_pending_store(audio_path, mic_path, context, transcription_result, identity=identity)
         transcription_record = save_transcription(
             audio_path,
             transcription_result,
@@ -3117,7 +3277,29 @@ def main():
             relate_verbose=bool(args.relate_verbose),
             original_source_file=args.original_source_file or None,
             extra_entity_fields=extra_fields,
+            require_audio_attachment=args.require_audio_attachment,
         )
+
+        if args.receipt_file:
+            if _pending_store_identity(audio_path, mic_path) != identity:
+                raise RuntimeError("Audio changed during store; verified receipt refused")
+            receipt = {
+                "version": 1, "entity_id": transcription_record["entity_id"],
+                "identity": identity, "capture_method": extra_fields["capture_method"],
+                "engine": engine,
+                "audio_attachment_verified": transcription_record.get("audio_attachment_verified") is True,
+                "audio_source_id": transcription_record.get("audio_source_id"),
+            }
+            with tempfile.NamedTemporaryFile(mode="w", dir=args.receipt_file.parent, delete=False) as handle:
+                temporary = Path(handle.name)
+                try:
+                    os.chmod(temporary, 0o600)
+                    json.dump(receipt, handle)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    os.replace(temporary, args.receipt_file)
+                finally:
+                    temporary.unlink(missing_ok=True)
 
         print("\nTranscription complete:")
         print(f"  File: {audio_path.name}")
@@ -3137,6 +3319,8 @@ def main():
 
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        _ACTIVE_CORRECTIONS = previous_corrections
 
 
 if __name__ == "__main__":

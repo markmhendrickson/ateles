@@ -905,3 +905,116 @@ def test_no_speech_marker_is_not_run_through_stutter_cleanup(tmp_path, monkeypat
 
     assert result["transcription_text"] == marker
     assert result["silence"] is True
+
+
+@pytest.mark.parametrize('store_only', [False, True])
+def test_denied_store_recovers_cached_pair_without_asr(tmp_path, monkeypatch, store_only):
+    audio = tmp_path / 'sample remote.wav'
+    mic = tmp_path / 'sample mic.wav'
+    audio.write_bytes(b'system audio')
+    mic.write_bytes(b'microphone audio')
+    result = {'transcription_text': 'System/1: hello\nMic/1: yes',
+              'language': 'en', 'raw_response': {'segments': [1]},
+              'transcription_engine': 'local_fluid_audio'}
+    argv = ['transcribe_audio.py', str(audio), '--mic-file', str(mic),
+            '--capture-method', 'platform_native']
+    monkeypatch.setattr(sys, 'argv', argv)
+    with patch.object(ta, 'transcribe_two_files', return_value=result) as asr, patch.object(
+        ta, '_merge_transcription_relate_targets', return_value=([], None)
+    ), patch.object(ta, 'save_transcription', side_effect=RuntimeError('capability_denied')):
+        with pytest.raises(SystemExit):
+            ta.main()
+        asr.assert_called_once()
+    pending = audio.with_suffix('.wav.pending-store.json')
+    assert pending.stat().st_mode & 0o777 == 0o600
+    assert json.loads(pending.read_text())['result'] == result
+    monkeypatch.setattr(sys, 'argv', argv + (['--store-only'] if store_only else []))
+    with patch.object(ta, 'transcribe_two_files', side_effect=AssertionError('ASR repeated')), patch.object(
+        ta, 'transcribe_audio_file', side_effect=AssertionError('ASR repeated')
+    ), patch.object(ta, '_merge_transcription_relate_targets', return_value=([], None)), patch.object(
+        ta, 'save_transcription', return_value={**result, 'entity_id': 'ent_synthetic'}
+    ) as store:
+        ta.main()
+    assert store.call_args.args[:2] == (audio, result)
+    assert store.call_args.kwargs['extra_entity_fields']['capture_method'] == 'platform_native'
+    assert audio.read_bytes() == b'system audio'
+    assert mic.read_bytes() == b'microphone audio'
+    assert audio.with_suffix('.wav.stt_raw.json').exists()
+
+
+@pytest.mark.parametrize('change', ['audio', 'mic', 'context', 'missing'])
+def test_store_only_refuses_unbound_pending_result(tmp_path, monkeypatch, change):
+    audio = tmp_path / 'sample.wav'
+    mic = tmp_path / 'mic.wav'
+    audio.write_bytes(b'audio')
+    mic.write_bytes(b'mic')
+    context = {'capture_method': 'platform_native'}
+    ta._write_pending_store(audio, mic, context, {'transcription_text': 'synthetic'})
+    if change == 'audio':
+        audio.write_bytes(b'changed')
+    elif change == 'mic':
+        mic.write_bytes(b'changed')
+    elif change == 'context':
+        context['capture_method'] = 'unknown'
+    else:
+        audio.with_suffix('.wav.pending-store.json').unlink()
+    with pytest.raises(RuntimeError, match='pending store'):
+        ta._read_pending_store(audio, mic, context, required=True)
+
+
+@pytest.mark.parametrize('setting,value', [
+    ('TRANSCRIBE_CLEAN_STUTTERS', '0'), ('TRANSCRIBE_LABEL_MIC', 'Different'),
+    ('TRANSCRIBE_UTTERANCE_GAP_SECONDS', '2.8'), ('TRANSCRIBE_WHISPER_MODEL_NAME', 'different.bin'),
+    ('TRANSCRIBE_FLUID_COMPUTE_UNITS', 'ane'), ('TRANSCRIBE_DEFAULT_LANGUAGE', 'spa'),
+    ('TRANSCRIBE_PROPER_NOUNS', 'Different=variant'),
+])
+def test_cli_pending_cache_rejects_changed_processing_options(tmp_path, monkeypatch, setting, value):
+    audio = tmp_path / 'sample.wav'
+    audio.write_bytes(b'audio')
+    result = {'transcription_text': 'Synthetic.', 'language': 'en'}
+    argv = ['transcribe_audio.py', str(audio)]
+    monkeypatch.setattr(sys, 'argv', argv)
+    with patch.object(ta, '_merge_transcription_relate_targets', return_value=([], None)), patch.object(
+        ta, 'transcribe_audio_file', return_value=result
+    ), patch.object(ta, 'save_transcription', side_effect=RuntimeError('capability_denied')):
+        with pytest.raises(SystemExit):
+            ta.main()
+    monkeypatch.setenv(setting, value)
+    monkeypatch.setattr(sys, 'argv', argv + ['--store-only'])
+    with patch.object(ta, '_merge_transcription_relate_targets', return_value=([], None)), patch.object(
+        ta, 'transcribe_audio_file', side_effect=AssertionError('unexpected ASR')
+    ) as asr, patch.object(ta, 'save_transcription') as store:
+        with pytest.raises(SystemExit):
+            ta.main()
+        asr.assert_not_called()
+        store.assert_not_called()
+
+
+@pytest.mark.parametrize('source', ['file', 'neotoma'])
+def test_cli_pending_cache_binds_resolved_vocabulary(tmp_path, monkeypatch, source):
+    audio = tmp_path / 'sample.wav'
+    audio.write_bytes(b'audio')
+    vocabulary = tmp_path / 'vocabulary.json'
+    vocabulary.write_text(json.dumps([['Synthetic', 'old']]))
+    monkeypatch.setenv('TRANSCRIBE_PROPER_NOUNS_FILE', str(vocabulary))
+    resolved = [('Synthetic', 'old')]
+    monkeypatch.setattr(ta, '_proper_nouns_from_neotoma', lambda: list(resolved) if source == 'neotoma' else [])
+    argv = ['transcribe_audio.py', str(audio)]
+    monkeypatch.setattr(sys, 'argv', argv)
+    with patch.object(ta, '_merge_transcription_relate_targets', return_value=([], None)), patch.object(
+        ta, 'transcribe_audio_file', return_value={'transcription_text': 'Synthetic.', 'language': 'en'}
+    ), patch.object(ta, 'save_transcription', side_effect=RuntimeError('capability_denied')):
+        with pytest.raises(SystemExit):
+            ta.main()
+    if source == 'file':
+        vocabulary.write_text(json.dumps([['Synthetic', 'new']]))
+    else:
+        resolved[:] = [('Synthetic', 'new')]
+    monkeypatch.setattr(sys, 'argv', argv + ['--store-only'])
+    with patch.object(ta, '_merge_transcription_relate_targets', return_value=([], None)), patch.object(
+        ta, 'transcribe_audio_file', side_effect=AssertionError('unexpected ASR')
+    ) as asr, patch.object(ta, 'save_transcription') as store:
+        with pytest.raises(SystemExit):
+            ta.main()
+        asr.assert_not_called()
+        store.assert_not_called()

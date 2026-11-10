@@ -1,7 +1,7 @@
 """Normal watcher containment using synthetic audio, inference and store transport.
 
-This deliberately retains the inherited storage handoff. It proves denied work
-stops, not a strong persisted-result receipt or authorized operational recovery.
+Unit B layers its structured persistence handoff onto the containment entrance.
+Synthetic checks do not authorize operational recovery or daemon activation.
 """
 import asyncio
 import contextlib
@@ -58,7 +58,8 @@ def test_normal_handoff_stores_or_contains_denial_across_restart(storage, tmp_pa
                 return SimpleNamespace(returncode=1, stdout='', stderr='x' * 400 + ' capability_denied')
             return external_transport(command, **kwargs)
         child_commands.append(command)
-        assert '--receipt-file' not in command and '--store-only' not in command
+        assert '--receipt-file' in command and '--require-audio-attachment' in command
+        assert '--store-only' not in command
         with monkeypatch.context() as child:
             child.setattr(sys, 'argv', command[1:])
             child.setenv('TRANSCRIBE_BACKEND', kwargs['env'].get('TRANSCRIBE_BACKEND', ''))
@@ -86,7 +87,7 @@ def test_normal_handoff_stores_or_contains_denial_across_restart(storage, tmp_pa
     assert json.loads(journal.read_text())['hard_failed'][0]['error_code'] == 'capability_denied'
     assert audio.with_suffix('.wav.transcript.txt').exists()
     assert audio.with_suffix('.wav.stt_raw.json').exists()
-    assert not audio.with_suffix('.wav.pending-store.json').exists()
+    assert audio.with_suffix('.wav.pending-store.json').exists()
     if alias_kind == 'case':
         alias = audio.with_name(audio.name.upper())
     elif alias_kind == 'unicode':

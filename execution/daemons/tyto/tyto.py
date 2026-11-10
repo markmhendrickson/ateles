@@ -89,12 +89,16 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import json
 import logging
 import os
 import subprocess
 import sys
+import tempfile
+import time
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -603,6 +607,7 @@ class ScreenshotWatcher:
 SOURCE_REJECTION_ERROR_CODE = "ERR_RECORDING_SOURCE_REJECTED"
 PERMANENT_STORE_ERROR_CODES = (
     SOURCE_REJECTION_ERROR_CODE,
+    "ERR_AUDIO_ATTACHMENT_REQUIRED",
     "ERR_FILE_PATH_IS_SERVER_LOCAL",
     "ERR_IDEMPOTENCY_MISMATCH",
     # A grant rejection cannot heal by re-running ASR. Retain the source and
@@ -1255,7 +1260,58 @@ class RecordingWatcher:
                 )
         return "success", None
 
-    def _run_transcription(self, remote_path: Path, mic_path: Path | None) -> str | None:
+    def process_selected_recording(
+        self, path: Path, *, store_only: bool, recover_held: bool,
+    ) -> str:
+        """One explicitly selected file; no directory poll, analysis or screenshots.
+
+        Run only with the normal daemon stopped: the retry journal has one writer.
+        Legacy failures without a pending result can be explicitly transcribed once
+        by omitting store_only. Never delete their hold before verified success.
+        """
+        if not self._retry_state_available:
+            raise RuntimeError("Retry journal is unavailable; selected processing refused")
+        path = self._canonical_source(path)
+        if not self._is_eligible_file(path):
+            raise RuntimeError("Selected file is outside this configured recording source")
+        held = self._hard_failed.get(path)
+        if held is not None and not recover_held:
+            raise RuntimeError("Selected file is held; explicit --recover-held is required")
+        code = str(held.get("error_code", "")) if held else ""
+        if (held is not None and code not in ("capability_denied", "ERR_AUDIO_ATTACHMENT_REQUIRED")
+                and not code.startswith(RETRY_LIMIT_ERROR_CODE)):
+            raise RuntimeError("Selected hold is not a recoverable denied/exhausted store")
+        mic = self._find_mic_pair(path) if self._paired else None
+        for source in (path, mic):
+            if source is not None and time.time() - source.stat().st_mtime < self.SETTLE_SECS:
+                raise RuntimeError("Selected recording is still settling; no transcription started")
+        try:
+            entity_id = self._run_transcription(path, mic, store_only=store_only)
+        except Exception as exc:
+            code = _classify_store_error(exc)
+            if code is not None:
+                self._mark_hard_failed(path, code)
+            raise
+        if not entity_id:
+            raise RuntimeError("Selected store returned no verified transcription entity receipt")
+        pending = self._pending_retries.pop(path, None)
+        attempts = self._attempts.pop(path, None)
+        self._hard_failed.pop(path, None)
+        if not self._save_retry_state():
+            if held is not None:
+                self._hard_failed[path] = held
+            if pending is not None:
+                self._pending_retries[path] = pending
+            if attempts is not None:
+                self._attempts[path] = attempts
+            raise RuntimeError("Store succeeded but recovery journal could not be committed")
+        self._transcribed.add(path)
+        return entity_id
+
+
+    def _run_transcription(
+        self, remote_path: Path, mic_path: Path | None, *, store_only: bool = False,
+    ) -> str | None:
         """
         Run transcription and return the Neotoma transcription entity ID (or None).
         Raises RuntimeError on unrecoverable failure.
@@ -1288,12 +1344,6 @@ class RecordingWatcher:
         )
         _verify_transcription_cli_runtime(transcription_env)
 
-        def _extract_entity_id(stdout: str) -> str | None:
-            for line in stdout.splitlines():
-                if line.startswith("NEOTOMA_TRANSCRIPTION_ENTITY_ID="):
-                    return line.split("=", 1)[1].strip() or None
-            return None
-
         def _extract_backend(stdout: str, fallback: str) -> str:
             backend_to_engine = {
                 "local": "local_whisper_cpp",
@@ -1313,13 +1363,32 @@ class RecordingWatcher:
             if not self._retry_state_available:
                 raise RuntimeError("Recording retry journal is unavailable; inference disabled")
             try:
-                return subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=TRANSCRIBE_PROCESS_TIMEOUT_SECS,
-                    env=transcription_env,
-                )
+                identity = self._source_receipt_identity(remote_path, mic_path)
+                with tempfile.TemporaryDirectory(prefix="tyto-receipt-") as temporary:
+                    receipt_path = Path(temporary) / "receipt.json"
+                    result = subprocess.run(
+                        [*cmd, "--require-audio-attachment", "--receipt-file", str(receipt_path)],
+                        capture_output=True, text=True,
+                        timeout=TRANSCRIBE_PROCESS_TIMEOUT_SECS, env=transcription_env,
+                    )
+                    if result.returncode == 0:
+                        try:
+                            receipt = json.loads(receipt_path.read_text())
+                            entity_id = receipt.get("entity_id")
+                            if (receipt.get("version") != 1 or not isinstance(entity_id, str)
+                                    or not entity_id.startswith("ent_")
+                                    or any(c.isspace() for c in entity_id)
+                                    or receipt.get("identity") != identity
+                                    or self._source_receipt_identity(remote_path, mic_path) != identity
+                                    or receipt.get("capture_method") != self._capture_method
+                                    or receipt.get("audio_attachment_verified") is not True
+                                    or not isinstance(receipt.get("audio_source_id"), str)
+                                    or not receipt["audio_source_id"].strip()):
+                                raise ValueError("receipt binding or custody mismatch")
+                        except (OSError, ValueError, TypeError, AttributeError) as exc:
+                            raise RuntimeError("Missing or invalid verified transcription receipt") from exc
+                        result.tyto_receipt = receipt
+                    return result
             except subprocess.TimeoutExpired as exc:
                 stdout = exc.stdout or ""
                 if isinstance(stdout, bytes):
@@ -1348,10 +1417,12 @@ class RecordingWatcher:
                 "--mic-file", str(mic_path),
                 "--capture-method", self._capture_method,
             ]
+            if store_only:
+                cmd.append("--store-only")
             result = _run_command(cmd, "local_fluid_audio")
             if result.returncode == 0:
-                entity_id = _extract_entity_id(result.stdout)
-                backend = _extract_backend(result.stdout, "local_fluid_audio")
+                entity_id = result.tyto_receipt["entity_id"]
+                backend = result.tyto_receipt.get("engine", "local_fluid_audio")
                 log.info(
                     f"[{DAEMON_NAME}] Two-file transcription complete. "
                     f"entity_id={entity_id}"
@@ -1384,6 +1455,8 @@ class RecordingWatcher:
             python, str(TRANSCRIBE_SCRIPT), str(remote_path),
             "--capture-method", self._capture_method,
         ]
+        if store_only:
+            cmd.append("--store-only")
         if self._capture_method == "voice_memo":
             # Let the CLI probe the audio and choose the local backend. Empty
             # values also prevent its dotenv load from supplying overrides.
@@ -1417,8 +1490,8 @@ class RecordingWatcher:
                 f"backend={backend}: {_subprocess_failure_detail(result.stderr)}"
             )
         else:
-            entity_id = _extract_entity_id(result.stdout)
-            backend = _extract_backend(result.stdout, fallback)
+            entity_id = result.tyto_receipt["entity_id"]
+            backend = result.tyto_receipt.get("engine", fallback)
             log.info(
                 f"[{DAEMON_NAME}] Transcription complete: {remote_path.name} "
                 f"entity_id={entity_id}"
@@ -1429,6 +1502,20 @@ class RecordingWatcher:
                 handler=DAEMON_NAME,
             )
             return entity_id
+
+
+    @staticmethod
+    def _source_receipt_identity(audio: Path, mic: Path | None) -> dict:
+        result = {}
+        for name, path in (("audio", audio), ("mic", mic)):
+            if path is not None:
+                digest = hashlib.sha256()
+                with path.open("rb") as handle:
+                    while block := handle.read(1024 * 1024):
+                        digest.update(block)
+                result[name] = {"path": str(path.resolve()), "sha256": digest.hexdigest()}
+        return result
+
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1612,8 +1699,72 @@ async def main() -> None:
     await asyncio.gather(*loops)
 
 
+@contextmanager
+def _exclusive_runtime():
+    """Daemon and selected recovery share one journal writer on this host."""
+    lock_path = Path(os.environ.get(
+        "TYTO_RUNTIME_LOCK", str(Path.home() / ".local/state/ateles/tyto.lock"),
+    ))
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("Tyto is already running; stop it before selected recovery") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def cli() -> None:
+    with _exclusive_runtime():
+        _cli()
+
+
+def _cli() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--recording-file", action="append", type=Path, default=[],
+                        help="Process only this exact configured recording; repeat for a selected backfill.")
+    parser.add_argument("--store-only", action="store_true",
+                        help="Require source-bound pending results; never run ASR.")
+    parser.add_argument("--recover-held", action="store_true",
+                        help="Retry a named denied/exhausted recording; clear its hold only after readback.")
+    args = parser.parse_args()
+    if not args.recording_file:
+        if args.store_only or args.recover_held:
+            parser.error("Recovery flags require an explicit --recording-file")
+        asyncio.run(main())
+        return
+    agent_def = load_agent_definition_or_exit(DAEMON_NAME)
+    enforce_status_or_exit(agent_def, DAEMON_NAME)
+
+    class QuietNotifier:
+        def send(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    # This route deliberately never constructs screenshot/analysis/poll loops or
+    # notification transports. The normal signed, attached-audio store is unchanged.
+    watchers = _recording_watchers(QuietNotifier())
+    selected = []
+    for path in args.recording_file:
+        path = path.absolute()
+        matches = [watcher for watcher in watchers if path.resolve().parent == watcher._dir.resolve()]
+        if len(matches) != 1:
+            parser.error("Selected recording requires exactly one enabled configured source")
+        selected.append((matches[0], path))
+    for watcher, path in selected:
+        entity_id = watcher.process_selected_recording(
+            path, store_only=args.store_only, recover_held=args.recover_held,
+        )
+        print(f"NEOTOMA_TRANSCRIPTION_ENTITY_ID={entity_id}", flush=True)
+
+
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        cli()
     except KeyboardInterrupt:
         log.info(f"[{DAEMON_NAME}] Stopped by operator.")
