@@ -833,6 +833,10 @@ def _live_execution_evidence(
             continue
         if activity.get("native_session_id") != runner:
             continue
+        # Require the lifecycle emitted by the active run producer as well as
+        # the independently qualified lease, task binding and recent activity.
+        if activity.get("status") != "active":
+            return unknown("The held runner's activity lifecycle is not qualified")
         now = datetime.now(timezone.utc)
         observed = _parse_timestamp(activity.get("last_activity_at"))
         if (

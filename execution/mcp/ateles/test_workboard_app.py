@@ -50,6 +50,7 @@ def test_old_activity_does_not_prove_working_now():
             "entity_type": "agent_session",
             "snapshot": {
                 "kind": "autonomous",
+                "status": "active",
                 "task_id": "ent_task",
                 "native_session_id": "runner-1",
                 "runner_id": "runner-1",
@@ -341,6 +342,7 @@ def test_lease_refusals_preserve_recorded_state(variant):
     edge = _lease_edge()
     activity = {
         "kind": "autonomous",
+        "status": "active",
         "trigger_ref": "ent_task",
         "native_session_id": "run",
         "last_activity_at": datetime.now(timezone.utc).isoformat(),
@@ -387,7 +389,10 @@ def test_lease_refusals_preserve_recorded_state(variant):
         )
 
 
-def test_recent_bound_lease_and_activity_control():
+@pytest.mark.parametrize(
+    "activity_status, qualified", [("active", True), ("unknown", False), (None, False)]
+)
+def test_recent_bound_lease_and_activity_control(activity_status, qualified):
     records = {
         "/entities/ent_task/relationships?expand_entities=true": _relationship_response(
             _lease_edge(), _activity_edge()
@@ -396,17 +401,26 @@ def test_recent_bound_lease_and_activity_control():
             "entity_type": "agent_session",
             "snapshot": {
                 "kind": "autonomous",
+                "status": activity_status,
                 "trigger_ref": "ent_task",
                 "native_session_id": "run",
                 "last_activity_at": datetime.now(timezone.utc).isoformat(),
             },
         },
     }
+    gaps = []
     with patch.object(srv, "_get", side_effect=records.get):
         result = srv._live_execution_evidence(
-            {"live_execution_evidence": {"activity_ref": "ent_activity"}}, "ent_task"
+            {"live_execution_evidence": {"activity_ref": "ent_activity"}},
+            "ent_task",
+            read_gaps=gaps,
         )
-    assert result["lease_holder"] == "ent_worker" and result["runner"] == "run"
+    assert bool(result) == qualified
+    if qualified:
+        assert result["lease_holder"] == "ent_worker" and result["runner"] == "run"
+        assert not gaps
+    else:
+        assert any("unknown" in gap for gap in gaps)
 
 
 @pytest.mark.parametrize(

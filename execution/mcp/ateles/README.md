@@ -41,8 +41,8 @@ harness argument or harness-specific configuration: a connected Claude, Codex,
 or Cursor session uses the same MCP read. It is an on-demand derived read, not
 a canonical projection or a session/authority binding. Stored task and plan
 fields render as **Recorded state**. **Working now** requires separately
-read, task-bound held-lease and recent activity records; interactive-session
-activity alone is insufficient. Operator attention requires a current open
+read, task-bound held-lease, qualified active runner lifecycle and recent
+activity records; interactive-session activity alone is insufficient. Operator attention requires a current open
 operator checkpoint for that task. The current adapter cannot qualify the
 canonical claimability predicate, so a stored `claimable` flag and pending/open
 states retain their recorded meaning. The table distinguishes assigned principal, lease holder, runner, and
