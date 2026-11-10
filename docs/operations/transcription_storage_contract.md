@@ -167,8 +167,15 @@ conditional duration; paired Fluid does not require RMS or silence.
 
 Fluid results retain the complete tracks and aligned-word structures, including
 both System/Mic originals for a pair, nested diarization/ASR containers, timing,
-speaker and nullable confidence fields. ElevenLabs retains its returned raw body
-or segmented envelope. Extra legitimate JSON fields are preserved. This checks
+speaker and confidence fields (including null/backend passthrough values). The
+same local alignment function checks preserved ASR/diarization against retained
+aligned words, including both paired track results; missing words cannot become
+silence while speech evidence remains. ElevenLabs validates ordinary/word,
+multichannel and segmented bodies through the synchronous response parser and
+its event converters, retaining text-only and optional/null metadata forms.
+A successful nonempty transcript requires retained usable content, while silent
+parts within a valid segmented result remain supported. Extra legitimate JSON
+fields are preserved. This checks
 constructor completeness, not cryptographic authenticity against the same user
 who controls the executable, audio and local files.
 

@@ -46,7 +46,7 @@ _BAD_EL = [
     {'segments': []}, {'segments': [{}]}, {'segments': [{'transcripts': 7}]},
     {'segments': [{'transcripts': [_CHANNEL, {'words': 7}]}]},
     {'segments': [{'transcripts': [{'text': 'not timestamped'}]}]},
-    {'words': [7]}, {'words': [{'text': 7, 'start': 0}]},
+    {'words': [7]}, {'text': 'unchanged', 'words': [{}]}, {'words': [{'text': 7, 'start': 0}]},
     {'words': [{'text': 'word', 'start': []}]},
     {'words': [{'text': 'word', 'start': 1, 'end': 0}]},
     {'transcripts': [{'text': 'ok', 'language_code': 7}]},
@@ -156,3 +156,70 @@ def test_fluid_confidence_remains_backend_passthrough(backend_flow, paired):
     tyto.cli()
     assert state['cmd'] and receipts and audio not in watcher._hard_failed
     inference.assert_not_called()
+
+
+@pytest.mark.parametrize('raw', _VALID_EL)
+def test_actual_elevenlabs_constructor_shapes_validate(tmp_path, monkeypatch, raw):
+    audio = tmp_path / 'synthetic.wav'
+    audio.write_bytes(b'synthetic')
+    monkeypatch.setenv('ELEVENLABS_API_KEY', 'synthetic-only')
+    monkeypatch.setattr(ta, 'get_audio_channel_count', lambda _: 2 if 'segments' in raw else 1)
+    monkeypatch.setattr(ta, 'get_audio_duration', lambda _: 4000 if 'segments' in raw else None)
+    monkeypatch.setattr(ta, 'prepare_elevenlabs_upload_file', lambda path, **k: (path, None))
+    bodies = iter(copy.deepcopy(raw.get('segments', [raw])))
+    monkeypatch.setattr(ta, '_post_elevenlabs_stt_raw', lambda *a: next(bodies))
+    if 'segments' in raw:
+        split = tmp_path / 'split'
+        split.mkdir()
+        monkeypatch.setattr(ta, '_ffmpeg_split_audio_segments',
+                            lambda *a, **k: ([audio] * len(raw['segments']), split))
+    result = ta.transcribe_with_elevenlabs_speech_to_text(audio)
+    ta._validate_transcription_result(result, paired=False)
+    assert result['raw_response'] == raw
+
+
+def test_actual_fluid_multichannel_constructor_validates(tmp_path, monkeypatch):
+    import local_fluid
+    audio = tmp_path / 'synthetic.wav'
+    audio.write_bytes(b'synthetic')
+    raw = fluid_raw()['tracks'][0]
+    monkeypatch.setattr(local_fluid, 'resolve_fluid_cli', lambda: 'synthetic-fluid')
+    monkeypatch.setattr(local_fluid.shutil, 'which', lambda _: 'synthetic-ffmpeg')
+    monkeypatch.setattr(local_fluid.subprocess, 'run', lambda *a, **k: None)
+    monkeypatch.setattr(local_fluid, '_run_json', lambda cli, args, output:
+                        copy.deepcopy(raw['diarization'] if args[0] == 'process' else raw['asr']))
+    result = local_fluid.transcribe_fluid(audio, channel_count=2)
+    ta._validate_transcription_result(result, paired=False)
+    assert [track['channel'] for track in result['raw_response']['tracks']] == ['Channel_0', 'Channel_1']
+
+
+@pytest.mark.parametrize('paired', [False, True])
+@pytest.mark.parametrize('raw', _BAD_EL)
+def test_actual_fresh_elevenlabs_parser_refuses_before_evidence_effects(backend_flow, monkeypatch, paired, raw):
+    state, phase, watcher, journal, audio, mic, inference, receipts, _ = backend_flow('elevenlabs', paired)
+    pending = audio.with_suffix(audio.suffix + '.pending-store.json')
+    original_cache = pending.with_suffix('.preserved.json')
+    pending.rename(original_cache)
+    preserved = {p: p.read_bytes() for p in (original_cache, journal, audio,
+        audio.with_suffix(audio.suffix + '.transcript.txt'), audio.with_suffix(audio.suffix + '.stt_raw.json'))}
+    if mic:
+        preserved[mic] = mic.read_bytes()
+    monkeypatch.setenv('ELEVENLABS_API_KEY', 'synthetic-only')
+    monkeypatch.setattr(ta, 'get_audio_channel_count', lambda _: 2 if 'segments' in raw else 1)
+    monkeypatch.setattr(ta, 'get_audio_duration', lambda _: 4000 if 'segments' in raw else None)
+    monkeypatch.setattr(ta, 'prepare_elevenlabs_upload_file', lambda path, **k: (path, None))
+    bodies = iter(copy.deepcopy(raw.get('segments', [raw])))
+    monkeypatch.setattr(ta, '_post_elevenlabs_stt_raw', lambda *a: next(bodies))
+    if 'segments' in raw:
+        split = audio.parent / 'split'
+        split.mkdir()
+        monkeypatch.setattr(ta, '_ffmpeg_split_audio_segments',
+                            lambda *a, **k: ([audio] * len(raw['segments']), split))
+    inference.side_effect = lambda *a, **k: ta.transcribe_with_elevenlabs_speech_to_text(audio)
+    monkeypatch.setattr(ta.sys, 'argv', ['tyto.py', '--recording-file', str(audio), '--recover-held'])
+    phase.update(mode='fresh')
+    with pytest.raises(RuntimeError, match='ERR_INCOMPLETE_TRANSCRIPTION_RESULT'):
+        tyto.cli()
+    assert 'cmd' not in state and not receipts and not pending.exists()
+    assert audio in watcher._hard_failed
+    assert all(p.read_bytes() == value for p, value in preserved.items())

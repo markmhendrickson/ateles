@@ -1043,6 +1043,15 @@ def _parse_elevenlabs_stt_response(
 
 
 def _validate_elevenlabs_raw_body(body: object) -> None:
+    try:
+        _check_elevenlabs_raw_body(body)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise IncompleteTranscriptionResult(
+            "ERR_INCOMPLETE_TRANSCRIPTION_RESULT: invalid ElevenLabs raw evidence"
+        ) from exc
+
+
+def _check_elevenlabs_raw_body(body: object) -> None:
     """Check the synchronous parser's consumed structure, including silent parts.
 
     Text-only bodies and optional/null word metadata are supported. A body must
@@ -1070,8 +1079,8 @@ def _validate_elevenlabs_raw_body(body: object) -> None:
     if not isinstance(words, list):
         raise ValueError("ElevenLabs words must be a list or null")
     for word in words:
-        if not isinstance(word, dict):
-            raise ValueError("ElevenLabs word must be an object")
+        if not isinstance(word, dict) or "text" not in word:
+            raise ValueError("ElevenLabs word must retain its text field")
         for field in ("text", "type"):
             if word.get(field) is not None and not isinstance(word[field], str):
                 raise ValueError(f"ElevenLabs word {field} must be a string or null")
@@ -1080,7 +1089,7 @@ def _validate_elevenlabs_raw_body(body: object) -> None:
         for field in ("start", "end"):
             if word.get(field) is not None:
                 value = word[field]
-                if not isinstance(value, (str, int, float)) or not math.isfinite(float(value)):
+                if isinstance(value, bool) or not isinstance(value, (str, int, float)) or not math.isfinite(float(value)):
                     raise ValueError("ElevenLabs word has invalid timing")
         if word.get("start") is not None and word.get("end") is not None:
             if float(word["end"]) < float(word["start"]):
