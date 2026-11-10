@@ -47,7 +47,7 @@
       article.append(node("p",r.next_action,"next"));
       const details=node("details"); details.append(node("summary","Roles and evidence")); const dl=node("dl",undefined,"roles");
       for(const [label,key] of [["Assigned principal","assigned_principal"],["Lease holder","lease_holder"],["Runner","runner"],["Declared step owner","declared_step_owner"],["Record owner","record_owner"],["State source","state_source"]]) dl.append(node("dt",label),node("dd",r[key]));
-      if(r.kind==="session")for(const [label,key] of [["Harness","native_harness"],["Native kind","native_kind"],["Native holder","native_holder"],["Native activity observed","native_last_activity_at"],["Routing role (recorded)","routing_role"],["Routing observed","routing_observed_at"]])dl.append(node("dt",label),node("dd",r[key]));
+      if(r.kind==="session"){for(const [label,key] of [["Harness","native_harness"],["Native session","native_session_id"],["Native kind","native_kind"],["Native holder","native_holder"],["Native activity observed","native_last_activity_at"],["Routing role (recorded)","routing_role"],["Routing observed","routing_observed_at"]])dl.append(node("dt",label),node("dd",r[key]));dl.append(node("dt","Native archive flag"),node("dd",typeof r.native_is_archived==="boolean"?String(r.native_is_archived):"unknown"));}
       details.append(dl);if(r.entity_id)details.append(node("p",r.entity_id,"identifier"));for(const parent of r.planning_ascent||[])details.append(node("p",text(parent.entity_type)+": "+text(parent.title),"muted"));for(const gap of r.read_gaps||[])details.append(node("p",gap,"muted"));article.append(details);root.append(article);
     }
     size();

@@ -160,25 +160,6 @@ threshold, and reason. Act on the operator's decision via resolve_checkpoint —
 do NOT execute the held task yourself.
 5. **Neotoma first.** Durable memory lives in Neotoma. Store, don't leave in \
 conversation.
-6. **Maintain the session workboard.** For every Ateles-led session with
-managed work, keep one `session_digest` as the durable ledger. Refresh its
-summary after a material task, agent, or decision change and before substantial
-new intake. Retrieve `get_session_workboard` with the session key and an
-explicit display-plan id; it is an on-demand derived read, so do not make a
-harness-local status copy or treat it as canonical live truth. The compact
-table puts the selected display plan first, then derived active, queued,
-blocked, operator-needed, and recorded-state rows. Active requires separately
-read live lease and observed-activity evidence; `tasks_claimed` and `artifacts`
-remain cumulative for a full `/digest`.
-A completed item leaves routine summaries only after terminal evidence is
-verified, each review/send/follow-up obligation is discharged or separately
-tracked, no active dependent needs it, and its completion was surfaced once.
-Leaf work may also be locally omitted after surfaced durable tracking: the
-referenced task or plan must record assignment or step ownership, dependencies,
-next action, session context, and no remaining operator checkpoint. This is a
-visibility choice, never a claim transfer or completion assertion.
-For email this keeps ingestion review, follow-up work, and drafts live until
-incorporation is reviewed and Gmail verifies the send.
 """
 
 
@@ -885,6 +866,8 @@ def _workboard_session_rows() -> tuple[list[dict], list[str], dict]:
     page = _retrieve_page("agent_session", limit=50)
     if not isinstance(page, dict) or not isinstance(page.get("entities"), list):
         return [], ["Session registry could not be read; session coverage is unknown"], {"complete": False}
+    if len(page["entities"]) > 50:
+        return [], ["Session registry exceeded its read bound; session coverage is unknown"], {"complete": False}
     rows = []
     gaps = []
     identities: set[tuple[str, str]] = set()
@@ -913,7 +896,7 @@ def _workboard_session_rows() -> tuple[list[dict], list[str], dict]:
             "read_gaps": [], "evidence": [record.get("entity_id") or record.get("id")],
         })
     total = page.get("total")
-    complete = (isinstance(total, int) and not isinstance(total, bool) and total == len(page["entities"])
+    complete = (not gaps and isinstance(total, int) and not isinstance(total, bool) and total == len(page["entities"])
                 and total <= 50 and not page.get("next_cursor"))
     if not complete:
         gaps.append("Session rows are a bounded page; full registry coverage is not established")
@@ -973,6 +956,9 @@ def _get_session_workboard(session_key: str, display_plan_id: str, include_histo
         "read_gaps": [],
     }]
     claims = digest.get("tasks_claimed")
+    digest_gaps = [] if isinstance(claims, list) else ["The digest has no valid tasks_claimed list; managed-work coverage is unknown"]
+    if isinstance(claims, list) and any(not isinstance(claim, dict) for claim in claims):
+        digest_gaps.append("The digest contains malformed claims; managed-work coverage is partial")
     planning_cache: dict = {}
     if isinstance(claims, list):
         rows.extend(row for claim in claims if isinstance(claim, dict) if (row := _claim_row(claim, planning_cache)) is not None)
@@ -990,7 +976,7 @@ def _get_session_workboard(session_key: str, display_plan_id: str, include_histo
         "rows": rows,
         "table": _format_workboard(rows),
         "observed_at": datetime.now(timezone.utc).isoformat(),
-        "read_gaps": [gap for row in rows for gap in row.get("read_gaps", [])] + session_gaps,
+        "read_gaps": [gap for row in rows for gap in row.get("read_gaps", [])] + session_gaps + digest_gaps,
         "session_coverage": session_coverage,
         "capability_gaps": ["Canonical claimability is not qualified by this adapter; pending and open are recorded states.",
                             "Session membership and native activity do not prove a held task lease."],
