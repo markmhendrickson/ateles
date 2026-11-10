@@ -9,7 +9,7 @@ Tyto watches up to four directories:
      `screenshot` entities in Neotoma. Phase 3: OCR dispatch.
   2. TYTO_RECORDINGS_DIR — new meeting recording files (*remote*.aac/.m4a),
      auto-transcribed via transcribe_audio.py --diarize immediately on
-     detection (with --no-diarize fallback). Optionally also
+     detection, retaining both tracks without a plain fallback. Optionally also
      TYTO_NATIVE_RECORDINGS_DIR for platform-native (Zoom/Meet/Teams)
      recordings, which carry the platform's built-in consent disclosure.
      Each transcription is stamped with capture_method for consent auditing.
@@ -751,20 +751,26 @@ class RecordingWatcher:
             for item in payload["pending"]:
                 if not isinstance(item, dict) or not isinstance(item.get("path"), str):
                     raise ValueError("invalid pending retry entry")
-                self._pending_retries[Path(item["path"])] = float(
-                    item.get("retry_after", 0)
+                path = self._recording_identity_path(Path(item["path"]))
+                self._pending_retries[path] = max(
+                    self._pending_retries.get(path, 0), float(item.get("retry_after", 0))
                 )
                 attempts = int(item.get("attempts", 0) or 0)
                 if attempts > 0:
-                    self._attempts[Path(item["path"])] = attempts
+                    self._attempts[path] = max(self._attempts.get(path, 0), attempts)
             for item in payload.get("hard_failed", []) or []:
                 if not isinstance(item, dict) or not isinstance(item.get("path"), str):
                     raise ValueError("invalid hard-failed entry")
-                self._hard_failed[Path(item["path"])] = {
+                path = self._recording_identity_path(Path(item["path"]))
+                existing = self._hard_failed.get(path)
+                entry = {
                     "error_code": item.get("error_code", "unknown"),
                     "at": item.get("at", ""),
                     "notified": bool(item.get("notified", False)),
                 }
+                if existing and existing["error_code"] != entry["error_code"]:
+                    entry["error_code"] = "conflicting_journal_holds"
+                self._hard_failed[path] = entry
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             self._retry_state_available = False
             log.error(
@@ -773,6 +779,7 @@ class RecordingWatcher:
                 "until the journal is repaired; existing files will not be seeded "
                 "as handled."
             )
+
 
     def _save_retry_state(self) -> bool:
         """Atomically persist pending retries and hard failures (journal v2)."""
@@ -816,13 +823,17 @@ class RecordingWatcher:
             return False
 
     def _mark_pending(self, path: Path, retry_after: float = 0) -> bool:
+        path = self._recording_identity_path(path)
         self._pending_retries[path] = retry_after
         return self._save_retry_state()
 
+
     def _clear_pending(self, path: Path) -> bool:
+        path = self._recording_identity_path(path)
         self._pending_retries.pop(path, None)
         self._attempts.pop(path, None)
         return self._save_retry_state()
+
 
     def _retry_delay(self, attempts: int) -> float:
         """Delay before the next attempt: retry_secs, doubling per failure, capped."""
@@ -836,6 +847,7 @@ class RecordingWatcher:
         state rather than resetting it, so a later poll cannot re-trigger a
         notification for the same permanent failure.
         """
+        path = self._recording_identity_path(path)
         self._pending_retries.pop(path, None)
         self._attempts.pop(path, None)
         existing = self._hard_failed.get(path)
@@ -847,19 +859,22 @@ class RecordingWatcher:
             }
         return self._save_retry_state()
 
+
     def _mark_hard_failure_notified(self, path: Path) -> bool:
+        path = self._recording_identity_path(path)
         entry = self._hard_failed.get(path)
         if entry is None or entry.get("notified"):
             return True
         entry["notified"] = True
         return self._save_retry_state()
 
+
     def _seed_existing(self) -> None:
         """Mark every currently-present eligible file as already handled."""
         if not self._retry_state_available:
             return
         try:
-            existing = [p for p in self._dir.iterdir() if self._is_eligible_file(p)]
+            existing = [self._canonical_source(p) for p in self._dir.iterdir() if self._is_eligible_file(p)]
         except OSError:
             return
         for path in existing:
@@ -879,6 +894,7 @@ class RecordingWatcher:
                 f"[{DAEMON_NAME}] Restored {len(self._pending_retries)} pending "
                 "Voice Memo retry/retries from durable state."
             )
+
 
     # Audio Hijack recorder block names that represent the far-end / system audio track.
     # "remote" = original naming, "system" = after session rename to "Tyto".
@@ -903,11 +919,14 @@ class RecordingWatcher:
         .composition, .db, and the extensionless CaptureRecovery/Capture
         directories) fall out because their suffixes are not in _extensions.
         """
+        if path.is_symlink() or path.resolve().parent != self._dir.resolve():
+            return False
         if self._paired:
             return self._is_remote_file(path)
         if not path.is_file():
             return False
         return path.suffix.lower() in self._extensions
+
 
     def _is_within_age_window(self, path: Path, now: float) -> bool:
         """Return True when path is new enough to be eligible.
@@ -945,8 +964,37 @@ class RecordingWatcher:
                     and candidate.suffix.lower() == ext.lower()
                     and candidate.stem.lower().replace("mic", "").rstrip() == prefix
                 ):
-                    return candidate
+                    return self._canonical_source(candidate)
         return None
+
+
+    def _recording_identity_path(self, path: Path) -> Path:
+        """Use observed filesystem identity, retaining the recorded source name.
+
+        resolve() alone does not unify case/Unicode equivalents or hard links.
+        samefile() does, without conflating distinct case-sensitive files or
+        identical bytes in separate files. Missing legacy paths retain their
+        resolved spelling and never become proof of filesystem equivalence.
+        """
+        resolved = path.resolve()
+        for field in ("_hard_failed", "_pending_retries", "_attempts", "_transcribed", "_seen"):
+            for known in getattr(self, field, ()):
+                if resolved == known:
+                    return known
+                try:
+                    if resolved.samefile(known):
+                        return known
+                except OSError:
+                    continue
+        return resolved
+
+
+    def _canonical_source(self, path: Path) -> Path:
+        resolved = path.resolve()
+        if path.is_symlink() or not resolved.is_file() or resolved.parent != self._dir.resolve():
+            raise RuntimeError("Track is outside the configured recording source or is not a regular file")
+        return self._recording_identity_path(resolved)
+
 
     def _is_settled(self, path: Path, now: float) -> bool:
         """Return True if path exists, has size > 0, and mtime has been stable."""
@@ -979,6 +1027,7 @@ class RecordingWatcher:
         for path in sorted(self._dir.iterdir()):
             if not self._is_eligible_file(path):
                 continue
+            path = self._canonical_source(path)
             if path in self._transcribed:
                 continue
             if path in self._hard_failed:
@@ -1134,6 +1183,9 @@ class RecordingWatcher:
         Run transcription and return the Neotoma transcription entity ID (or None).
         Raises RuntimeError on unrecoverable failure.
         """
+        remote_path = self._canonical_source(remote_path)
+        if mic_path is not None:
+            mic_path = self._canonical_source(mic_path)
         if not TRANSCRIBE_SCRIPT.exists():
             raise RuntimeError(
                 f"transcribe_audio.py not found: {TRANSCRIBE_SCRIPT}"
