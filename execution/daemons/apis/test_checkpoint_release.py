@@ -49,12 +49,19 @@ if importlib.util.find_spec("mcp") is None:
     stdio_module.stdio_server = None
     types_module.TextContent = _Shape
     types_module.Tool = _Shape
+    types_module.CallToolResult = _Shape
+    types_module.Resource = _Shape
+    lowlevel = types.ModuleType("mcp.server.lowlevel")
+    helper = types.ModuleType("mcp.server.lowlevel.helper_types")
+    helper.ReadResourceContents = _Shape
     sys.modules.update(
         {
             "mcp": mcp_module,
             "mcp.server": server_module,
             "mcp.server.stdio": stdio_module,
             "mcp.types": types_module,
+            "mcp.server.lowlevel": lowlevel,
+            "mcp.server.lowlevel.helper_types": helper,
         }
     )
 

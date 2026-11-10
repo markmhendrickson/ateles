@@ -1,5 +1,8 @@
 """Causal workboard and MCP App acceptance, with synthetic source records only."""
 
+import os
+os.environ["ATELES_SKIP_DOTENV"] = "1"
+
 from datetime import datetime, timedelta, timezone
 import sys
 import json
@@ -295,6 +298,10 @@ def _lease_edge():
     }
 
 
+def _activity_edge():
+    return {"relationship_type": "REFERS_TO", "source_entity_id": "ent_activity", "target_entity_id": "ent_task", "is_live": 1}
+
+
 def _relationship_response(*edges):
     return {"outgoing": [], "incoming": list(edges), "relationships": list(edges)}
 
@@ -321,7 +328,7 @@ def test_lease_refusals_preserve_recorded_state(variant):
     edge = _lease_edge()
     activity = {
         "kind": "autonomous",
-        "task_id": "ent_task",
+        "trigger_ref": "ent_task",
         "native_session_id": "run",
         "last_activity_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -348,13 +355,13 @@ def test_lease_refusals_preserve_recorded_state(variant):
             datetime.now(timezone.utc) - timedelta(minutes=2)
         ).isoformat()
     if variant == "foreign_activity":
-        activity["task_id"] = "ent_other"
+        activity["trigger_ref"] = "ent_other"
     if variant == "missing_runner":
         del edge["snapshot"]["runner_id"]
     edges = [edge, dict(edge)] if variant == "duplicate" else [edge]
     records = {
         "/entities/ent_task/relationships?expand_entities=true": _relationship_response(
-            *edges
+            *edges, _activity_edge()
         ),
         "/entities/ent_activity": {
             "entity_type": "agent_session",
@@ -370,13 +377,13 @@ def test_lease_refusals_preserve_recorded_state(variant):
 def test_recent_bound_lease_and_activity_control():
     records = {
         "/entities/ent_task/relationships?expand_entities=true": _relationship_response(
-            _lease_edge()
+            _lease_edge(), _activity_edge()
         ),
         "/entities/ent_activity": {
             "entity_type": "agent_session",
             "snapshot": {
                 "kind": "autonomous",
-                "task_id": "ent_task",
+                "trigger_ref": "ent_task",
                 "native_session_id": "run",
                 "last_activity_at": datetime.now(timezone.utc).isoformat(),
             },
@@ -475,3 +482,59 @@ def test_workboard_request_performs_only_read_operations():
         result = srv._get_session_workboard("synthetic:inbox", "ent_plan")
     assert not result.get("error")
     assert requests == [("POST", "/entities/query"), ("GET", "/entities/ent_plan")]
+
+
+@pytest.mark.parametrize("change", [{"next_cursor": "more"}, {"total": 2}, {"complete": False}, {"has_more": True}])
+def test_relationship_completeness_signals_agree(change):
+    envelope = {**_relationship_response(_lease_edge()), **change}
+    with patch.object(srv, "_get", return_value=envelope):
+        rels, error = srv._workboard_relationships("ent_task", {})
+    assert rels is None and error
+
+
+@pytest.mark.parametrize("fields", [None, {}, {"task_entity_id": "ent_other", "status": "awaiting_operator"}, {"task_entity_id": "ent_task", "status": "unrecognized"}, {"task_entity_id": "ent_task", "status": "awaiting_operator", "resolved_dispatched": "unreadable"}])
+def test_checkpoint_semantic_coverage_is_unknown(fields):
+    checkpoint = {"entity_id": "ent_checkpoint", "entity_type": "checkpoint_brief", "snapshot": fields}
+    gaps = []
+    with patch.object(srv, "_retrieve_page", return_value={"entities": [checkpoint], "total": 1}), patch.object(srv, "_get", return_value=checkpoint):
+        assert not srv._open_operator_checkpoint({}, {"operator_checkpoint_ref": "ent_checkpoint"}, "ent_task", gaps)
+    assert any("unknown" in gap for gap in gaps)
+
+
+def test_producer_session_is_discovered_without_digest_locator():
+    from lib.daemon_runtime.session_finalize import build_run_session_payload
+    payload = build_run_session_payload(task_id="ent_task", agent="role", run_key="run")
+    session = {**payload["entities"][1], "last_activity_at": datetime.now(timezone.utc).isoformat()}
+    edge = _lease_edge()
+    edge["snapshot"]["runner_id"] = session["native_session_id"]
+    refers = {"relationship_type": "REFERS_TO", "source_entity_id": "ent_activity", "target_entity_id": "ent_task", "is_live": 1}
+    records = {"/entities/ent_task/relationships?expand_entities=true": _relationship_response(edge, refers), "/entities/ent_activity": {"entity_id": "ent_activity", "entity_type": "agent_session", "snapshot": session}}
+    with patch.object(srv, "_get", side_effect=records.get):
+        evidence = srv._live_execution_evidence({}, "ent_task")
+    assert evidence["runner"] == session["native_session_id"]
+    assert "task_id" not in session and "task_entity_id" not in session
+
+
+def test_fallback_preserves_coverage_and_requested_history():
+    import asyncio
+    import socket
+    from mcp.types import CallToolRequest, CallToolRequestParams
+    from lib.daemon_runtime.agent_loader import AgentLoader
+    result = {"session_key": "synthetic:inbox", "display_plan_id": "ent_plan", "rows": [], "table": "Empty table", "read_gaps": ["Supporting reads unknown"], "capability_gaps": ["Claimability unknown"], "history": {"tasks_claimed": [{"claim": "Historical work"}], "artifacts": ["Historical artifact"]}}
+    async def call():
+        with patch.object(socket.socket, "connect", side_effect=AssertionError("Network denied")), patch.object(AgentLoader, "render_policy_prompt", return_value=""), patch.object(srv, "render_server_instructions", return_value="Synthetic"), patch.dict(srv.TOOL_HANDLERS, {"get_session_workboard": lambda args: result}):
+            server = srv.create_server()
+            response = await server.request_handlers[CallToolRequest](CallToolRequest(method="tools/call", params=CallToolRequestParams(name="get_session_workboard", arguments={"session_key": "synthetic:inbox", "display_plan_id": "ent_plan"})))
+            return response.root.content[0].text
+    text = asyncio.run(call())
+    for expected in ["Supporting reads unknown", "Claimability unknown", "Historical work", "Historical artifact"]:
+        assert expected in text
+
+
+@pytest.mark.parametrize("claims", [[{}], [{"task_entity_id": "invalid"}], [{"claim": "Historical", "task_entity_id": "invalid"}], [[], {"task_entity_id": "ent_task"}]])
+def test_unrenderable_claims_report_partial_coverage(claims):
+    digest = {"entity_id": "ent_digest", "entity_type": "session_digest", "snapshot": {"session_key": "synthetic:inbox", "tasks_claimed": claims}}
+    with patch.object(srv, "_find_session_digest", return_value=digest), patch.object(srv, "_get", return_value={"entity_type": "plan", "snapshot": {"title": "Plan"}}), patch.object(srv, "_retrieve_page", return_value={"entities": [], "total": 0}):
+        result = srv._get_session_workboard("synthetic:inbox", "ent_plan", include_history=True)
+    assert result["read_gaps"]
+    assert result["history"]["tasks_claimed"] == claims
