@@ -61,11 +61,16 @@ resource using `text/html;profile=mcp-app`, linked by the tool's
 `_meta.ui.resourceUri`. It follows the stable
 [MCP Apps protocol](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx).
 An MCP Apps host initializes the view and supplies the original tool input and
-structured result. Other hosts retain a readable text table. The self-contained
+structured result. Other hosts retain a readable table together with read
+limits, planning context and any requested cumulative history. The self-contained
 resource requests no external network, static assets, nested frames or browser
 permissions; record text renders as text. Refresh invokes only the read-only
 workboard tool through the same host/server connection. A failed refresh marks
-retained rows stale. There is no timer, browser storage or second status store.
+retained rows stale and preserves the last successful scope and read time.
+Requested history remains available across refreshes. Read coverage and adapter
+limits remain visible, and decision attention is labelled independently of the
+recorded lifecycle state. There is no automatic polling, browser storage or
+second status store.
 
 Selecting **Sessions** requests an optional page of up to 50 existing
 `agent_session` records. Native identity, kind, status, activity and holder stay

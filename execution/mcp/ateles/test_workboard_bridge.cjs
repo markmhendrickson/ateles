@@ -14,10 +14,11 @@ class Element {
 }
 const ids=Object.fromEntries(['count','status','primary','notice','search','filter','rows','refresh'].map(id=>[id,new Element(id)]));
 ids.filter.value='all';
-const sent=[];let receive;
+const sent=[];let receive;const timers=new Map();let timerId=0;
+const startTimer=fn=>{timers.set(++timerId,fn);return timerId;};const stopTimer=id=>timers.delete(id);
 const parent={postMessage(message){sent.push(message);}};
 const document={getElementById:id=>ids[id],createElement:tag=>new Element(tag),documentElement:{style:{},scrollHeight:500}};
-vm.runInNewContext(script,{document,window:{parent,addEventListener(name,fn){if(name==='message')receive=fn;}},Map,Promise,setTimeout,clearTimeout,console});
+vm.runInNewContext(script,{document,window:{parent,addEventListener(name,fn){if(name==='message')receive=fn;}},Map,Promise,setTimeout:startTimer,clearTimeout:stopTimer,console});
 const deliver=(message,source=parent)=>receive({source,data:{jsonrpc:'2.0',...message}});
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
@@ -50,7 +51,7 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
   assert(ids.primary.allText().includes('synthetic:inbox'));
   assert(ids.rows.allText().includes('Historical work'));
   const saved=ids.rows.allText(), time=ids.status.allText();
-  for(const malformed of [null, [], 3, {...payload,rows:[null]}, {...payload,rows:[{...payload.rows[1],planning_ascent:[null]}]}, {...payload,read_gaps:[{}]}, {...payload,observed_at:'invalid'}, {...payload,session_key:'synthetic:foreign'}, {...payload,display_plan_id:'ent_other'}]) {
+  for(const malformed of [null, [], 3, {...payload,rows:[null]}, {...payload,rows:[{...payload.rows[1],planning_ascent:[null]}]}, {...payload,read_gaps:[{}]}, {...payload,capability_gaps:[null]}, {...payload,history:null}, {...payload,rows:[{...payload.rows[1],read_gaps:[null]}]}, {...payload,rows:[{...payload.rows[1],native_last_activity_at:'invalid'}]}, {...payload,session_coverage:[]}, {...payload,observed_at:'invalid'}, {...payload,observed_at:'2026-02-30T00:00:00Z'}, {...payload,session_key:'synthetic:foreign'}, {...payload,display_plan_id:'ent_other'}]) {
     present(malformed);
     assert.equal(ids.rows.allText(),saved,'a rejected read retains all previous evidence');
     assert(ids.notice.allText().includes('stale'));
@@ -73,5 +74,21 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
   deliver({method:'ui/notifications/tool-cancelled'});
   assert(ids.notice.allText().includes('stale'));
   assert(!ids.status.allText().includes('Reading'));
+  present(payload);
+  let run=ids.refresh.handlers.click();let latest=sent.filter(m=>m.method==='tools/call').at(-1);
+  deliver({id:latest.id,result:{structuredContent:{observed_at:'2026-01-01T13:00:00Z'}}});await run;
+  assert(ids.notice.allText().includes('stale'));assert(!ids.status.allText().includes('Reading'));
+  run=ids.refresh.handlers.click();latest=sent.filter(m=>m.method==='tools/call').at(-1);
+  deliver({method:'ui/notifications/tool-cancelled'});await run;
+  const cancelledView=ids.rows.allText();deliver({id:latest.id,result:{structuredContent:{...payload,rows:[]}}});assert.equal(ids.rows.allText(),cancelledView);
+  run=ids.refresh.handlers.click();const timer=[...timers.values()].at(-1);timer();await run;
+  assert(ids.notice.allText().includes('stale'));assert(!ids.status.allText().includes('Reading'));
+  run=ids.refresh.handlers.click();latest=sent.filter(m=>m.method==='tools/call').at(-1);
+  deliver({method:'ui/notifications/tool-input',params:{arguments:{session_key:'synthetic:foreign',display_plan_id:'ent_other',include_history:true}}});await run;
+  deliver({id:latest.id,result:{structuredContent:payload}});assert(ids.notice.allText().includes('stale'));
+  run=ids.refresh.handlers.click();latest=sent.filter(m=>m.method==='tools/call').at(-1);deliver({method:'ui/notifications/tool-input',params:{arguments:{session_key:3,display_plan_id:'ent_plan'}}});await run;deliver({id:latest.id,result:{structuredContent:payload}});assert(ids.notice.allText().includes('stale'));
+  const circular={};circular.child=circular;present({...payload,history:{tasks_claimed:[circular],artifacts:[]}});assert(ids.notice.allText().includes('stale'));
+  assert(html.includes('overflow-wrap:anywhere'));
+  if(process.argv[3]) {const data=JSON.parse(fs.readFileSync(process.argv[3],'utf8'));present(data);assert(!ids.notice.allText().includes('stale'));assert(ids.rows.allText().includes('Current producer-bound task'));assert(ids.rows.allText().includes('Working now'));assert(ids.rows.allText().includes('Historical artifact'));}
   console.log('actual view bridge: transactional validation, bound scope, history, coverage, decisions, cancellation and refresh passed');
 })().catch(error=>{console.error(error);process.exit(1);});

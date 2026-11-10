@@ -1,6 +1,7 @@
 """Causal workboard and MCP App acceptance, with synthetic source records only."""
 
 import os
+
 os.environ["ATELES_SKIP_DOTENV"] = "1"
 
 from datetime import datetime, timedelta, timezone
@@ -226,6 +227,7 @@ def test_actual_view_bridge_behavior():
         timeout=15,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "cancellation and refresh passed" in result.stdout
 
 
 def test_derived_result_through_real_stdio_with_synthetic_record_source(
@@ -264,6 +266,7 @@ def test_derived_result_through_real_stdio_with_synthetic_record_source(
                         "arguments": {
                             "session_key": "synthetic:inbox",
                             "display_plan_id": "ent_plan",
+                            "include_history": True,
                         },
                     },
                 }
@@ -276,7 +279,12 @@ def test_derived_result_through_real_stdio_with_synthetic_record_source(
         assert data["rows"][1]["state"] == "Recorded state: open"
         assert data["rows"][1]["next_action"] == "Review the current artifact"
         assert data["rows"][1]["planning_ascent"][0]["entity_id"] == "ent_plan"
-        assert "Current task" in response["content"][0]["text"]
+        fallback = response["content"][0]["text"]
+        assert "Current task" in fallback
+        assert "Historical follow-up" in fallback
+        assert "Canonical claimability" in fallback
+        assert "Planning context" in fallback
+        assert data["history"]["tasks_claimed"][0]["task_entity_id"] == "ent_task"
         assert response["_meta"]["ui"]["resourceUri"] == srv.WORKBOARD_RESOURCE_URI
     finally:
         smoke._stop_server(proc)
@@ -299,7 +307,12 @@ def _lease_edge():
 
 
 def _activity_edge():
-    return {"relationship_type": "REFERS_TO", "source_entity_id": "ent_activity", "target_entity_id": "ent_task", "is_live": 1}
+    return {
+        "relationship_type": "REFERS_TO",
+        "source_entity_id": "ent_activity",
+        "target_entity_id": "ent_task",
+        "is_live": 1,
+    }
 
 
 def _relationship_response(*edges):
@@ -484,7 +497,18 @@ def test_workboard_request_performs_only_read_operations():
     assert requests == [("POST", "/entities/query"), ("GET", "/entities/ent_plan")]
 
 
-@pytest.mark.parametrize("change", [{"next_cursor": "more"}, {"total": 2}, {"complete": False}, {"has_more": True}])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"next_cursor": "more"},
+        {"next_cursor": ""},
+        {"next_cursor": False},
+        {"next_cursor": 0},
+        {"total": 2},
+        {"complete": False},
+        {"has_more": True},
+    ],
+)
 def test_relationship_completeness_signals_agree(change):
     envelope = {**_relationship_response(_lease_edge()), **change}
     with patch.object(srv, "_get", return_value=envelope):
@@ -492,23 +516,65 @@ def test_relationship_completeness_signals_agree(change):
     assert rels is None and error
 
 
-@pytest.mark.parametrize("fields", [None, {}, {"task_entity_id": "ent_other", "status": "awaiting_operator"}, {"task_entity_id": "ent_task", "status": "unrecognized"}, {"task_entity_id": "ent_task", "status": "awaiting_operator", "resolved_dispatched": "unreadable"}])
+@pytest.mark.parametrize(
+    "fields",
+    [
+        None,
+        {},
+        {"task_entity_id": "ent_other", "status": "awaiting_operator"},
+        {"task_entity_id": "ent_task", "status": "unrecognized"},
+        {
+            "task_entity_id": "ent_task",
+            "status": "awaiting_operator",
+            "resolved_dispatched": "unreadable",
+        },
+    ],
+)
 def test_checkpoint_semantic_coverage_is_unknown(fields):
-    checkpoint = {"entity_id": "ent_checkpoint", "entity_type": "checkpoint_brief", "snapshot": fields}
+    checkpoint = {
+        "entity_id": "ent_checkpoint",
+        "entity_type": "checkpoint_brief",
+        "snapshot": fields,
+    }
     gaps = []
-    with patch.object(srv, "_retrieve_page", return_value={"entities": [checkpoint], "total": 1}), patch.object(srv, "_get", return_value=checkpoint):
-        assert not srv._open_operator_checkpoint({}, {"operator_checkpoint_ref": "ent_checkpoint"}, "ent_task", gaps)
+    with (
+        patch.object(
+            srv, "_retrieve_page", return_value={"entities": [checkpoint], "total": 1}
+        ),
+        patch.object(srv, "_get", return_value=checkpoint),
+    ):
+        assert not srv._open_operator_checkpoint(
+            {}, {"operator_checkpoint_ref": "ent_checkpoint"}, "ent_task", gaps
+        )
     assert any("unknown" in gap for gap in gaps)
 
 
 def test_producer_session_is_discovered_without_digest_locator():
     from lib.daemon_runtime.session_finalize import build_run_session_payload
+
     payload = build_run_session_payload(task_id="ent_task", agent="role", run_key="run")
-    session = {**payload["entities"][1], "last_activity_at": datetime.now(timezone.utc).isoformat()}
+    session = {
+        **payload["entities"][1],
+        "last_activity_at": datetime.now(timezone.utc).isoformat(),
+    }
     edge = _lease_edge()
     edge["snapshot"]["runner_id"] = session["native_session_id"]
-    refers = {"relationship_type": "REFERS_TO", "source_entity_id": "ent_activity", "target_entity_id": "ent_task", "is_live": 1}
-    records = {"/entities/ent_task/relationships?expand_entities=true": _relationship_response(edge, refers), "/entities/ent_activity": {"entity_id": "ent_activity", "entity_type": "agent_session", "snapshot": session}}
+    refers = {
+        "relationship_type": "REFERS_TO",
+        "source_entity_id": "ent_activity",
+        "target_entity_id": "ent_task",
+        "is_live": 1,
+    }
+    records = {
+        "/entities/ent_task/relationships?expand_entities=true": _relationship_response(
+            edge, refers
+        ),
+        "/entities/ent_activity": {
+            "entity_id": "ent_activity",
+            "entity_type": "agent_session",
+            "snapshot": session,
+        },
+    }
     with patch.object(srv, "_get", side_effect=records.get):
         evidence = srv._live_execution_evidence({}, "ent_task")
     assert evidence["runner"] == session["native_session_id"]
@@ -520,21 +586,331 @@ def test_fallback_preserves_coverage_and_requested_history():
     import socket
     from mcp.types import CallToolRequest, CallToolRequestParams
     from lib.daemon_runtime.agent_loader import AgentLoader
-    result = {"session_key": "synthetic:inbox", "display_plan_id": "ent_plan", "rows": [], "table": "Empty table", "read_gaps": ["Supporting reads unknown"], "capability_gaps": ["Claimability unknown"], "history": {"tasks_claimed": [{"claim": "Historical work"}], "artifacts": ["Historical artifact"]}}
+
+    result = {
+        "session_key": "synthetic:inbox",
+        "display_plan_id": "ent_plan",
+        "rows": [],
+        "table": "Empty table",
+        "read_gaps": ["Supporting reads unknown"],
+        "capability_gaps": ["Claimability unknown"],
+        "history": {
+            "tasks_claimed": [{"claim": "Historical work"}],
+            "artifacts": ["Historical artifact"],
+        },
+    }
+
     async def call():
-        with patch.object(socket.socket, "connect", side_effect=AssertionError("Network denied")), patch.object(AgentLoader, "render_policy_prompt", return_value=""), patch.object(srv, "render_server_instructions", return_value="Synthetic"), patch.dict(srv.TOOL_HANDLERS, {"get_session_workboard": lambda args: result}):
+        with (
+            patch.object(
+                socket.socket, "connect", side_effect=AssertionError("Network denied")
+            ),
+            patch.object(AgentLoader, "render_policy_prompt", return_value=""),
+            patch.object(srv, "render_server_instructions", return_value="Synthetic"),
+            patch.dict(
+                srv.TOOL_HANDLERS, {"get_session_workboard": lambda args: result}
+            ),
+        ):
             server = srv.create_server()
-            response = await server.request_handlers[CallToolRequest](CallToolRequest(method="tools/call", params=CallToolRequestParams(name="get_session_workboard", arguments={"session_key": "synthetic:inbox", "display_plan_id": "ent_plan"})))
+            response = await server.request_handlers[CallToolRequest](
+                CallToolRequest(
+                    method="tools/call",
+                    params=CallToolRequestParams(
+                        name="get_session_workboard",
+                        arguments={
+                            "session_key": "synthetic:inbox",
+                            "display_plan_id": "ent_plan",
+                        },
+                    ),
+                )
+            )
             return response.root.content[0].text
+
     text = asyncio.run(call())
-    for expected in ["Supporting reads unknown", "Claimability unknown", "Historical work", "Historical artifact"]:
+    for expected in [
+        "Supporting reads unknown",
+        "Claimability unknown",
+        "Historical work",
+        "Historical artifact",
+    ]:
         assert expected in text
 
 
-@pytest.mark.parametrize("claims", [[{}], [{"task_entity_id": "invalid"}], [{"claim": "Historical", "task_entity_id": "invalid"}], [[], {"task_entity_id": "ent_task"}]])
+@pytest.mark.parametrize(
+    "claims",
+    [
+        [{}],
+        [{"task_entity_id": "invalid"}],
+        [{"claim": "Historical", "task_entity_id": "invalid"}],
+        [[], {"task_entity_id": "ent_task"}],
+    ],
+)
 def test_unrenderable_claims_report_partial_coverage(claims):
-    digest = {"entity_id": "ent_digest", "entity_type": "session_digest", "snapshot": {"session_key": "synthetic:inbox", "tasks_claimed": claims}}
-    with patch.object(srv, "_find_session_digest", return_value=digest), patch.object(srv, "_get", return_value={"entity_type": "plan", "snapshot": {"title": "Plan"}}), patch.object(srv, "_retrieve_page", return_value={"entities": [], "total": 0}):
-        result = srv._get_session_workboard("synthetic:inbox", "ent_plan", include_history=True)
+    digest = {
+        "entity_id": "ent_digest",
+        "entity_type": "session_digest",
+        "snapshot": {"session_key": "synthetic:inbox", "tasks_claimed": claims},
+    }
+    with (
+        patch.object(srv, "_find_session_digest", return_value=digest),
+        patch.object(
+            srv,
+            "_get",
+            return_value={"entity_type": "plan", "snapshot": {"title": "Plan"}},
+        ),
+        patch.object(srv, "_retrieve_page", return_value={"entities": [], "total": 0}),
+    ):
+        result = srv._get_session_workboard(
+            "synthetic:inbox", "ent_plan", include_history=True
+        )
     assert result["read_gaps"]
     assert result["history"]["tasks_claimed"] == claims
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "wrong_type",
+        "foreign_task",
+        "missing_task",
+        "conflicting_task",
+        "malformed_snapshot",
+        "unknown_state",
+        "resolved_open",
+        "malformed_resolution",
+        "missing_read",
+    ],
+)
+@pytest.mark.parametrize("direct", [False, True])
+def test_checkpoint_all_semantic_variants(variant, direct):
+    row = {
+        "entity_id": "ent_checkpoint",
+        "entity_type": "checkpoint_brief",
+        "snapshot": {"task_entity_id": "ent_task", "status": "awaiting_operator"},
+    }
+    fields = row["snapshot"]
+    if variant == "wrong_type":
+        row["entity_type"] = "task"
+    if variant == "foreign_task":
+        fields["task_entity_id"] = "ent_other"
+    if variant == "missing_task":
+        del fields["task_entity_id"]
+    if variant == "conflicting_task":
+        fields["task_id"] = "ent_other"
+    if variant == "malformed_snapshot":
+        row["snapshot"] = []
+    if variant == "unknown_state":
+        fields["status"] = "unknown"
+    if variant == "resolved_open":
+        fields["resolved_dispatched"] = True
+    if variant == "malformed_resolution":
+        fields["resolved_at"] = "unreadable"
+    if variant == "missing_read":
+        row = None
+    page = (
+        {"entities": [], "total": 0}
+        if direct
+        else ({"entities": [row], "total": 1} if row is not None else None)
+    )
+    gaps = []
+    with (
+        patch.object(srv, "_get", return_value=row),
+        patch.object(srv, "_retrieve_page", return_value=page),
+    ):
+        assert not srv._open_operator_checkpoint(
+            {},
+            {"operator_checkpoint_ref": "ent_checkpoint"} if direct else {},
+            "ent_task",
+            gaps,
+        )
+    assert any("unknown" in gap for gap in gaps)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "awaiting_operator",
+        "approved",
+        "rejected",
+        "approved_no_release",
+        "approved_requires_fresh_approval",
+    ],
+)
+def test_checkpoint_known_direct_state_controls(status):
+    row = {
+        "entity_type": "checkpoint_brief",
+        "snapshot": {"task_entity_id": "ent_task", "status": status},
+    }
+    gaps = []
+    with (
+        patch.object(srv, "_get", return_value=row),
+        patch.object(srv, "_retrieve_page", return_value={"entities": [], "total": 0}),
+    ):
+        found = srv._open_operator_checkpoint(
+            {}, {"operator_checkpoint_ref": "ent_checkpoint"}, "ent_task", gaps
+        )
+    assert found == (status == "awaiting_operator")
+    assert not gaps
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "no_link",
+        "wrong_trigger",
+        "wrong_runner",
+        "stale",
+        "missing",
+        "partial_relationships",
+        "duplicate_session",
+    ],
+)
+def test_actual_producer_discovery_negative_controls(variant):
+    from lib.daemon_runtime.session_finalize import build_run_session_payload
+
+    payload = build_run_session_payload(task_id="ent_task", agent="role", run_key="run")
+    session = {
+        **payload["entities"][1],
+        "last_activity_at": datetime.now(timezone.utc).isoformat(),
+    }
+    edge = _lease_edge()
+    edge["snapshot"]["runner_id"] = session["native_session_id"]
+    refs = [_activity_edge()]
+    if variant == "no_link":
+        refs = []
+    if variant == "wrong_trigger":
+        session["trigger_ref"] = "ent_other"
+    if variant == "wrong_runner":
+        session["native_session_id"] = "other"
+    if variant == "stale":
+        session["last_activity_at"] = "2020-01-01T00:00:00Z"
+    if variant == "duplicate_session":
+        refs.append({**_activity_edge(), "source_entity_id": "ent_second"})
+    relationships = _relationship_response(edge, *refs)
+    if variant == "partial_relationships":
+        relationships["next_cursor"] = "more"
+    record = {"entity_type": "agent_session", "snapshot": session}
+    records = {
+        "/entities/ent_task/relationships?expand_entities=true": relationships,
+        "/entities/ent_activity": record,
+        "/entities/ent_second": record,
+    }
+    if variant == "missing":
+        del records["/entities/ent_activity"]
+    gaps = []
+    with patch.object(srv, "_get", side_effect=records.get):
+        assert not srv._live_execution_evidence({}, "ent_task", read_gaps=gaps)
+    assert gaps
+
+
+def test_actual_producer_through_tool_and_bundled_view(tmp_path):
+    import asyncio
+    import socket
+    from mcp.types import CallToolRequest, CallToolRequestParams
+    from lib.daemon_runtime.agent_loader import AgentLoader
+    from lib.daemon_runtime.session_finalize import build_run_session_payload
+
+    payload = build_run_session_payload(task_id="ent_task", agent="role", run_key="run")
+    session = {
+        **payload["entities"][1],
+        "last_activity_at": datetime.now(timezone.utc).isoformat(),
+    }
+    lease = _lease_edge()
+    lease["snapshot"]["runner_id"] = session["native_session_id"]
+    parent = {
+        "relationship_type": "PART_OF",
+        "source_entity_id": "ent_task",
+        "target_entity_id": "ent_plan",
+        "is_live": 1,
+    }
+    incoming = [lease, _activity_edge()]
+    records = {
+        "/entities/ent_task": {
+            "entity_type": "task",
+            "snapshot": {
+                "title": "Current producer-bound task",
+                "status": "executing",
+                "admission_class": "workflow_entering",
+            },
+        },
+        "/entities/ent_activity": {"entity_type": "agent_session", "snapshot": session},
+        "/entities/ent_plan": {"entity_type": "plan", "snapshot": {"title": "Plan"}},
+        "/entities/ent_task/relationships?expand_entities=true": {
+            "outgoing": [parent],
+            "incoming": incoming,
+            "relationships": [parent, *incoming],
+        },
+        "/entities/ent_plan/relationships?expand_entities=true": _relationship_response(),
+    }
+    digest = {
+        "entity_id": "ent_digest",
+        "entity_type": "session_digest",
+        "snapshot": {
+            "session_key": "synthetic:inbox",
+            "tasks_claimed": [{"task_entity_id": "ent_task"}],
+            "artifacts": ["Historical artifact"],
+        },
+    }
+
+    def page(kind, **kwargs):
+        return (
+            {"entities": [digest], "total": 1}
+            if kind == "session_digest"
+            else {"entities": [], "total": 0}
+        )
+
+    async def read():
+        with (
+            patch.object(
+                socket.socket, "connect", side_effect=AssertionError("Network denied")
+            ),
+            patch.object(AgentLoader, "render_policy_prompt", return_value=""),
+            patch.object(srv, "render_server_instructions", return_value="Synthetic"),
+            patch.object(srv, "_get", side_effect=records.get),
+            patch.object(srv, "_retrieve_page", side_effect=page),
+        ):
+            server = srv.create_server()
+            response = await server.request_handlers[CallToolRequest](
+                CallToolRequest(
+                    method="tools/call",
+                    params=CallToolRequestParams(
+                        name="get_session_workboard",
+                        arguments={
+                            "session_key": "synthetic:inbox",
+                            "display_plan_id": "ent_plan",
+                            "include_history": True,
+                        },
+                    ),
+                )
+            )
+            return response.root
+
+    result = asyncio.run(read())
+    assert not result.isError
+    data = result.structuredContent
+    row = data["rows"][1]
+    assert (
+        row["state"] == "Working now" and row["runner"] == session["native_session_id"]
+    )
+    assert row["planning_ascent"][0]["entity_id"] == "ent_plan"
+    assert not data["read_gaps"]
+    assert "Claimability" not in row["state"]
+    assert "Canonical claimability" in result.content[0].text
+    node = shutil.which("node")
+    if node:
+        fixture = tmp_path / "synthetic-result.json"
+        fixture.write_text(json.dumps(data))
+        here = Path(__file__).parent
+        view = subprocess.run(
+            [
+                node,
+                str(here / "test_workboard_bridge.cjs"),
+                str(here / "workboard.html"),
+                str(fixture),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert view.returncode == 0, view.stdout + view.stderr
+        assert "cancellation and refresh passed" in view.stdout

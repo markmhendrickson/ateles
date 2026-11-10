@@ -714,11 +714,14 @@ def _workboard_relationships(
         and not data.get("next_cursor")
     )
     contradictory = (
-        bool(data.get("next_cursor"))
+        data.get("next_cursor") is not None
         or ("total" in data and (type(total) is not int or total != len(rels)))
         or ("complete" in data and data["complete"] is not True)
         or ("has_more" in data and data["has_more"] is not False)
-        or ("offset" in data and (type(data["offset"]) is not int or data["offset"] != 0))
+        or (
+            "offset" in data
+            and (type(data["offset"]) is not int or data["offset"] != 0)
+        )
         or (("outgoing" in data or "incoming" in data) and not full_arrays)
     )
     if contradictory or not (full_arrays or counted_page):
@@ -732,10 +735,13 @@ def _workboard_relationships(
 
 
 def _live_execution_evidence(
-    board: dict, task_id: str | None = None, cache: dict | None = None,
+    board: dict,
+    task_id: str | None = None,
+    cache: dict | None = None,
     read_gaps: list[str] | None = None,
 ) -> dict:
     """Join a held canonical LEASE to its producer-linked recent runner session."""
+
     def unknown(message):
         if read_gaps is not None:
             read_gaps.append(message + "; current execution is unknown")
@@ -750,7 +756,10 @@ def _live_execution_evidence(
     now = datetime.now(timezone.utc)
     held = []
     for rel in rels:
-        if rel.get("relationship_type") != "LEASE" or rel.get("target_entity_id") != task_id:
+        if (
+            rel.get("relationship_type") != "LEASE"
+            or rel.get("target_entity_id") != task_id
+        ):
             continue
         fields = rel.get("snapshot")
         if not isinstance(fields, dict):
@@ -777,18 +786,32 @@ def _live_execution_evidence(
         return unknown("The held lease lacks its holder or runner")
     # session_finalize.build_run_session_payload emits REFERS_TO and trigger_ref,
     # not a task_id field on agent_session. Discover from that canonical join.
-    candidates = list(dict.fromkeys(
-        r.get("source_entity_id") for r in rels
-        if r.get("relationship_type") == "REFERS_TO" and r.get("target_entity_id") == task_id
-    ))
+    candidates = list(
+        dict.fromkeys(
+            r.get("source_entity_id")
+            for r in rels
+            if r.get("relationship_type") == "REFERS_TO"
+            and r.get("target_entity_id") == task_id
+        )
+    )
     refs = board.get("live_execution_evidence")
     locator = refs.get("activity_ref") if isinstance(refs, dict) else None
-    if locator is not None and (not isinstance(locator, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", locator)):
+    if locator is not None and (
+        not isinstance(locator, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", locator)
+    ):
         return unknown("The recorded activity locator is malformed")
     if locator and locator not in candidates:
         return unknown("The recorded activity has no task relationship")
-    if any(not isinstance(ref, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", ref) for ref in candidates) or len(candidates) > 50:
-        return unknown("Activity relationship coverage is malformed or exceeds the read bound")
+    if (
+        any(
+            not isinstance(ref, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", ref)
+            for ref in candidates
+        )
+        or len(candidates) > 50
+    ):
+        return unknown(
+            "Activity relationship coverage is malformed or exceeds the read bound"
+        )
     matched = []
     incomplete = False
     for reference in candidates:
@@ -807,38 +830,65 @@ def _live_execution_evidence(
             continue
         if activity.get("native_session_id") != runner:
             continue
+        now = datetime.now(timezone.utc)
         observed = _parse_timestamp(activity.get("last_activity_at"))
-        if (activity.get("trigger_ref") != task_id
+        if (
+            activity.get("trigger_ref") != task_id
             or activity.get("kind") not in {"autonomous", "subagent"}
-            or not observed or not max(claimed, now - timedelta(minutes=5)) <= observed <= now):
+            or not observed
+            or not max(claimed, now - timedelta(minutes=5)) <= observed <= now
+        ):
             incomplete = True
             continue
         matched.append(reference)
     if incomplete or len(matched) != 1:
-        return unknown("A unique recent activity record for the held runner could not be verified")
+        return unknown(
+            "A unique recent activity record for the held runner could not be verified"
+        )
     if _parse_timestamp(lease.get("expires_at")) <= datetime.now(timezone.utc):
         return unknown("The lease expired during the read")
-    return {"lease_holder": holder, "runner": runner,
-            "lease_ref": rel.get("relationship_key") or rel.get("id"), "activity_ref": matched[0]}
+    return {
+        "lease_holder": holder,
+        "runner": runner,
+        "lease_ref": rel.get("relationship_key") or rel.get("id"),
+        "activity_ref": matched[0],
+    }
 
 
-def _open_operator_checkpoint(snapshot: dict, board: dict, task_id: str | None = None,
-                              read_gaps: list[str] | None = None) -> bool:
+def _open_operator_checkpoint(
+    snapshot: dict,
+    board: dict,
+    task_id: str | None = None,
+    read_gaps: list[str] | None = None,
+) -> bool:
     """Validate every returned brief; a malformed read cannot prove absence."""
     from lib.daemon_runtime.gating import (
-        CHECKPOINT_APPROVED_STATES, CHECKPOINT_REJECTED_STATES,
-        CHECKPOINT_APPROVED_NO_RELEASE, CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+        CHECKPOINT_APPROVED_STATES,
+        CHECKPOINT_REJECTED_STATES,
+        CHECKPOINT_APPROVED_NO_RELEASE,
+        CHECKPOINT_REQUIRES_FRESH_APPROVAL,
     )
-    closed = CHECKPOINT_APPROVED_STATES | CHECKPOINT_REJECTED_STATES | {
-        CHECKPOINT_APPROVED_NO_RELEASE, CHECKPOINT_REQUIRES_FRESH_APPROVAL,
-    }
+
+    closed = (
+        CHECKPOINT_APPROVED_STATES
+        | CHECKPOINT_REJECTED_STATES
+        | {
+            CHECKPOINT_APPROVED_NO_RELEASE,
+            CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+        }
+    )
+
     def unknown(message):
         if read_gaps is not None:
             read_gaps.append(message + "; operator attention is unknown")
 
-    def inspect_record(record, *, filtered=False):
+    def inspect_record(record, *, filtered=False, reference=None):
         if not isinstance(record, dict) or _entity_type(record) != "checkpoint_brief":
             unknown("A checkpoint record could not be read as a checkpoint brief")
+            return False
+        identity = record.get("entity_id") or record.get("id")
+        if identity is not None and (not isinstance(identity, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", identity) or (reference is not None and identity != reference)):
+            unknown("A checkpoint identity is inconsistent with the requested record")
             return False
         fields = record.get("snapshot")
         if not isinstance(fields, dict):
@@ -848,33 +898,62 @@ def _open_operator_checkpoint(snapshot: dict, board: dict, task_id: str | None =
         status = fields.get("status")
         dispatched = fields.get("resolved_dispatched")
         resolved = fields.get("resolved_at")
-        if (not bindings or any(value != task_id for value in bindings)
-            or not isinstance(status, str) or status not in closed | {"awaiting_operator"}
+        if (
+            not bindings
+            or any(value != task_id for value in bindings)
+            or not isinstance(status, str)
+            or status not in closed | {"awaiting_operator"}
             or (dispatched is not None and type(dispatched) is not bool)
             or (resolved is not None and _parse_timestamp(resolved) is None)
             or (filtered and status != "awaiting_operator")
-            or (status == "awaiting_operator" and (dispatched is True or resolved is not None))):
+            or (
+                status == "awaiting_operator"
+                and (dispatched is True or resolved is not None)
+            )
+        ):
             unknown("A checkpoint has inconsistent task, state or resolution fields")
             return False
         return status == "awaiting_operator"
 
     found = False
-    for reference in dict.fromkeys(value for value in (
-        snapshot.get("operator_checkpoint_ref"), snapshot.get("checkpoint_ref"),
-        snapshot.get("gate_ref"), board.get("operator_checkpoint_ref")) if value is not None and isinstance(value, str)):
+    for reference in dict.fromkeys(
+        value
+        for value in (
+            snapshot.get("operator_checkpoint_ref"),
+            snapshot.get("checkpoint_ref"),
+            snapshot.get("gate_ref"),
+            board.get("operator_checkpoint_ref"),
+        )
+        if value is not None and isinstance(value, str)
+    ):
         if not re.fullmatch(r"ent_[A-Za-z0-9_]+", reference):
             unknown("A checkpoint locator is malformed")
             continue
-        found = inspect_record(_get(f"/entities/{reference}")) or found
-    for source, keys in ((snapshot, ("operator_checkpoint_ref", "checkpoint_ref", "gate_ref")), (board, ("operator_checkpoint_ref",))):
-        if any(k in source and source[k] is not None and not isinstance(source[k], str) for k in keys):
+        found = inspect_record(_get(f"/entities/{reference}"), reference=reference) or found
+    for source, keys in (
+        (snapshot, ("operator_checkpoint_ref", "checkpoint_ref", "gate_ref")),
+        (board, ("operator_checkpoint_ref",)),
+    ):
+        if any(
+            k in source and source[k] is not None and not isinstance(source[k], str)
+            for k in keys
+        ):
             unknown("A checkpoint locator is malformed")
     if not task_id:
         return found
-    page = _retrieve_page("checkpoint_brief", snapshot_filters={
-        "task_entity_id": {"op": "eq", "value": task_id},
-        "status": {"op": "eq", "value": "awaiting_operator"}}, limit=50)
-    malformed, partial = _filtered_read_problem(page, "this task's open checkpoints", 50) if page is not None else ("unavailable", None)
+    page = _retrieve_page(
+        "checkpoint_brief",
+        snapshot_filters={
+            "task_entity_id": {"op": "eq", "value": task_id},
+            "status": {"op": "eq", "value": "awaiting_operator"},
+        },
+        limit=50,
+    )
+    malformed, partial = (
+        _filtered_read_problem(page, "this task's open checkpoints", 50)
+        if page is not None
+        else ("unavailable", None)
+    )
     if malformed:
         unknown(f"Checkpoints for {task_id} could not be read completely")
         return found
@@ -1003,11 +1082,44 @@ def _claim_row(claim: dict, planning_cache: dict | None = None) -> dict | None:
     board = _claim_workboard(claim)
     live_record: dict | None = None
     read_gaps: list[str] = []
-    if "task_entity_id" in claim and (not isinstance(claim["task_entity_id"], str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", claim["task_entity_id"])):
-        read_gaps.append("The explicit task locator is malformed; current task state is unknown")
+    if "task_entity_id" in claim and (
+        not isinstance(claim["task_entity_id"], str)
+        or not re.fullmatch(r"ent_[A-Za-z0-9_]+", claim["task_entity_id"])
+    ):
+        read_gaps.append(
+            "The explicit task locator is malformed; current task state is unknown"
+        )
         evidence = []
-    if "evidence_pointers" in claim and (not isinstance(claim["evidence_pointers"], list) or any(not isinstance(v, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", v) for v in claim["evidence_pointers"])):
-        read_gaps.append("Some evidence locators are malformed; evidence coverage is partial")
+    if "evidence_pointers" in claim and (
+        not isinstance(claim["evidence_pointers"], list)
+        or any(
+            not isinstance(v, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", v)
+            for v in claim["evidence_pointers"]
+        )
+    ):
+        read_gaps.append(
+            "Some evidence locators are malformed; evidence coverage is partial"
+        )
+    if "workboard" in claim and not isinstance(claim["workboard"], dict):
+        read_gaps.append(
+            "The historical workboard metadata is malformed; evidence coverage is partial"
+        )
+    refs = board.get("live_execution_evidence")
+    if refs is not None and not isinstance(refs, dict):
+        read_gaps.append(
+            "The activity evidence metadata is malformed; execution coverage is unknown"
+        )
+    elif (
+        isinstance(refs, dict)
+        and "activity_ref" in refs
+        and (
+            not isinstance(refs["activity_ref"], str)
+            or not re.fullmatch(r"ent_[A-Za-z0-9_]+", refs["activity_ref"])
+        )
+    ):
+        read_gaps.append(
+            "The recorded activity locator is malformed; execution coverage is unknown"
+        )
     task_id: str | None = None
     for entity_id in evidence:
         candidate = _get(f"/entities/{entity_id}")
@@ -1029,6 +1141,12 @@ def _claim_row(claim: dict, planning_cache: dict | None = None) -> dict | None:
             )
     record_kind = _entity_type(live_record)
     snapshot = _as_snapshot(live_record)
+    if live_record is not None and not isinstance(live_record.get("snapshot"), dict):
+        read_gaps.append(
+            "The current record snapshot is malformed; current state is unknown"
+        )
+        live_record = None
+        snapshot = {}
     live_status = _text(snapshot.get("status"))
     status = (
         live_status
@@ -1304,22 +1422,48 @@ def _get_session_workboard(
             else [],
         }
     # Text-only hosts receive the same coverage, lineage and requested history.
+    result["table"] = _format_workboard_result(result)
     return result
 
 
 def _format_workboard_result(result: dict) -> str:
     if result.get("error"):
         return json.dumps(result, indent=2, default=str)
-    sections = [str(result.get("table") or _format_workboard(result.get("rows", [])))]
-    sections.append("Display context (not authority): session " + str(result.get("session_key", "unknown")) + "; Primary plan " + str(result.get("display_plan_id", "unknown")))
-    for key, label in (("read_gaps", "Read coverage"), ("capability_gaps", "Adapter limits")):
+    sections = [
+        _format_workboard(result["rows"])
+        if "rows" in result
+        else str(result.get("table", ""))
+    ]
+    sections.append(
+        "Display context (not authority): session "
+        + str(result.get("session_key", "unknown"))
+        + "; Primary plan "
+        + str(result.get("display_plan_id", "unknown"))
+    )
+    for key, label in (
+        ("read_gaps", "Read coverage"),
+        ("capability_gaps", "Adapter limits"),
+    ):
         if result.get(key):
-            sections.append(label + ":\n" + "\n".join("- " + str(gap) for gap in result[key]))
+            sections.append(
+                label + ":\n" + "\n".join("- " + str(gap) for gap in result[key])
+            )
     for row in result.get("rows", []):
         if row.get("planning_ascent"):
-            sections.append("Planning context for " + str(row.get("work")) + ": " + " > ".join(str(parent.get("entity_type")) + ": " + str(parent.get("title")) for parent in row["planning_ascent"]))
+            sections.append(
+                "Planning context for "
+                + str(row.get("work"))
+                + ": "
+                + " > ".join(
+                    str(parent.get("entity_type")) + ": " + str(parent.get("title"))
+                    for parent in row["planning_ascent"]
+                )
+            )
     if "history" in result:
-        sections.append("Requested cumulative session history (not current status):\n" + json.dumps(result["history"], indent=2, default=str))
+        sections.append(
+            "Requested cumulative session history (not current status):\n"
+            + json.dumps(result["history"], indent=2, default=str)
+        )
     return "\n\n".join(sections)
 
 

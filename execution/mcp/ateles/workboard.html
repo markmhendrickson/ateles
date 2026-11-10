@@ -24,7 +24,14 @@
   const el = id => document.getElementById(id);
   const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
   const strings = value => Array.isArray(value) && value.every(v => typeof v === "string");
-  const timestamp = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
+  function timestamp(value) {
+    if(typeof value!=="string")return false;
+    const match=value.match(/^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/);
+    if(!match || !Number.isFinite(Date.parse(value)))return false;
+    const year=Number(match[1]),month=Number(match[2]),day=Number(match[3]);
+    const leap=year%4===0 && (year%100!==0 || year%400===0);
+    return month>=1 && month<=12 && day>=1 && day<=[31,leap?29:28,31,30,31,30,31,31,30,31,30,31][month-1];
+  }
   const entityId = value => typeof value === "string" && /^ent_[A-Za-z0-9_]+$/.test(value);
   let nextId = 1, args = null, view = null, ready = false, hostTools = false;
   let generation = 0, notificationPending = false, busy = false;
@@ -49,8 +56,17 @@
     const gaps=view ? [...view.read_gaps,...view.capability_gaps].join("\n") : "";
     notice(message+previous+(gaps?"\nPrevious read limits: "+gaps:""),true);size();
   }
+  function jsonValue(value, ancestors=new Set(), depth=0) {
+    if (depth>32) return false;
+    if (value===null || typeof value==="string" || typeof value==="boolean") return true;
+    if (typeof value==="number") return Number.isFinite(value);
+    if (!object(value) && !Array.isArray(value) || ancestors.has(value)) return false;
+    ancestors.add(value);
+    const valid=Object.values(value).every(child=>jsonValue(child,ancestors,depth+1));
+    ancestors.delete(value);return valid;
+  }
   function validate(data) {
-    if (!object(data) || data.error || !args || data.session_key!==args.session_key || data.display_plan_id!==args.display_plan_id || !timestamp(data.observed_at) || !Array.isArray(data.rows) || !strings(data.read_gaps) || !strings(data.capability_gaps)) return false;
+    if (!jsonValue(data) || !object(data) || data.error || !args || data.session_key!==args.session_key || data.display_plan_id!==args.display_plan_id || !timestamp(data.observed_at) || !Array.isArray(data.rows) || !strings(data.read_gaps) || !strings(data.capability_gaps)) return false;
     if (["harness","digest_id","refresh_rule","table"].some(k=>data[k]!=null && typeof data[k]!=="string")) return false;
     if (data.session_coverage!==undefined && (!object(data.session_coverage) || Object.entries(data.session_coverage).some(([key,value])=>["requested","complete"].includes(key)?typeof value!=="boolean":["returned","limit"].includes(key)?!Number.isInteger(value)||value<0:true))) return false;
     if ((args.include_history || data.history!==undefined) && (!object(data.history) || !Array.isArray(data.history.tasks_claimed) || !Array.isArray(data.history.artifacts))) return false;
@@ -105,7 +121,7 @@
   }
   function cancelPending(message){for(const [id,p] of pending)if(p.method==="tools/call"){clearTimeout(p.timer);pending.delete(id);p.reject(new Error(message));}}
   function setArgs(value){
-    if(!object(value) || typeof value.session_key!=="string" || !value.session_key.trim() || value.session_key.length>256 || !entityId(value.display_plan_id) || ["include_history","include_sessions"].some(k=>value[k]!==undefined && typeof value[k]!=="boolean")){failure("The workboard input is invalid.");return;}
+    if(!object(value) || typeof value.session_key!=="string" || !value.session_key.trim() || value.session_key.length>256 || !entityId(value.display_plan_id) || ["include_history","include_sessions"].some(k=>value[k]!==undefined && typeof value[k]!=="boolean")){generation++;notificationPending=false;cancelPending("Invalid input");failure("The workboard input is invalid.");return;}
     const candidate={session_key:value.session_key,display_plan_id:value.display_plan_id,include_history:value.include_history===true,include_sessions:value.include_sessions===true};
     if(args && (candidate.session_key!==args.session_key || candidate.display_plan_id!==args.display_plan_id || candidate.include_history!==args.include_history)){generation++;notificationPending=false;cancelPending("Scope changed");failure("A different workboard scope was rejected. Open a new view for that scope.");return;}
     args=candidate;generation++;notificationPending=true;cancelPending("Read superseded");busy=false;enabled();if(view)failure("A new read is pending.");
@@ -121,7 +137,7 @@
   });
   async function refresh(){
     if(!args||!ready||!hostTools||el("refresh").disabled)return;
-    const version=++generation, requestArgs={...args};notificationPending=false;busy=true;enabled();el("status").textContent="Reading current records…";
+    const version=++generation, requestArgs={...args};cancelPending("Read superseded");notificationPending=false;busy=true;enabled();el("status").textContent="Reading current records…";
     try{const result=await request("tools/call",{name:"get_session_workboard",arguments:requestArgs});applyResult(result,version);}
     catch(e){if(version===generation)failure(e.message);}
     finally{if(version===generation){busy=false;enabled();}}
