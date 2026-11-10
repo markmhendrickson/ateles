@@ -546,14 +546,27 @@ def _correct(
 WORKBOARD_RESOURCE_MIME = "text/html;profile=mcp-app"
 _WORKBOARD_HTML_PATH = Path(__file__).with_name("workboard.html")
 _WORKBOARD_HTML = _WORKBOARD_HTML_PATH.read_text()
-WORKBOARD_RESOURCE_URI = "ui://ateles/workboard-" + hashlib.sha256(_WORKBOARD_HTML.encode()).hexdigest()[:16] + ".html"
-_WORKBOARD_UI_META = {"csp": {"connectDomains": [], "resourceDomains": [], "frameDomains": []}, "prefersBorder": True}
+WORKBOARD_RESOURCE_URI = (
+    "ui://ateles/workboard-"
+    + hashlib.sha256(_WORKBOARD_HTML.encode()).hexdigest()[:16]
+    + ".html"
+)
+_WORKBOARD_UI_META = {
+    "csp": {"connectDomains": [], "resourceDomains": [], "frameDomains": []},
+    "prefersBorder": True,
+}
 
 
 def _workboard_resource() -> Resource:
-    return Resource(uri=WORKBOARD_RESOURCE_URI, name="ateles_workboard", title="Ateles workboard",
-                    description="Read-only derived work and session history", mimeType=WORKBOARD_RESOURCE_MIME,
-                    **{"_meta": {"ui": _WORKBOARD_UI_META}})
+    return Resource(
+        uri=WORKBOARD_RESOURCE_URI,
+        name="ateles_workboard",
+        title="Ateles workboard",
+        description="Read-only derived work and session history",
+        mimeType=WORKBOARD_RESOURCE_MIME,
+        **{"_meta": {"ui": _WORKBOARD_UI_META}},
+    )
+
 
 # This is an on-demand derived read, deliberately not another record.  A
 # session_digest is summarized history, never canonical live truth.  The
@@ -562,8 +575,15 @@ def _workboard_resource() -> Resource:
 # or separately-written board would go stale in exactly the direction an
 # operator needs it to be current.
 _TERMINAL_TASK_STATES = {
-    "done", "completed", "verified", "closed", "failed", "declined",
-    "superseded", "cancelled", "canceled",
+    "done",
+    "completed",
+    "verified",
+    "closed",
+    "failed",
+    "declined",
+    "superseded",
+    "cancelled",
+    "canceled",
 }
 _WORKBOARD_ORDER = {
     "display-plan": 0,
@@ -598,28 +618,52 @@ def _entity_type(entity: dict | None) -> str | None:
 def _evidence_entity_ids(claim: dict) -> list[str]:
     """Resolve only explicit entity locators; prose is not a live-state source."""
     raw = claim.get("evidence_pointers")
-    if not isinstance(raw, list):
-        return []
-    return list(dict.fromkeys(pointer for pointer in raw if isinstance(pointer, str) and re.fullmatch(r"ent_[A-Za-z0-9_]+", pointer)))
+    raw = raw if isinstance(raw, list) else []
+    explicit_task = claim.get("task_entity_id")
+    if isinstance(explicit_task, str):
+        raw = [explicit_task, *raw]
+    return list(
+        dict.fromkeys(
+            pointer
+            for pointer in raw
+            if isinstance(pointer, str) and re.fullmatch(r"ent_[A-Za-z0-9_]+", pointer)
+        )
+    )
 
 
 def _find_session_digest(session_key: str) -> dict | None:
     """Find by stored session_key, not by the current harness or worktree."""
-    page = _retrieve_page("session_digest", snapshot_filters={
-        "session_key": {"op": "eq", "value": session_key}}, limit=2)
+    page = _retrieve_page(
+        "session_digest",
+        snapshot_filters={"session_key": {"op": "eq", "value": session_key}},
+        limit=2,
+    )
     if page is None:
-        raise ValueError(_describe_transport_error() or "session_digest query could not be read")
+        raise ValueError(
+            _describe_transport_error() or "session_digest query could not be read"
+        )
     rows = page.get("entities") if isinstance(page, dict) else None
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError("session_digest query returned malformed records")
     total = page.get("total")
-    if not isinstance(total, int) or isinstance(total, bool) or total != len(rows) or page.get("next_cursor"):
+    if (
+        not isinstance(total, int)
+        or isinstance(total, bool)
+        or total != len(rows)
+        or page.get("next_cursor")
+    ):
         raise ValueError("session_digest query coverage is incomplete or ambiguous")
-    matches = [row for row in rows if isinstance(row, dict)
-               and _entity_type(row) == "session_digest"
-               and _as_snapshot(row).get("session_key") == session_key]
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and _entity_type(row) == "session_digest"
+        and _as_snapshot(row).get("session_key") == session_key
+    ]
     if len(matches) > 1:
-        raise ValueError("session_key identifies multiple digests; select an unambiguous lineage")
+        raise ValueError(
+            "session_key identifies multiple digests; select an unambiguous lineage"
+        )
     if len(matches) != len(rows):
         raise ValueError("session_digest query returned a different native lineage")
     return matches[0] if matches else None
@@ -639,56 +683,121 @@ def _parse_timestamp(value: Any) -> datetime | None:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else None
 
 
-def _live_execution_evidence(board: dict, task_id: str | None = None) -> dict:
-    """Return a live lease/activity reading, never infer it from task status.
+def _workboard_relationships(
+    entity_id: str, cache: dict
+) -> tuple[list[dict] | None, str | None]:
+    path = f"/entities/{entity_id}/relationships?expand_entities=true"
+    if path not in cache:
+        cache[path] = _get(path)
+    data = cache[path]
+    if not isinstance(data, dict) or not isinstance(data.get("relationships"), list):
+        return None, f"Relationships for {entity_id} could not be read"
+    rels = data["relationships"]
+    if any(not isinstance(r, dict) for r in rels):
+        return None, f"Relationships for {entity_id} are malformed"
+    # The owning REST endpoint returns complete outgoing/incoming arrays,
+    # not a paginated collection with a `total` (Neotoma actions.ts).
+    outgoing, incoming = data.get("outgoing"), data.get("incoming")
+    full_arrays = (
+        isinstance(outgoing, list)
+        and isinstance(incoming, list)
+        and outgoing + incoming == rels
+    )
+    total = data.get("total")
+    counted_page = (
+        isinstance(total, int)
+        and not isinstance(total, bool)
+        and total == len(rels)
+        and not data.get("next_cursor")
+    )
+    if not (full_arrays or counted_page):
+        return None, f"Relationship coverage for {entity_id} is incomplete or unknown"
+    if any(
+        type(r.get("is_live")) not in (bool, int) or r.get("is_live") not in (0, 1)
+        for r in rels
+    ):
+        return None, f"Relationship liveness for {entity_id} is unknown"
+    return [r for r in rels if r["is_live"] == 1], None
 
-    The digest may point at a reconciler-produced lease and activity record,
-    but the records themselves are re-read here.  A task's stored
-    ``in_progress``/``executing`` value is intentionally insufficient: task
-    status has no lease semantics and can outlive a killed runner.
-    """
+
+def _live_execution_evidence(
+    board: dict, task_id: str | None = None, cache: dict | None = None
+) -> dict:
+    """Read the canonical LEASE edge and recent activity for its exact runner."""
     refs = board.get("live_execution_evidence")
-    if not isinstance(refs, dict):
+    if not isinstance(refs, dict) or not task_id:
         return {}
-    lease_ref = _text(refs.get("lease_ref"))
     activity_ref = _text(refs.get("activity_ref"))
-    if not (lease_ref and activity_ref and re.fullmatch(r"ent_[A-Za-z0-9_]+", lease_ref) and re.fullmatch(r"ent_[A-Za-z0-9_]+", activity_ref)):
+    if not activity_ref or not re.fullmatch(r"ent_[A-Za-z0-9_]+", activity_ref):
         return {}
-    lease_record = _get(f"/entities/{lease_ref}")
-    activity_record = _get(f"/entities/{activity_ref}")
-    lease = _as_snapshot(lease_record)
-    activity = _as_snapshot(activity_record)
-    holder = _text(lease.get("holder")) or _text(lease.get("lease_holder"))
-    runner = _text(lease.get("runner_id"))
-    expires_at = _parse_timestamp(lease.get("expires_at"))
-    observed_at = _parse_timestamp(activity.get("last_activity_at") or activity.get("observed_at") or activity.get("activity_at"))
+    rels, error = _workboard_relationships(task_id, cache if cache is not None else {})
+    if error or rels is None:
+        return {}
     now = datetime.now(timezone.utc)
-    if not (task_id and _entity_type(lease_record) == "lease"
-            and lease.get("status") == "held"
-            and (lease.get("task_id") or lease.get("task_entity_id")) == task_id
-            and holder and runner and expires_at and expires_at > now
-            and observed_at and now - timedelta(minutes=5) <= observed_at <= now):
+    held = []
+    for rel in rels:
+        if (
+            rel.get("relationship_type") != "LEASE"
+            or rel.get("target_entity_id") != task_id
+        ):
+            continue
+        fields = _as_snapshot(rel)
+        claimed = _parse_timestamp(fields.get("claimed_at"))
+        expires = _parse_timestamp(fields.get("expires_at"))
+        returned = fields.get("returned_at")
+        if not (claimed and expires and claimed <= now and claimed < expires):
+            return {}
+        if returned is not None:
+            ended = _parse_timestamp(returned)
+            if not ended or not claimed <= ended <= now:
+                return {}
+            continue
+        if expires > now:
+            held.append((rel, fields, claimed))
+    if len(held) != 1:
         return {}
-    # Activity must identify the same runner when it names one.  If it does
-    # not, it is not evidence that this held lease is doing work.
-    observed_runner = _text(activity.get("runner_id") or activity.get("native_session_id"))
-    if (_entity_type(activity_record) not in {"agent_session", "harness_event"}
-            or (activity.get("task_id") or activity.get("task_entity_id")) != task_id
-            or observed_runner != runner
-            or (_entity_type(activity_record) == "agent_session" and activity.get("kind") == "interactive")):
+    rel, lease, claimed = held[0]
+    holder = _text(rel.get("source_entity_id"))
+    runner = _text(lease.get("runner_id"))
+    activity_record = _get(f"/entities/{activity_ref}")
+    activity = _as_snapshot(activity_record)
+    now = datetime.now(timezone.utc)
+    observed_at = _parse_timestamp(
+        activity.get("last_activity_at") or activity.get("observed_at")
+    )
+    observed_runner = _text(
+        activity.get("native_session_id") or activity.get("runner_id")
+    )
+    if (
+        _parse_timestamp(lease.get("expires_at")) <= now
+        or not holder
+        or not re.fullmatch(r"ent_[A-Za-z0-9_]+", holder)
+        or not runner
+        or _entity_type(activity_record) != "agent_session"
+        or activity.get("kind") not in {"autonomous", "subagent"}
+        or (activity.get("task_id") or activity.get("task_entity_id")) != task_id
+        or observed_runner != runner
+        or not observed_at
+        or not max(claimed, now - timedelta(minutes=5)) <= observed_at <= now
+    ):
         return {}
     return {
         "lease_holder": holder,
         "runner": runner,
-        "lease_ref": lease_ref,
+        "lease_ref": rel.get("relationship_key") or rel.get("id"),
         "activity_ref": activity_ref,
     }
 
 
-def _open_operator_checkpoint(snapshot: dict, board: dict, task_id: str | None = None) -> bool:
+def _open_operator_checkpoint(
+    snapshot: dict,
+    board: dict,
+    task_id: str | None = None,
+    read_gaps: list[str] | None = None,
+) -> bool:
     """Operator attention is derived from a currently open checkpoint/gate."""
     refs = (
         _text(snapshot.get("operator_checkpoint_ref")),
@@ -703,8 +812,55 @@ def _open_operator_checkpoint(snapshot: dict, board: dict, task_id: str | None =
         kind = _entity_type(checkpoint)
         status = (_text(_as_snapshot(checkpoint).get("status")) or "").lower()
         fields = _as_snapshot(checkpoint)
-        if (task_id and kind == "checkpoint_brief" and status == "awaiting_operator"
-                and (fields.get("task_entity_id") or fields.get("task_id")) == task_id):
+        if (
+            task_id
+            and kind == "checkpoint_brief"
+            and status == "awaiting_operator"
+            and (fields.get("task_entity_id") or fields.get("task_id")) == task_id
+            and fields.get("resolved_dispatched") in (None, False)
+            and fields.get("resolved_at") is None
+        ):
+            return True
+        if checkpoint is None and read_gaps is not None:
+            read_gaps.append(f"Checkpoint {reference} could not be read")
+    if not task_id:
+        return False
+    # Current checkpoint producers name task_entity_id; a digest need not
+    # have captured a checkpoint locator for it to appear in the workboard.
+    page = _retrieve_page(
+        "checkpoint_brief",
+        snapshot_filters={
+            "task_entity_id": {"op": "eq", "value": task_id},
+            "status": {"op": "eq", "value": "awaiting_operator"},
+        },
+        limit=50,
+    )
+    if page is None:
+        if read_gaps is not None:
+            read_gaps.append(
+                f"Checkpoints for {task_id} could not be read; operator attention is unknown"
+            )
+        return False
+    malformed, partial = _filtered_read_problem(
+        page, "this task's open checkpoints", 50
+    )
+    if malformed:
+        if read_gaps is not None:
+            read_gaps.append(
+                f"Checkpoints for {task_id} returned malformed data; operator attention is unknown"
+            )
+        return False
+    if partial and read_gaps is not None:
+        read_gaps.append(partial)
+    for checkpoint in page["entities"]:
+        fields = _as_snapshot(checkpoint)
+        if (
+            _entity_type(checkpoint) == "checkpoint_brief"
+            and fields.get("task_entity_id") == task_id
+            and fields.get("status") == "awaiting_operator"
+            and fields.get("resolved_dispatched") in (None, False)
+            and fields.get("resolved_at") is None
+        ):
             return True
     return False
 
@@ -719,16 +875,15 @@ def _is_explicitly_claimable(snapshot: dict) -> bool:
     return False
 
 
-
-
-
-
-
-
-
-
-def _bucket_for(snapshot: dict, board: dict, status: str, live_execution: dict, task_id: str | None = None) -> str:
-    if _open_operator_checkpoint(snapshot, board, task_id):
+def _bucket_for(
+    snapshot: dict,
+    board: dict,
+    status: str,
+    live_execution: dict,
+    task_id: str | None = None,
+    read_gaps: list[str] | None = None,
+) -> str:
+    if _open_operator_checkpoint(snapshot, board, task_id, read_gaps):
         return "operator-needed"
     if status == "blocked":
         return "blocked"
@@ -739,9 +894,15 @@ def _bucket_for(snapshot: dict, board: dict, status: str, live_execution: dict, 
     return "recorded"
 
 
-def _next_action(snapshot: dict, claim: dict, bucket: str, has_live_record: bool) -> str:
+def _next_action(
+    snapshot: dict, claim: dict, bucket: str, has_live_record: bool
+) -> str:
     board = _claim_workboard(claim)
-    candidates = (snapshot.get("next_action"), snapshot.get("next_steps"), snapshot.get("blocked_reason"))
+    candidates = (
+        snapshot.get("next_action"),
+        snapshot.get("next_steps"),
+        snapshot.get("blocked_reason"),
+    )
     if not has_live_record:
         candidates += (board.get("next_action"),)
     for candidate in candidates:
@@ -764,31 +925,50 @@ def _planning_ascent(entity_id: str, cache: dict) -> tuple[list[dict], list[str]
     ascent: list[dict] = []
     seen = {entity_id}
     current = entity_id
+
     def read(path):
         if path not in cache:
             cache[path] = _get(path)
         return cache[path]
+
     for _ in range(8):
-        data = read(f"/entities/{current}/relationships?expand_entities=true")
-        if not isinstance(data, dict) or not isinstance(data.get("relationships"), list):
-            return ascent, [f"Planning relationships for {current} could not be read"]
-        rels = data["relationships"]
-        total = data.get("total")
-        if not isinstance(total, int) or isinstance(total, bool) or total != len(rels):
-            return ascent, [f"Planning relationship coverage for {current} is incomplete or unknown"]
-        parents = list(dict.fromkeys(r.get("target_entity_id") for r in rels if isinstance(r, dict)
-            and r.get("source_entity_id") == current and str(r.get("relationship_type", "")).upper() == "PART_OF"))
+        rels, error = _workboard_relationships(current, cache)
+        if error or rels is None:
+            return ascent, [error or "Planning relationships are unknown"]
+        parents = list(
+            dict.fromkeys(
+                r.get("target_entity_id")
+                for r in rels
+                if isinstance(r, dict)
+                and r.get("source_entity_id") == current
+                and str(r.get("relationship_type", "")).upper() == "PART_OF"
+            )
+        )
         if not parents:
-            return ascent, ([] if ascent else [f"No planning parent is recorded for {current}"])
+            return ascent, (
+                [] if ascent else [f"No planning parent is recorded for {current}"]
+            )
         if len(parents) != 1:
-            return ascent, [f"Multiple planning parents are recorded for {current}; no parent was selected"]
+            return ascent, [
+                f"Multiple planning parents are recorded for {current}; no parent was selected"
+            ]
         parent = parents[0]
-        if not isinstance(parent, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", parent) or parent in seen:
+        if (
+            not isinstance(parent, str)
+            or not re.fullmatch(r"ent_[A-Za-z0-9_]+", parent)
+            or parent in seen
+        ):
             return ascent, ["The planning ascent has an invalid or repeated parent"]
         record = read(f"/entities/{parent}")
         if not isinstance(record, dict) or not _entity_type(record):
             return ascent, [f"Planning parent {parent} could not be read"]
-        ascent.append({"entity_id": parent, "entity_type": _entity_type(record), "title": _text(_as_snapshot(record).get("title")) or parent})
+        ascent.append(
+            {
+                "entity_id": parent,
+                "entity_type": _entity_type(record),
+                "title": _text(_as_snapshot(record).get("title")) or parent,
+            }
+        )
         seen.add(parent)
         current = parent
     return ascent, ["The planning ascent exceeded the eight-level read bound"]
@@ -796,34 +976,59 @@ def _planning_ascent(entity_id: str, cache: dict) -> tuple[list[dict], list[str]
 
 def _claim_row(claim: dict, planning_cache: dict | None = None) -> dict | None:
     """Build one derived row without promoting digest history to live truth."""
-    title = _text(claim.get("claim"))
+    evidence = _evidence_entity_ids(claim)
+    title = _text(claim.get("claim")) or (evidence[0] if evidence else None)
     if not title:
         return None
     board = _claim_workboard(claim)
     live_record: dict | None = None
     read_gaps: list[str] = []
     task_id: str | None = None
-    for entity_id in _evidence_entity_ids(claim):
+    for entity_id in evidence:
         candidate = _get(f"/entities/{entity_id}")
+        if (
+            entity_id == claim.get("task_entity_id")
+            and _entity_type(candidate) != "task"
+        ):
+            read_gaps.append(
+                f"Explicit task {entity_id} could not be read as a task; its current state is unknown"
+            )
+            break
         if _entity_type(candidate) in {"task", "plan"}:
             live_record = candidate
             task_id = entity_id
             break
         if candidate is None:
-            read_gaps.append(f"Referenced record {entity_id} could not be read; its current state is unknown")
+            read_gaps.append(
+                f"Referenced record {entity_id} could not be read; its current state is unknown"
+            )
     record_kind = _entity_type(live_record)
     snapshot = _as_snapshot(live_record)
     live_status = _text(snapshot.get("status"))
-    status = live_status or _text(claim.get("status_claimed")) or "unknown"
+    status = (
+        live_status
+        or _text(claim.get("recorded_status"))
+        or _text(claim.get("status_claimed"))
+        or "unknown"
+    )
     # Historical completion, send, and handoff flags cannot discharge today's
     # obligations. Keep the row until an owning verifier supplies actual
     # completion/recovery evidence. UI filters change visibility only.
-    live_execution = (_live_execution_evidence(board, task_id)
-                      if record_kind == "task" and snapshot.get("admission_class") == "workflow_entering"
-                      and status.lower() not in _TERMINAL_TASK_STATES else {})
-    bucket = _bucket_for(snapshot, board, status.lower(), live_execution, task_id) if live_record is not None else "recorded"
+    cache = planning_cache if planning_cache is not None else {}
+    live_execution = (
+        _live_execution_evidence(board, task_id, cache)
+        if record_kind == "task"
+        and snapshot.get("admission_class") == "workflow_entering"
+        and status.lower() not in _TERMINAL_TASK_STATES
+        else {}
+    )
+    bucket = (
+        _bucket_for(snapshot, board, status.lower(), live_execution, task_id, read_gaps)
+        if live_record is not None
+        else "recorded"
+    )
     state = "Working now" if live_execution else f"Recorded state: {status}"
-    ascent, planning_gaps = _planning_ascent(task_id, planning_cache if planning_cache is not None else {}) if task_id else ([], [])
+    ascent, planning_gaps = _planning_ascent(task_id, cache) if task_id else ([], [])
     read_gaps.extend(planning_gaps)
     return {
         "kind": record_kind or "task",
@@ -835,9 +1040,13 @@ def _claim_row(claim: dict, planning_cache: dict | None = None) -> dict | None:
         "runner": live_execution.get("runner") or "unknown",
         "declared_step_owner": _text(snapshot.get("step_owner")) or "unknown",
         "record_owner": _text(snapshot.get("owner")) or "unknown",
+        "recorded_executor": _text(snapshot.get("executor")) or "unknown",
+        "recorded_session_next_action": _text(claim.get("next_action")),
         "next_action": _next_action(snapshot, claim, bucket, live_record is not None),
-        "evidence": _evidence_entity_ids(claim),
-        "state_source": "live_lease_and_activity" if live_execution else (f"recorded_{record_kind}" if live_record else "session_digest_history"),
+        "evidence": evidence,
+        "state_source": "live_lease_and_activity"
+        if live_execution
+        else (f"recorded_{record_kind}" if live_record else "session_digest_history"),
         "entity_id": task_id,
         "read_gaps": read_gaps,
         "planning_ascent": ascent,
@@ -852,12 +1061,20 @@ def _format_workboard(rows: list[dict]) -> str:
     ]
     for row in rows:
         cells = [
-            str(row["priority"]), str(row["work"]), str(row["state"]),
-            str(row.get("assigned_principal", "unknown")), str(row.get("lease_holder", "unknown")),
-            str(row.get("runner", "unknown")), str(row.get("declared_step_owner", "unknown")),
+            str(row["priority"]),
+            str(row["work"]),
+            str(row["state"]),
+            str(row.get("assigned_principal", "unknown")),
+            str(row.get("lease_holder", "unknown")),
+            str(row.get("runner", "unknown")),
+            str(row.get("declared_step_owner", "unknown")),
             str(row["next_action"]),
         ]
-        table.append("| " + " | ".join(cell.replace("|", "\\|").replace("\n", " ") for cell in cells) + " |")
+        table.append(
+            "| "
+            + " | ".join(cell.replace("|", "\\|").replace("\n", " ") for cell in cells)
+            + " |"
+        )
     return "\n".join(table)
 
 
@@ -865,9 +1082,17 @@ def _workboard_session_rows() -> tuple[list[dict], list[str], dict]:
     """A bounded native-session read, never an ownership or liveness authority."""
     page = _retrieve_page("agent_session", limit=50)
     if not isinstance(page, dict) or not isinstance(page.get("entities"), list):
-        return [], ["Session registry could not be read; session coverage is unknown"], {"complete": False}
+        return (
+            [],
+            ["Session registry could not be read; session coverage is unknown"],
+            {"complete": False},
+        )
     if len(page["entities"]) > 50:
-        return [], ["Session registry exceeded its read bound; session coverage is unknown"], {"complete": False}
+        return (
+            [],
+            ["Session registry exceeded its read bound; session coverage is unknown"],
+            {"complete": False},
+        )
     rows = []
     gaps = []
     identities: set[tuple[str, str]] = set()
@@ -876,34 +1101,65 @@ def _workboard_session_rows() -> tuple[list[dict], list[str], dict]:
         harness = _text(fields.get("harness"))
         native = _text(fields.get("native_session_id"))
         if not harness or not native or _entity_type(record) != "agent_session":
-            gaps.append("A session row lacks its native identity; it was not assigned a routing identity")
+            gaps.append(
+                "A session row lacks its native identity; it was not assigned a routing identity"
+            )
             continue
         identity = (harness, native)
         if identity in identities:
-            gaps.append("The bounded registry read contains a repeated native session identity; routing is ambiguous")
+            gaps.append(
+                "The bounded registry read contains a repeated native session identity; routing is ambiguous"
+            )
         identities.add(identity)
-        rows.append({
-            "kind": "session", "priority": "recorded", "entity_id": record.get("entity_id") or record.get("id"),
-            "work": _text(fields.get("title")) or f"{harness}: {native}",
-            "state": "Native state: " + (_text(fields.get("status")) or "unknown"),
-            "native_harness": harness, "native_session_id": native, "native_kind": fields.get("kind"),
-            "native_holder": fields.get("holder"), "native_task_id": fields.get("task_id"),
-            "native_last_activity_at": fields.get("last_activity_at"), "native_is_archived": fields.get("is_archived"),
-            "routing_role": fields.get("coordination_role"), "routing_observed_at": fields.get("routing_observed_at"),
-            "assigned_principal": "unknown", "lease_holder": "unknown", "runner": "unknown",
-            "declared_step_owner": "unknown", "record_owner": "unknown", "state_source": "recorded_agent_session",
-            "next_action": "Read the owning task and current routing evidence before a handoff.",
-            "read_gaps": [], "evidence": [record.get("entity_id") or record.get("id")],
-        })
+        rows.append(
+            {
+                "kind": "session",
+                "priority": "recorded",
+                "entity_id": record.get("entity_id") or record.get("id"),
+                "work": _text(fields.get("title")) or f"{harness}: {native}",
+                "state": "Native state: " + (_text(fields.get("status")) or "unknown"),
+                "native_harness": harness,
+                "native_session_id": native,
+                "native_kind": fields.get("kind"),
+                "native_holder": fields.get("holder"),
+                "native_task_id": fields.get("task_id"),
+                "native_last_activity_at": fields.get("last_activity_at"),
+                "native_is_archived": fields.get("is_archived"),
+                "routing_role": fields.get("coordination_role"),
+                "routing_observed_at": fields.get("routing_observed_at"),
+                "assigned_principal": "unknown",
+                "lease_holder": "unknown",
+                "runner": "unknown",
+                "declared_step_owner": "unknown",
+                "record_owner": "unknown",
+                "state_source": "recorded_agent_session",
+                "next_action": "Read the owning task and current routing evidence before a handoff.",
+                "read_gaps": [],
+                "evidence": [record.get("entity_id") or record.get("id")],
+            }
+        )
     total = page.get("total")
-    complete = (not gaps and isinstance(total, int) and not isinstance(total, bool) and total == len(page["entities"])
-                and total <= 50 and not page.get("next_cursor"))
+    complete = (
+        not gaps
+        and isinstance(total, int)
+        and not isinstance(total, bool)
+        and total == len(page["entities"])
+        and total <= 50
+        and not page.get("next_cursor")
+    )
     if not complete:
-        gaps.append("Session rows are a bounded page; full registry coverage is not established")
+        gaps.append(
+            "Session rows are a bounded page; full registry coverage is not established"
+        )
     return rows, gaps, {"complete": complete, "returned": len(rows), "limit": 50}
 
 
-def _get_session_workboard(session_key: str, display_plan_id: str, include_history: bool = False, include_sessions: bool = False) -> dict:
+def _get_session_workboard(
+    session_key: str,
+    display_plan_id: str,
+    include_history: bool = False,
+    include_sessions: bool = False,
+) -> dict:
     """Derive an on-demand session summary with one explicitly selected plan.
 
     `session_key` is deliberately harness-agnostic: a Codex session can inspect
@@ -911,9 +1167,17 @@ def _get_session_workboard(session_key: str, display_plan_id: str, include_histo
     explicit and affects table order only; it creates no authority or session
     binding and no hidden default plan is inferred.
     """
-    if not isinstance(session_key, str) or not session_key.strip() or len(session_key) > 256:
-        return {"error": "session_key must be a nonempty string of at most 256 characters"}
-    if not isinstance(display_plan_id, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", display_plan_id):
+    if (
+        not isinstance(session_key, str)
+        or not session_key.strip()
+        or len(session_key) > 256
+    ):
+        return {
+            "error": "session_key must be a nonempty string of at most 256 characters"
+        }
+    if not isinstance(display_plan_id, str) or not re.fullmatch(
+        r"ent_[A-Za-z0-9_]+", display_plan_id
+    ):
         return {"error": "display_plan_id must be an entity id"}
     try:
         digest_entity = _find_session_digest(session_key)
@@ -921,7 +1185,10 @@ def _get_session_workboard(session_key: str, display_plan_id: str, include_histo
         return {"error": str(exc), "session_key": session_key}
     if digest_entity is None:
         detail = _describe_transport_error()
-        return {"error": detail or "session_digest not found", "session_key": session_key}
+        return {
+            "error": detail or "session_digest not found",
+            "session_key": session_key,
+        }
     plan_entity = _get(f"/entities/{display_plan_id}")
     if plan_entity is None:
         detail = _describe_transport_error()
@@ -939,35 +1206,57 @@ def _get_session_workboard(session_key: str, display_plan_id: str, include_histo
 
     digest = _as_snapshot(digest_entity)
     plan = _as_snapshot(plan_entity)
-    rows: list[dict] = [{
-        "kind": "plan",
-        "priority": "display-plan",
-        "work": _text(plan.get("title")) or display_plan_id,
-        "state": f"Recorded state: {_text(plan.get('status')) or 'unknown'}",
-        "assigned_principal": _text(plan.get("assigned_to")) or "unknown",
-        "lease_holder": "unknown",
-        "runner": "unknown",
-        "declared_step_owner": _text(plan.get("step_owner")) or "unknown",
-        "record_owner": _text(plan.get("owner")) or "unknown",
-        "next_action": _text(plan.get("next_steps")) or "Read the current plan next steps",
-        "evidence": [display_plan_id],
-        "state_source": "recorded_plan",
-        "entity_id": display_plan_id,
-        "read_gaps": [],
-    }]
+    rows: list[dict] = [
+        {
+            "kind": "plan",
+            "priority": "display-plan",
+            "work": _text(plan.get("title")) or display_plan_id,
+            "state": f"Recorded state: {_text(plan.get('status')) or 'unknown'}",
+            "assigned_principal": _text(plan.get("assigned_to")) or "unknown",
+            "lease_holder": "unknown",
+            "runner": "unknown",
+            "declared_step_owner": _text(plan.get("step_owner")) or "unknown",
+            "record_owner": _text(plan.get("owner")) or "unknown",
+            "next_action": _text(plan.get("next_steps"))
+            or "Read the current plan next steps",
+            "evidence": [display_plan_id],
+            "state_source": "recorded_plan",
+            "entity_id": display_plan_id,
+            "read_gaps": [],
+        }
+    ]
     claims = digest.get("tasks_claimed")
-    digest_gaps = [] if isinstance(claims, list) else ["The digest has no valid tasks_claimed list; managed-work coverage is unknown"]
-    if isinstance(claims, list) and any(not isinstance(claim, dict) for claim in claims):
-        digest_gaps.append("The digest contains malformed claims; managed-work coverage is partial")
+    digest_gaps = (
+        []
+        if isinstance(claims, list)
+        else [
+            "The digest has no valid tasks_claimed list; managed-work coverage is unknown"
+        ]
+    )
+    if isinstance(claims, list) and any(
+        not isinstance(claim, dict) for claim in claims
+    ):
+        digest_gaps.append(
+            "The digest contains malformed claims; managed-work coverage is partial"
+        )
     planning_cache: dict = {}
     if isinstance(claims, list):
-        rows.extend(row for claim in claims if isinstance(claim, dict) if (row := _claim_row(claim, planning_cache)) is not None)
+        rows.extend(
+            row
+            for claim in claims
+            if isinstance(claim, dict)
+            if (row := _claim_row(claim, planning_cache)) is not None
+        )
     session_gaps: list[str] = []
     session_coverage: dict = {"requested": False}
     if include_sessions:
         sessions, session_gaps, session_coverage = _workboard_session_rows()
         rows.extend(sessions)
-    rows.sort(key=lambda row: _WORKBOARD_ORDER.get(str(row["priority"]), len(_WORKBOARD_ORDER)))
+    rows.sort(
+        key=lambda row: _WORKBOARD_ORDER.get(
+            str(row["priority"]), len(_WORKBOARD_ORDER)
+        )
+    )
     result: dict[str, Any] = {
         "session_key": session_key,
         "harness": _text(digest.get("harness")),
@@ -976,10 +1265,14 @@ def _get_session_workboard(session_key: str, display_plan_id: str, include_histo
         "rows": rows,
         "table": _format_workboard(rows),
         "observed_at": datetime.now(timezone.utc).isoformat(),
-        "read_gaps": [gap for row in rows for gap in row.get("read_gaps", [])] + session_gaps + digest_gaps,
+        "read_gaps": [gap for row in rows for gap in row.get("read_gaps", [])]
+        + session_gaps
+        + digest_gaps,
         "session_coverage": session_coverage,
-        "capability_gaps": ["Canonical claimability is not qualified by this adapter; pending and open are recorded states.",
-                            "Session membership and native activity do not prove a held task lease."],
+        "capability_gaps": [
+            "Canonical claimability is not qualified by this adapter; pending and open are recorded states.",
+            "Session membership and native activity do not prove a held task lease.",
+        ],
         "refresh_rule": "Refresh after a material task, agent, or decision change and before substantial new intake. This is an on-demand derived read, not a canonical projection.",
     }
     if include_history:
@@ -987,7 +1280,9 @@ def _get_session_workboard(session_key: str, display_plan_id: str, include_histo
         # while `rows` is intentionally the routine live view.
         result["history"] = {
             "tasks_claimed": claims if isinstance(claims, list) else [],
-            "artifacts": digest.get("artifacts") if isinstance(digest.get("artifacts"), list) else [],
+            "artifacts": digest.get("artifacts")
+            if isinstance(digest.get("artifacts"), list)
+            else [],
         }
     return result
 

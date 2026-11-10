@@ -43,15 +43,26 @@ def test_old_activity_does_not_prove_working_now():
             "snapshot": {"status": "executing", "admission_class": "workflow_entering"},
         },
         "/entities/ent_activity": {
-            "entity_type": "harness_event",
+            "entity_type": "agent_session",
             "snapshot": {
+                "kind": "autonomous",
                 "task_id": "ent_task",
+                "native_session_id": "runner-1",
                 "runner_id": "runner-1",
+                "last_activity_at": "2020-01-01T00:00:00Z",
                 "observed_at": "2020-01-01T00:00:00Z",
             },
         },
     }
-    with patch.object(srv, "_get", side_effect=records.get):
+    edge = _lease_edge()
+    edge["snapshot"]["runner_id"] = "runner-1"
+    records["/entities/ent_task/relationships?expand_entities=true"] = (
+        _relationship_response(edge)
+    )
+    with (
+        patch.object(srv, "_retrieve_page", return_value={"entities": [], "total": 0}),
+        patch.object(srv, "_get", side_effect=records.get),
+    ):
         row = srv._claim_row(
             {
                 "claim": "Recorded run",
@@ -84,6 +95,48 @@ def test_broken_task_read_keeps_the_row_and_reports_unknown():
     assert row["read_gaps"]
 
 
+def test_current_id_only_digest_rows_are_not_dropped_or_promoted():
+    claim = {
+        "task_entity_id": "ent_task",
+        "recorded_status": "done",
+        "claimed": False,
+        "executor": "historical-executor",
+        "next_action": "Historical follow-up",
+    }
+    task = {
+        "entity_type": "task",
+        "snapshot": {
+            "title": "Current task title",
+            "status": "blocked",
+            "executor": "session",
+        },
+    }
+    with patch.object(
+        srv,
+        "_get",
+        side_effect=lambda path: task if path == "/entities/ent_task" else None,
+    ):
+        row = srv._claim_row(claim)
+    assert row["work"] == "Current task title"
+    assert row["state"] == "Recorded state: blocked"
+    assert row["runner"] == "unknown" and row["lease_holder"] == "unknown"
+    assert row["recorded_executor"] == "session"
+    assert row["recorded_session_next_action"] == "Historical follow-up"
+
+
+def test_unreadable_id_only_digest_row_keeps_explicit_history():
+    with patch.object(srv, "_get", return_value=None):
+        row = srv._claim_row(
+            {
+                "task_entity_id": "ent_task",
+                "recorded_status": "awaiting_approval",
+                "claimed": False,
+            }
+        )
+    assert row and row["state"] == "Recorded state: awaiting_approval"
+    assert row["state_source"] == "session_digest_history" and row["read_gaps"]
+
+
 def test_checkpoint_must_belong_to_this_task():
     checkpoint = {
         "entity_type": "checkpoint_brief",
@@ -93,7 +146,10 @@ def test_checkpoint_must_belong_to_this_task():
         "/entities/ent_task": {"entity_type": "task", "snapshot": {"status": "open"}},
         "/entities/ent_checkpoint": checkpoint,
     }
-    with patch.object(srv, "_get", side_effect=records.get):
+    with (
+        patch.object(srv, "_retrieve_page", return_value={"entities": [], "total": 0}),
+        patch.object(srv, "_get", side_effect=records.get),
+    ):
         row = srv._claim_row(
             {
                 "claim": "Owned work",
@@ -181,8 +237,8 @@ def test_derived_result_through_real_stdio_with_synthetic_record_source(
         + repr(str(here))
         + ")\nimport server as s\n"
         "s.render_server_instructions=lambda:'Synthetic workboard fixture'\n"
-        "s._retrieve_page=lambda *a,**k:{'entities':[{'entity_id':'ent_digest','entity_type':'session_digest','snapshot':{'session_key':'synthetic:inbox','tasks_claimed':[{'claim':'Old claim','status_claimed':'executing','evidence_pointers':['ent_task']}]}}],'total':1}\n"
-        "records={'/entities/ent_plan':{'entity_type':'plan','snapshot':{'title':'Primary plan','status':'active'}},'/entities/ent_task':{'entity_type':'task','snapshot':{'title':'Current task','status':'open','assigned_to':'principal','next_action':'Review the current artifact'}},'/entities/ent_task/relationships?expand_entities=true':{'relationships':[{'relationship_type':'PART_OF','source_entity_id':'ent_task','target_entity_id':'ent_plan'}],'total':1},'/entities/ent_plan/relationships?expand_entities=true':{'relationships':[],'total':0}}\n"
+        "s._retrieve_page=lambda *a,**k:({'entities':[],'total':0} if a[0]=='checkpoint_brief' else {'entities':[{'entity_id':'ent_digest','entity_type':'session_digest','snapshot':{'session_key':'synthetic:inbox','tasks_claimed':[{'task_entity_id':'ent_task','recorded_status':'executing','claimed':False,'executor':'session','next_action':'Historical follow-up'}]}}],'total':1})\n"
+        "records={'/entities/ent_plan':{'entity_type':'plan','snapshot':{'title':'Primary plan','status':'active'}},'/entities/ent_task':{'entity_type':'task','snapshot':{'title':'Current task','status':'open','assigned_to':'principal','next_action':'Review the current artifact'}},'/entities/ent_task/relationships?expand_entities=true':{'relationships':[{'relationship_type':'PART_OF','source_entity_id':'ent_task','target_entity_id':'ent_plan','is_live':1}],'total':1},'/entities/ent_plan/relationships?expand_entities=true':{'relationships':[],'total':0}}\n"
         "s._get=lambda path:records.get(path)\nasyncio.run(s.main())\n"
     )
     monkeypatch.setattr(smoke, "SERVER", fixture)
@@ -223,62 +279,99 @@ def test_derived_result_through_real_stdio_with_synthetic_record_source(
         smoke._stop_server(proc)
 
 
+def _lease_edge():
+    now = datetime.now(timezone.utc)
+    return {
+        "relationship_type": "LEASE",
+        "relationship_key": "LEASE:ent_worker:ent_task",
+        "source_entity_id": "ent_worker",
+        "target_entity_id": "ent_task",
+        "is_live": 1,
+        "snapshot": {
+            "claimed_at": (now - timedelta(minutes=1)).isoformat(),
+            "expires_at": (now + timedelta(minutes=1)).isoformat(),
+            "runner_id": "run",
+        },
+    }
+
+
+def _relationship_response(*edges):
+    return {"outgoing": [], "incoming": list(edges), "relationships": list(edges)}
+
+
 @pytest.mark.parametrize(
-    "change",
+    "variant",
     [
-        {"expires_at": "2020-01-01T00:00:00Z"},
-        {"status": "returned"},
-        {"task_id": "ent_other"},
-        {"runner_id": "other"},
+        "expired",
+        "returned",
+        "foreign_task",
+        "wrong_runner",
+        "future_claim",
+        "naive_claim",
+        "deleted",
+        "duplicate",
+        "stale_activity",
+        "interactive_activity",
+        "activity_before_claim",
+        "foreign_activity",
+        "missing_runner",
     ],
 )
-def test_lease_refusals_preserve_recorded_state(change):
-    lease = {
-        "status": "held",
+def test_lease_refusals_preserve_recorded_state(variant):
+    edge = _lease_edge()
+    activity = {
+        "kind": "autonomous",
         "task_id": "ent_task",
-        "holder": "worker",
-        "runner_id": "run",
-        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
-        **change,
+        "native_session_id": "run",
+        "last_activity_at": datetime.now(timezone.utc).isoformat(),
     }
+    if variant == "expired":
+        edge["snapshot"]["expires_at"] = "2020-01-01T00:00:00Z"
+    if variant == "returned":
+        edge["snapshot"]["returned_at"] = datetime.now(timezone.utc).isoformat()
+    if variant == "foreign_task":
+        edge["target_entity_id"] = "ent_other"
+    if variant == "wrong_runner":
+        edge["snapshot"]["runner_id"] = "other"
+    if variant == "future_claim":
+        edge["snapshot"]["claimed_at"] = "2999-01-01T00:00:00Z"
+    if variant == "naive_claim":
+        edge["snapshot"]["claimed_at"] = "2026-01-01T00:00:00"
+    if variant == "deleted":
+        edge["is_live"] = 0
+    if variant == "stale_activity":
+        activity["last_activity_at"] = "2020-01-01T00:00:00Z"
+    if variant == "interactive_activity":
+        activity["kind"] = "interactive"
+    if variant == "activity_before_claim":
+        activity["last_activity_at"] = (
+            datetime.now(timezone.utc) - timedelta(minutes=2)
+        ).isoformat()
+    if variant == "foreign_activity":
+        activity["task_id"] = "ent_other"
+    if variant == "missing_runner":
+        del edge["snapshot"]["runner_id"]
+    edges = [edge, dict(edge)] if variant == "duplicate" else [edge]
     records = {
-        "/entities/ent_lease": {"entity_type": "lease", "snapshot": lease},
+        "/entities/ent_task/relationships?expand_entities=true": _relationship_response(
+            *edges
+        ),
         "/entities/ent_activity": {
             "entity_type": "agent_session",
-            "snapshot": {
-                "kind": "autonomous",
-                "task_id": "ent_task",
-                "native_session_id": "run",
-                "last_activity_at": datetime.now(timezone.utc).isoformat(),
-            },
+            "snapshot": activity,
         },
     }
     with patch.object(srv, "_get", side_effect=records.get):
         assert not srv._live_execution_evidence(
-            {
-                "live_execution_evidence": {
-                    "lease_ref": "ent_lease",
-                    "activity_ref": "ent_activity",
-                }
-            },
-            "ent_task",
+            {"live_execution_evidence": {"activity_ref": "ent_activity"}}, "ent_task"
         )
 
 
 def test_recent_bound_lease_and_activity_control():
     records = {
-        "/entities/ent_lease": {
-            "entity_type": "lease",
-            "snapshot": {
-                "status": "held",
-                "task_id": "ent_task",
-                "holder": "worker",
-                "runner_id": "run",
-                "expires_at": (
-                    datetime.now(timezone.utc) + timedelta(minutes=1)
-                ).isoformat(),
-            },
-        },
+        "/entities/ent_task/relationships?expand_entities=true": _relationship_response(
+            _lease_edge()
+        ),
         "/entities/ent_activity": {
             "entity_type": "agent_session",
             "snapshot": {
@@ -291,15 +384,9 @@ def test_recent_bound_lease_and_activity_control():
     }
     with patch.object(srv, "_get", side_effect=records.get):
         result = srv._live_execution_evidence(
-            {
-                "live_execution_evidence": {
-                    "lease_ref": "ent_lease",
-                    "activity_ref": "ent_activity",
-                }
-            },
-            "ent_task",
+            {"live_execution_evidence": {"activity_ref": "ent_activity"}}, "ent_task"
         )
-    assert result["lease_holder"] == "worker" and result["runner"] == "run"
+    assert result["lease_holder"] == "ent_worker" and result["runner"] == "run"
 
 
 @pytest.mark.parametrize(
