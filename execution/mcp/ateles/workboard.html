@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ateles workboard</title>
+<style>
+:root{color-scheme:light dark;font-family:var(--font-sans,system-ui,sans-serif);color:var(--color-text-primary,light-dark(#25251f,#e9e9e2));background:var(--color-background-primary,light-dark(#fafaf7,#20211e));font-size:14px;line-height:1.45}
+*{box-sizing:border-box}body{margin:0;padding:20px;max-width:1100px}button,input,select{font:inherit;color:inherit;background:var(--color-background-secondary,light-dark(#fff,#292b26));border:1px solid var(--color-border-primary,light-dark(#d8d9d1,#50534a));border-radius:7px;padding:7px 10px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #80a16b;outline-offset:3px}h1{font-size:21px;letter-spacing:-.025em;margin:0}h2{font-size:16px;margin:0}p{margin:5px 0}header{display:flex;align-items:center;justify-content:space-between;gap:12px}.eyebrow{font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:var(--color-text-secondary,light-dark(#6a6e60,#adb39f));font-weight:650}.muted{color:var(--color-text-secondary,light-dark(#6c7065,#aab09f));font-size:12px}.plan{margin:18px 0;padding:14px 16px;border-left:3px solid #7b9968;background:var(--color-background-secondary,light-dark(#f0f3ea,#2a3025));border-radius:0 9px 9px 0}.toolbar{display:flex;gap:8px;margin:16px 0 12px}.toolbar input{flex:1;min-width:80px}.notice{padding:9px 11px;margin:10px 0;border:1px solid #b8873d;border-radius:7px;font-size:12px;white-space:pre-wrap}.row{border:1px solid var(--color-border-primary,light-dark(#dedfd7,#484c42));border-radius:9px;margin:9px 0;padding:13px 14px}.row-top{display:flex;gap:12px;justify-content:space-between;align-items:start}.state{font-size:11px;border-radius:5px;padding:3px 6px;background:var(--color-background-secondary,light-dark(#eeefe9,#34382f));white-space:nowrap}.operator-needed .state{background:light-dark(#fbecd2,#584025)}.blocked .state{background:light-dark(#f7e8df,#55382a)}.active .state{background:light-dark(#e3f0da,#344c2b)}.next{margin-top:9px;white-space:pre-wrap;overflow-wrap:anywhere}details{margin-top:9px;font-size:12px}summary{cursor:pointer;color:var(--color-text-secondary,light-dark(#686d5e,#adb39f))}.roles{display:grid;grid-template-columns:minmax(100px,auto) 1fr;gap:4px 14px;margin:9px 0;overflow-wrap:anywhere}.roles dt{color:var(--color-text-secondary,light-dark(#686d5e,#adb39f))}.roles dd{margin:0}.empty{padding:25px;text-align:center;color:var(--color-text-secondary,light-dark(#686d5e,#adb39f))}footer{font-size:11px;margin-top:16px;color:var(--color-text-secondary,light-dark(#686d5e,#adb39f))}.error{border-color:#bb7251}#status{min-height:18px}.count{font-size:12px;margin-left:6px;font-weight:400}.identifier{font-family:ui-monospace,monospace;font-size:10px;overflow-wrap:anywhere}
+@media(max-width:450px){body{padding:13px}.toolbar{flex-wrap:wrap}.toolbar input{width:100%;flex-basis:100%}.row-top{display:block}.state{display:inline-block;margin-top:6px}.roles{grid-template-columns:1fr}.roles dd{margin-bottom:5px}}
+</style>
+</head>
+<body>
+<header><div><div class="eyebrow">Ateles · current record</div><h1>Workboard<span id="count" class="count"></span></h1></div><button id="refresh" disabled>Refresh</button></header>
+<p id="status" class="muted" role="status" aria-live="polite">Connecting to this conversation…</p>
+<section id="primary" class="plan" hidden aria-label="Primary plan"></section>
+<div id="notice" class="notice" hidden role="status"></div>
+<div class="toolbar"><input id="search" aria-label="Find work" placeholder="Find work…" type="search"><select id="filter" aria-label="Filter work"><option value="all">All work</option><option value="operator-needed">Needs your decision</option><option value="blocked">Blocked</option><option value="active">Working now</option><option value="recorded">Recorded state</option><option value="session">Sessions</option></select></div>
+<main id="rows" aria-live="polite"><p class="empty">Waiting for the workboard read.</p></main>
+<footer>Read-only. The Primary plan sets display order. Session membership and recorded status do not establish authority, a lease or completion.</footer>
+<script>
+(() => {
+  "use strict";
+  const el = id => document.getElementById(id);
+  let nextId = 1, args = null, rows = [], lastRead = null, ready = false, hostTools = false;
+  const pending = new Map();
+  const text = value => typeof value === "string" ? value : "unknown";
+  const send = message => window.parent.postMessage({jsonrpc:"2.0",...message}, "*");
+  function request(method, params) {
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { pending.delete(id); reject(new Error("The host did not answer. Refresh to try another read.")); }, 45000);
+      pending.set(id, {resolve, reject, timer}); send({id,method,params});
+    });
+  }
+  function node(tag, value, cls) { const n = document.createElement(tag); if (value !== undefined) n.textContent = text(value); if(cls) n.className=cls; return n; }
+  function notice(message, error=false) { el("notice").hidden=!message; el("notice").textContent=message||""; el("notice").className=error?"notice error":"notice"; }
+  function size() { send({method:"ui/notifications/size-changed",params:{height:document.documentElement.scrollHeight}}); }
+  function render() {
+    const query=el("search").value.toLocaleLowerCase(), filter=el("filter").value;
+    const shown=rows.filter(r => r.priority!=="display-plan" && (filter==="all" || (filter==="session" ? r.kind==="session" : r.priority===filter)) && [r.work,r.next_action,r.state].map(text).join(" ").toLocaleLowerCase().includes(query));
+    const root=el("rows"); root.replaceChildren(); el("count").textContent=` · ${shown.length}`;
+    if(!shown.length) root.append(node("p", rows.length ? "No work matches this filter." : "No managed work was returned by this read.", "empty"));
+    for(const r of shown) {
+      const article=node("article",undefined,"row "+(["active","blocked","operator-needed"].includes(r.priority)?r.priority:"recorded"));
+      const top=node("div",undefined,"row-top");top.append(node("h2",r.work),node("span",r.state,"state"));article.append(top);
+      article.append(node("p",r.next_action,"next"));
+      const details=node("details"); details.append(node("summary","Roles and evidence")); const dl=node("dl",undefined,"roles");
+      for(const [label,key] of [["Assigned principal","assigned_principal"],["Lease holder","lease_holder"],["Runner","runner"],["Declared step owner","declared_step_owner"],["Record owner","record_owner"],["State source","state_source"]]) dl.append(node("dt",label),node("dd",r[key]));
+      if(r.kind==="session")for(const [label,key] of [["Harness","native_harness"],["Native kind","native_kind"],["Native holder","native_holder"],["Native activity observed","native_last_activity_at"],["Routing role (recorded)","routing_role"],["Routing observed","routing_observed_at"]])dl.append(node("dt",label),node("dd",r[key]));
+      details.append(dl);if(r.entity_id)details.append(node("p",r.entity_id,"identifier"));for(const parent of r.planning_ascent||[])details.append(node("p",text(parent.entity_type)+": "+text(parent.title),"muted"));for(const gap of r.read_gaps||[])details.append(node("p",gap,"muted"));article.append(details);root.append(article);
+    }
+    size();
+  }
+  function applyResult(result) {
+    let data=result&&result.structuredContent;
+    if(!data && result && Array.isArray(result.content)) { const block=result.content.find(c=>c.type==="text");try{data=JSON.parse(block.text);}catch{} }
+    if(!data || typeof data!=="object" || data.error || result.isError) {
+      const message=data&&data.error?text(data.error):"The workboard could not be read.";
+      notice(message+(lastRead?" Last successful read: "+lastRead+". Existing rows are stale.":" Current state is unknown."),true);return;
+    }
+    if(!Array.isArray(data.rows)){notice("The response has no workboard rows. Current state is unknown.",true);return;}
+    rows=data.rows.filter(r=>r&&typeof r==="object");lastRead=text(data.observed_at);el("status").textContent="Read "+lastRead;
+    const plan=rows.find(r=>r.priority==="display-plan");el("primary").hidden=!plan;el("primary").replaceChildren();
+    if(plan)el("primary").append(node("div","Primary plan","eyebrow"),node("h2",plan.work),node("p",plan.state,"muted"),node("p",plan.next_action));
+    const gaps=Array.isArray(data.read_gaps)?data.read_gaps:[];notice(gaps.length?"Partial read: "+gaps.join("\n"):"");render();
+  }
+  function setArgs(value){if(value&&typeof value.session_key==="string"&&typeof value.display_plan_id==="string")args={session_key:value.session_key,display_plan_id:value.display_plan_id,include_history:false,include_sessions:value.include_sessions===true};el("refresh").disabled=!(ready&&hostTools&&args);}
+  window.addEventListener("message",event=>{
+    if(event.source!==window.parent)return;const m=event.data;if(!m||m.jsonrpc!=="2.0")return;
+    if(pending.has(m.id) && (m.result!==undefined||m.error)) {const p=pending.get(m.id);pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(new Error(text(m.error.message))):p.resolve(m.result);return;}
+    if(m.method==="ui/notifications/tool-input")setArgs(m.params&&m.params.arguments);
+    else if(m.method==="ui/notifications/tool-result")applyResult(m.params);
+    else if(m.method==="ui/notifications/tool-cancelled")notice("The read was cancelled. Current state is unknown.",true);
+    else if(m.method==="ui/notifications/host-context-changed"){if(m.params&&["dark","light"].includes(m.params.theme))document.documentElement.style.colorScheme=m.params.theme;size();}
+    else if(m.method==="ui/resource-teardown"&&m.id!==undefined){for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error("View closed"));}pending.clear();send({id:m.id,result:{}});}
+  });
+  async function refresh(){if(!args||!ready||!hostTools||el("refresh").disabled)return;el("refresh").disabled=true;el("status").textContent="Reading current records…";try{applyResult(await request("tools/call",{name:"get_session_workboard",arguments:args}));}catch(e){notice(e.message+(lastRead?" Existing rows are stale.":" Current state is unknown."),true);}finally{el("refresh").disabled=false;}}
+  el("search").addEventListener("input",render);el("filter").addEventListener("change",()=>{render();if(el("filter").value==="session"&&args&&!args.include_sessions){args.include_sessions=true;refresh();}});
+  el("refresh").addEventListener("click",refresh);
+  request("ui/initialize",{protocolVersion:"2026-01-26",appInfo:{name:"Ateles workboard",version:"1.0.0"},appCapabilities:{availableDisplayModes:["inline"]}}).then(result=>{
+    ready=true;hostTools=!!(result.hostCapabilities&&result.hostCapabilities.serverTools);const context=result.hostContext||{};if(["light","dark"].includes(context.theme))document.documentElement.style.colorScheme=context.theme;
+    send({method:"ui/notifications/initialized"});setArgs(args);if(!lastRead)el("status").textContent="Connected. Waiting for current records…";size();
+  }).catch(e=>{el("status").textContent="Inline host connection unavailable.";notice(e.message,true);});
+})();
+</script>
+</body>
+</html>

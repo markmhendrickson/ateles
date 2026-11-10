@@ -54,6 +54,7 @@ import asyncio
 import base64
 import contextvars
 import hmac
+import hashlib
 import inspect
 import json
 import logging
@@ -71,7 +72,10 @@ from urllib.parse import urlsplit
 import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
+from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.types import (
+    CallToolResult,
+    Resource,
     TextContent,
     Tool,
 )
@@ -558,6 +562,18 @@ def _correct(
 
 # ── Session workboard ───────────────────────────────────────────────────────
 
+WORKBOARD_RESOURCE_MIME = "text/html;profile=mcp-app"
+_WORKBOARD_HTML_PATH = Path(__file__).with_name("workboard.html")
+_WORKBOARD_HTML = _WORKBOARD_HTML_PATH.read_text()
+WORKBOARD_RESOURCE_URI = "ui://ateles/workboard-" + hashlib.sha256(_WORKBOARD_HTML.encode()).hexdigest()[:16] + ".html"
+_WORKBOARD_UI_META = {"csp": {"connectDomains": [], "resourceDomains": [], "frameDomains": []}, "prefersBorder": True}
+
+
+def _workboard_resource() -> Resource:
+    return Resource(uri=WORKBOARD_RESOURCE_URI, name="ateles_workboard", title="Ateles workboard",
+                    description="Read-only derived work and session history", mimeType=WORKBOARD_RESOURCE_MIME,
+                    **{"_meta": {"ui": _WORKBOARD_UI_META}})
+
 # This is an on-demand derived read, deliberately not another record.  A
 # session_digest is summarized history, never canonical live truth.  The
 # workboard labels ordinary task/plan fields as recorded state; only separate
@@ -603,16 +619,29 @@ def _evidence_entity_ids(claim: dict) -> list[str]:
     raw = claim.get("evidence_pointers")
     if not isinstance(raw, list):
         return []
-    return [pointer for pointer in raw if isinstance(pointer, str) and pointer.startswith("ent_")]
+    return list(dict.fromkeys(pointer for pointer in raw if isinstance(pointer, str) and re.fullmatch(r"ent_[A-Za-z0-9_]+", pointer)))
 
 
 def _find_session_digest(session_key: str) -> dict | None:
     """Find by stored session_key, not by the current harness or worktree."""
-    rows = _retrieve_entities("session_digest", search=session_key, limit=100)
-    for row in rows:
-        if _as_snapshot(row).get("session_key") == session_key:
-            return row
-    return None
+    page = _retrieve_page("session_digest", snapshot_filters={
+        "session_key": {"op": "eq", "value": session_key}}, limit=2)
+    if page is None:
+        raise ValueError(_describe_transport_error() or "session_digest query could not be read")
+    rows = page.get("entities") if isinstance(page, dict) else None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("session_digest query returned malformed records")
+    total = page.get("total")
+    if not isinstance(total, int) or isinstance(total, bool) or total != len(rows) or page.get("next_cursor"):
+        raise ValueError("session_digest query coverage is incomplete or ambiguous")
+    matches = [row for row in rows if isinstance(row, dict)
+               and _entity_type(row) == "session_digest"
+               and _as_snapshot(row).get("session_key") == session_key]
+    if len(matches) > 1:
+        raise ValueError("session_key identifies multiple digests; select an unambiguous lineage")
+    if len(matches) != len(rows):
+        raise ValueError("session_digest query returned a different native lineage")
+    return matches[0] if matches else None
 
 
 def _claim_workboard(claim: dict) -> dict:
@@ -632,7 +661,7 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _live_execution_evidence(board: dict) -> dict:
+def _live_execution_evidence(board: dict, task_id: str | None = None) -> dict:
     """Return a live lease/activity reading, never infer it from task status.
 
     The digest may point at a reconciler-produced lease and activity record,
@@ -645,21 +674,30 @@ def _live_execution_evidence(board: dict) -> dict:
         return {}
     lease_ref = _text(refs.get("lease_ref"))
     activity_ref = _text(refs.get("activity_ref"))
-    if not (lease_ref and activity_ref and lease_ref.startswith("ent_") and activity_ref.startswith("ent_")):
+    if not (lease_ref and activity_ref and re.fullmatch(r"ent_[A-Za-z0-9_]+", lease_ref) and re.fullmatch(r"ent_[A-Za-z0-9_]+", activity_ref)):
         return {}
-    lease = _as_snapshot(_get(f"/entities/{lease_ref}"))
-    activity = _as_snapshot(_get(f"/entities/{activity_ref}"))
+    lease_record = _get(f"/entities/{lease_ref}")
+    activity_record = _get(f"/entities/{activity_ref}")
+    lease = _as_snapshot(lease_record)
+    activity = _as_snapshot(activity_record)
     holder = _text(lease.get("holder")) or _text(lease.get("lease_holder"))
     runner = _text(lease.get("runner_id"))
     expires_at = _parse_timestamp(lease.get("expires_at"))
-    observed_at = _parse_timestamp(activity.get("observed_at") or activity.get("activity_at"))
+    observed_at = _parse_timestamp(activity.get("last_activity_at") or activity.get("observed_at") or activity.get("activity_at"))
     now = datetime.now(timezone.utc)
-    if not (holder and runner and expires_at and expires_at > now and observed_at and observed_at <= now):
+    if not (task_id and _entity_type(lease_record) == "lease"
+            and lease.get("status") == "held"
+            and (lease.get("task_id") or lease.get("task_entity_id")) == task_id
+            and holder and runner and expires_at and expires_at > now
+            and observed_at and now - timedelta(minutes=5) <= observed_at <= now):
         return {}
     # Activity must identify the same runner when it names one.  If it does
     # not, it is not evidence that this held lease is doing work.
-    observed_runner = _text(activity.get("runner_id"))
-    if observed_runner and observed_runner != runner:
+    observed_runner = _text(activity.get("runner_id") or activity.get("native_session_id"))
+    if (_entity_type(activity_record) not in {"agent_session", "harness_event"}
+            or (activity.get("task_id") or activity.get("task_entity_id")) != task_id
+            or observed_runner != runner
+            or (_entity_type(activity_record) == "agent_session" and activity.get("kind") == "interactive")):
         return {}
     return {
         "lease_holder": holder,
@@ -669,7 +707,7 @@ def _live_execution_evidence(board: dict) -> dict:
     }
 
 
-def _open_operator_checkpoint(snapshot: dict, board: dict) -> bool:
+def _open_operator_checkpoint(snapshot: dict, board: dict, task_id: str | None = None) -> bool:
     """Operator attention is derived from a currently open checkpoint/gate."""
     refs = (
         _text(snapshot.get("operator_checkpoint_ref")),
@@ -678,102 +716,38 @@ def _open_operator_checkpoint(snapshot: dict, board: dict) -> bool:
         _text(board.get("operator_checkpoint_ref")),
     )
     for reference in refs:
-        if not reference or not reference.startswith("ent_"):
+        if not reference or not re.fullmatch(r"ent_[A-Za-z0-9_]+", reference):
             continue
         checkpoint = _get(f"/entities/{reference}")
         kind = _entity_type(checkpoint)
         status = (_text(_as_snapshot(checkpoint).get("status")) or "").lower()
-        if kind in {"checkpoint_brief", "gate"} and status in {"awaiting_operator", "pending", "open"}:
+        fields = _as_snapshot(checkpoint)
+        if (task_id and kind == "checkpoint_brief" and status == "awaiting_operator"
+                and (fields.get("task_entity_id") or fields.get("task_id")) == task_id):
             return True
     return False
 
 
 def _is_explicitly_claimable(snapshot: dict) -> bool:
-    """Queue is a presentation of a live claimability result, never a status synonym."""
-    return snapshot.get("claimable") is True or (_text(snapshot.get("claimability")) or "").lower() == "claimable"
+    """A stored flag is not the canonical claim predicate.
 
-
-def _operator_obligations_are_accounted_for(board: dict) -> bool:
-    """Unknown obligations fail open into the live view rather than disappearing."""
-    obligations = board.get("operator_obligations")
-    if not isinstance(obligations, list):
-        return False
-    for obligation in obligations:
-        if not isinstance(obligation, dict):
-            return False
-        state = (_text(obligation.get("status")) or "").lower()
-        separately_tracked = bool(_text(obligation.get("tracking_ref")))
-        if state not in {"discharged", "verified", "sent", "reviewed"} and not separately_tracked:
-            return False
-    return True
-
-
-def _has_active_dependents(board: dict) -> bool:
-    """An absent dependency declaration is unknown, so retain the completed row."""
-    dependents = board.get("active_dependents")
-    if not isinstance(dependents, list):
-        return True
-    for dependent in dependents:
-        if isinstance(dependent, str) and dependent.strip():
-            return True
-        if isinstance(dependent, dict):
-            state = (_text(dependent.get("status")) or "active").lower()
-            if state not in _TERMINAL_TASK_STATES:
-                return True
+    The current adapter has no qualified predicate read. Keep recorded state
+    until one is supplied by the owning record implementation; do not invent
+    lease/checkpoint absence from missing task fields.
+    """
     return False
 
 
-def _completion_can_age_out(claim: dict, live_status: str | None) -> bool:
-    """Apply every discharge condition before hiding a terminal historical row."""
-    board = _claim_workboard(claim)
-    verified = (_text(claim.get("verification_state")) or "").lower() == "confirmed"
-    has_evidence = bool(_evidence_entity_ids(claim))
-    terminal = (live_status or _text(claim.get("status_claimed")) or "").lower()
-    return (
-        terminal in _TERMINAL_TASK_STATES
-        and verified
-        and has_evidence
-        and bool(_text(board.get("completion_surfaced_at")))
-        and _operator_obligations_are_accounted_for(board)
-        and not _has_active_dependents(board)
-    )
 
 
-def _durable_tracking_can_omit_locally(
-    claim: dict, receiver_snapshot: dict, receiver_kind: str | None, snapshot: dict,
-) -> bool:
-    """Omit a local leaf only after another durable record tracks the work.
-
-    This affects the summary's visibility only.  It neither transfers a claim
-    nor says the work completed; the referenced task or plan remains the
-    source to inspect for its own recorded state.
-    """
-    board = _claim_workboard(claim)
-    tracking = board.get("durable_tracking")
-    if not isinstance(tracking, dict):
-        return False
-    if receiver_kind not in {"task", "plan"} or not receiver_snapshot:
-        return False
-    assigned_principal = _text(receiver_snapshot.get("assigned_to"))
-    declared_step_owner = _text(receiver_snapshot.get("step_owner"))
-    next_action = _text(receiver_snapshot.get("next_action")) or _text(receiver_snapshot.get("next_steps"))
-    # A declared empty dependency list is useful evidence; a missing list is
-    # unknown and must retain the leaf in the live view.
-    dependencies = tracking.get("dependencies")
-    checkpoint = (_text(tracking.get("operator_checkpoint_status")) or "").lower()
-    return (
-        bool(assigned_principal or declared_step_owner)
-        and bool(next_action)
-        and isinstance(dependencies, list)
-        and bool(_text(tracking.get("session_context_ref")))
-        and checkpoint in {"none", "resolved", "not_required"}
-        and bool(_text(tracking.get("visibility_surfaced_at")))
-        and not _open_operator_checkpoint(snapshot, board)
-    )
 
 
-def _bucket_for(snapshot: dict, board: dict, status: str, live_execution: dict) -> str:
-    if _open_operator_checkpoint(snapshot, board):
+
+
+
+
+def _bucket_for(snapshot: dict, board: dict, status: str, live_execution: dict, task_id: str | None = None) -> str:
+    if _open_operator_checkpoint(snapshot, board, task_id):
         return "operator-needed"
     if status == "blocked":
         return "blocked"
@@ -804,29 +778,72 @@ def _next_action(snapshot: dict, claim: dict, bucket: str, has_live_record: bool
     return "Recorded next action unavailable"
 
 
-def _claim_row(claim: dict) -> dict | None:
+def _planning_ascent(entity_id: str, cache: dict) -> tuple[list[dict], list[str]]:
+    """Follow current outgoing PART_OF only, disclosing gaps and ambiguity."""
+    ascent: list[dict] = []
+    seen = {entity_id}
+    current = entity_id
+    def read(path):
+        if path not in cache:
+            cache[path] = _get(path)
+        return cache[path]
+    for _ in range(8):
+        data = read(f"/entities/{current}/relationships?expand_entities=true")
+        if not isinstance(data, dict) or not isinstance(data.get("relationships"), list):
+            return ascent, [f"Planning relationships for {current} could not be read"]
+        rels = data["relationships"]
+        total = data.get("total")
+        if not isinstance(total, int) or isinstance(total, bool) or total != len(rels):
+            return ascent, [f"Planning relationship coverage for {current} is incomplete or unknown"]
+        parents = list(dict.fromkeys(r.get("target_entity_id") for r in rels if isinstance(r, dict)
+            and r.get("source_entity_id") == current and str(r.get("relationship_type", "")).upper() == "PART_OF"))
+        if not parents:
+            return ascent, ([] if ascent else [f"No planning parent is recorded for {current}"])
+        if len(parents) != 1:
+            return ascent, [f"Multiple planning parents are recorded for {current}; no parent was selected"]
+        parent = parents[0]
+        if not isinstance(parent, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", parent) or parent in seen:
+            return ascent, ["The planning ascent has an invalid or repeated parent"]
+        record = read(f"/entities/{parent}")
+        if not isinstance(record, dict) or not _entity_type(record):
+            return ascent, [f"Planning parent {parent} could not be read"]
+        ascent.append({"entity_id": parent, "entity_type": _entity_type(record), "title": _text(_as_snapshot(record).get("title")) or parent})
+        seen.add(parent)
+        current = parent
+    return ascent, ["The planning ascent exceeded the eight-level read bound"]
+
+
+def _claim_row(claim: dict, planning_cache: dict | None = None) -> dict | None:
     """Build one derived row without promoting digest history to live truth."""
     title = _text(claim.get("claim"))
     if not title:
         return None
     board = _claim_workboard(claim)
     live_record: dict | None = None
+    read_gaps: list[str] = []
+    task_id: str | None = None
     for entity_id in _evidence_entity_ids(claim):
         candidate = _get(f"/entities/{entity_id}")
         if _entity_type(candidate) in {"task", "plan"}:
             live_record = candidate
+            task_id = entity_id
             break
+        if candidate is None:
+            read_gaps.append(f"Referenced record {entity_id} could not be read; its current state is unknown")
     record_kind = _entity_type(live_record)
     snapshot = _as_snapshot(live_record)
     live_status = _text(snapshot.get("status"))
     status = live_status or _text(claim.get("status_claimed")) or "unknown"
-    if _completion_can_age_out(claim, live_status) or _durable_tracking_can_omit_locally(
-        claim, snapshot, record_kind, snapshot,
-    ):
-        return None
-    live_execution = _live_execution_evidence(board)
-    bucket = _bucket_for(snapshot, board, status.lower(), live_execution)
+    # Historical completion, send, and handoff flags cannot discharge today's
+    # obligations. Keep the row until an owning verifier supplies actual
+    # completion/recovery evidence. UI filters change visibility only.
+    live_execution = (_live_execution_evidence(board, task_id)
+                      if record_kind == "task" and snapshot.get("admission_class") == "workflow_entering"
+                      and status.lower() not in _TERMINAL_TASK_STATES else {})
+    bucket = _bucket_for(snapshot, board, status.lower(), live_execution, task_id) if live_record is not None else "recorded"
     state = "Working now" if live_execution else f"Recorded state: {status}"
+    ascent, planning_gaps = _planning_ascent(task_id, planning_cache if planning_cache is not None else {}) if task_id else ([], [])
+    read_gaps.extend(planning_gaps)
     return {
         "kind": record_kind or "task",
         "priority": bucket,
@@ -840,6 +857,9 @@ def _claim_row(claim: dict) -> dict | None:
         "next_action": _next_action(snapshot, claim, bucket, live_record is not None),
         "evidence": _evidence_entity_ids(claim),
         "state_source": "live_lease_and_activity" if live_execution else (f"recorded_{record_kind}" if live_record else "session_digest_history"),
+        "entity_id": task_id,
+        "read_gaps": read_gaps,
+        "planning_ascent": ascent,
     }
 
 
@@ -860,7 +880,47 @@ def _format_workboard(rows: list[dict]) -> str:
     return "\n".join(table)
 
 
-def _get_session_workboard(session_key: str, display_plan_id: str, include_history: bool = False) -> dict:
+def _workboard_session_rows() -> tuple[list[dict], list[str], dict]:
+    """A bounded native-session read, never an ownership or liveness authority."""
+    page = _retrieve_page("agent_session", limit=50)
+    if not isinstance(page, dict) or not isinstance(page.get("entities"), list):
+        return [], ["Session registry could not be read; session coverage is unknown"], {"complete": False}
+    rows = []
+    gaps = []
+    identities: set[tuple[str, str]] = set()
+    for record in page["entities"]:
+        fields = _as_snapshot(record)
+        harness = _text(fields.get("harness"))
+        native = _text(fields.get("native_session_id"))
+        if not harness or not native or _entity_type(record) != "agent_session":
+            gaps.append("A session row lacks its native identity; it was not assigned a routing identity")
+            continue
+        identity = (harness, native)
+        if identity in identities:
+            gaps.append("The bounded registry read contains a repeated native session identity; routing is ambiguous")
+        identities.add(identity)
+        rows.append({
+            "kind": "session", "priority": "recorded", "entity_id": record.get("entity_id") or record.get("id"),
+            "work": _text(fields.get("title")) or f"{harness}: {native}",
+            "state": "Native state: " + (_text(fields.get("status")) or "unknown"),
+            "native_harness": harness, "native_session_id": native, "native_kind": fields.get("kind"),
+            "native_holder": fields.get("holder"), "native_task_id": fields.get("task_id"),
+            "native_last_activity_at": fields.get("last_activity_at"), "native_is_archived": fields.get("is_archived"),
+            "routing_role": fields.get("coordination_role"), "routing_observed_at": fields.get("routing_observed_at"),
+            "assigned_principal": "unknown", "lease_holder": "unknown", "runner": "unknown",
+            "declared_step_owner": "unknown", "record_owner": "unknown", "state_source": "recorded_agent_session",
+            "next_action": "Read the owning task and current routing evidence before a handoff.",
+            "read_gaps": [], "evidence": [record.get("entity_id") or record.get("id")],
+        })
+    total = page.get("total")
+    complete = (isinstance(total, int) and not isinstance(total, bool) and total == len(page["entities"])
+                and total <= 50 and not page.get("next_cursor"))
+    if not complete:
+        gaps.append("Session rows are a bounded page; full registry coverage is not established")
+    return rows, gaps, {"complete": complete, "returned": len(rows), "limit": 50}
+
+
+def _get_session_workboard(session_key: str, display_plan_id: str, include_history: bool = False, include_sessions: bool = False) -> dict:
     """Derive an on-demand session summary with one explicitly selected plan.
 
     `session_key` is deliberately harness-agnostic: a Codex session can inspect
@@ -868,7 +928,14 @@ def _get_session_workboard(session_key: str, display_plan_id: str, include_histo
     explicit and affects table order only; it creates no authority or session
     binding and no hidden default plan is inferred.
     """
-    digest_entity = _find_session_digest(session_key)
+    if not isinstance(session_key, str) or not session_key.strip() or len(session_key) > 256:
+        return {"error": "session_key must be a nonempty string of at most 256 characters"}
+    if not isinstance(display_plan_id, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", display_plan_id):
+        return {"error": "display_plan_id must be an entity id"}
+    try:
+        digest_entity = _find_session_digest(session_key)
+    except ValueError as exc:
+        return {"error": str(exc), "session_key": session_key}
     if digest_entity is None:
         detail = _describe_transport_error()
         return {"error": detail or "session_digest not found", "session_key": session_key}
@@ -902,10 +969,18 @@ def _get_session_workboard(session_key: str, display_plan_id: str, include_histo
         "next_action": _text(plan.get("next_steps")) or "Read the current plan next steps",
         "evidence": [display_plan_id],
         "state_source": "recorded_plan",
+        "entity_id": display_plan_id,
+        "read_gaps": [],
     }]
     claims = digest.get("tasks_claimed")
+    planning_cache: dict = {}
     if isinstance(claims, list):
-        rows.extend(row for claim in claims if isinstance(claim, dict) if (row := _claim_row(claim)) is not None)
+        rows.extend(row for claim in claims if isinstance(claim, dict) if (row := _claim_row(claim, planning_cache)) is not None)
+    session_gaps: list[str] = []
+    session_coverage: dict = {"requested": False}
+    if include_sessions:
+        sessions, session_gaps, session_coverage = _workboard_session_rows()
+        rows.extend(sessions)
     rows.sort(key=lambda row: _WORKBOARD_ORDER.get(str(row["priority"]), len(_WORKBOARD_ORDER)))
     result: dict[str, Any] = {
         "session_key": session_key,
@@ -914,6 +989,11 @@ def _get_session_workboard(session_key: str, display_plan_id: str, include_histo
         "display_plan_id": display_plan_id,
         "rows": rows,
         "table": _format_workboard(rows),
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "read_gaps": [gap for row in rows for gap in row.get("read_gaps", [])] + session_gaps,
+        "session_coverage": session_coverage,
+        "capability_gaps": ["Canonical claimability is not qualified by this adapter; pending and open are recorded states.",
+                            "Session membership and native activity do not prove a held task lease."],
         "refresh_rule": "Refresh after a material task, agent, or decision change and before substantial new intake. This is an on-demand derived read, not a canonical projection.",
     }
     if include_history:
@@ -4431,6 +4511,7 @@ TOOLS = [
     ),
     Tool(
         name="get_session_workboard",
+        **{"_meta": {"ui": {"resourceUri": WORKBOARD_RESOURCE_URI, "visibility": ["model", "app"]}}},
         description=(
             "Read-only. Derive an on-demand workboard from one stable session_digest. "
             "It labels task and plan fields as recorded state unless separately read "
@@ -4456,6 +4537,10 @@ TOOLS = [
                     "type": "boolean",
                     "default": False,
                     "description": "Include the unfiltered cumulative tasks_claimed and artifacts ledger.",
+                },
+                "include_sessions": {
+                    "type": "boolean", "default": False,
+                    "description": "Also read a bounded page of native agent_session registry rows; native state is not task execution or routing authority.",
                 },
             },
             "required": ["session_key", "display_plan_id"],
@@ -4493,30 +4578,52 @@ TOOL_HANDLERS = {
         bool(args.get("include_checkpoints", False)),
         args.get("wait_seconds", 0),
     ),
-    "get_session_workboard": lambda args: _get_session_workboard(
-        args["session_key"], args["display_plan_id"], bool(args.get("include_history", False))
+    "get_session_workboard": lambda args: asyncio.to_thread(
+        _get_session_workboard, args["session_key"], args["display_plan_id"], bool(args.get("include_history", False)), bool(args.get("include_sessions", False))
     ),
 }
 
 
-async def main():
-    denial_store = _require_checkpoint_release_state()
-    log.info("Checkpoint denial store ready at %s", denial_store)
+def create_server() -> Server:
+    """Build the existing server; static UI discovery requires no data credentials."""
     server = Server("ateles", instructions=render_server_instructions())
 
     @server.list_tools()
     async def handle_list_tools() -> list[Tool]:
         return TOOLS
 
+    @server.list_resources()
+    async def handle_list_resources() -> list[Resource]:
+        return [_workboard_resource()]
+
+    @server.read_resource()
+    async def handle_read_resource(uri):
+        if str(uri) != WORKBOARD_RESOURCE_URI:
+            raise ValueError("Unknown Ateles UI resource")
+        return [ReadResourceContents(content=_WORKBOARD_HTML,
+                                     mime_type=WORKBOARD_RESOURCE_MIME, meta={"ui": _WORKBOARD_UI_META})]
+
     @server.call_tool()
-    async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    async def handle_call_tool(name: str, arguments: dict):
         handler = TOOL_HANDLERS.get(name)
         if not handler:
             return [TextContent(type="text", text=json.dumps({"error": f"unknown tool: {name}"}))]
         result = handler(arguments or {})
         if inspect.isawaitable(result):
             result = await result
+        if name == "get_session_workboard":
+            return CallToolResult(content=[TextContent(type="text", text=result.get("table") or json.dumps(result, default=str))],
+                                  structuredContent=result, isError=bool(result.get("error")),
+                                  **{"_meta": {"ui": {"resourceUri": WORKBOARD_RESOURCE_URI}}})
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+    return server
+
+
+async def main():
+    denial_store = _require_checkpoint_release_state()
+    log.info("Checkpoint denial store ready at %s", denial_store)
+    server = create_server()
 
     options = server.create_initialization_options()
     async with stdio_server() as (read_stream, write_stream):

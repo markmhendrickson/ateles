@@ -1541,12 +1541,12 @@ class TestSessionWorkboard(unittest.TestCase):
     PLAN_ID = "ent_plan_1"
 
     def _digest(self, claims, harness="codex"):
-        return [{
+        return {"entities": [{
             "entity_id": "ent_digest_1",
             "entity_type": "session_digest",
             "snapshot": {"session_key": f"{harness}:root", "harness": harness, "tasks_claimed": claims,
                          "artifacts": [{"kind": "entity", "ref": "ent_artifact", "description": "history"}]},
-        }]
+        }], "total": 1}
 
     def _plan(self):
         return {"entity_id": self.PLAN_ID, "entity_type": "plan", "snapshot": {
@@ -1554,7 +1554,7 @@ class TestSessionWorkboard(unittest.TestCase):
         }}
 
     @patch("server._get")
-    @patch("server._retrieve_entities")
+    @patch("server._retrieve_page")
     def test_plan_is_first_then_live_buckets_in_contract_order(self, retrieve, get):
         claims = [
             {"claim": "queued work", "status_claimed": "todo", "evidence_pointers": ["ent_queue"]},
@@ -1567,23 +1567,23 @@ class TestSessionWorkboard(unittest.TestCase):
         retrieve.return_value = self._digest(claims)
         get.side_effect = lambda path: {
             f"/entities/{self.PLAN_ID}": self._plan(),
-            "/entities/ent_active": {"entity_type": "task", "snapshot": {"status": "executing", "assigned_to": "cicada"}},
-            "/entities/ent_lease": {"entity_type": "lease", "snapshot": {"holder": "cicada", "runner_id": "runner-1", "expires_at": "2999-01-01T00:00:00Z"}},
-            "/entities/ent_activity": {"entity_type": "harness_event", "snapshot": {"runner_id": "runner-1", "observed_at": "2020-01-01T00:00:00Z"}},
+            "/entities/ent_active": {"entity_type": "task", "snapshot": {"status": "executing", "assigned_to": "cicada", "admission_class": "workflow_entering"}},
+            "/entities/ent_lease": {"entity_type": "lease", "snapshot": {"status": "held", "task_id": "ent_active", "holder": "cicada", "runner_id": "runner-1", "expires_at": "2999-01-01T00:00:00Z"}},
+            "/entities/ent_activity": {"entity_type": "harness_event", "snapshot": {"task_id": "ent_active", "runner_id": "runner-1", "observed_at": srv.datetime.now(srv.timezone.utc).isoformat()}},
             "/entities/ent_queue": {"entity_type": "task", "snapshot": {"status": "todo", "assigned_to": "cicada", "claimable": True}},
             "/entities/ent_blocked": {"entity_type": "task", "snapshot": {"status": "blocked", "assigned_to": "cicada"}},
             "/entities/ent_operator": {"entity_type": "task", "snapshot": {"status": "todo", "assigned_to": "operator"}},
-            "/entities/ent_checkpoint": {"entity_type": "checkpoint_brief", "snapshot": {"status": "awaiting_operator"}},
+            "/entities/ent_checkpoint": {"entity_type": "checkpoint_brief", "snapshot": {"status": "awaiting_operator", "task_id": "ent_operator"}},
         }.get(path)
 
         out = srv._get_session_workboard("codex:root", self.PLAN_ID)
         self.assertEqual([row["priority"] for row in out["rows"]],
-                         ["display-plan", "active", "queued", "blocked", "operator-needed"])
+                         ["display-plan", "active", "blocked", "operator-needed", "recorded"])
         self.assertIn("| Priority | Work | State | Assigned principal | Lease holder | Runner | Declared step owner | Next action |", out["table"])
         self.assertEqual(out["rows"][1]["state"], "Working now")
 
     @patch("server._get")
-    @patch("server._retrieve_entities")
+    @patch("server._retrieve_page")
     def test_live_task_replaces_a_stale_completed_digest_claim(self, retrieve, get):
         retrieve.return_value = self._digest([{
             "claim": "old completion", "status_claimed": "complete", "verification_state": "confirmed",
@@ -1600,7 +1600,7 @@ class TestSessionWorkboard(unittest.TestCase):
         self.assertEqual(row["state_source"], "recorded_task")
 
     @patch("server._get")
-    @patch("server._retrieve_entities")
+    @patch("server._retrieve_page")
     def test_subordinate_plan_is_read_live_not_duplicated_as_session_status(self, retrieve, get):
         retrieve.return_value = self._digest([{
             "claim": "Advance the subordinate workstream", "status_claimed": "todo",
@@ -1617,7 +1617,7 @@ class TestSessionWorkboard(unittest.TestCase):
         self.assertEqual((row["kind"], row["state"], row["state_source"]), ("plan", "Recorded state: active", "recorded_plan"))
 
     @patch("server._get")
-    @patch("server._retrieve_entities")
+    @patch("server._retrieve_page")
     def test_any_harness_uses_the_same_mcp_read_and_full_history_is_cumulative(self, retrieve, get):
         retrieve.return_value = self._digest([], harness="cursor")
         get.return_value = self._plan()
@@ -1630,7 +1630,7 @@ class TestSessionWorkboard(unittest.TestCase):
         self.assertNotIn("harness", tool.inputSchema["properties"])
 
     @patch("server._get")
-    @patch("server._retrieve_entities")
+    @patch("server._retrieve_page")
     def test_email_work_stays_live_until_review_and_gmail_send_are_discharged(self, retrieve, get):
         claim = {
             "claim": "Review intake, follow up, and send draft", "status_claimed": "complete",
@@ -1652,11 +1652,11 @@ class TestSessionWorkboard(unittest.TestCase):
         self.assertEqual(len(srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"]), 2)
 
         claim["workboard"]["operator_obligations"][1]["status"] = "sent"
-        self.assertEqual(len(srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"]), 1)
+        self.assertEqual(len(srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"]), 2)  # cached send flags do not prove a delivered send
 
     @patch("server._get")
-    @patch("server._retrieve_entities")
-    def test_durable_tracking_locally_omits_leaf_but_preserves_history(self, retrieve, get):
+    @patch("server._retrieve_page")
+    def test_durable_tracking_claim_keeps_leaf_and_preserves_history(self, retrieve, get):
         claim = {
             "claim": "Prepare tracked material", "status_claimed": "outstanding", "evidence_pointers": ["ent_receiver"],
             "workboard": {"durable_tracking": {
@@ -1672,11 +1672,11 @@ class TestSessionWorkboard(unittest.TestCase):
         }.get(path)
 
         out = srv._get_session_workboard("codex:root", self.PLAN_ID, include_history=True)
-        self.assertEqual(len(out["rows"]), 1)  # selected display plan remains visible
+        self.assertEqual(len(out["rows"]), 2)  # a digest handoff claim alone does not discharge the leaf
         self.assertEqual(out["history"]["tasks_claimed"][0]["claim"], "Prepare tracked material")
 
     @patch("server._get")
-    @patch("server._retrieve_entities")
+    @patch("server._retrieve_page")
     def test_recorded_execution_is_not_active_and_roles_are_not_conflated(self, retrieve, get):
         retrieve.return_value = self._digest([{
             "claim": "Recorded execution", "status_claimed": "outstanding", "evidence_pointers": ["ent_task"],
@@ -1697,7 +1697,7 @@ class TestSessionWorkboard(unittest.TestCase):
         self.assertEqual(row["next_action"], "Live record action")
 
     @patch("server._get")
-    @patch("server._retrieve_entities")
+    @patch("server._retrieve_page")
     def test_operator_attention_requires_open_checkpoint_and_queue_requires_claimability(self, retrieve, get):
         claim = {"claim": "Need a person", "status_claimed": "todo", "evidence_pointers": ["ent_task"]}
         retrieve.return_value = self._digest([claim])
@@ -1711,12 +1711,12 @@ class TestSessionWorkboard(unittest.TestCase):
         get.side_effect = lambda path: {
             f"/entities/{self.PLAN_ID}": self._plan(),
             "/entities/ent_task": {"entity_type": "task", "snapshot": {"status": "todo", "assigned_to": "operator"}},
-            "/entities/ent_checkpoint": {"entity_type": "checkpoint_brief", "snapshot": {"status": "awaiting_operator"}},
+            "/entities/ent_checkpoint": {"entity_type": "checkpoint_brief", "snapshot": {"status": "awaiting_operator", "task_id": "ent_task"}},
         }.get(path)
         self.assertEqual(srv._get_session_workboard("codex:root", self.PLAN_ID)["rows"][1]["priority"], "operator-needed")
 
     @patch("server._get")
-    @patch("server._retrieve_entities")
+    @patch("server._retrieve_page")
     def test_live_next_action_beats_stale_digest_next_action(self, retrieve, get):
         retrieve.return_value = self._digest([{
             "claim": "Fresh action", "status_claimed": "todo", "evidence_pointers": ["ent_task"],
