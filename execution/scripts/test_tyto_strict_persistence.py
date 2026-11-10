@@ -31,7 +31,7 @@ _FIELDS = ('transcription_text', 'capture_method', 'transcription_engine', 'cons
 def selected_flow(storage, tmp_path, monkeypatch):
     state, _save = storage
     external_transport = ta.subprocess.run
-    def setup(paired):
+    def setup(paired, *, duration=2.5):
         audio = state['audio']
         target = audio.with_name('meeting remote.wav' if paired else 'memo.wav')
         audio.rename(target)
@@ -61,7 +61,9 @@ def selected_flow(storage, tmp_path, monkeypatch):
         monkeypatch.setattr(tyto, '_verify_transcription_cli_runtime', lambda _: None)
         monkeypatch.setattr(ta, '_merge_transcription_relate_targets', lambda *a: ([], None))
         text = 'System/1: remote words.\nMic/1: microphone words.' if paired else 'Synthetic memo.'
-        inference = MagicMock(return_value=complete_result(audio, mic, text=text))
+        result = complete_result(audio, mic, text=text)
+        result['audio_duration_seconds'] = duration
+        inference = MagicMock(return_value=result)
         monkeypatch.setattr(ta, 'transcribe_two_files' if paired else 'transcribe_audio_file', inference)
         phase = {'mode': 'denied', 'field': None, 'change': None}
         receipts = []

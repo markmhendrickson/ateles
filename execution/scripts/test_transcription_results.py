@@ -95,3 +95,37 @@ def test_actual_fluid_constructors_satisfy_complete_raw_contract(tmp_path, monke
     monkeypatch.setattr(ta, 'get_audio_duration', lambda _: 2.5)
     result = ta.transcribe_two_files(mic, audio, backend='fluid') if paired else local_fluid.transcribe_fluid(audio)
     ta._validate_transcription_result(result, paired=paired)
+
+
+@pytest.mark.parametrize('paired', [False, True])
+def test_actual_elevenlabs_constructors_nullable_duration_contract(tmp_path, monkeypatch, paired):
+    audio = tmp_path / 'source.wav'
+    audio.write_bytes(b'synthetic')
+    mic = tmp_path / 'mic.wav'
+    mic.write_bytes(b'synthetic mic')
+    monkeypatch.setenv('ELEVENLABS_API_KEY', 'synthetic-test-only')
+    monkeypatch.setenv('TRANSCRIBE_DISABLE_NEOTOMA_VOCAB', '1')
+    monkeypatch.setattr(ta, 'get_audio_channel_count', lambda _: 1)
+    monkeypatch.setattr(ta, 'get_audio_duration', lambda _: None)
+    monkeypatch.setattr(ta, 'prepare_elevenlabs_upload_file', lambda path, **k: (path, None))
+    monkeypatch.setattr(ta, '_post_elevenlabs_stt_raw', lambda *a: {'text': 'Synthetic.', 'words': []})
+    monkeypatch.setattr(ta, '_combine_tracks_to_stereo', lambda *a, **k: (audio, None))
+    result = ta.transcribe_two_files(mic, audio, backend='elevenlabs') if paired else ta.transcribe_audio_file(audio, backend='elevenlabs')
+    ta._validate_transcription_result(result, paired=paired)
+    assert result['audio_duration_seconds'] is None
+
+
+def test_actual_openai_constructor_has_no_raw_guarantee(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    audio = tmp_path / 'source.wav'
+    audio.write_bytes(b'synthetic')
+    monkeypatch.setenv('OPENAI_API_KEY', 'synthetic-test-only')
+    monkeypatch.setenv('TRANSCRIBE_DISABLE_NEOTOMA_VOCAB', '1')
+    monkeypatch.setattr(ta, 'get_audio_channel_count', lambda _: 1)
+    monkeypatch.setattr(ta, 'get_audio_duration', lambda _: None)
+    monkeypatch.setattr(ta, 'OpenAI', lambda **k: object())
+    monkeypatch.setattr(ta, 'transcribe_with_retry', lambda **k: SimpleNamespace(text='Synthetic.', language=None))
+    result = ta.transcribe_audio_file(audio, backend='openai')
+    ta._validate_transcription_result(result, paired=False)
+    assert result['language'] is None and result['audio_duration_seconds'] is None
+    assert 'raw_response' not in result

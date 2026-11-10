@@ -101,3 +101,36 @@ def test_malformed_fresh_result_preserves_existing_sidecars(selected_flow, monke
     assert 'cmd' not in state and receipts == [] and audio in watcher._hard_failed
     assert not pending.exists()
     assert all(path.read_bytes() == content for path, content in preserved.items())
+
+
+@pytest.mark.parametrize('path,value', [
+    (('tracks',), 7), (('aligned_words',), {}), (('tracks', 0, 'channel'), []),
+    (('tracks', 0, 'result', 'tracks', 0, 'channel'), 7),
+    (('tracks', 0, 'result', 'tracks', 0, 'diarization', 'segments'), {}),
+    (('tracks', 0, 'result', 'tracks', 0, 'diarization', 'segments', 0, 'startTimeSeconds'), 'invalid'),
+    (('tracks', 0, 'result', 'tracks', 0, 'diarization', 'segments', 0, 'speakerId'), 7),
+    (('tracks', 0, 'result', 'tracks', 0, 'asr', 'wordTimings'), {}),
+    (('tracks', 0, 'result', 'tracks', 0, 'asr', 'wordTimings', 0, 'word'), 7),
+    (('aligned_words', 0, 'start'), 'invalid'), (('aligned_words', 0, 'end'), -1),
+    (('aligned_words', 0, 'text'), 7), (('aligned_words', 0, 'speaker'), 7),
+    (('aligned_words', 0, 'speaker_candidates'), 7),
+    (('aligned_words', 0, 'confidence'), float('nan')),
+])
+def test_wrong_type_fluid_raw_fields_preserve_original_evidence(selected_flow, path, value):
+    def mutate(result):
+        node = result['raw_response']
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+    _assert_rejected(selected_flow(True), mutate)
+
+
+def test_complete_nullable_local_measurements_recover_without_raw_response(selected_flow):
+    state, phase, watcher, journal, audio, _mic, inference, receipts, _text = selected_flow(False, duration=None)
+    phase.update(mode='fresh')
+    tyto.cli()
+    inference.assert_not_called()
+    assert len(receipts) == 1 and audio not in watcher._hard_failed
+    assert state['entity']['audio_duration_seconds'] is None
+    assert not audio.with_suffix(audio.suffix + '.stt_raw.json').exists()
+    assert json.loads(journal.read_text())['hard_failed'] == []

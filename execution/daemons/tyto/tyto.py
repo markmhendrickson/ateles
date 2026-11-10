@@ -1282,7 +1282,8 @@ class RecordingWatcher:
         code = str(held.get("error_code", "")) if held else ""
         if (held is not None and code not in (
                 "capability_denied", "ERR_AUDIO_ATTACHMENT_REQUIRED",
-                "ERR_PERSISTED_RESULT_MISMATCH", SOURCE_REJECTION_ERROR_CODE)
+                "ERR_PERSISTED_RESULT_MISMATCH", "ERR_INCOMPLETE_TRANSCRIPTION_RESULT",
+                SOURCE_REJECTION_ERROR_CODE)
                 and not code.startswith(RETRY_LIMIT_ERROR_CODE)):
             raise RuntimeError("Selected hold is not a recoverable store/source disposition")
         mic = self._find_mic_pair(path) if self._paired else None

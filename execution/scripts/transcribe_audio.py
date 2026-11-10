@@ -2569,11 +2569,9 @@ def _read_pending_store(
         payload = json.loads(target.read_text())
         if (payload.get("version") != 1
                 or payload.get("identity") != _pending_store_identity(audio_path, mic_path)
-                or payload.get("context") != context
-                or not isinstance(payload.get("result"), dict)
-                or not payload["result"].get("transcription_text")):
+                or payload.get("context") != context):
             raise ValueError("source or context mismatch")
-        _validate_transcription_result(payload["result"], paired=mic_path is not None)
+        _validate_transcription_result(payload.get("result"), paired=mic_path is not None)
         return payload["result"]
     except (OSError, ValueError, TypeError, AttributeError) as exc:
         if isinstance(exc, IncompleteTranscriptionResult):

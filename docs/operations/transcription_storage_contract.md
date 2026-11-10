@@ -151,3 +151,31 @@ a matching cached result can retry without inference. Likewise a
 storage/evidence prerequisite is repaired; the exact persisted-result comparison
 still runs and an incompatible result remains held. Neither retry flag waives
 source confinement, consent, authority, attachment or persistence predicates.
+
+## Complete inference-result validation
+
+Before writing sidecars, replacing a pending result or entering storage, the CLI
+validates the actual backend's complete result contract. The pending reader and
+writer apply the same check. Unknown/missing backend or engine cannot select a
+weaker default. Common text/model/language/backend/engine/size fields and the
+constructor's duration key are required with their supported types; finite
+numeric measurements reject booleans, NaN and infinity. A nullable measurement
+still retains its key where emitted. Local Whisper additionally retains nullable
+RMS and boolean silence; it and OpenAI do not require raw model JSON. OpenAI's
+returned nullable language is preserved. Paired ElevenLabs permits unmeasured
+conditional duration; paired Fluid does not require RMS or silence.
+
+Fluid results retain the complete tracks and aligned-word structures, including
+both System/Mic originals for a pair, nested diarization/ASR containers, timing,
+speaker and nullable confidence fields. ElevenLabs retains its returned raw body
+or segmented envelope. Extra legitimate JSON fields are preserved. This checks
+constructor completeness, not cryptographic authenticity against the same user
+who controls the executable, audio and local files.
+
+Missing/mistyped required fields raise `ERR_INCOMPLETE_TRANSCRIPTION_RESULT`
+before any sidecar/cache/storage effect. Existing malformed input caches, complete
+raw/text sidecars, originals and selected holds remain unchanged; there is no ASR
+fallback in store-only mode. An owning repair may explicitly retry after restoring
+a complete valid result, with all source and exact persisted-result checks still
+required. No model, server metadata, schema or authorization change follows from
+this validation.
