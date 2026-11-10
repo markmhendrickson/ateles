@@ -55,6 +55,8 @@ if _mcp_sdk_missing():
         "mcp.server": types.ModuleType("mcp.server"),
         "mcp.server.stdio": types.ModuleType("mcp.server.stdio"),
         "mcp.types": types.ModuleType("mcp.types"),
+        "mcp.server.lowlevel": types.ModuleType("mcp.server.lowlevel"),
+        "mcp.server.lowlevel.helper_types": types.ModuleType("mcp.server.lowlevel.helper_types"),
     }
 
     class _Shape:
@@ -65,6 +67,9 @@ if _mcp_sdk_missing():
     _shapes["mcp.server.stdio"].stdio_server = None
     _shapes["mcp.types"].TextContent = _Shape
     _shapes["mcp.types"].Tool = _Shape
+    _shapes["mcp.types"].CallToolResult = _Shape
+    _shapes["mcp.types"].Resource = _Shape
+    _shapes["mcp.server.lowlevel.helper_types"].ReadResourceContents = _Shape
     for _name, _module in _shapes.items():
         # A stand-in with a spec, so a later find_spec("mcp") in the same run
         # sees a module rather than raising on a missing spec.
