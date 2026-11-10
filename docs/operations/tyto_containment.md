@@ -56,3 +56,13 @@ The normal daemon also runs screenshot intake, enabled analysis and its existing
 retry queue. Its activation remains broader than the source checks here, and
 pre-upgrade writers require independent operational exclusion. Keep activation
 and real recording acceptance with their existing qualified owner and gates.
+
+Invalid physical inputs are confined to their recording. A directory/FIFO remote
+entry or a rejected microphone produces one durable
+`ERR_RECORDING_SOURCE_REJECTED` hold, with no inference or remote-only pair
+fallback. Later healthy recordings continue through the same source. Known
+holds are checked before physical revalidation so unchanged invalid items do not
+repeatedly abort or rewrite the source poll after restart. If that quarantine
+cannot be persisted, the watcher stops before any inference instead. Original
+invalid entries and both physical tracks are retained for their owning recovery
+route; this unit does not clear those holds.

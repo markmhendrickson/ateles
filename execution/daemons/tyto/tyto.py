@@ -600,13 +600,25 @@ class ScreenshotWatcher:
 # ERR_IDEMPOTENCY_MISMATCH reaches the daemon only after transcribe_audio.py has
 # tried to resolve the prior write under the same content key and could not
 # find it; re-sending under that key is rejected identically every time.
+SOURCE_REJECTION_ERROR_CODE = "ERR_RECORDING_SOURCE_REJECTED"
 PERMANENT_STORE_ERROR_CODES = (
+    SOURCE_REJECTION_ERROR_CODE,
     "ERR_FILE_PATH_IS_SERVER_LOCAL",
     "ERR_IDEMPOTENCY_MISMATCH",
     # A grant rejection cannot heal by re-running ASR. Retain the source and
     # journal the rejection for explicit recovery after its cause is repaired.
     "capability_denied",
 )
+
+
+class RecordingSourceError(RuntimeError):
+    """A physical recording input is unsafe; quarantine only that recording."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            f"{SOURCE_REJECTION_ERROR_CODE}: track is outside the configured recording source "
+            "or is not a regular file"
+        )
 
 
 def _classify_store_error(exc: BaseException) -> str | None:
@@ -919,13 +931,16 @@ class RecordingWatcher:
         .composition, .db, and the extensionless CaptureRecovery/Capture
         directories) fall out because their suffixes are not in _extensions.
         """
-        if path.is_symlink() or path.resolve().parent != self._dir.resolve():
+        try:
+            if path.is_symlink() or not path.is_file() or path.resolve().parent != self._dir.resolve():
+                return False
+        except (OSError, RuntimeError):
             return False
-        if self._paired:
-            return self._is_remote_file(path)
-        if not path.is_file():
-            return False
-        return path.suffix.lower() in self._extensions
+        return self._is_recording_candidate(path)
+
+    def _is_recording_candidate(self, path: Path) -> bool:
+        """Name filter only; physical validation is an item-level disposition."""
+        return self._is_remote_file(path) if self._paired else path.suffix.lower() in self._extensions
 
 
     def _is_within_age_window(self, path: Path, now: float) -> bool:
@@ -976,7 +991,10 @@ class RecordingWatcher:
         identical bytes in separate files. Missing legacy paths retain their
         resolved spelling and never become proof of filesystem equivalence.
         """
-        resolved = path.resolve()
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError):
+            resolved = path.absolute()
         for field in ("_hard_failed", "_pending_retries", "_attempts", "_transcribed", "_seen"):
             for known in getattr(self, field, ()):
                 if resolved == known:
@@ -990,10 +1008,28 @@ class RecordingWatcher:
 
 
     def _canonical_source(self, path: Path) -> Path:
-        resolved = path.resolve()
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise RecordingSourceError() from exc
         if path.is_symlink() or not resolved.is_file() or resolved.parent != self._dir.resolve():
-            raise RuntimeError("Track is outside the configured recording source or is not a regular file")
+            raise RecordingSourceError()
         return self._recording_identity_path(resolved)
+
+    def _quarantine_rejected_source(self, path: Path) -> bool:
+        """Persist one unsafe input's hold; a failed journal disables inference."""
+        path = self._recording_identity_path(path)
+        if not self._mark_hard_failed(path, SOURCE_REJECTION_ERROR_CODE):
+            return False
+        if not self._hard_failed[path].get("notified"):
+            self._notifier.send(
+                f"Recording source rejected for {path.name}: {SOURCE_REJECTION_ERROR_CODE} "
+                "(will not retry; both tracks retained)",
+                priority=Priority.BLOCKER, handler=DAEMON_NAME,
+            )
+            if not self._mark_hard_failure_notified(path):
+                return False
+        return True
 
 
     def _is_settled(self, path: Path, now: float) -> bool:
@@ -1025,9 +1061,10 @@ class RecordingWatcher:
 
         processed = 0
         for path in sorted(self._dir.iterdir()):
-            if not self._is_eligible_file(path):
+            if not self._is_recording_candidate(path):
                 continue
-            path = self._canonical_source(path)
+            candidate = path
+            path = self._recording_identity_path(path)
             if path in self._transcribed:
                 continue
             if path in self._hard_failed:
@@ -1046,6 +1083,12 @@ class RecordingWatcher:
                     )
                     self._mark_hard_failure_notified(path)
                 continue
+            try:
+                path = self._canonical_source(candidate)
+            except RecordingSourceError:
+                if not self._quarantine_rejected_source(candidate):
+                    return
+                continue
             if self._pending_retries.get(path, 0) > now:
                 continue
             # Backlog guard: an old file is never a fresh recording. Checked
@@ -1061,7 +1104,12 @@ class RecordingWatcher:
 
             # Find matching mic file. Unpaired watchers (Voice Memos) are
             # always single-file — never attempt the two-file merge path.
-            mic_path = self._find_mic_pair(path) if self._paired else None
+            try:
+                mic_path = self._find_mic_pair(path) if self._paired else None
+            except RecordingSourceError:
+                if not self._quarantine_rejected_source(path):
+                    return
+                continue
 
             # If mic file exists, wait for it to settle too
             if mic_path is not None and not self._is_settled(mic_path, now):

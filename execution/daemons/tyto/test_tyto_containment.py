@@ -154,19 +154,60 @@ def test_normal_poll_preserves_distinct_files_and_deduplicates_hardlinks(tmp_pat
     assert original in watcher._hard_failed
 
 
-def test_normal_pair_rejects_escaping_mic_before_inference(tmp_path, monkeypatch):
+@pytest.mark.parametrize('kind', ['directory_remote', 'fifo_remote', 'directory_mic', 'symlink_mic'])
+def test_rejected_recording_cannot_starve_healthy_source(tmp_path, monkeypatch, kind):
     source = tmp_path / 'source'
     source.mkdir()
-    remote = source / 'fixture remote.wav'
-    remote.write_bytes(b'synthetic')
-    outside = tmp_path / 'outside.wav'
-    outside.write_bytes(b'outside synthetic')
-    (source / 'fixture mic.wav').symlink_to(outside)
-    watcher = tyto.RecordingWatcher(source, MagicMock(), retry_state_path=tmp_path / 'retries.json')
+    bad = source / 'a remote.wav'
+    if kind == 'directory_remote':
+        bad.mkdir()
+    elif kind == 'fifo_remote':
+        os.mkfifo(bad)
+    else:
+        bad.write_bytes(b'synthetic remote')
+        mic = source / 'a mic.wav'
+        if kind == 'directory_mic':
+            mic.mkdir()
+        else:
+            outside = tmp_path / 'outside.wav'
+            outside.write_bytes(b'outside synthetic')
+            mic.symlink_to(outside)
+    healthy = source / 'z remote.wav'
+    healthy.write_bytes(b'healthy remote')
+    healthy_mic = source / 'z mic.wav'
+    healthy_mic.write_bytes(b'healthy microphone')
+    journal = tmp_path / 'retries.json'
+    observed = []
+    async def handle(path, mic):
+        observed.append((path, mic))
+        return 'success', None
+    watcher = tyto.RecordingWatcher(source, MagicMock(), retry_state_path=journal,
+                                   max_files_per_poll=1, max_attempts=2)
     monkeypatch.setattr(watcher, '_is_settled', lambda *a: True)
-    with pytest.raises(RuntimeError, match='configured recording source'):
+    monkeypatch.setattr(watcher, '_handle_recording', handle)
+    for _ in range(3):
         asyncio.run(watcher.poll_once())
-    assert watcher._pending_retries == {}
+    assert observed == [(healthy, healthy_mic)]
+    payload = json.loads(journal.read_text())
+    assert len(payload['hard_failed']) == 1
+    assert payload['hard_failed'][0]['path'] == str(bad)
+    assert payload['hard_failed'][0]['error_code'] == 'ERR_RECORDING_SOURCE_REJECTED'
+    assert payload['hard_failed'][0]['notified'] is True
+    assert payload['pending'] == []
+    restarted = tyto.RecordingWatcher(source, MagicMock(), retry_state_path=journal,
+                                     max_files_per_poll=1, max_attempts=2)
+    monkeypatch.setattr(restarted, '_is_settled', lambda *a: True)
+    after_restart = []
+    async def resumed_handle(path, mic):
+        after_restart.append((path, mic))
+        return 'success', None
+    monkeypatch.setattr(restarted, '_handle_recording', resumed_handle)
+    for _ in range(3):
+        asyncio.run(restarted.poll_once())
+    assert after_restart == [(healthy, healthy_mic)]
+    assert bad.exists()
+    assert healthy.read_bytes() == b'healthy remote'
+    assert healthy_mic.read_bytes() == b'healthy microphone'
 
 
 def test_normal_case_sensitive_distinct_files_remain_distinct(tmp_path, monkeypatch):
@@ -187,3 +228,29 @@ def test_normal_case_sensitive_distinct_files_remain_distinct(tmp_path, monkeypa
     asyncio.run(watcher.poll_once())
     assert observed == [separate]
     assert original in watcher._hard_failed
+
+
+def test_source_quarantine_journal_failure_stops_inference(tmp_path, monkeypatch):
+    (tmp_path / 'a remote.wav').mkdir()
+    (tmp_path / 'z remote.wav').write_bytes(b'healthy synthetic')
+    watcher = tyto.RecordingWatcher(tmp_path, MagicMock(), retry_state_path=tmp_path / 'retry.json')
+    monkeypatch.setattr(watcher, '_is_settled', lambda *a: True)
+    monkeypatch.setattr(Path, 'replace', MagicMock(side_effect=OSError('synthetic journal failure')))
+    inference = MagicMock(side_effect=AssertionError('inference after journal failure'))
+    monkeypatch.setattr(watcher, '_run_transcription', inference)
+    asyncio.run(watcher.poll_once())
+    assert watcher._retry_state_available is False
+    inference.assert_not_called()
+
+
+def test_internal_remote_symlink_remains_rejected(tmp_path, monkeypatch):
+    source = tmp_path / 'source.wav'
+    source.write_bytes(b'synthetic')
+    (tmp_path / 'a remote.wav').symlink_to(source)
+    watcher = tyto.RecordingWatcher(tmp_path, MagicMock(), retry_state_path=tmp_path / 'retry.json')
+    monkeypatch.setattr(watcher, '_is_settled', lambda *a: True)
+    inference = MagicMock(side_effect=AssertionError('symlink accepted'))
+    monkeypatch.setattr(watcher, '_run_transcription', inference)
+    asyncio.run(watcher.poll_once())
+    inference.assert_not_called()
+    assert list(watcher._hard_failed.values())[0]['error_code'] == 'ERR_RECORDING_SOURCE_REJECTED'
