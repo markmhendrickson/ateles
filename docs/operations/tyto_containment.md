@@ -66,3 +66,13 @@ repeatedly abort or rewrite the source poll after restart. If that quarantine
 cannot be persisted, the watcher stops before any inference instead. Original
 invalid entries and both physical tracks are retained for their owning recovery
 route; this unit does not clear those holds.
+
+Every failed retry-journal write latches that watcher unavailable and terminates
+the current poll, including failures during notification marking, initial pending
+preparation, result clearing, permanent holds and transient rescheduling. A later
+already-pending recording cannot skip this barrier. Handler, process and analysis
+entrances also honor the latch. Failed clearing retains the known pending row and
+attempt count in memory; a failed permanent transition retains pending evidence
+alongside its unpersisted hold. The authoritative on-disk journal and recordings
+remain intact. No recovery, automatic latch reset or runtime restart is added by
+this containment change.

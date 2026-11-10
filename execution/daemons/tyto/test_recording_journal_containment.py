@@ -103,7 +103,7 @@ def test_healthy_control_keeps_expected_single_or_paired_call(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize('paired', [False, True])
-@pytest.mark.parametrize('entry', ['restored_notice', 'first_pending', 'clear_success', 'permanent', 'transient'])
+@pytest.mark.parametrize('entry', ['restored_notice', 'first_pending', 'clear_success', 'permanent', 'permanent_notice', 'transient'])
 def test_retry_state_save_failure_stops_later_pending_inference(tmp_path, monkeypatch, paired, entry):
     bad = tmp_path / ('a remote.wav' if paired else 'a.wav')
     if entry == 'restored_notice':
@@ -123,11 +123,18 @@ def test_retry_state_save_failure_stops_later_pending_inference(tmp_path, monkey
     item = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=paired, retry_state_path=journal,
                                  max_files_per_poll=1 if paired else None)
     monkeypatch.setattr(item, '_is_settled', lambda *a: True)
-    monkeypatch.setattr(Path, 'replace', MagicMock(side_effect=OSError('synthetic journal failure')))
+    actual_replace = Path.replace
+    writes = []
+    def failed_replace(path, target):
+        writes.append(path)
+        if entry == 'permanent_notice' and len(writes) == 1:
+            return actual_replace(path, target)
+        raise OSError('synthetic journal failure')
+    monkeypatch.setattr(Path, 'replace', failed_replace)
     observed = []
     async def handle(path, mic):
         observed.append((path, mic))
-        if path == bad and entry == 'permanent':
+        if path == bad and entry in ('permanent', 'permanent_notice'):
             return 'permanent', 'capability_denied'
         if path == bad and entry == 'transient':
             return 'transient', None
@@ -138,3 +145,101 @@ def test_retry_state_save_failure_stops_later_pending_inference(tmp_path, monkey
     expected = [] if entry in ('restored_notice', 'first_pending') else [(bad, None)]
     assert observed == expected, 'continued inference after retry-journal persistence failure'
 
+
+
+def test_real_handler_never_sees_failed_journal_after_notice(tmp_path, monkeypatch):
+    bad = tmp_path / 'a remote.wav'
+    bad.mkdir()
+    healthy = tmp_path / 'z remote.wav'
+    healthy.write_bytes(b'synthetic pending source')
+    journal = tmp_path / 'journal.json'
+    journal.write_text(json.dumps({'version': 2, 'pending': [
+        {'path': str(healthy), 'retry_after': 0, 'attempts': 1}], 'hard_failed': [
+        {'path': str(bad), 'error_code': 'ERR_RECORDING_SOURCE_REJECTED', 'notified': False}]}))
+    item = tyto.RecordingWatcher(tmp_path, MagicMock(), retry_state_path=journal, max_files_per_poll=1)
+    monkeypatch.setattr(item, '_is_settled', lambda *a: True)
+    monkeypatch.setattr(tyto, 'ANALYZE_ENABLED', False)
+    monkeypatch.setattr(Path, 'replace', MagicMock(side_effect=OSError('synthetic journal failure')))
+    observed = []
+    def inference(*args):
+        observed.append(item._retry_state_available)
+        return 'ent_synthetic'
+    monkeypatch.setattr(item, '_run_transcription', inference)
+    asyncio.run(item.poll_once())
+    assert observed == []
+    assert item._retry_state_available is False
+    assert healthy in item._pending_retries
+
+
+def test_unavailable_journal_blocks_direct_inference_before_identity(tmp_path, monkeypatch):
+    audio = tmp_path / 'source.wav'
+    audio.write_bytes(b'synthetic')
+    item = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False)
+    item._retry_state_available = False
+    identity = MagicMock(side_effect=AssertionError('identity reached after journal failure'))
+    monkeypatch.setattr(tyto, 'agent_identity', identity)
+    with pytest.raises(RuntimeError, match='journal is unavailable'):
+        item._run_transcription(audio, None)
+    identity.assert_not_called()
+
+
+def test_journal_failure_during_preflight_blocks_process_entrance(tmp_path, monkeypatch):
+    audio = tmp_path / 'source.wav'
+    audio.write_bytes(b'synthetic')
+    script = tmp_path / 'synthetic.py'
+    script.write_text('# synthetic subprocess target')
+    item = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False)
+    monkeypatch.setattr(tyto, 'TRANSCRIBE_SCRIPT', script)
+    monkeypatch.setattr(tyto, 'agent_identity', lambda _: {
+        'sub': 'tyto@ateles-swarm', 'key': '/synthetic/key', 'kid': 'synthetic'})
+    monkeypatch.setattr(tyto, '_verify_transcription_cli_runtime',
+                        lambda _: setattr(item, '_retry_state_available', False))
+    process = MagicMock(side_effect=AssertionError('process reached after journal failure'))
+    monkeypatch.setattr(tyto.subprocess, 'run', process)
+    with pytest.raises(RuntimeError, match='journal is unavailable'):
+        item._run_transcription(audio, None)
+    process.assert_not_called()
+
+
+def test_unavailable_journal_blocks_direct_handler(tmp_path, monkeypatch):
+    audio = tmp_path / 'source.wav'
+    audio.write_bytes(b'synthetic')
+    item = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False)
+    item._retry_state_available = False
+    inference = MagicMock(side_effect=AssertionError('handler reached inference after failure'))
+    monkeypatch.setattr(item, '_run_transcription', inference)
+    assert asyncio.run(item._handle_recording(audio, None)) == ('transient', None)
+    inference.assert_not_called()
+    item._notifier.send.assert_not_called()
+
+
+def test_failed_journal_latch_also_blocks_analysis_handoff(tmp_path, monkeypatch):
+    audio = tmp_path / 'source.wav'
+    audio.write_bytes(b'synthetic')
+    item = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False)
+    def inference(*args):
+        item._retry_state_available = False
+        return 'ent_synthetic'
+    monkeypatch.setattr(item, '_run_transcription', inference)
+    analysis = MagicMock(side_effect=AssertionError('analysis after journal failure'))
+    monkeypatch.setattr(tyto, '_run_analysis', analysis)
+    monkeypatch.setattr(tyto, 'ANALYZE_ENABLED', True)
+    assert asyncio.run(item._handle_recording(audio, None)) == ('transient', None)
+    analysis.assert_not_called()
+
+
+@pytest.mark.parametrize('operation', ['clear', 'permanent'])
+def test_failed_journal_transition_preserves_pending_evidence(tmp_path, monkeypatch, operation):
+    audio = tmp_path / 'source.wav'
+    audio.write_bytes(b'synthetic retained source')
+    journal = tmp_path / 'journal.json'
+    original = {'version': 2, 'pending': [
+        {'path': str(audio), 'retry_after': 50, 'attempts': 2}], 'hard_failed': []}
+    journal.write_text(json.dumps(original))
+    item = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False, retry_state_path=journal)
+    monkeypatch.setattr(Path, 'replace', MagicMock(side_effect=OSError('synthetic journal failure')))
+    success = item._clear_pending(audio) if operation == 'clear' else item._mark_hard_failed(audio, 'capability_denied')
+    assert success is False and item._retry_state_available is False
+    assert item._pending_retries[audio] == 50 and item._attempts[audio] == 2
+    assert json.loads(journal.read_text()) == original
+    assert audio.read_bytes() == b'synthetic retained source'

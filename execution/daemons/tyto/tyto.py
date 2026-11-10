@@ -1236,6 +1236,8 @@ class RecordingWatcher:
                 return "transient", None
             return "permanent", error_code
 
+        if not self._retry_state_available:
+            return "transient", None
         if ANALYZE_ENABLED:
             try:
                 await asyncio.to_thread(
