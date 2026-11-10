@@ -842,9 +842,15 @@ class RecordingWatcher:
 
     def _clear_pending(self, path: Path) -> bool:
         path = self._recording_identity_path(path)
-        self._pending_retries.pop(path, None)
-        self._attempts.pop(path, None)
-        return self._save_retry_state()
+        pending = self._pending_retries.pop(path, None)
+        attempts = self._attempts.pop(path, None)
+        if self._save_retry_state():
+            return True
+        if pending is not None:
+            self._pending_retries[path] = pending
+        if attempts is not None:
+            self._attempts[path] = attempts
+        return False
 
 
     def _retry_delay(self, attempts: int) -> float:
@@ -860,8 +866,8 @@ class RecordingWatcher:
         notification for the same permanent failure.
         """
         path = self._recording_identity_path(path)
-        self._pending_retries.pop(path, None)
-        self._attempts.pop(path, None)
+        pending = self._pending_retries.pop(path, None)
+        attempts = self._attempts.pop(path, None)
         existing = self._hard_failed.get(path)
         if existing is None:
             self._hard_failed[path] = {
@@ -869,7 +875,15 @@ class RecordingWatcher:
                 "at": datetime.now(tz=UTC).isoformat(),
                 "notified": False,
             }
-        return self._save_retry_state()
+        if self._save_retry_state():
+            return True
+        # Keep the known pending evidence as well as the unpersisted new hold;
+        # the failed journal latch prevents either from triggering inference.
+        if pending is not None:
+            self._pending_retries[path] = pending
+        if attempts is not None:
+            self._attempts[path] = attempts
+        return False
 
 
     def _mark_hard_failure_notified(self, path: Path) -> bool:
@@ -1061,6 +1075,8 @@ class RecordingWatcher:
 
         processed = 0
         for path in sorted(self._dir.iterdir()):
+            if not self._retry_state_available:
+                return
             if not self._is_recording_candidate(path):
                 continue
             candidate = path
@@ -1081,7 +1097,8 @@ class RecordingWatcher:
                         priority=Priority.BLOCKER,
                         handler=DAEMON_NAME,
                     )
-                    self._mark_hard_failure_notified(path)
+                    if not self._mark_hard_failure_notified(path):
+                        return
                 continue
             try:
                 path = self._canonical_source(candidate)
@@ -1121,17 +1138,22 @@ class RecordingWatcher:
             durable_retry = self._retry_state_path is not None
             if durable_retry:
                 if path not in self._pending_retries and not self._mark_pending(path):
-                    continue
+                    return
+            if not self._retry_state_available:
+                return
             log.info(
                 f"[{DAEMON_NAME}] Recording settled, transcribing: {path.name}"
                 + (f" + {mic_path.name}" if mic_path else " (remote only)")
             )
             outcome, error_code = await self._handle_recording(path, mic_path)
+            if not self._retry_state_available:
+                return
             if outcome == "success":
                 self._transcribed.add(path)
                 if durable_retry:
                     if not self._clear_pending(path):
                         self._transcribed.discard(path)
+                        return
                 else:
                     self._pending_retries.pop(path, None)
                     self._attempts.pop(path, None)
@@ -1146,20 +1168,23 @@ class RecordingWatcher:
                 if outcome == "permanent":
                     # Watchers without a journal hold this in memory only, so
                     # a restart gives the recording one more bounded run.
-                    self._mark_hard_failed(path, error_code or "unknown")
+                    if not self._mark_hard_failed(path, error_code or "unknown"):
+                        return
                     self._notifier.send(
                         f"Transcription permanently failed for {path.name}: "
                         f"{error_code} (will not retry)",
                         priority=Priority.BLOCKER,
                         handler=DAEMON_NAME,
                     )
-                    self._mark_hard_failure_notified(path)
+                    if not self._mark_hard_failure_notified(path):
+                        return
                 else:
                     retry_after = (
                         datetime.now(tz=UTC).timestamp() + self._retry_delay(attempts)
                     )
                     if durable_retry:
-                        self._mark_pending(path, retry_after)
+                        if not self._mark_pending(path, retry_after):
+                            return
                     else:
                         self._pending_retries[path] = retry_after
             processed += 1
@@ -1179,6 +1204,8 @@ class RecordingWatcher:
         should stop retrying and journal it), or ``"transient"`` (worth
         retrying later). ``error_code`` is set only for ``"permanent"``.
         """
+        if not self._retry_state_available:
+            return "transient", None
         label = remote_path.name + (f" + {mic_path.name}" if mic_path else "")
         self._notifier.send(
             f"Auto-transcribing: {label}",
@@ -1231,6 +1258,8 @@ class RecordingWatcher:
         Run transcription and return the Neotoma transcription entity ID (or None).
         Raises RuntimeError on unrecoverable failure.
         """
+        if not self._retry_state_available:
+            raise RuntimeError("Recording retry journal is unavailable; inference disabled")
         remote_path = self._canonical_source(remote_path)
         if mic_path is not None:
             mic_path = self._canonical_source(mic_path)
@@ -1279,6 +1308,8 @@ class RecordingWatcher:
             return fallback
 
         def _run_command(cmd: list[str], fallback_backend: str) -> subprocess.CompletedProcess[str]:
+            if not self._retry_state_available:
+                raise RuntimeError("Recording retry journal is unavailable; inference disabled")
             try:
                 return subprocess.run(
                     cmd,
