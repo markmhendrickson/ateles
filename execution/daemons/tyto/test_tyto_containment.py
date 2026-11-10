@@ -21,6 +21,7 @@ for directory in (_ROOT, _ROOT / 'execution/scripts', Path(__file__).parent):
     sys.path.insert(0, str(directory))
 import tyto  # noqa: E402
 import transcribe_audio as ta  # noqa: E402
+from test_transcription_results import complete_result  # noqa: E402
 from test_transcription_contract import storage as storage  # noqa: E402
 
 
@@ -42,9 +43,7 @@ def test_normal_handoff_stores_or_contains_denial_across_restart(storage, tmp_pa
         os.utime(mic, (time.time() - 100, time.time() - 100))
     monkeypatch.setenv('TRANSCRIBE_DISABLE_NEOTOMA_VOCAB', '1')
     monkeypatch.setattr(ta, '_merge_transcription_relate_targets', lambda *a: ([], None))
-    inference = MagicMock(return_value={'transcription_text': 'Synthetic dialogue.', 'language': 'en',
-                                      'transcription_engine': 'local_fluid_audio',
-                                      'raw_response': {'segments': [{'speaker': 'synthetic', 'start': 0}]}})
+    inference = MagicMock(return_value=complete_result(audio, mic, text='Synthetic dialogue.', backend='fluid'))
     monkeypatch.setattr(ta, 'transcribe_two_files' if paired else 'transcribe_audio_file', inference)
     monkeypatch.setattr(tyto, 'TRANSCRIBE_SCRIPT', Path(ta.__file__))
     monkeypatch.setattr(tyto, 'agent_identity', lambda _: {

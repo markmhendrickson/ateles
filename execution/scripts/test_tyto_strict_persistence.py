@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import transcribe_audio as ta
+from test_transcription_results import complete_result
 from test_transcription_contract import storage as storage
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'daemons/tyto'))
@@ -23,7 +24,7 @@ import tyto  # noqa: E402
 
 _FIELDS = ('transcription_text', 'capture_method', 'transcription_engine', 'consent_basis',
            'original_source_file', 'audio_content_sha256', 'audio_file_path',
-           'file_size_bytes', 'language', 'transcription_model')
+           'file_size_bytes', 'language', 'transcription_model', 'audio_duration_seconds')
 
 
 @pytest.fixture
@@ -60,9 +61,7 @@ def selected_flow(storage, tmp_path, monkeypatch):
         monkeypatch.setattr(tyto, '_verify_transcription_cli_runtime', lambda _: None)
         monkeypatch.setattr(ta, '_merge_transcription_relate_targets', lambda *a: ([], None))
         text = 'System/1: remote words.\nMic/1: microphone words.' if paired else 'Synthetic memo.'
-        inference = MagicMock(return_value={'transcription_text': text, 'language': 'en',
-            'transcription_engine': 'local_fluid_audio' if paired else 'local_whisper_cpp',
-            'transcription_model': 'synthetic-model', 'raw_response': {'segments': [1, 2]}})
+        inference = MagicMock(return_value=complete_result(audio, mic, text=text))
         monkeypatch.setattr(ta, 'transcribe_two_files' if paired else 'transcribe_audio_file', inference)
         phase = {'mode': 'denied', 'field': None, 'change': None}
         receipts = []
@@ -79,7 +78,7 @@ def selected_flow(storage, tmp_path, monkeypatch):
                     if field:
                         if phase['change'] == 'missing':
                             snapshot.pop(field)
-                        elif field == 'file_size_bytes':
+                        elif field in ('file_size_bytes', 'audio_duration_seconds'):
                             snapshot[field] = snapshot[field] + 1
                         elif field == 'transcription_text' and paired:
                             snapshot[field] = 'System/1: remote words.'  # same remote; wrong mic-derived result
@@ -87,8 +86,11 @@ def selected_flow(storage, tmp_path, monkeypatch):
                             snapshot[field] = 'different-synthetic-value'
                     state['prior'] = {'id': 'ent_prior', 'snapshot': snapshot}
                 elif phase['field']:
-                    state['drop'] = phase['field']
-                    state['declared'] = set(state['entity']) - {phase['field']}
+                    if phase['change'] == 'different':
+                        state['snapshot_overrides'] = {phase['field']: state['entity'][phase['field']] + 1}
+                    else:
+                        state['drop'] = phase['field']
+                        state['declared'] = set(state['entity']) - {phase['field']}
                 return result
             output, errors = io.StringIO(), io.StringIO()
             with monkeypatch.context() as child:
@@ -191,4 +193,16 @@ def test_source_recovery_checks_both_tracks_before_store_only(selected_flow, tmp
     os.utime(mic, (time.time() - 100, time.time() - 100))
     tyto.cli()
     assert json.loads(journal.read_text())['hard_failed'] == []
+    inference.assert_not_called()
+
+
+@pytest.mark.parametrize('paired', [False, True])
+@pytest.mark.parametrize('change', ['different', 'missing'])
+def test_strict_fresh_duration_mismatch_retains_selected_hold(selected_flow, paired, change):
+    _state, phase, watcher, journal, audio, _mic, inference, receipts, _text = selected_flow(paired)
+    phase.update(mode='fresh', field='audio_duration_seconds', change=change)
+    with pytest.raises(RuntimeError):
+        tyto.cli()
+    assert receipts == [] and audio in watcher._hard_failed
+    assert json.loads(journal.read_text())['hard_failed']
     inference.assert_not_called()

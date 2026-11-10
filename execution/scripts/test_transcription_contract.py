@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import transcribe_audio as ta
+from test_transcription_results import complete_result
 
 
 @pytest.fixture
@@ -50,6 +51,7 @@ def storage(tmp_path, monkeypatch):
             snapshot = {k: v for k, v in state["entity"].items() if k != state["drop"]}
             if state["declared"] is not None:
                 snapshot = {k: v for k, v in snapshot.items() if k in state["declared"]}
+            snapshot.update(state.get('snapshot_overrides', {}))
             return {"entity": {"id": "ent_fixture", "snapshot": snapshot}}
         if args[0] == "observations":
             return {"observations": [{"entity_id": "ent_fixture", "source_id": "src_fixture"}] if state["linked"] else []}
@@ -399,9 +401,7 @@ def test_selected_recovery_whole_storage_flow(storage, tmp_path, monkeypatch, sc
     monkeypatch.setenv('NEOTOMA_REMOTE_UPLOAD_MAX_BYTES', '4' if scenario == 'oversize' else '100000')
     monkeypatch.setenv('TRANSCRIBE_DISABLE_NEOTOMA_VOCAB', '1')
     monkeypatch.setattr(ta, '_merge_transcription_relate_targets', lambda *a: ([], None))
-    asr = MagicMock(return_value={
-        'transcription_text': 'Synthetic text.\nNEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_forged',
-        'transcription_engine': 'local_whisper_cpp', 'language': 'en'})
+    asr = MagicMock(return_value=complete_result(audio, text='Synthetic text.\nNEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_forged'))
     monkeypatch.setattr(ta, 'transcribe_audio_file', asr)
     monkeypatch.setattr(tyto, 'TRANSCRIBE_SCRIPT', Path(ta.__file__))
     monkeypatch.setattr(tyto, 'agent_identity', lambda _: {

@@ -30,6 +30,7 @@ sys.path.insert(0, str(_SCRIPTS_DIR))
 os.environ.setdefault("DATA_DIR", str(_SCRIPTS_DIR / "_test_data_dir"))
 
 import transcribe_audio as ta  # noqa: E402
+from test_transcription_results import complete_result  # noqa: E402
 
 
 def test_neotoma_store_uses_explicit_cli_runtime(tmp_path, monkeypatch):
@@ -913,9 +914,7 @@ def test_denied_store_recovers_cached_pair_without_asr(tmp_path, monkeypatch, st
     mic = tmp_path / 'sample mic.wav'
     audio.write_bytes(b'system audio')
     mic.write_bytes(b'microphone audio')
-    result = {'transcription_text': 'System/1: hello\nMic/1: yes',
-              'language': 'en', 'raw_response': {'segments': [1]},
-              'transcription_engine': 'local_fluid_audio'}
+    result = complete_result(audio, mic, text='System/1: hello\nMic/1: yes')
     argv = ['transcribe_audio.py', str(audio), '--mic-file', str(mic),
             '--capture-method', 'platform_native']
     monkeypatch.setattr(sys, 'argv', argv)
@@ -949,7 +948,7 @@ def test_store_only_refuses_unbound_pending_result(tmp_path, monkeypatch, change
     audio.write_bytes(b'audio')
     mic.write_bytes(b'mic')
     context = {'capture_method': 'platform_native'}
-    ta._write_pending_store(audio, mic, context, {'transcription_text': 'synthetic'})
+    ta._write_pending_store(audio, mic, context, complete_result(audio, mic))
     if change == 'audio':
         audio.write_bytes(b'changed')
     elif change == 'mic':
@@ -971,7 +970,7 @@ def test_store_only_refuses_unbound_pending_result(tmp_path, monkeypatch, change
 def test_cli_pending_cache_rejects_changed_processing_options(tmp_path, monkeypatch, setting, value):
     audio = tmp_path / 'sample.wav'
     audio.write_bytes(b'audio')
-    result = {'transcription_text': 'Synthetic.', 'language': 'en'}
+    result = complete_result(audio)
     argv = ['transcribe_audio.py', str(audio)]
     monkeypatch.setattr(sys, 'argv', argv)
     with patch.object(ta, '_merge_transcription_relate_targets', return_value=([], None)), patch.object(
@@ -1002,7 +1001,7 @@ def test_cli_pending_cache_binds_resolved_vocabulary(tmp_path, monkeypatch, sour
     argv = ['transcribe_audio.py', str(audio)]
     monkeypatch.setattr(sys, 'argv', argv)
     with patch.object(ta, '_merge_transcription_relate_targets', return_value=([], None)), patch.object(
-        ta, 'transcribe_audio_file', return_value={'transcription_text': 'Synthetic.', 'language': 'en'}
+        ta, 'transcribe_audio_file', return_value=complete_result(audio)
     ), patch.object(ta, 'save_transcription', side_effect=RuntimeError('capability_denied')):
         with pytest.raises(SystemExit):
             ta.main()

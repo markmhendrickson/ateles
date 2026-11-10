@@ -2426,11 +2426,120 @@ def _processing_fingerprint() -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
+class IncompleteTranscriptionResult(ValueError):
+    pass
+
+
+def _validate_transcription_result(result: object, *, paired: bool) -> None:
+    """Validate the actual supported constructors before preserving or storing.
+
+    Nullable measurements still require their keys where the constructor emits
+    them. Raw Whisper/OpenAI responses and paired Fluid silence/RMS are optional.
+    Extra JSON fields are retained; this is completeness validation, not signing.
+    """
+    def require(ok, field):
+        if not ok:
+            raise IncompleteTranscriptionResult(
+                f"ERR_INCOMPLETE_TRANSCRIPTION_RESULT: invalid or missing {field}"
+            )
+
+    def text(value):
+        return isinstance(value, str) and bool(value.strip())
+
+    def number(value, *, nullable=False, nonnegative=True):
+        try:
+            return (nullable and value is None) or (
+                not isinstance(value, bool) and isinstance(value, (int, float))
+                and math.isfinite(value) and (not nonnegative or value >= 0)
+            )
+        except OverflowError:
+            return False
+
+    def words(events, field):
+        require(isinstance(events, list), field)
+        for word in events:
+            require(isinstance(word, dict), field + "[]")
+            require(number(word.get("start")) and number(word.get("end"))
+                    and word["end"] >= word["start"], field + ".timing")
+            require(text(word.get("text")) and text(word.get("speaker")), field + ".text/speaker")
+            require(isinstance(word.get("speaker_candidates"), list)
+                    and all(text(speaker) for speaker in word["speaker_candidates"]), field + ".speaker_candidates")
+            require("confidence" in word, field + ".confidence")
+
+    def fluid_raw(raw, *, two_tracks=False):
+        require(isinstance(raw, dict), "raw_response")
+        require(isinstance(raw.get("tracks"), list) and bool(raw["tracks"]), "raw_response.tracks")
+        require("aligned_words" in raw, "raw_response.aligned_words")
+        words(raw["aligned_words"], "raw_response.aligned_words")
+        if two_tracks:
+            require(len(raw["tracks"]) == 2 and all(isinstance(track, dict) for track in raw["tracks"]),
+                    "raw_response.tracks paired originals")
+            require(all(text(track.get("channel")) for track in raw["tracks"]), "raw_response.tracks channels")
+            require({track.get("channel") for track in raw["tracks"]} == {"System", "Mic"},
+                    "raw_response.tracks channels")
+            for track in raw["tracks"]:
+                fluid_raw(track.get("result"))
+            return
+        for track in raw["tracks"]:
+            require(isinstance(track, dict), "raw_response.tracks[]")
+            require("channel" in track and (track["channel"] is None or text(track["channel"])), "raw_response.channel")
+            diar, asr = track.get("diarization"), track.get("asr")
+            require(isinstance(diar, dict) and isinstance(diar.get("segments"), list), "raw_response.diarization.segments")
+            require(isinstance(asr, dict) and isinstance(asr.get("wordTimings"), list), "raw_response.asr.wordTimings")
+            if "text" in asr:
+                require(isinstance(asr["text"], str), "raw_response.asr.text")
+            for segment in diar["segments"]:
+                require(isinstance(segment, dict), "raw_response.segment")
+                require(number(segment.get("startTimeSeconds")) and number(segment.get("endTimeSeconds"))
+                        and segment["endTimeSeconds"] > segment["startTimeSeconds"]
+                        and text(segment.get("speakerId")), "raw_response.segment timing/speaker")
+            for word in asr["wordTimings"]:
+                require(isinstance(word, dict), "raw_response.wordTiming")
+                require(number(word.get("startTime")) and number(word.get("endTime"))
+                        and word["endTime"] >= word["startTime"] and text(word.get("word")), "raw_response.wordTiming")
+
+    require(isinstance(result, dict), "result")
+    backend = result.get("backend")
+    require(isinstance(backend, str) and backend in VALID_BACKENDS, "backend")
+    require(not paired or backend in (BACKEND_FLUID, BACKEND_ELEVENLABS), "paired backend")
+    engines = {BACKEND_LOCAL: TRANSCRIPTION_ENGINE_LOCAL, BACKEND_FLUID: "local_fluid_audio",
+               BACKEND_ELEVENLABS: "elevenlabs_stt", BACKEND_OPENAI: "openai_whisper_api"}
+    require(result.get("transcription_engine") == engines[backend], "transcription_engine")
+    require(text(result.get("transcription_model")), "transcription_model")
+    require(text(result.get("transcription_text")), "transcription_text")
+    require("language" in result and (text(result["language"]) or backend == BACKEND_OPENAI
+            and result["language"] is None), "language")
+    require(type(result.get("file_size_bytes")) is int and result["file_size_bytes"] >= 0, "file_size_bytes")
+    if not (paired and backend == BACKEND_ELEVENLABS and "audio_duration_seconds" not in result):
+        require("audio_duration_seconds" in result and number(result["audio_duration_seconds"],
+                nullable=backend != BACKEND_FLUID), "audio_duration_seconds")
+    if paired:
+        require(text(result.get("mic_file")) and text(result.get("remote_file")), "mic_file/remote_file")
+    if backend == BACKEND_LOCAL:
+        require("rms_db" in result and number(result["rms_db"], nullable=True, nonnegative=False), "rms_db")
+        require(type(result.get("silence")) is bool, "silence")
+    elif backend == BACKEND_FLUID:
+        fluid_raw(result.get("raw_response"), two_tracks=paired)
+        if not paired:
+            require(type(result.get("silence")) is bool, "silence")
+    elif backend == BACKEND_ELEVENLABS:
+        require(isinstance(result.get("raw_response"), dict), "raw_response")
+        raw = result["raw_response"]
+        if "segments" in raw:
+            require(isinstance(raw["segments"], list) and all(isinstance(item, dict) for item in raw["segments"]),
+                    "raw_response.segments")
+    try:
+        json.dumps(result, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise IncompleteTranscriptionResult("ERR_INCOMPLETE_TRANSCRIPTION_RESULT: result is not finite JSON") from exc
+
+
 def _write_pending_store(
     audio_path: Path, mic_path: Path | None, context: dict, result: dict,
     *, identity: dict | None = None,
 ) -> None:
     """Durably retain the complete result before any store; never log its text."""
+    _validate_transcription_result(result, paired=mic_path is not None)
     current = _pending_store_identity(audio_path, mic_path)
     if identity is not None and current != identity:
         raise RuntimeError("Audio changed during transcription; refusing pending store")
@@ -2464,8 +2573,11 @@ def _read_pending_store(
                 or not isinstance(payload.get("result"), dict)
                 or not payload["result"].get("transcription_text")):
             raise ValueError("source or context mismatch")
+        _validate_transcription_result(payload["result"], paired=mic_path is not None)
         return payload["result"]
     except (OSError, ValueError, TypeError, AttributeError) as exc:
+        if isinstance(exc, IncompleteTranscriptionResult):
+            raise RuntimeError(f"{exc}; pending store retained; no ASR was run") from exc
         raise RuntimeError("Missing, malformed or mismatched pending store; no ASR was run") from exc
 
 
@@ -3295,7 +3407,8 @@ def main():
                 backend=args.backend,
             )
 
-        engine = (transcription_result.get("transcription_engine") or "unknown").strip()
+        _validate_transcription_result(transcription_result, paired=mic_path is not None)
+        engine = transcription_result["transcription_engine"]
         print(f"TRANSCRIPTION_ENGINE={engine}", flush=True)
 
         # Always drop sidecars next to the audio: a .txt of the merged transcript

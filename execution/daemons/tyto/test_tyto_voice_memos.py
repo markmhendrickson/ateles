@@ -958,11 +958,9 @@ def test_voice_memo_uses_channel_appropriate_local_backend(
     monkeypatch.setenv("RECORD_MEETING_DIARIZE", "0")
     monkeypatch.setenv("TRANSCRIBE_DISABLE_NEOTOMA_VOCAB", "1")
     whisper = MagicMock(return_value={"transcription_text": "Synthetic memo.", "language": "en"})
-    fluid = MagicMock(return_value={
-        "transcription_text": "[Channel_0/S1] First channel.\n[Channel_1/S1] Second channel.",
-        "transcription_engine": "local_fluid_audio",
-        "language": "en",
-    })
+    from test_transcription_results import complete_result
+    fluid = MagicMock(return_value=complete_result(memo, backend='fluid',
+        text='[Channel_0/S1] First channel.\n[Channel_1/S1] Second channel.'))
     monkeypatch.setattr(cli, "transcribe_local", whisper)
     monkeypatch.setattr(cli, "transcribe_fluid", fluid)
     monkeypatch.setattr(cli, "get_audio_duration", lambda _path: 1.0)
