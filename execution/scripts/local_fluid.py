@@ -38,6 +38,7 @@ def resolve_fluid_cli() -> str:
 
 
 def _run_json(cli: str, args: list[str], output: Path) -> dict:
+    stage = args[0] if args else "unknown"
     try:
         result = subprocess.run(
             [cli, *args, str(output)],
@@ -47,12 +48,16 @@ def _run_json(cli: str, args: list[str], output: Path) -> dict:
         )
     except subprocess.TimeoutExpired as exc:
         raise LocalFluidUnavailable(
-            "FluidAudio timed out; no fallback attempted"
+            f"FluidAudio stage={stage} timed out; no fallback attempted"
         ) from exc
     # Some CLI versions log an error but exit zero. The output is required too.
     if result.returncode != 0 or not output.is_file():
+        stderr = (result.stderr or "").strip()
+        # Profiling output can bury the initial Metal error. Keep both ends,
+        # bounded, rather than losing the cause to the final timing summary.
+        detail = stderr if len(stderr) <= 2000 else stderr[:1000] + " [...] " + stderr[-1000:]
         raise LocalFluidUnavailable(
-            f"FluidAudio failed ({result.returncode}): {(result.stderr or '')[-2000:]}"
+            f"FluidAudio failed ({result.returncode}) stage={stage}: {detail}"
         )
     try:
         value = json.loads(output.read_text())
@@ -149,6 +154,14 @@ def transcribe_fluid(
     cli = resolve_fluid_cli()
     if not audio_path.is_file():
         raise FileNotFoundError(audio_path)
+    # The offline CLI's default `all` placement may use Metal and fail with a
+    # command-buffer timeout. Use its documented off-GPU mode from the outset;
+    # this keeps the same local diarization model and does not drop speakers.
+    compute_units = os.environ.get("TRANSCRIBE_FLUID_COMPUTE_UNITS", "cpu-only").strip()
+    if compute_units not in {"cpu-only", "ane", "all"}:
+        raise LocalFluidUnavailable(
+            "TRANSCRIBE_FLUID_COMPUTE_UNITS must be cpu-only, ane or all"
+        )
     all_events, raw = [], []
     with tempfile.TemporaryDirectory(prefix="local-fluid-") as temporary:
         root = Path(temporary)
@@ -182,7 +195,8 @@ def transcribe_fluid(
                 channel = f"Channel_{index}"
             diar = _run_json(
                 cli,
-                ["process", str(source), "--mode", "offline", "--output"],
+                ["process", str(source), "--mode", "offline",
+                 "--compute-units", compute_units, "--output"],
                 root / f"diar-{index}.json",
             )
             args = ["transcribe", str(source), "--model-version", "v3"]

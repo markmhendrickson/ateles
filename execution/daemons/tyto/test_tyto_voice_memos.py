@@ -1339,3 +1339,55 @@ def test_error_code_past_the_stderr_cut_is_still_classified(tmp_path):
 
     assert outcome == "permanent"
     assert error_code == "ERR_IDEMPOTENCY_MISMATCH"
+
+
+@pytest.mark.parametrize("paired", [False, True])
+def test_capability_denial_is_preserved_and_stops_expensive_retry(tmp_path, paired):
+    remote = _write(tmp_path, "fixture-system.mp4" if paired else "fixture.m4a", age_secs=FRESH)
+    mic = _write(tmp_path, "fixture-mic.mp4", age_secs=FRESH) if paired else None
+    watcher = _make_watcher(tmp_path, paired=paired, capture_method="audio_hijack_system" if paired else "voice_memo")
+    failed = MagicMock(returncode=1, stdout="TRANSCRIPTION_ENGINE=local_fluid_audio\n",
+                       stderr="sidecar diagnostic " + "x" * 400 +
+                       ' Neotoma store failed: {"error_code":"capability_denied"}')
+    with patch.object(tyto.subprocess, "run", return_value=failed) as run:
+        outcome, code = asyncio.run(watcher._handle_recording(remote, mic))
+    assert (outcome, code) == ("permanent", "capability_denied")
+    assert run.call_count == 1
+    assert remote.read_bytes() == b"\0" * 2048
+    if mic is not None:
+        assert mic.read_bytes() == b"\0" * 2048
+
+
+def test_meeting_capability_denial_is_durable_across_restart(tmp_path, monkeypatch):
+    remote = _write(tmp_path, "fixture system.mp4", age_secs=FRESH)
+    mic = _write(tmp_path, "fixture mic.mp4", age_secs=FRESH)
+    journal = tmp_path / "retry.json"
+    watcher = _make_watcher(tmp_path, paired=True, retry_state_path=journal, retry_secs=0)
+    _settled(watcher)
+    failed = MagicMock(returncode=1, stdout="",
+                       stderr='Neotoma store failed: {"error_code":"capability_denied"}')
+    monkeypatch.setattr(tyto, "ANALYZE_ENABLED", False)
+    with patch.object(tyto.subprocess, "run", return_value=failed) as run:
+        for _ in range(3):
+            asyncio.run(watcher.poll_once())
+        restarted = _make_watcher(tmp_path, paired=True, retry_state_path=journal, retry_secs=0)
+        _settled(restarted)
+        asyncio.run(restarted.poll_once())
+    assert run.call_count == 1
+    state = json.loads(journal.read_text())
+    assert state["hard_failed"][0]["error_code"] == "capability_denied"
+    assert state["pending"] == []
+    assert remote.exists() and mic.exists()
+
+
+def test_runtime_recording_watchers_persist_meeting_failures(tmp_path, monkeypatch):
+    monkeypatch.setattr(tyto, "TRANSCRIBE_ENABLED", True)
+    monkeypatch.setattr(tyto, "RECORDINGS_DIR", tmp_path / "meetings")
+    monkeypatch.setattr(tyto, "NATIVE_RECORDINGS_DIR", tmp_path / "native")
+    monkeypatch.setattr(tyto, "VOICE_MEMOS_DIR", None)
+    monkeypatch.setattr(tyto, "RECORDING_RETRY_STATE", tmp_path / "meeting-retries.json")
+    monkeypatch.setattr(tyto, "NATIVE_RECORDING_RETRY_STATE", tmp_path / "native-retries.json")
+    watchers = tyto._recording_watchers(MagicMock())
+    assert len(watchers) == 2
+    assert [w._retry_state_path for w in watchers] == [
+        tmp_path / "meeting-retries.json", tmp_path / "native-retries.json"]

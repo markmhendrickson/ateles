@@ -58,6 +58,9 @@ Environment variables:
   TYTO_VOICE_MEMO_INCLUDE_QTA  Set to 0 to exclude .qta files (default: 1).
                             Current Voice Memos can arrive as .qta; the same
                             startup, age, and stable-file guards apply.
+  TYTO_RECORDING_RETRY_STATE  Audio Hijack retry journal (default:
+                            ~/.local/state/ateles/tyto-recording-retries.json).
+  TYTO_NATIVE_RECORDING_RETRY_STATE  Separate platform-native retry journal.
   TYTO_VOICE_MEMO_RETRY_STATE  Durable pending-retry journal (default:
                             ~/.local/state/ateles/tyto-voice-memo-retries.json).
   TYTO_VOICE_MEMO_RETRY_SECS  Delay after a failed memo transcription before
@@ -219,6 +222,16 @@ VOICE_MEMO_RETRY_STATE = Path(
     )
 )
 VOICE_MEMO_RETRY_SECS = int(os.environ.get("TYTO_VOICE_MEMO_RETRY_SECS", "300"))
+# Meeting failures need the same restart-safe journal as Voice Memos. Keeping
+# separate files preserves each watcher's single-writer ownership.
+RECORDING_RETRY_STATE = Path(os.environ.get(
+    "TYTO_RECORDING_RETRY_STATE",
+    str(Path.home() / ".local" / "state" / "ateles" / "tyto-recording-retries.json"),
+))
+NATIVE_RECORDING_RETRY_STATE = Path(os.environ.get(
+    "TYTO_NATIVE_RECORDING_RETRY_STATE",
+    str(Path.home() / ".local" / "state" / "ateles" / "tyto-native-recording-retries.json"),
+))
 # Per-recording attempt cap. ateles#1084 capped only failures it could name as
 # permanent; every other failure was retried every five minutes with no limit,
 # so a failure the classifier did not recognise (a read-back mismatch, then
@@ -590,6 +603,9 @@ class ScreenshotWatcher:
 PERMANENT_STORE_ERROR_CODES = (
     "ERR_FILE_PATH_IS_SERVER_LOCAL",
     "ERR_IDEMPOTENCY_MISMATCH",
+    # A grant rejection cannot heal by re-running ASR. Retain the source and
+    # journal the rejection for explicit recovery after its cause is repaired.
+    "capability_denied",
 )
 
 
@@ -1219,7 +1235,11 @@ class RecordingWatcher:
                 f"(rc={result.returncode}): {result.stderr.strip()[:300]}"
                 " — preserving both tracks for retry."
             )
-            raise RuntimeError("Paired local transcription failed; both tracks retained for retry")
+            raise RuntimeError(
+                "Paired local transcription failed; both tracks retained for retry; "
+                f"backend={_extract_backend(result.stdout, 'local_fluid_audio')}: "
+                f"{_subprocess_failure_detail(result.stderr)}"
+            )
         elif mic_path is not None and mic_path.exists() and not paired:
             raise RuntimeError(
                 "Paired recording requires local FluidAudio or explicitly selected "
@@ -1323,6 +1343,47 @@ async def _poll_watcher_forever(
         await asyncio.sleep(interval)
 
 
+def _recording_watchers(notifier: Notifier) -> list[RecordingWatcher]:
+    """Construct each independently journaled transcription source."""
+    recording_watchers: list[RecordingWatcher] = []
+    if TRANSCRIBE_ENABLED:
+        recording_watchers.append(
+            RecordingWatcher(
+                RECORDINGS_DIR,
+                notifier,
+                capture_method="audio_hijack_system",
+                max_files_per_poll=1,
+                retry_state_path=RECORDING_RETRY_STATE,
+            )
+        )
+        if NATIVE_RECORDINGS_DIR is not None:
+            recording_watchers.append(
+                RecordingWatcher(
+                    NATIVE_RECORDINGS_DIR,
+                    notifier,
+                    capture_method="platform_native",
+                    max_files_per_poll=1,
+                    retry_state_path=NATIVE_RECORDING_RETRY_STATE,
+                )
+            )
+        if VOICE_MEMOS_DIR is not None:
+            memo_exts = {".m4a", ".wav"} | ({".qta"} if VOICE_MEMO_INCLUDE_QTA else set())
+            recording_watchers.append(
+                RecordingWatcher(
+                    VOICE_MEMOS_DIR,
+                    notifier,
+                    capture_method="voice_memo",
+                    paired=False,
+                    extensions=memo_exts,
+                    max_age_secs=VOICE_MEMO_MAX_AGE_SECS,
+                    seed_existing=True,
+                    retry_state_path=VOICE_MEMO_RETRY_STATE,
+                    retry_secs=VOICE_MEMO_RETRY_SECS,
+                )
+            )
+    return recording_watchers
+
+
 async def main() -> None:
     log.info(f"[{DAEMON_NAME}] Starting up...")
 
@@ -1403,40 +1464,7 @@ async def main() -> None:
 
     # 6. Poll loop
     screenshot_watcher = ScreenshotWatcher(SCREENSHOTS_DIR, notifier)
-    recording_watchers: list[RecordingWatcher] = []
-    if TRANSCRIBE_ENABLED:
-        recording_watchers.append(
-            RecordingWatcher(
-                RECORDINGS_DIR,
-                notifier,
-                capture_method="audio_hijack_system",
-                max_files_per_poll=1,
-            )
-        )
-        if NATIVE_RECORDINGS_DIR is not None:
-            recording_watchers.append(
-                RecordingWatcher(
-                    NATIVE_RECORDINGS_DIR,
-                    notifier,
-                    capture_method="platform_native",
-                    max_files_per_poll=1,
-                )
-            )
-        if VOICE_MEMOS_DIR is not None:
-            memo_exts = {".m4a", ".wav"} | ({".qta"} if VOICE_MEMO_INCLUDE_QTA else set())
-            recording_watchers.append(
-                RecordingWatcher(
-                    VOICE_MEMOS_DIR,
-                    notifier,
-                    capture_method="voice_memo",
-                    paired=False,
-                    extensions=memo_exts,
-                    max_age_secs=VOICE_MEMO_MAX_AGE_SECS,
-                    seed_existing=True,
-                    retry_state_path=VOICE_MEMO_RETRY_STATE,
-                    retry_secs=VOICE_MEMO_RETRY_SECS,
-                )
-            )
+    recording_watchers = _recording_watchers(notifier)
     log.info(f"[{DAEMON_NAME}] Poll interval: {POLL_INTERVAL}s")
 
     loops = [
