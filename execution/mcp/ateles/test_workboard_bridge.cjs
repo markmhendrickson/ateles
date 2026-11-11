@@ -70,6 +70,40 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
   const unknownCount={...unplanned,planning:{...unplanned.planning,level_coverage:[{level:20,entity_types:['purpose'],reached_tasks:0,complete_tasks:0}]}};
   const beforeUnknown=ids.rows.allText();present(unknownCount);assert.equal(ids.rows.allText(),beforeUnknown);assert(ids.notice.allText().includes('stale'),'unknown coverage cannot report a false completed zero');
   present(unplanned);assert(ids.rows.allText().includes('Unplanned'));assert(ids.rows.allText().includes('The registry could not be read'));assert(ids.planning.allText().includes('coverage is unknown'));
+  // An existing plan with no parent: its observed branch stays beneath Unplanned.
+  const orphanRow=(id,work,priority)=>({priority,kind:'task',entity_id:id,work,state:'Recorded state: open',next_action:'Review '+work,read_gaps:[],planning_ascent:[{entity_id:'ent_orphan',entity_type:'plan',title:'Orphan plan'}]});
+  const orphan={...payload,rows:[payload.rows[0],orphanRow('ent_a','Alpha work','recorded'),orphanRow('ent_b','Beta work','blocked')],planning:{version:1,scope:'Only this session, not whole-plan completion',registry_complete:true,registry_gaps:[],membership_entries:2,unique_tasks:2,unresolved_entries:0,qualified_tasks:0,unknown_tasks:0,
+    level_coverage:[{level:20,entity_types:['project'],reached_tasks:0,complete_tasks:0},{level:10,entity_types:['plan'],reached_tasks:2,complete_tasks:2}],nodes:[],roots:[],
+    unplanned:[{row_index:1,reason:'The ascent ends before, or skips, a declared planning level',unknown:false},{row_index:2,reason:'The ascent ends before, or skips, a declared planning level',unknown:false}],
+    unplanned_nodes:[{entity_id:'ent_a',entity_type:'task',title:'Alpha work',level:null,read_only:false,parent_id:'ent_orphan',row_indexes:[1]},{entity_id:'ent_orphan',entity_type:'plan',title:'Orphan plan',level:10,read_only:false,parent_id:null,row_indexes:[]},{entity_id:'ent_b',entity_type:'task',title:'Beta work',level:null,read_only:false,parent_id:'ent_orphan',row_indexes:[2]}],unplanned_roots:['ent_orphan']}};
+  present(orphan);
+  const group=()=>ids.rows.children.find(c=>c.id==='unplanned'),branch=()=>group()&&group().children.find(c=>c.id==='node-unplanned:ent_orphan');
+  assert(branch(),'the orphan plan is an expandable branch under Unplanned');
+  assert(branch().allText().includes('Alpha work')&&branch().allText().includes('Beta work'));
+  assert(branch().allText().includes('2 session tasks · 1 blocked · 1 recorded'));
+  assert(branch().allText().includes('ends before'),'each task keeps its coverage reason');
+  assert(ids.planning.allText().includes('0 / 2 task ascents reach every declared level'),'partial branches do not qualify');
+  assert.equal(branch().open,false);branch().open=true;branch().handlers.toggle();present(orphan);assert.equal(branch().open,true,'branch expansion survives a same-scope refresh');
+  ids.search.value='beta';ids.search.handlers.input();assert(branch().open);assert(branch().allText().includes('Beta work'));assert(!branch().allText().includes('Alpha work'));assert(branch().allText().includes('1 shown · 2 session tasks'));
+  ids.search.value='orphan plan';ids.search.handlers.input();assert(branch().allText().includes('Alpha work')&&branch().allText().includes('Beta work'),'search matches the observed planning context');
+  ids.search.value='';ids.filter.value='blocked';ids.filter.handlers.change();assert(branch().allText().includes('Beta work'));assert(!branch().allText().includes('Alpha work'));
+  ids.filter.value='all';ids.filter.handlers.change();
+  ids['view-mode'].value='list';ids['view-mode'].handlers.change();assert(!ids.rows.children.some(c=>c.id==='unplanned'));assert(ids.rows.allText().includes('Alpha work'));ids['view-mode'].value='tree';ids['view-mode'].handlers.change();
+  const orphanSaved=ids.rows.allText();const op=orphan.planning,pn=op.unplanned_nodes;
+  for(const malformed of [
+    {...orphan,planning:{...op,unplanned_roots:[]}},
+    {...orphan,planning:{...op,unplanned_roots:undefined}},
+    {...orphan,planning:{...op,registry_complete:false,level_coverage:[]}},
+    {...orphan,planning:{...op,unplanned:op.unplanned.map(e=>({...e,unknown:true})),unknown_tasks:2}},
+    {...orphan,planning:{...op,unplanned_nodes:pn.map(n=>n.entity_id==='ent_orphan'?{...n,level:20}:n)}},
+    {...orphan,planning:{...op,unplanned_nodes:pn.map(n=>n.entity_id==='ent_orphan'?{...n,entity_type:'mission'}:n)}},
+    {...orphan,planning:{...op,unplanned_nodes:pn.map(n=>n.entity_id==='ent_orphan'?{...n,parent_id:'ent_a'}:n)}},
+    {...orphan,planning:{...op,unplanned_nodes:pn.map(n=>n.entity_id==='ent_b'?{...n,row_indexes:[1]}:n)}},
+    {...orphan,planning:{...op,unplanned_nodes:[...pn,{entity_id:'ent_dangling',entity_type:'project',title:'Invented',level:20,read_only:false,parent_id:null,row_indexes:[]}],unplanned_roots:['ent_orphan','ent_dangling']}},
+    {...orphan,planning:{...op,unplanned_nodes:pn.filter(n=>n.entity_id!=='ent_orphan'),unplanned_roots:[]}},
+  ]){present(malformed);assert.equal(ids.rows.allText(),orphanSaved,'a malformed branch rejects the whole payload');assert(ids.notice.allText().includes('stale'));}
+  const older={...orphan,planning:{...op}};delete older.planning.unplanned_nodes;delete older.planning.unplanned_roots;
+  present(older);assert(!ids.notice.allText().includes('stale'),'an older producer without branches still renders');assert(group().allText().includes('Alpha work'));assert(!branch());
   present({...payload,read_gaps:Array.from({length:59},(_,i)=>`Explicit task ent_${i} could not be read as a task; its current state is unknown`)});
   assert(ids.notice.children[0].allText().includes('59 × Explicit task [record]'));
   assert(ids.notice.children[0].allText().split('could not be read').length===2,'repeated unavailable-read classes have one visible summary');
@@ -137,7 +171,7 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
   run=ids.refresh.handlers.click();latest=sent.filter(m=>m.method==='tools/call').at(-1);deliver({method:'ui/notifications/tool-input',params:{arguments:{session_key:3,display_plan_id:'ent_plan'}}});await run;deliver({id:latest.id,result:{structuredContent:payload}});assert(ids.notice.allText().includes('stale'));
   const circular={};circular.child=circular;present({...payload,history:{tasks_claimed:[circular],artifacts:[]}});assert(ids.notice.allText().includes('stale'));
   assert(html.includes('overflow-wrap:anywhere'));
-  if(process.argv[3]) {const data=JSON.parse(fs.readFileSync(process.argv[3],'utf8'));present(data);assert(!ids.notice.allText().includes('stale'));if(process.argv[4]==='planning'){assert(data.planning.qualified_tasks>0);assert(ids.rows.allText().includes(data.planning.nodes.find(n=>n.parent_id===null).title));assert(ids.planning.allText().includes('reach every declared level'));}else{assert(ids.rows.allText().includes('Current producer-bound task'));assert(ids.rows.allText().includes('Working now'));assert(ids.rows.allText().includes('Historical artifact'));}}
+  if(process.argv[3]) {const data=JSON.parse(fs.readFileSync(process.argv[3],'utf8'));present(data);assert(!ids.notice.allText().includes('stale'));if(process.argv[4]==='orphan'){const g=ids.rows.children.find(c=>c.id==='unplanned'),b=g&&g.children.find(c=>c.id==='node-unplanned:ent_orphan');assert(b,'producer orphan plan renders as a branch under Unplanned');assert(b.allText().includes('Existing orphan plan')&&b.allText().includes('First orphan task')&&b.allText().includes('Second orphan task'));assert(!b.allText().includes('Complete task'));assert(ids.planning.allText().includes('1 / 3 task ascents reach every declared level'));assert(ids.rows.children[0].id==='node-ent_project');}else if(process.argv[4]==='planning'){assert(data.planning.qualified_tasks>0);assert(ids.rows.allText().includes(data.planning.nodes.find(n=>n.parent_id===null).title));assert(ids.planning.allText().includes('reach every declared level'));}else{assert(ids.rows.allText().includes('Current producer-bound task'));assert(ids.rows.allText().includes('Working now'));assert(ids.rows.allText().includes('Historical artifact'));}}
   const beforeClose=sent.filter(m=>m.method==='tools/call').length;deliver({id:9999,method:'ui/resource-teardown'});assert.equal(ids.refresh.disabled,true);await ids.refresh.handlers.click();documentEvents.visibilitychange();assert.equal(sent.filter(m=>m.method==='tools/call').length,beforeClose);assert(sent.some(m=>m.id===9999&&m.result));
   console.log('actual view bridge: transactional validation, bound scope, history, coverage, decisions, cancellation and refresh passed');
 })().catch(error=>{console.error(error);process.exit(1);});

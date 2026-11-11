@@ -117,6 +117,7 @@ def session_planning_tree(
         values.difference_update(disputed_tasks)
     nodes: dict[str, dict] = {}
     unplanned = []
+    partial_paths: list[tuple[int, list[dict]]] = []
     qualified: set[str] = set()
     unknown_ids: set[str] = set()
     for index, path, reason, unknown in paths:
@@ -128,32 +129,37 @@ def session_planning_tree(
             unplanned.append({"row_index": index, "reason": reason, "unknown": unknown})
             if unknown and isinstance(rows[index].get("entity_id"), str):
                 unknown_ids.add(rows[index]["entity_id"])
+            elif (
+                complete and isinstance(path[0]["entity_id"], str)
+                and path[0]["entity_id"] not in disputed_tasks
+                and any(record["entity_type"] in declarations for record in path[1:])
+            ):
+                # A known, coherent prefix that stops short (for example an
+                # existing plan with no parent) stays visible as a branch
+                # beneath Unplanned. It never counts as a qualified ascent.
+                partial_paths.append((index, path))
             continue
         qualified.add(path[0]["entity_id"])
-        for position, record in enumerate(path):
-            record_id = record["entity_id"]
-            mark = declarations.get(record["entity_type"])
-            node = nodes.setdefault(record_id, {
-                "entity_id": record_id,
-                "entity_type": record["entity_type"],
-                "title": record["title"],
-                "level": mark["level"] if mark else None,
-                "read_only": mark["read_only"] if mark else False,
-                "parent_id": path[position + 1]["entity_id"] if position + 1 < len(path) else None,
-                "row_indexes": [],
-            })
-            if position == 0:
-                node["row_indexes"].append(index)
+        _add_path(nodes, path, index, declarations)
 
-    descendant_indexes: dict[str, set[int]] = {node_id: set() for node_id in nodes}
-    for node in nodes.values():
-        for index in node["row_indexes"]:
-            current = node
-            while current is not None:
-                descendant_indexes[current["entity_id"]].add(index)
-                current = nodes.get(current["parent_id"])
-    for node_id, node in nodes.items():
-        node["counts"] = session_state_counts(rows, list(descendant_indexes[node_id]))
+    # Partial branches add no parent beyond the last observed record. A record
+    # that a qualified branch also holds, or that partial paths give different
+    # parents, is a contradiction in this read: those entries stay flat.
+    partial_parents: dict[str, set[str | None]] = {}
+    for _, path in partial_paths:
+        for position, record in enumerate(path):
+            parent_id = path[position + 1]["entity_id"] if position + 1 < len(path) else None
+            partial_parents.setdefault(record["entity_id"], set()).add(parent_id)
+    contested = {
+        record_id for record_id, values in partial_parents.items()
+        if len(values) != 1 or record_id in nodes
+    }
+    unplanned_nodes: dict[str, dict] = {}
+    for index, path in partial_paths:
+        if not any(record["entity_id"] in contested for record in path):
+            _add_path(unplanned_nodes, path, index, declarations)
+    _add_counts(rows, nodes)
+    _add_counts(rows, unplanned_nodes)
 
     task_ids = {row["entity_id"] for _, row in memberships if isinstance(row.get("entity_id"), str)}
     return {
@@ -176,7 +182,42 @@ def session_planning_tree(
         "nodes": list(nodes.values()),
         "roots": [node["entity_id"] for node in nodes.values() if node["parent_id"] is None],
         "unplanned": unplanned,
+        # Observed, coherent but incomplete ascents. Roots here are the highest
+        # record observed, not a claim that the record has no parent.
+        "unplanned_nodes": list(unplanned_nodes.values()),
+        "unplanned_roots": [
+            node["entity_id"] for node in unplanned_nodes.values() if node["parent_id"] is None
+        ],
     }
+
+
+def _add_path(nodes: dict[str, dict], path: list[dict], index: int, declarations: dict) -> None:
+    for position, record in enumerate(path):
+        record_id = record["entity_id"]
+        mark = declarations.get(record["entity_type"])
+        node = nodes.setdefault(record_id, {
+            "entity_id": record_id,
+            "entity_type": record["entity_type"],
+            "title": record["title"],
+            "level": mark["level"] if mark else None,
+            "read_only": mark["read_only"] if mark else False,
+            "parent_id": path[position + 1]["entity_id"] if position + 1 < len(path) else None,
+            "row_indexes": [],
+        })
+        if position == 0:
+            node["row_indexes"].append(index)
+
+
+def _add_counts(rows: list[dict], nodes: dict[str, dict]) -> None:
+    descendant_indexes: dict[str, set[int]] = {node_id: set() for node_id in nodes}
+    for node in nodes.values():
+        for index in node["row_indexes"]:
+            current = node
+            while current is not None:
+                descendant_indexes[current["entity_id"]].add(index)
+                current = nodes.get(current["parent_id"])
+    for node_id, node in nodes.items():
+        node["counts"] = session_state_counts(rows, list(descendant_indexes[node_id]))
 
 
 def session_state_counts(rows: list[dict], row_indexes: list[int]) -> dict[str, int]:

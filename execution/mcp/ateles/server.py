@@ -1612,6 +1612,13 @@ def _format_workboard_result(result: dict) -> str:
                     + json.dumps(node["counts"], sort_keys=True)
                     + "; these counts do not establish whole-plan completion."
                 )
+        for node in planning.get("unplanned_nodes", []):
+            if node["parent_id"] is None:
+                sections.append(
+                    "Unplanned observed branch (incomplete ascent; no parent inferred): "
+                    + node["entity_type"] + ": " + node["title"] + " — "
+                    + json.dumps(node["counts"], sort_keys=True)
+                )
     if "history" in result:
         sections.append(
             "Requested cumulative session history (not current status):\n"

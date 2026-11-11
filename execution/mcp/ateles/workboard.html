@@ -129,10 +129,35 @@
     if(roots.length!==p.roots.length||roots.some(id=>!p.roots.includes(id)))return false;
     const ancestors=new Set();for(const n of nodes.values())if(n.row_indexes.length){const levels=new Set();let at=n;while(at){ancestors.add(at.entity_id);if(at.level!==null)levels.add(at.level);at=at.parent_id===null?null:nodes.get(at.parent_id);}if(levels.size!==p.level_coverage.length)return false;}
     if(ancestors.size!==nodes.size)return false;
-    const unknownIds=new Set();for(const missing of p.unplanned){const i=missing&&missing.row_index;if(!object(missing)||!Number.isInteger(i)||!rows[i]||rows[i].kind!=="task"||assigned.has(i)||typeof missing.reason!=="string"||typeof missing.unknown!=="boolean"||qualified.has(rows[i].entity_id))return false;assigned.add(i);if(missing.unknown&&entityId(rows[i].entity_id))unknownIds.add(rows[i].entity_id);}
+    const unknownIds=new Set(),knownUnplanned=new Set();for(const missing of p.unplanned){const i=missing&&missing.row_index;if(!object(missing)||!Number.isInteger(i)||!rows[i]||rows[i].kind!=="task"||assigned.has(i)||typeof missing.reason!=="string"||typeof missing.unknown!=="boolean"||qualified.has(rows[i].entity_id))return false;assigned.add(i);if(missing.unknown&&entityId(rows[i].entity_id))unknownIds.add(rows[i].entity_id);else if(!missing.unknown)knownUnplanned.add(i);}
     if(unknownIds.size!==p.unknown_tasks)return false;
     if(members.some(([,i])=>!assigned.has(i)))return false;
-    return true;
+    return validatePartial(p,rows,registryTypes,nodes,knownUnplanned);
+  }
+  // Observed, incomplete ascents beneath Unplanned. Optional for an older
+  // producer; when present, each branch must be a declared, strictly rising
+  // prefix of known (not unknown) unplanned entries and adds no parent.
+  function validatePartial(p,rows,registryTypes,qualifiedNodes,knownUnplanned) {
+    if(p.unplanned_nodes===undefined&&p.unplanned_roots===undefined)return true;
+    if(!Array.isArray(p.unplanned_nodes)||!strings(p.unplanned_roots)||new Set(p.unplanned_roots).size!==p.unplanned_roots.length)return false;
+    if(p.unplanned_nodes.length&&!p.registry_complete)return false;
+    const nodes=new Map(),placed=new Set();
+    for(const n of p.unplanned_nodes){
+      if(!object(n)||!entityId(n.entity_id)||nodes.has(n.entity_id)||qualifiedNodes.has(n.entity_id)||typeof n.entity_type!=="string"||typeof n.title!=="string"||typeof n.read_only!=="boolean"||!(n.level===null&&n.entity_type==="task"||typeof n.level==="number"&&Number.isFinite(n.level))||!(n.parent_id===null||entityId(n.parent_id))||!Array.isArray(n.row_indexes))return false;
+      if(n.level!==null&&registryTypes.get(n.entity_type)!==n.level)return false;
+      if(n.row_indexes.length&&n.level!==null)return false;
+      for(const i of n.row_indexes){if(!Number.isInteger(i)||!knownUnplanned.has(i)||rows[i].entity_id!==n.entity_id||placed.has(i))return false;placed.add(i);}
+      nodes.set(n.entity_id,n);
+    }
+    const roots=[];
+    for(const n of nodes.values()){
+      if(n.parent_id===null){if(n.level===null)return false;roots.push(n.entity_id);continue;}
+      const parent=nodes.get(n.parent_id);if(!parent||parent.level===null&&n.level!==null||parent.level!==null&&n.level!==null&&parent.level<=n.level)return false;
+      const seen=new Set([n.entity_id]);let current=parent;while(current){if(seen.has(current.entity_id))return false;seen.add(current.entity_id);current=current.parent_id===null?null:nodes.get(current.parent_id);}
+    }
+    if(roots.length!==p.unplanned_roots.length||roots.some(id=>!p.unplanned_roots.includes(id)))return false;
+    const ancestors=new Set();for(const n of nodes.values())if(n.row_indexes.length){let at=n;while(at){ancestors.add(at.entity_id);at=at.parent_id===null?null:nodes.get(at.parent_id);}}
+    return ancestors.size===nodes.size;
   }
   function validate(data) {
     if (!jsonValue(data) || !object(data) || data.error || !args || data.session_key!==args.session_key || data.display_plan_id!==args.display_plan_id || !timestamp(data.observed_at) || !Array.isArray(data.rows) || !strings(data.read_gaps) || !strings(data.capability_gaps)) return false;
@@ -176,27 +201,34 @@
     const unresolved=indexes.some(i=>!entityId(view.rows[i].entity_id));
     return counts.tasks+(unresolved?" session entries":" session tasks")+Object.entries(labels).filter(([key])=>counts[key]).map(([key,label])=>" · "+counts[key]+" "+label).join("");
   }
-  function planningRows(p,shownIndexes,expandMatches) {
-    const byId=new Map(p.nodes.map(n=>[n.entity_id,n])),visible=new Set(),allIndexes=new Map(p.nodes.map(n=>[n.entity_id,new Set()])),selected=new Set(shownIndexes);
-    for(const n of p.nodes)for(const i of n.row_indexes){let at=n;while(at){allIndexes.get(at.entity_id).add(i);if(selected.has(i))visible.add(at.entity_id);at=at.parent_id===null?null:byId.get(at.parent_id);}}
+  function forest(list,selected,expandMatches,key,card) {
+    const byId=new Map(list.map(n=>[n.entity_id,n])),visible=new Set(),allIndexes=new Map(list.map(n=>[n.entity_id,new Set()]));
+    for(const n of list)for(const i of n.row_indexes){let at=n;while(at){allIndexes.get(at.entity_id).add(i);if(selected.has(i))visible.add(at.entity_id);at=at.parent_id===null?null:byId.get(at.parent_id);}}
     const elements=new Map(),result=[];
-    for(const n of p.nodes){
+    for(const n of list){
       if(!visible.has(n.entity_id))continue;
-      const branch=node("details",undefined,"tree-node");branch.id="node-"+n.entity_id;branch.open=expandMatches||expanded.get(n.entity_id)===true;
-      branch.addEventListener("toggle",()=>{expanded.set(n.entity_id,branch.open);size();});
+      const id=key+n.entity_id,branch=node("details",undefined,"tree-node");branch.id="node-"+id;branch.open=expandMatches||expanded.get(id)===true;
+      branch.addEventListener("toggle",()=>{expanded.set(id,branch.open);size();});
       const summary=node("summary");summary.append(node("span",n.entity_type,"tree-level"),node("strong",n.title));
       if(n.read_only)summary.append(node("span"," · Read-only reference","muted"));
       const indexes=[...allIndexes.get(n.entity_id)],shown=indexes.filter(i=>selected.has(i)).length;
       summary.append(node("span",(shown===indexes.length?"":shown+" shown · ")+stateCounts(indexes),"tree-count"));branch.append(summary);
-      for(const i of n.row_indexes)if(selected.has(i))branch.append(taskRow(view.rows[i]));
+      for(const i of n.row_indexes)if(selected.has(i))branch.append(card(i));
       elements.set(n.entity_id,branch);
     }
-    for(const n of p.nodes){const branch=elements.get(n.entity_id);if(!branch)continue;if(n.parent_id===null)result.push(branch);else elements.get(n.parent_id).append(branch);}
+    for(const n of list){const branch=elements.get(n.entity_id);if(!branch)continue;if(n.parent_id===null)result.push(branch);else elements.get(n.parent_id).append(branch);}
+    return result;
+  }
+  function planningRows(p,shownIndexes,expandMatches) {
+    const selected=new Set(shownIndexes),result=forest(p.nodes,selected,expandMatches,"",i=>taskRow(view.rows[i]));
     const missing=p.unplanned.filter(entry=>selected.has(entry.row_index));
     if(missing.length){
       const group=node("details",undefined,"tree-node");group.id="unplanned";group.open=expandMatches||expanded.get("unplanned")!==false;group.addEventListener("toggle",()=>{expanded.set("unplanned",group.open);size();});
-      group.append(node("summary","Unplanned · "+stateCounts(missing.map(entry=>entry.row_index))),node("p","Missing, undeclared or unreadable ancestry stays here; no parent is inferred.","muted"));
-      for(const entry of missing){const article=taskRow(view.rows[entry.row_index]);article.append(node("p",entry.reason,"muted coverage-reason"));group.append(article);}result.push(group);
+      group.append(node("summary","Unplanned · "+stateCounts(missing.map(entry=>entry.row_index))),node("p","Missing, undeclared or unreadable ancestry stays here; no parent is inferred. An observed branch shows only the records actually read; its top record's own parent is not recorded or not qualified.","muted"));
+      const reasons=new Map(missing.map(entry=>[entry.row_index,entry.reason])),partial=p.unplanned_nodes||[],branched=new Set(partial.flatMap(n=>n.row_indexes));
+      const card=i=>{const article=taskRow(view.rows[i]);article.append(node("p",reasons.get(i),"muted coverage-reason"));return article;};
+      group.append(...forest(partial,selected,expandMatches,"unplanned:",card));
+      for(const entry of missing)if(!branched.has(entry.row_index))group.append(card(entry.row_index));result.push(group);
     }
     for(const i of shownIndexes)if(view.rows[i].kind!=="task")result.push(taskRow(view.rows[i]));
     return result;
