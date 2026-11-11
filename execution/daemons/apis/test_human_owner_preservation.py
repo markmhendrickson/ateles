@@ -128,3 +128,21 @@ def test_human_branch_forgets_previously_unroutable_task(_world, _isolated_ledge
     ))
     assert not apis._unroutable._seen and not apis._unroutable._pending
     assert _world["statuses"] == []
+
+
+@pytest.mark.parametrize("response", [
+    {"entities": [], "total": 1},
+    {"entities": [{"snapshot": {"display_name": 42}}], "total": 1},
+    {"entities": [{"snapshot": {"display_name": "Other Person"}}], "total": 9,
+     "next_cursor": "more"},
+])
+def test_incomplete_identity_read_is_not_no_owner(_world, _isolated_ledger, monkeypatch, response):
+    monkeypatch.setattr(neotoma_http, "request_json", lambda *_a, **_k: response)
+    notifier = _Notifier()
+    asyncio.run(apis.dispatch_task(
+        "ent_partial_profile", {"title": "Review notes", "status": "open",
+                                "assigned_to": "Example Person", "tags": []},
+        trigger="created", notifier=notifier, snapshot_hydrated=True,
+    ))
+    assert _world == {"statuses": [], "started": [], "spawns": []}
+    assert len(notifier.sent) == 1 and "ownership could not be verified" in notifier.sent[0]

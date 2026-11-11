@@ -31,6 +31,12 @@ def operator_names(requester: Callable) -> tuple[frozenset[str], str | None]:
         rows = response.get("entities")
         if not isinstance(rows, list):
             return frozenset(), "malformed_operator_profiles"
+        total = response.get("total")
+        if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < 0):
+            return frozenset(), "malformed_operator_profiles"
+        if (response.get("next_cursor") or (total is not None and total != len(rows))
+                or (total is None and len(rows) >= 5)):
+            return frozenset(), "partial_operator_profiles"
         names: set[str] = set()
         for row in rows:
             if not isinstance(row, dict):
@@ -44,7 +50,9 @@ def operator_names(requester: Callable) -> tuple[frozenset[str], str | None]:
                     names.add(value)
     except Exception as exc:  # noqa: BLE001 - category only, never raw text
         return frozenset(), type(exc).__name__
-    return (frozenset(names), None) if names else (frozenset(), "no_operator_profile")
+    if names:
+        return frozenset(names), None
+    return frozenset(), "operator_profile_has_no_names" if rows else "no_operator_profile"
 
 # Values that encode "nobody owns this" as a STRING rather than as absence.
 # They are worse than an empty field: `bool(assigned_to)` is True for them, so

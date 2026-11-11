@@ -138,7 +138,7 @@ class FakeNeotoma:
         if etype == "operator_profile":
             return {
                 "entities": [{"snapshot": self.profile}] if self.profile else [],
-                "total": 0,
+                "total": 1 if self.profile else 0,
             }
         if etype in ("metric_reading", "metric_definition"):
             ents = [{"snapshot": s} for s in self.stored.get(etype, {}).values()]
