@@ -1518,10 +1518,14 @@ def _format_workboard_result(result: dict) -> str:
             )
     planning = result.get("planning")
     if isinstance(planning, dict):
+        qualification = (
+            f"{planning['qualified_tasks']}/{planning['unique_tasks']} task ascents reach every declared level"
+            if planning["registry_complete"]
+            else f"planning-level coverage is unknown for {planning['membership_entries']} session entries"
+        )
         sections.append(
             "Planning coverage (this session only): "
-            f"{planning['qualified_tasks']}/{planning['unique_tasks']} task ascents "
-            "reach every declared level; "
+            + qualification + "; "
             f"{len(planning['unplanned'])} membership entries are under Unplanned. "
             + planning["scope"]
         )

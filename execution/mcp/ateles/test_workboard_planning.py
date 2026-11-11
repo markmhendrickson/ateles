@@ -95,3 +95,31 @@ def test_actual_workboard_read_exposes_session_tree_without_a_parallel_store():
     assert result.get("planning", {}).get("roots") == ["ent_purpose"]
     assert result["planning"]["qualified_tasks"] == 1
     assert result["planning"]["scope"].startswith("Only this session")
+
+
+def test_ascent_depth_is_open_instead_of_eight_planning_levels():
+    records = {}
+    for i in range(12):
+        edges = ([{"source_entity_id": "ent_" + str(i), "target_entity_id": "ent_" + str(i + 1),
+                   "relationship_type": "PART_OF", "is_live": 1}] if i < 11 else [])
+        records[f"/entities/ent_{i}/relationships?expand_entities=true"] = {"relationships": edges, "total": len(edges)}
+        records[f"/entities/ent_{i}"] = {"entity_type": "stage_" + str(i), "snapshot": {"title": "Stage " + str(i)}}
+    with patch.object(srv, "_get", side_effect=records.get):
+        ascent, gaps = srv._planning_ascent("ent_0", {})
+    assert not gaps and len(ascent) == 11
+    assert ascent[-1]["entity_id"] == "ent_11"
+
+
+def test_planning_read_budget_is_unknown_coverage_not_a_fabricated_root():
+    with patch.object(srv, "_get") as read:
+        ascent, gaps = srv._planning_ascent("ent_work", {"_planning_reads_remaining": 0})
+    assert ascent == [] and gaps == ["Planning read budget exhausted; ascent coverage is unknown"]
+    read.assert_not_called()
+
+
+def test_duplicate_task_coverage_cannot_select_a_convenient_parent():
+    rows = [task(ascent=[parent("purpose")]), task(ascent=[])]
+    tree = session_planning_tree(rows, {"purpose": {"level": 20, "read_only": True}}, complete=True, gaps=[])
+    assert not tree["nodes"] and not tree["qualified_tasks"]
+    assert len(tree["unplanned"]) == 2
+    assert tree["level_coverage"][0]["complete_tasks"] == 0
