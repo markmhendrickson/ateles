@@ -16,8 +16,16 @@ import re
 from collections.abc import Callable
 
 
+def _required_profile_fields(value: object, expected: dict) -> bool:
+    """Require this consumer's evidence, including explicit null end markers."""
+    return isinstance(value, dict) and all(
+        key in value and type(value[key]) is type(wanted) and value[key] == wanted
+        for key, wanted in expected.items()
+    )
+
+
 def _profile_scope_compatible(response: dict) -> bool:
-    """An explicit response contradiction cannot establish even an identity."""
+    """A current-contract identity needs affirmative, nonforeign scope proof."""
     if any(response.get(key) is not None for key in ("error", "error_code", "errors", "detail")):
         return False
     if "success" in response and response["success"] is not True:
@@ -25,25 +33,46 @@ def _profile_scope_compatible(response: dict) -> bool:
     if "read_contract" not in response:
         return True  # compatibility with the earlier counted HTTP envelope
     contract = response["read_contract"]
-    if not isinstance(contract, dict):
+    return (
+        _required_profile_fields(contract, {"version": "1", "surface": "entity_collection"})
+        and _required_profile_fields(contract.get("applied_scope"), {
+            "owner": "authenticated", "entity_types": ["operator_profile"],
+            "include_merged": False, "include_deleted": False,
+            "include_snapshots": True, "predicates": [],
+        })
+        and _required_profile_fields(contract.get("request_options"), {"ignored": []})
+    )
+
+
+def _complete_current_profile_contract(response: dict, count: int) -> bool:
+    """The complete v1 negative proof, as constructed by the current producer.
+
+    A sparse present contract is never the counted-legacy branch. Required
+    scope, mode, population counts and explicit exhaustion/continuation must
+    agree as a whole. Ordering, timestamps and common_view are not this proof.
+    """
+    contract = response["read_contract"]
+    limit = response.get("limit")
+    if type(limit) is not int or not 0 <= count < limit:
         return False
-    for key, expected in (("version", "1"), ("surface", "entity_collection")):
-        if key in contract and contract[key] != expected:
-            return False
-    if "applied_scope" in contract:
-        scope = contract["applied_scope"]
-        if not isinstance(scope, dict):
-            return False
-        for key, expected in (("owner", "authenticated"), ("entity_types", ["operator_profile"]),
-                              ("include_merged", False), ("include_deleted", False),
-                              ("include_snapshots", True), ("predicates", [])):
-            if key in scope and (type(scope[key]) is not type(expected) or scope[key] != expected):
-                return False
-    if "request_options" in contract:
-        options = contract["request_options"]
-        if not isinstance(options, dict) or ("ignored" in options and options["ignored"] != []):
-            return False
-    return True
+    if not _profile_scope_compatible(response):
+        return False
+    coverage = contract.get("coverage")
+    return (
+        _required_profile_fields(response, {"total": count, "offset": 0})
+        and _required_profile_fields(contract.get("mode"), {"actual": "structured", "fallback_reason": None})
+        and _required_profile_fields(contract["applied_scope"].get("pagination"), {
+            "kind": "keyset", "limit": limit, "offset": 0,
+        })
+        and _required_profile_fields(coverage, {
+            "kind": "predicate_population", "state": "complete", "reasons": [],
+            "returned_count": count, "page_exhausted": True, "scope_exhausted": True,
+        })
+        and _required_profile_fields(coverage.get("total"), {"value": count, "relation": "exact", "unit": "entities"})
+        and _required_profile_fields(coverage.get("continuation"), {
+            "kind": "none", "next_cursor": None, "next_offset": None,
+        })
+    )
 
 
 def _profile_page_problem(response: dict, count: int) -> str | None:
@@ -70,42 +99,7 @@ def _profile_page_problem(response: dict, count: int) -> str | None:
         return "malformed_operator_profiles"
     if "read_contract" not in response:
         return None
-    contract = response["read_contract"]
-    coverage = contract.get("coverage")
-    if not isinstance(coverage, dict) or coverage.get("state") != "complete":
-        return "partial_operator_profiles"
-    if "kind" in coverage and coverage["kind"] != "predicate_population":
-        return "partial_operator_profiles"
-    if "reasons" in coverage and coverage["reasons"] != []:
-        return "partial_operator_profiles"
-    for key in ("scope_exhausted", "page_exhausted"):
-        if key in coverage and coverage[key] is not True:
-            return "partial_operator_profiles"
-    if "returned_count" in coverage and (type(coverage["returned_count"]) is not int
-                                          or coverage["returned_count"] != count):
-        return "partial_operator_profiles"
-    if "total" in coverage:
-        claimed = coverage["total"]
-        if (not isinstance(claimed, dict) or type(claimed.get("value")) is not int
-                or claimed["value"] != total or claimed.get("relation") != "exact"
-                or claimed.get("unit") != "entities"):
-            return "partial_operator_profiles"
-    if "continuation" in coverage:
-        continuation = coverage["continuation"]
-        if (not isinstance(continuation, dict) or continuation.get("kind") != "none"
-                or any(continuation.get(key) is not None for key in ("next_cursor", "next_offset"))):
-            return "partial_operator_profiles"
-    scope = contract.get("applied_scope", {})
-    if "pagination" in scope:
-        pagination = scope["pagination"]
-        if (not isinstance(pagination, dict)
-                or ("kind" in pagination and pagination["kind"] not in ("keyset", "offset"))
-                or ("offset" in pagination and (type(pagination["offset"]) is not int or pagination["offset"] != 0))
-                or ("limit" in pagination and (type(pagination["limit"]) is not int
-                                               or pagination["limit"] < max(1, count)
-                                               or ("limit" in response and pagination["limit"] != response["limit"])))):
-            return "partial_operator_profiles"
-    return None
+    return None if _complete_current_profile_contract(response, count) else "partial_operator_profiles"
 
 
 def operator_names(requester: Callable) -> tuple[frozenset[str], str | None]:

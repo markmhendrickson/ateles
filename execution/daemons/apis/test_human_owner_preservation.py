@@ -18,6 +18,15 @@ _world = _noowner._world
 _isolated_ledger = _noowner._isolated_ledger
 
 
+@pytest.fixture(autouse=True)
+def _ownership_paths_have_no_gate_or_session_effect(monkeypatch):
+    def forbidden(*_a, **_k):
+        raise AssertionError("Ownership-only routing must not enter a gate, assessment or run session")
+
+    for name in ("evaluate_gate", "write_checkpoint_brief", "write_assessment", "create_run_session"):
+        monkeypatch.setattr(apis, name, forbidden)
+
+
 @pytest.fixture
 def profile(monkeypatch):
     calls = []
@@ -204,6 +213,7 @@ def test_r1_reported_envelope_never_proves_negative_ownership(
 def _complete_profile_contract(count):
     # Same shape as the configured HTTP response, with synthetic identities.
     return {"version": "1", "surface": "entity_collection",
+            "mode": {"actual": "structured", "fallback_reason": None},
             "applied_scope": {"owner": "authenticated", "entity_types": ["operator_profile"],
                               "include_merged": False, "include_deleted": False,
                               "include_snapshots": True, "predicates": [],
@@ -332,3 +342,145 @@ def test_malformed_row_does_not_disappear_beside_a_usable_profile(
     ))
     assert _world == {"statuses": [], "started": [], "spawns": []}
     assert len(notifier.sent) == 1 and "ownership could not be verified" in notifier.sent[0]
+
+
+# These are the state-critical parts of the producer's current v1 contract.
+# Sorting, timestamps and common_view are deliberately outside this proof.
+_REQUIRED_NEGATIVE_PROOF = [
+    ("version",), ("surface",), ("mode",), ("mode", "actual"), ("mode", "fallback_reason"),
+    ("applied_scope",), ("applied_scope", "owner"), ("applied_scope", "entity_types"),
+    ("applied_scope", "include_snapshots"), ("applied_scope", "include_merged"),
+    ("applied_scope", "include_deleted"), ("applied_scope", "predicates"),
+    ("applied_scope", "pagination"), ("applied_scope", "pagination", "kind"),
+    ("applied_scope", "pagination", "offset"), ("applied_scope", "pagination", "limit"),
+    ("request_options",), ("request_options", "ignored"),
+    ("coverage",), ("coverage", "kind"), ("coverage", "state"), ("coverage", "reasons"),
+    ("coverage", "returned_count"), ("coverage", "total"), ("coverage", "total", "value"),
+    ("coverage", "total", "relation"), ("coverage", "total", "unit"),
+    ("coverage", "page_exhausted"), ("coverage", "scope_exhausted"),
+    ("coverage", "continuation"), ("coverage", "continuation", "kind"),
+    ("coverage", "continuation", "next_cursor"), ("coverage", "continuation", "next_offset"),
+]
+
+
+def _required_contract_cases():
+    original = _complete_profile_contract(0)
+    cases = []
+    for path in _REQUIRED_NEGATIVE_PROOF:
+        expected = original
+        for key in path:
+            expected = expected[key]
+        cases.append(pytest.param(path, "delete", None, id="delete-" + ".".join(path)))
+        if expected is not None:
+            cases.append(pytest.param(path, "replace", None, id="null-" + ".".join(path)))
+        wrong_type = 0 if isinstance(expected, bool) else False if isinstance(expected, (int, type(None))) else [] if isinstance(expected, (str, dict)) else {}
+        cases.append(pytest.param(path, "replace", wrong_type, id="type-" + ".".join(path)))
+    return cases
+
+
+@pytest.mark.parametrize("path,mutation,value", _required_contract_cases())
+def test_present_current_contract_requires_the_whole_negative_proof(
+    _world, _isolated_ledger, monkeypatch, path, mutation, value,
+):
+    contract = copy.deepcopy(_complete_profile_contract(0))
+    target = contract
+    for key in path[:-1]:
+        target = target[key]
+    if mutation == "delete":
+        del target[path[-1]]
+    else:
+        target[path[-1]] = value
+    response = {"entities": [], "total": 0, "offset": 0, "limit": 5, "read_contract": contract}
+    monkeypatch.setattr(neotoma_http, "request_json", lambda *_a, **_k: response)
+    notifier = _Notifier()
+    asyncio.run(apis.dispatch_task(
+        "ent_r3_missing_proof", {"title": "Review notes", "status": "open",
+                                "assigned_to": "Example Person", "tags": []},
+        trigger="created", notifier=notifier, snapshot_hydrated=True,
+    ))
+    assert _world == {"statuses": [], "started": [], "spawns": []}
+    assert len(notifier.sent) == 1 and "ownership could not be verified" in notifier.sent[0]
+
+
+@pytest.mark.parametrize("contract", [None, {}, {"coverage": {"state": "complete"}},
+                                      {"version": "1", "surface": "entity_collection", "coverage": {"state": "complete"}}])
+def test_present_sparse_contract_is_never_counted_legacy(_world, _isolated_ledger, monkeypatch, contract):
+    response = {"entities": [], "total": 0, "offset": 0, "limit": 5, "read_contract": contract}
+    monkeypatch.setattr(neotoma_http, "request_json", lambda *_a, **_k: response)
+    notifier = _Notifier()
+    asyncio.run(apis.dispatch_task(
+        "ent_r3_sparse_proof", {"title": "Review notes", "status": "open",
+                               "assigned_to": "Example Person", "tags": []},
+        trigger="created", notifier=notifier, snapshot_hydrated=True,
+    ))
+    assert _world == {"statuses": [], "started": [], "spawns": []}
+    assert len(notifier.sent) == 1 and "ownership could not be verified" in notifier.sent[0]
+
+
+@pytest.mark.parametrize("foreign", ["row_type", "owner", "entity_types", "missing_scope"])
+def test_a_matching_alias_cannot_hide_a_foreign_or_unqualified_identity_scope(
+    _world, _isolated_ledger, monkeypatch, foreign,
+):
+    response = {"entities": [{"entity_type": "operator_profile", "snapshot": {"display_name": "Example Person"}}],
+                "total": 1, "offset": 0, "limit": 5, "read_contract": _complete_profile_contract(1)}
+    if foreign == "row_type":
+        response["entities"][0]["entity_type"] = "task"
+    elif foreign == "missing_scope":
+        del response["read_contract"]["applied_scope"]
+    else:
+        response["read_contract"]["applied_scope"][foreign] = "foreign" if foreign == "owner" else ["task"]
+    monkeypatch.setattr(neotoma_http, "request_json", lambda *_a, **_k: response)
+    notifier = _Notifier()
+    asyncio.run(apis.dispatch_task(
+        "ent_r3_foreign_identity", {"title": "Review notes", "status": "open",
+                                  "assigned_to": "Example Person", "tags": []},
+        trigger="created", notifier=notifier, snapshot_hydrated=True,
+    ))
+    assert _world == {"statuses": [], "started": [], "spawns": []}
+    assert len(notifier.sent) == 1 and "ownership could not be verified" in notifier.sent[0]
+
+
+@pytest.mark.parametrize("missing", ["limit", "offset"])
+def test_current_negative_proof_needs_the_actual_http_page_binding(_world, _isolated_ledger, monkeypatch, missing):
+    response = {"entities": [], "total": 0, "offset": 0, "limit": 5, "read_contract": _complete_profile_contract(0)}
+    del response[missing]
+    monkeypatch.setattr(neotoma_http, "request_json", lambda *_a, **_k: response)
+    notifier = _Notifier()
+    asyncio.run(apis.dispatch_task(
+        "ent_r3_page_binding", {"title": "Review notes", "status": "open",
+                              "assigned_to": "Example Person", "tags": []},
+        trigger="created", notifier=notifier, snapshot_hydrated=True,
+    ))
+    assert _world == {"statuses": [], "started": [], "spawns": []}
+    assert len(notifier.sent) == 1 and "ownership could not be verified" in notifier.sent[0]
+
+
+def test_a_full_keyset_page_cannot_claim_exhaustion(_world, _isolated_ledger, monkeypatch):
+    contract = _complete_profile_contract(1)
+    contract["applied_scope"]["pagination"]["limit"] = 1
+    response = {"entities": [_OTHER_PROFILE], "total": 1, "offset": 0, "limit": 1, "read_contract": contract}
+    monkeypatch.setattr(neotoma_http, "request_json", lambda *_a, **_k: response)
+    notifier = _Notifier()
+    asyncio.run(apis.dispatch_task(
+        "ent_r3_full_page", {"title": "Review notes", "status": "open",
+                           "assigned_to": "Example Person", "tags": []},
+        trigger="created", notifier=notifier, snapshot_hydrated=True,
+    ))
+    assert _world == {"statuses": [], "started": [], "spawns": []}
+    assert len(notifier.sent) == 1 and "ownership could not be verified" in notifier.sent[0]
+
+
+def test_configured_human_guard_never_reads_a_malformed_profile(_world, _isolated_ledger, monkeypatch):
+    def no_read(*_a, **_k):
+        raise AssertionError("Configured operator recognition does not query profiles")
+
+    monkeypatch.setenv("OPERATOR_NAME", "Example Person")
+    monkeypatch.setattr(neotoma_http, "request_json", no_read)
+    notifier = _Notifier()
+    asyncio.run(apis.dispatch_task(
+        "ent_r3_configured_human", {"title": "Review notes", "status": "open",
+                                  "assigned_to": "Example Person", "tags": []},
+        trigger="created", notifier=notifier, snapshot_hydrated=True,
+    ))
+    assert _world == {"statuses": [], "started": [], "spawns": []}
+    assert notifier.sent == []
