@@ -9,13 +9,19 @@
 *{box-sizing:border-box}h2,.row,p,pre{overflow-wrap:anywhere;min-width:0}pre{white-space:pre-wrap}.row-top h2{flex:1}body{margin:0;padding:20px;max-width:1100px}button,input,select{font:inherit;color:inherit;background:var(--color-background-secondary,light-dark(#fff,#292b26));border:1px solid var(--color-border-primary,light-dark(#d8d9d1,#50534a));border-radius:7px;padding:7px 10px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #80a16b;outline-offset:3px}h1{font-size:21px;letter-spacing:-.025em;margin:0}h2{font-size:16px;margin:0}p{margin:5px 0}header{display:flex;align-items:center;justify-content:space-between;gap:12px}.eyebrow{font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:var(--color-text-secondary,light-dark(#6a6e60,#adb39f));font-weight:650}.muted{color:var(--color-text-secondary,light-dark(#6c7065,#aab09f));font-size:12px}.plan{margin:18px 0;padding:14px 16px;border-left:3px solid #7b9968;background:var(--color-background-secondary,light-dark(#f0f3ea,#2a3025));border-radius:0 9px 9px 0}.toolbar{display:flex;gap:8px;margin:16px 0 12px}.toolbar input{flex:1;min-width:80px}.notice{padding:9px 11px;margin:10px 0;border:1px solid #b8873d;border-radius:7px;font-size:12px;white-space:pre-wrap}.row{border:1px solid var(--color-border-primary,light-dark(#dedfd7,#484c42));border-radius:9px;margin:9px 0;padding:13px 14px}.row-top{display:flex;gap:12px;justify-content:space-between;align-items:start}.state{max-width:100%;overflow-wrap:anywhere;font-size:11px;border-radius:5px;padding:3px 6px;background:var(--color-background-secondary,light-dark(#eeefe9,#34382f));white-space:normal}.operator-needed .state{background:light-dark(#fbecd2,#584025)}.blocked .state{background:light-dark(#f7e8df,#55382a)}.active .state{background:light-dark(#e3f0da,#344c2b)}.next{margin-top:9px;white-space:pre-wrap;overflow-wrap:anywhere}details{margin-top:9px;font-size:12px}summary{cursor:pointer;color:var(--color-text-secondary,light-dark(#686d5e,#adb39f))}.roles{display:grid;grid-template-columns:minmax(100px,auto) 1fr;gap:4px 14px;margin:9px 0;overflow-wrap:anywhere}.roles dt{color:var(--color-text-secondary,light-dark(#686d5e,#adb39f))}.roles dd{margin:0}.empty{padding:25px;text-align:center;color:var(--color-text-secondary,light-dark(#686d5e,#adb39f))}footer{font-size:11px;margin-top:16px;color:var(--color-text-secondary,light-dark(#686d5e,#adb39f))}.error{border-color:#bb7251}#status{min-height:18px}.count{font-size:12px;margin-left:6px;font-weight:400}.identifier{font-family:ui-monospace,monospace;font-size:10px;overflow-wrap:anywhere}
 @media(max-width:450px){body{padding:13px}.toolbar{flex-wrap:wrap}.toolbar input{width:100%;flex-basis:100%}.row-top{display:block}.state{display:inline-block;margin-top:6px}.roles{grid-template-columns:1fr}.roles dd{margin-bottom:5px}}
 </style>
+<style>
+.tree-node{border-left:1px solid var(--color-border-primary,light-dark(#dedfd7,#484c42));padding-left:12px;margin:10px 0 10px 5px}.tree-node .tree-node .tree-node .tree-node{margin-left:0;padding-left:0;border-left:0}.tree-node>summary{padding:8px 0;font-size:14px;color:inherit;overflow-wrap:anywhere}.tree-count{display:block;font-size:12px;font-weight:400;margin-left:16px;color:var(--color-text-secondary,light-dark(#6c7065,#aab09f))}.tree-level{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;margin-right:8px}.planning-summary{margin:12px 0}.planning-summary p{font-size:12px}.presentation{display:flex;flex-wrap:wrap;gap:6px;align-items:center}.presentation button{font-size:12px}.mode-note{font-size:11px;margin:8px 0}.notice details{margin-top:6px}.notice pre{max-height:220px;overflow:auto}.coverage-reason{border-left:2px solid #b8873d;padding-left:8px}.toolbar select{max-width:100%}
+</style>
 </head>
 <body>
 <header><div><div class="eyebrow">Ateles · current record</div><h1>Workboard<span id="count" class="count"></span></h1></div><button id="refresh" disabled>Refresh</button></header>
 <p id="status" class="muted" role="status" aria-live="polite">Connecting to this conversation…</p>
+<div class="presentation"><button id="keep-visible" hidden>Keep visible</button><button id="expand" hidden>Expand</button><button id="inline" hidden>Return inline</button></div>
+<p id="presentation-note" class="muted mode-note">Inline fallback. Other presentation modes depend on this host.</p>
 <section id="primary" class="plan" hidden aria-label="Primary plan"></section>
+<section id="planning" class="planning-summary" hidden aria-label="Session planning coverage"></section>
 <div id="notice" class="notice" hidden role="status"></div>
-<div class="toolbar"><input id="search" aria-label="Find work" placeholder="Find work…" type="search"><select id="filter" aria-label="Filter work"><option value="all">All work</option><option value="operator-needed">Needs your decision</option><option value="blocked">Blocked</option><option value="active">Working now</option><option value="recorded">Recorded state</option><option value="session">Sessions</option></select></div>
+<div class="toolbar"><input id="search" aria-label="Find work" placeholder="Find work…" type="search"><select id="filter" aria-label="Filter work"><option value="all">All work</option><option value="operator-needed">Needs your decision</option><option value="blocked">Blocked</option><option value="active">Working now</option><option value="recorded">Recorded state</option><option value="session">Sessions</option></select><select id="view-mode" aria-label="Workboard view"><option value="tree">Planning tree</option><option value="list">Task list</option></select></div>
 <main id="rows" aria-live="polite"><p class="empty">Waiting for the workboard read.</p></main>
 <footer>Read-only. The Primary plan sets display order. Session membership and recorded status do not establish authority, a lease or completion.</footer>
 <script>
@@ -36,9 +42,11 @@
   let nextId = 1, args = null, view = null, ready = false, hostTools = false;
   let generation = 0, notificationPending = false, busy = false;
   const pending = new Map();
+  const expanded = new Map();
+  let hostContext = {}, closed = false;
   const text = value => typeof value === "string" ? value : "unknown";
   const send = message => window.parent.postMessage({jsonrpc:"2.0",...message}, "*");
-  const enabled = () => { el("refresh").disabled = !(ready && hostTools && args) || busy; };
+  const enabled = () => { el("refresh").disabled = closed || !(ready && hostTools && args) || busy; };
   function request(method, params) {
     const id = nextId++;
     return new Promise((resolve, reject) => {
@@ -47,8 +55,38 @@
     });
   }
   function node(tag, value, cls) { const n = document.createElement(tag); if (value !== undefined) n.textContent = text(value); if(cls) n.className=cls; return n; }
-  function notice(message, error=false) { el("notice").hidden=!message; el("notice").textContent=message||""; el("notice").className=error?"notice error":"notice"; }
+  function notice(message, error=false) { el("notice").hidden=!message; el("notice").replaceChildren(node("span",message||"")); el("notice").className=error?"notice error":"notice"; }
+  function readNotices(gaps) {
+    if(!gaps.length){notice("");return;}
+    const groups=new Map();
+    for(const gap of gaps){const key=gap.replace(/\bent_[A-Za-z0-9_]+\b/g,"[record]");const values=groups.get(key)||[];values.push(gap);groups.set(key,values);}
+    const summary=["Read limits: "+gaps.length+" notices in "+groups.size+" groups."];
+    for(const [key,values] of groups)summary.push(values.length>1 ? values.length+" × "+key : values[0]);
+    notice(summary.join("\n"));
+    const full=node("details");full.addEventListener("toggle",size);full.append(node("summary","Full read notices"),node("pre",gaps.join("\n")));el("notice").append(full);
+  }
   function size() { send({method:"ui/notifications/size-changed",params:{height:document.documentElement.scrollHeight}}); }
+  function presentation() {
+    const modes=strings(hostContext.availableDisplayModes)?hostContext.availableDisplayModes:[],bound=!!view&&!closed;
+    for(const [id,mode] of [["keep-visible","pip"],["expand","fullscreen"],["inline","inline"]])el(id).hidden=!bound||!modes.includes(mode)||hostContext.displayMode===mode;
+  }
+  function contextChanged(context) {
+    if(!object(context))return;
+    hostContext={...hostContext,...context};
+    if(["dark","light"].includes(context.theme))document.documentElement.style.colorScheme=context.theme;
+    presentation();size();
+  }
+  async function present(mode) {
+    if(closed||!view||!strings(hostContext.availableDisplayModes)||!hostContext.availableDisplayModes.includes(mode))return;
+    try{
+      const result=await request("ui/request-display-mode",{mode});
+      if(closed)return;
+      if(!object(result)||!["inline","fullscreen","pip"].includes(result.mode))throw new Error("The host returned an unknown presentation mode.");
+      hostContext.displayMode=result.mode;presentation();
+      el("presentation-note").textContent=result.mode==="pip"?"Picture-in-picture overlay · the same bound workboard; not a side rail.":result.mode==="fullscreen"?"Expanded view · the same bound workboard.":"Inline view · the same bound workboard.";
+      if(result.mode!==mode)el("presentation-note").textContent+=" The host kept its preferred presentation.";
+    }catch{if(!closed)el("presentation-note").textContent="This host could not change presentation. Keep using the current bound view.";}
+  }
   function failure(message) {
     busy=false; enabled();
     const previous=view ? " Last successful scope: "+view.session_key+" / "+view.display_plan_id+". Last successful read: "+view.observed_at+". Existing rows are stale." : " Current state is unknown.";
@@ -64,6 +102,37 @@
     ancestors.add(value);
     const valid=Object.values(value).every(child=>jsonValue(child,ancestors,depth+1));
     ancestors.delete(value);return valid;
+  }
+  function validatePlanning(p,rows) {
+    if(!object(p)||p.version!==1||typeof p.scope!=="string"||typeof p.registry_complete!=="boolean"||!strings(p.registry_gaps)||!["membership_entries","unique_tasks","unresolved_entries","qualified_tasks","unknown_tasks"].every(k=>Number.isInteger(p[k])&&p[k]>=0)||!Array.isArray(p.nodes)||!strings(p.roots)||!Array.isArray(p.unplanned)||!Array.isArray(p.level_coverage))return false;
+    const members=rows.map((r,i)=>[r,i]).filter(([r])=>r.kind==="task"&&r.priority!=="display-plan"), ids=new Set(members.filter(([r])=>entityId(r.entity_id)).map(([r])=>r.entity_id));
+    if(p.membership_entries!==members.length||p.unique_tasks!==ids.size||p.unresolved_entries!==members.filter(([r])=>!entityId(r.entity_id)).length||p.qualified_tasks>ids.size||p.unknown_tasks>ids.size)return false;
+    const registryTypes=new Map();let previousLevel=Infinity;
+    for(const level of p.level_coverage){
+      if(!object(level)||typeof level.level!=="number"||!Number.isFinite(level.level)||level.level>=previousLevel||!strings(level.entity_types)||!level.entity_types.length||!Number.isInteger(level.reached_tasks)||level.reached_tasks<0||level.reached_tasks>ids.size||!(p.registry_complete?Number.isInteger(level.complete_tasks)&&level.complete_tasks>=0&&level.complete_tasks<=level.reached_tasks:level.complete_tasks===null))return false;
+      previousLevel=level.level;for(const kind of level.entity_types){if(!kind||registryTypes.has(kind))return false;registryTypes.set(kind,level.level);}
+    }
+    const nodes=new Map(),assigned=new Set(),qualified=new Set();
+    for(const n of p.nodes){
+      if(!object(n)||!entityId(n.entity_id)||nodes.has(n.entity_id)||typeof n.entity_type!=="string"||typeof n.title!=="string"||typeof n.read_only!=="boolean"||!(n.level===null&&n.entity_type==="task"||typeof n.level==="number"&&Number.isFinite(n.level))||!(n.parent_id===null||entityId(n.parent_id))||!Array.isArray(n.row_indexes))return false;
+      if(n.level!==null&&registryTypes.get(n.entity_type)!==n.level)return false;
+      for(const i of n.row_indexes){if(!Number.isInteger(i)||!rows[i]||rows[i].kind!=="task"||rows[i].entity_id!==n.entity_id||assigned.has(i))return false;assigned.add(i);qualified.add(n.entity_id);}
+      nodes.set(n.entity_id,n);
+    }
+    if((nodes.size&&!p.registry_complete)||qualified.size!==p.qualified_tasks||new Set(p.roots).size!==p.roots.length)return false;
+    const roots=[];
+    for(const n of nodes.values()){
+      if(n.parent_id===null){if(!p.level_coverage.length||n.level!==p.level_coverage[0].level)return false;roots.push(n.entity_id);continue;}
+      const parent=nodes.get(n.parent_id);if(!parent||parent.level===null&&n.level!==null||parent.level!==null&&n.level!==null&&parent.level<=n.level)return false;
+      const seen=new Set([n.entity_id]);let current=parent;while(current){if(seen.has(current.entity_id))return false;seen.add(current.entity_id);current=current.parent_id===null?null:nodes.get(current.parent_id);}
+    }
+    if(roots.length!==p.roots.length||roots.some(id=>!p.roots.includes(id)))return false;
+    const ancestors=new Set();for(const n of nodes.values())if(n.row_indexes.length){const levels=new Set();let at=n;while(at){ancestors.add(at.entity_id);if(at.level!==null)levels.add(at.level);at=at.parent_id===null?null:nodes.get(at.parent_id);}if(levels.size!==p.level_coverage.length)return false;}
+    if(ancestors.size!==nodes.size)return false;
+    const unknownIds=new Set();for(const missing of p.unplanned){const i=missing&&missing.row_index;if(!object(missing)||!Number.isInteger(i)||!rows[i]||rows[i].kind!=="task"||assigned.has(i)||typeof missing.reason!=="string"||typeof missing.unknown!=="boolean"||qualified.has(rows[i].entity_id))return false;assigned.add(i);if(missing.unknown&&entityId(rows[i].entity_id))unknownIds.add(rows[i].entity_id);}
+    if(unknownIds.size!==p.unknown_tasks)return false;
+    if(members.some(([,i])=>!assigned.has(i)))return false;
+    return true;
   }
   function validate(data) {
     if (!jsonValue(data) || !object(data) || data.error || !args || data.session_key!==args.session_key || data.display_plan_id!==args.display_plan_id || !timestamp(data.observed_at) || !Array.isArray(data.rows) || !strings(data.read_gaps) || !strings(data.capability_gaps)) return false;
@@ -81,34 +150,73 @@
       if (row.read_gaps!==undefined && !strings(row.read_gaps)) return false;
       if (row.evidence!==undefined && !strings(row.evidence)) return false;
       if (row.planning_ascent!==undefined && (!Array.isArray(row.planning_ascent) || row.planning_ascent.some(parent=>!object(parent) || !entityId(parent.entity_id) || typeof parent.entity_type!=="string" || typeof parent.title!=="string"))) return false;
+      if (row.planning_read_gaps!==undefined&&!strings(row.planning_read_gaps))return false;
     }
-    return plans<=1;
+    return plans<=1&&(data.planning===undefined||validatePlanning(data.planning,data.rows));
+  }
+  function taskRow(r) {
+    const article=node("article",undefined,"row "+(["active","blocked","operator-needed"].includes(r.priority)?r.priority:"recorded"));
+    if(r.priority==="operator-needed")article.append(node("p","Needs your decision","eyebrow"));
+    const top=node("div",undefined,"row-top");top.append(node("h2",r.work),node("span",r.state,"state"));article.append(top,node("p",r.next_action,"next"));
+    const details=node("details");details.addEventListener("toggle",size);details.append(node("summary","Roles and evidence"));const dl=node("dl",undefined,"roles");
+    for(const [label,key] of [["Assigned principal","assigned_principal"],["Lease holder","lease_holder"],["Runner","runner"],["Declared step owner","declared_step_owner"],["Record owner","record_owner"],["State source","state_source"]])dl.append(node("dt",label),node("dd",r[key]));
+    if(r.kind==="session"){for(const [label,key] of [["Harness","native_harness"],["Native session","native_session_id"],["Native kind","native_kind"],["Native holder","native_holder"],["Native activity observed","native_last_activity_at"],["Routing role (recorded)","routing_role"],["Routing observed","routing_observed_at"]])dl.append(node("dt",label),node("dd",r[key]));dl.append(node("dt","Native archive flag"),node("dd",typeof r.native_is_archived==="boolean"?String(r.native_is_archived):"unknown"));}
+    details.append(dl);
+    if(r.recorded_session_next_action)details.append(node("p","Session history next action: "+r.recorded_session_next_action,"muted"));
+    if(r.entity_id)details.append(node("p",r.entity_id,"identifier"));
+    for(const parent of r.planning_ascent||[])details.append(node("p","Planning context: "+parent.entity_type+": "+parent.title,"muted"));
+    for(const gap of r.read_gaps||[])details.append(node("p",gap,"muted"));
+    article.append(details);return article;
+  }
+  function stateCounts(indexes) {
+    const states=new Map();
+    for(const i of indexes){const r=view.rows[i],key=r.entity_id||"unresolved:"+i;const values=states.get(key)||new Set();values.add(r.priority);states.set(key,values);}
+    const counts={tasks:states.size};for(const values of states.values()){const key=values.size===1?[...values][0]:"recorded";counts[key]=(counts[key]||0)+1;}
+    const labels={active:"working",blocked:"blocked","operator-needed":"awaiting decision",queued:"queued",recorded:"recorded"};
+    const unresolved=indexes.some(i=>!entityId(view.rows[i].entity_id));
+    return counts.tasks+(unresolved?" session entries":" session tasks")+Object.entries(labels).filter(([key])=>counts[key]).map(([key,label])=>" · "+counts[key]+" "+label).join("");
+  }
+  function planningRows(p,shownIndexes,expandMatches) {
+    const byId=new Map(p.nodes.map(n=>[n.entity_id,n])),visible=new Set(),allIndexes=new Map(p.nodes.map(n=>[n.entity_id,new Set()])),selected=new Set(shownIndexes);
+    for(const n of p.nodes)for(const i of n.row_indexes){let at=n;while(at){allIndexes.get(at.entity_id).add(i);if(selected.has(i))visible.add(at.entity_id);at=at.parent_id===null?null:byId.get(at.parent_id);}}
+    const elements=new Map(),result=[];
+    for(const n of p.nodes){
+      if(!visible.has(n.entity_id))continue;
+      const branch=node("details",undefined,"tree-node");branch.id="node-"+n.entity_id;branch.open=expandMatches||expanded.get(n.entity_id)===true;
+      branch.addEventListener("toggle",()=>{expanded.set(n.entity_id,branch.open);size();});
+      const summary=node("summary");summary.append(node("span",n.entity_type,"tree-level"),node("strong",n.title));
+      if(n.read_only)summary.append(node("span"," · Read-only reference","muted"));
+      const indexes=[...allIndexes.get(n.entity_id)],shown=indexes.filter(i=>selected.has(i)).length;
+      summary.append(node("span",(shown===indexes.length?"":shown+" shown · ")+stateCounts(indexes),"tree-count"));branch.append(summary);
+      for(const i of n.row_indexes)if(selected.has(i))branch.append(taskRow(view.rows[i]));
+      elements.set(n.entity_id,branch);
+    }
+    for(const n of p.nodes){const branch=elements.get(n.entity_id);if(!branch)continue;if(n.parent_id===null)result.push(branch);else elements.get(n.parent_id).append(branch);}
+    const missing=p.unplanned.filter(entry=>selected.has(entry.row_index));
+    if(missing.length){
+      const group=node("details",undefined,"tree-node");group.id="unplanned";group.open=expandMatches||expanded.get("unplanned")!==false;group.addEventListener("toggle",()=>{expanded.set("unplanned",group.open);size();});
+      group.append(node("summary","Unplanned · "+stateCounts(missing.map(entry=>entry.row_index))),node("p","Missing, undeclared or unreadable ancestry stays here; no parent is inferred.","muted"));
+      for(const entry of missing){const article=taskRow(view.rows[entry.row_index]);article.append(node("p",entry.reason,"muted coverage-reason"));group.append(article);}result.push(group);
+    }
+    for(const i of shownIndexes)if(view.rows[i].kind!=="task")result.push(taskRow(view.rows[i]));
+    return result;
   }
   function render() {
     if(!view)return;
     const query=el("search").value.toLocaleLowerCase(), filter=el("filter").value;
     const managed=view.rows.filter(r=>r.priority!=="display-plan");
-    const shown=managed.filter(r=>(filter==="all" || (filter==="session" ? r.kind==="session" : r.priority===filter)) && [r.work,r.next_action,r.state].join(" ").toLocaleLowerCase().includes(query));
+    const shownIndexes=view.rows.map((r,i)=>[r,i]).filter(([r])=>r.priority!=="display-plan"&&(filter==="all" || (filter==="session" ? r.kind==="session" : r.priority===filter)) && [r.work,r.next_action,r.state,...(r.planning_ascent||[]).map(p=>p.title)].join(" ").toLocaleLowerCase().includes(query)).map(([,i])=>i);
+    const shown=shownIndexes.map(i=>view.rows[i]);
     const children=[];
     if(!shown.length) children.push(node("p", managed.length ? "No work matches this filter." : view.read_gaps.length ? "No managed work is visible; coverage is unknown or partial." : "No managed work was returned by this read.","empty"));
-    for(const r of shown) {
-      const article=node("article",undefined,"row "+(["active","blocked","operator-needed"].includes(r.priority)?r.priority:"recorded"));
-      if(r.priority==="operator-needed") article.append(node("p","Needs your decision","eyebrow"));
-      const top=node("div",undefined,"row-top");top.append(node("h2",r.work),node("span",r.state,"state"));article.append(top,node("p",r.next_action,"next"));
-      const details=node("details"); details.addEventListener("toggle",size);details.append(node("summary","Roles and evidence")); const dl=node("dl",undefined,"roles");
-      for(const [label,key] of [["Assigned principal","assigned_principal"],["Lease holder","lease_holder"],["Runner","runner"],["Declared step owner","declared_step_owner"],["Record owner","record_owner"],["State source","state_source"]]) dl.append(node("dt",label),node("dd",r[key]));
-      if(r.kind==="session") { for(const [label,key] of [["Harness","native_harness"],["Native session","native_session_id"],["Native kind","native_kind"],["Native holder","native_holder"],["Native activity observed","native_last_activity_at"],["Routing role (recorded)","routing_role"],["Routing observed","routing_observed_at"]]) dl.append(node("dt",label),node("dd",r[key]));dl.append(node("dt","Native archive flag"),node("dd",typeof r.native_is_archived==="boolean"?String(r.native_is_archived):"unknown")); }
-      details.append(dl);
-      if(r.recorded_session_next_action)details.append(node("p","Session history next action: "+r.recorded_session_next_action,"muted"));
-      if(r.entity_id)details.append(node("p",r.entity_id,"identifier"));
-      for(const parent of r.planning_ascent||[])details.append(node("p","Planning context: "+parent.entity_type+": "+parent.title,"muted"));
-      for(const gap of r.read_gaps||[])details.append(node("p",gap,"muted"));
-      article.append(details);children.push(article);
-    }
+    if(view.planning&&el("view-mode").value!=="list")children.push(...planningRows(view.planning,shownIndexes,!!query||filter!=="all"));
+    else for(const r of shown)children.push(taskRow(r));
     if(view.history) {const history=node("details");history.addEventListener("toggle",size);history.append(node("summary","Cumulative session history (not current status)"),node("pre",JSON.stringify(view.history,null,2)));children.push(history);}
     const plan=view.rows.find(r=>r.priority==="display-plan");const primary=[node("p","Display context: "+view.session_key+" · "+view.display_plan_id+". This selection creates no authority.","muted")];
     if(plan)primary.unshift(node("div","Primary plan","eyebrow"),node("h2",plan.work),node("p",plan.state,"muted"),node("p",plan.next_action,"next"));
     el("primary").replaceChildren(...primary);el("primary").hidden=false;
+    const p=view.planning;el("planning").hidden=!p;
+    if(p){const coverage=!p.registry_complete?"Registered planning coverage is unknown · "+p.membership_entries+" session entries.":!p.level_coverage.length?"No planning levels are declared · "+p.membership_entries+" session entries.":"Planning coverage: "+p.qualified_tasks+" / "+p.unique_tasks+" task ascents reach every declared level.";const contents=[node("p",coverage)];contents.push(node("p",p.scope,"muted"));if(p.unresolved_entries)contents.push(node("p",p.unresolved_entries+" membership entries have an unreadable current task identity.","muted"));for(const level of p.level_coverage)contents.push(node("p",level.entity_types.join(" / ")+": "+level.reached_tasks+" reached · "+(level.complete_tasks===null?"complete ascent unknown":level.complete_tasks+" complete ascents to this level"),"muted"));for(const gap of p.registry_gaps)contents.push(node("p",gap,"muted"));el("planning").replaceChildren(...contents);}
     el("rows").replaceChildren(...children);el("count").textContent=` · ${shown.length}`;size();
   }
   function applyResult(result, version) {
@@ -117,7 +225,8 @@
     if(!object(result) || result.isError || !validate(data)){failure(object(data)&&typeof data.error==="string"?data.error:"The workboard response was incomplete, malformed or for another scope.");return;}
     // Commit only after the entire result has passed validation.
     view=data;busy=false;enabled();el("status").textContent="Read "+view.observed_at;
-    const gaps=[...view.read_gaps,...view.capability_gaps];notice(gaps.length?"Read limits: "+gaps.join("\n"):"");render();
+    presentation();
+    const gaps=[...view.read_gaps,...view.capability_gaps];readNotices(gaps);render();
   }
   function cancelPending(message){for(const [id,p] of pending)if(p.method==="tools/call"){clearTimeout(p.timer);pending.delete(id);p.reject(new Error(message));}}
   function setArgs(value){
@@ -127,13 +236,13 @@
     args=candidate;generation++;notificationPending=true;cancelPending("Read superseded");busy=false;enabled();if(view)failure("A new read is pending.");
   }
   window.addEventListener("message",event=>{
-    if(event.source!==window.parent)return;const m=event.data;if(!object(m)||m.jsonrpc!=="2.0")return;
+    if(event.source!==window.parent||closed)return;const m=event.data;if(!object(m)||m.jsonrpc!=="2.0")return;
     if(Number.isInteger(m.id) && pending.has(m.id) && (("result" in m)!=("error" in m)) && m.method===undefined){const p=pending.get(m.id);pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(new Error(text(m.error.message))):p.resolve(m.result);return;}
     if(m.method==="ui/notifications/tool-input" && m.id===undefined)setArgs(m.params&&m.params.arguments);
     else if(m.method==="ui/notifications/tool-result" && m.id===undefined){if(!notificationPending || busy){failure("An uncorrelated workboard result was rejected.");return;}notificationPending=false;applyResult(m.params,generation);}
     else if(m.method==="ui/notifications/tool-cancelled" && m.id===undefined){generation++;notificationPending=false;cancelPending("Read cancelled");failure("The read was cancelled.");}
-    else if(m.method==="ui/notifications/host-context-changed" && m.id===undefined){if(m.params&&["dark","light"].includes(m.params.theme))document.documentElement.style.colorScheme=m.params.theme;size();}
-    else if(m.method==="ui/resource-teardown" && Number.isInteger(m.id)){generation++;for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error("View closed"));}pending.clear();failure("View closed.");send({id:m.id,result:{}});}
+    else if(m.method==="ui/notifications/host-context-changed" && m.id===undefined)contextChanged(m.params);
+    else if(m.method==="ui/resource-teardown" && Number.isInteger(m.id)){closed=true;generation++;for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error("View closed"));}pending.clear();failure("View closed.");presentation();send({id:m.id,result:{}});}
   });
   async function refresh(){
     if(!args||!ready||!hostTools||el("refresh").disabled)return;
@@ -142,10 +251,12 @@
     catch(e){if(version===generation)failure(e.message);}
     finally{if(version===generation){busy=false;enabled();}}
   }
-  el("search").addEventListener("input",render);el("filter").addEventListener("change",()=>{render();if(el("filter").value==="session"&&args&&!args.include_sessions){args={...args,include_sessions:true};refresh();}});
+  el("search").addEventListener("input",render);el("view-mode").addEventListener("change",render);el("filter").addEventListener("change",()=>{render();if(el("filter").value==="session"&&args&&!args.include_sessions){args={...args,include_sessions:true};refresh();}});
   el("refresh").addEventListener("click",refresh);
-  request("ui/initialize",{protocolVersion:"2026-01-26",appInfo:{name:"Ateles workboard",version:"1.0.0"},appCapabilities:{availableDisplayModes:["inline"]}}).then(result=>{
-    if(!object(result))throw new Error("Invalid host initialization");ready=true;hostTools=!!(object(result.hostCapabilities)&&object(result.hostCapabilities.serverTools));const context=result.hostContext||{};if(["light","dark"].includes(context.theme))document.documentElement.style.colorScheme=context.theme;
+  for(const [id,mode] of [["keep-visible","pip"],["expand","fullscreen"],["inline","inline"]])el(id).addEventListener("click",()=>present(mode));
+  if(typeof document.addEventListener==="function")document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&view&&!closed)refresh();});
+  request("ui/initialize",{protocolVersion:"2026-01-26",appInfo:{name:"Ateles workboard",version:"1.1.0"},appCapabilities:{availableDisplayModes:["inline","fullscreen","pip"]}}).then(result=>{
+    if(closed)return;if(!object(result))throw new Error("Invalid host initialization");ready=true;hostTools=!!(object(result.hostCapabilities)&&object(result.hostCapabilities.serverTools));contextChanged(result.hostContext||{});
     send({method:"ui/notifications/initialized"});enabled();if(!view)el("status").textContent="Connected. Waiting for current records…";size();
   }).catch(e=>failure(e.message));
 })();

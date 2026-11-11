@@ -12,17 +12,18 @@ class Element {
   addEventListener(name,fn){this.handlers[name]=fn;}
   allText(){return this.textContent+this.children.map(c=>c.allText()).join(' ');}
 }
-const ids=Object.fromEntries(['count','status','primary','notice','search','filter','rows','refresh'].map(id=>[id,new Element(id)]));
+const ids=Object.fromEntries(['count','status','primary','notice','search','filter','rows','refresh','planning','view-mode','keep-visible','expand','inline','presentation-note'].map(id=>[id,new Element(id)]));
 ids.filter.value='all';
 const sent=[];let receive;const timers=new Map();let timerId=0;
 const startTimer=fn=>{timers.set(++timerId,fn);return timerId;};const stopTimer=id=>timers.delete(id);
 const parent={postMessage(message){sent.push(message);}};
-const document={getElementById:id=>ids[id],createElement:tag=>new Element(tag),documentElement:{style:{},scrollHeight:500}};
+const documentEvents={};const document={visibilityState:'hidden',addEventListener(name,fn){documentEvents[name]=fn;},getElementById:id=>ids[id],createElement:tag=>new Element(tag),documentElement:{style:{},scrollHeight:500}};
 vm.runInNewContext(script,{document,window:{parent,addEventListener(name,fn){if(name==='message')receive=fn;}},Map,Promise,setTimeout:startTimer,clearTimeout:stopTimer,console});
 const deliver=(message,source=parent)=>receive({source,data:{jsonrpc:'2.0',...message}});
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
   const init=sent.find(m=>m.method==='ui/initialize');assert(init);assert.equal(init.params.protocolVersion,'2026-01-26');
+  assert.equal(JSON.stringify(init.params.appCapabilities.availableDisplayModes),JSON.stringify(['inline','fullscreen','pip']));
   deliver({id:init.id,result:{hostCapabilities:{serverTools:{}},hostContext:{theme:'dark'}}});await settle();
   assert(sent.some(m=>m.method==='ui/notifications/initialized'));
   deliver({method:'ui/notifications/tool-input',params:{arguments:{session_key:'synthetic:inbox',display_plan_id:'ent_plan',include_history:true}}});
@@ -46,6 +47,47 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
   assert(sent.filter(m=>m.method==='tools/call').every(m=>m.params.name==='get_session_workboard'));
   const input=()=>deliver({method:'ui/notifications/tool-input',params:{arguments:{session_key:'synthetic:inbox',display_plan_id:'ent_plan',include_history:true}}});
   const present=data=>{input();deliver({method:'ui/notifications/tool-result',params:{structuredContent:data}});};
+  present(payload);
+  const treePayload={...payload,rows:[payload.rows[0],{...payload.rows[1],kind:'task',entity_id:'ent_task',work:'Scoped tree task'}],planning:{version:1,scope:'Only this session, not whole-plan completion',registry_complete:true,registry_gaps:[],membership_entries:1,unique_tasks:1,unresolved_entries:0,qualified_tasks:1,unknown_tasks:0,level_coverage:[{level:20,entity_types:['purpose'],reached_tasks:1,complete_tasks:1},{level:3,entity_types:['sprint'],reached_tasks:1,complete_tasks:1}],nodes:[{entity_id:'ent_task',entity_type:'task',title:'Scoped tree task',level:null,read_only:false,parent_id:'ent_sprint',row_indexes:[1]},{entity_id:'ent_sprint',entity_type:'sprint',title:'Small change',level:3,read_only:false,parent_id:'ent_purpose',row_indexes:[]},{entity_id:'ent_purpose',entity_type:'purpose',title:'Long direction',level:20,read_only:true,parent_id:null,row_indexes:[]}],roots:['ent_purpose'],unplanned:[]}};
+  present(treePayload);
+  assert(ids.rows.allText().includes('Long direction'));
+  assert(ids.rows.allText().includes('Read-only reference'));
+  assert(ids.rows.allText().includes('1 session tasks'));
+  assert(ids.planning.allText().includes('Only this session'));
+  const rootBranch=ids.rows.children[0];assert.equal(rootBranch.id,'node-ent_purpose');rootBranch.open=true;rootBranch.handlers.toggle();
+  present(treePayload);assert.equal(ids.rows.children[0].open,true,'expansion is transient and retained on a same-scope refresh');
+  ids.search.value='Existing plan';ids.search.handlers.input();assert(ids.rows.allText().includes('Scoped tree task'),'search includes actual planning context');
+  ids.search.value='';ids.search.handlers.input();
+  const treeSaved=ids.rows.allText();
+  for(const malformed of [
+    {...treePayload,planning:{...treePayload.planning,unique_tasks:2}},
+    {...treePayload,planning:{...treePayload.planning,roots:['ent_missing']}},
+    {...treePayload,planning:{...treePayload.planning,nodes:[...treePayload.planning.nodes,{...treePayload.planning.nodes[0]}]}},
+    {...treePayload,planning:{...treePayload.planning,nodes:treePayload.planning.nodes.map(n=>n.entity_id==='ent_purpose'?{...n,parent_id:'ent_sprint'}:n)}},
+    {...treePayload,planning:{...treePayload.planning,unplanned:[{row_index:1,reason:'Duplicate placement',unknown:false}]}},
+  ]){present(malformed);assert.equal(ids.rows.allText(),treeSaved);assert(ids.notice.allText().includes('stale'));}
+  const unplanned={...treePayload,planning:{...treePayload.planning,registry_complete:false,registry_gaps:['Levels are unknown'],qualified_tasks:0,unknown_tasks:1,level_coverage:[],nodes:[],roots:[],unplanned:[{row_index:1,reason:'The registry could not be read',unknown:true}]}};
+  const unknownCount={...unplanned,planning:{...unplanned.planning,level_coverage:[{level:20,entity_types:['purpose'],reached_tasks:0,complete_tasks:0}]}};
+  const beforeUnknown=ids.rows.allText();present(unknownCount);assert.equal(ids.rows.allText(),beforeUnknown);assert(ids.notice.allText().includes('stale'),'unknown coverage cannot report a false completed zero');
+  present(unplanned);assert(ids.rows.allText().includes('Unplanned'));assert(ids.rows.allText().includes('The registry could not be read'));assert(ids.planning.allText().includes('coverage is unknown'));
+  present({...payload,read_gaps:Array.from({length:59},(_,i)=>`Explicit task ent_${i} could not be read as a task; its current state is unknown`)});
+  assert(ids.notice.children[0].allText().includes('59 × Explicit task [record]'));
+  assert(ids.notice.children[0].allText().split('could not be read').length===2,'repeated unavailable-read classes have one visible summary');
+  assert(ids.notice.children[1].allText().includes('ent_58'),'full notices remain in collapsed detail');
+  present(payload);
+  assert.equal(ids['keep-visible'].hidden,true,'no presentation request without host capability');
+  deliver({method:'ui/notifications/host-context-changed',params:{availableDisplayModes:['inline','pip','fullscreen'],displayMode:'inline'}});
+  assert.equal(ids['keep-visible'].hidden,false);
+  let changeMode=ids['keep-visible'].handlers.click();let modeCall=sent.filter(m=>m.method==='ui/request-display-mode').at(-1);assert.equal(modeCall.params.mode,'pip');
+  deliver({id:modeCall.id,result:{mode:'inline'}});await changeMode;
+  assert(ids['presentation-note'].allText().includes('host kept'));
+  changeMode=ids['expand'].handlers.click();modeCall=sent.filter(m=>m.method==='ui/request-display-mode').at(-1);deliver({id:modeCall.id,result:{mode:'fullscreen'}});await changeMode;
+  assert(ids['presentation-note'].allText().includes('same bound workboard'));
+  assert.equal(ids.rows.allText(),previous,'presentation changes retain the same scope and data');
+  deliver({method:'ui/notifications/host-context-changed',params:{availableDisplayModes:['inline'],displayMode:'inline'}});
+  const modeCount=sent.filter(m=>m.method==='ui/request-display-mode').length;await ids['keep-visible'].handlers.click();assert.equal(sent.filter(m=>m.method==='ui/request-display-mode').length,modeCount);
+  const beforeFocus=sent.filter(m=>m.method==='tools/call').length;documentEvents.visibilitychange();assert.equal(sent.filter(m=>m.method==='tools/call').length,beforeFocus);
+  document.visibilityState='visible';documentEvents.visibilitychange();const visibleCall=sent.filter(m=>m.method==='tools/call').at(-1);assert.equal(visibleCall.params.arguments.session_key,'synthetic:inbox');deliver({id:visibleCall.id,result:{structuredContent:payload}});await settle();
   present(payload);
   assert(ids.notice.allText().includes('Claimability is unknown'));
   assert(ids.primary.allText().includes('synthetic:inbox'));
@@ -95,6 +137,7 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
   run=ids.refresh.handlers.click();latest=sent.filter(m=>m.method==='tools/call').at(-1);deliver({method:'ui/notifications/tool-input',params:{arguments:{session_key:3,display_plan_id:'ent_plan'}}});await run;deliver({id:latest.id,result:{structuredContent:payload}});assert(ids.notice.allText().includes('stale'));
   const circular={};circular.child=circular;present({...payload,history:{tasks_claimed:[circular],artifacts:[]}});assert(ids.notice.allText().includes('stale'));
   assert(html.includes('overflow-wrap:anywhere'));
-  if(process.argv[3]) {const data=JSON.parse(fs.readFileSync(process.argv[3],'utf8'));present(data);assert(!ids.notice.allText().includes('stale'));assert(ids.rows.allText().includes('Current producer-bound task'));assert(ids.rows.allText().includes('Working now'));assert(ids.rows.allText().includes('Historical artifact'));}
+  if(process.argv[3]) {const data=JSON.parse(fs.readFileSync(process.argv[3],'utf8'));present(data);assert(!ids.notice.allText().includes('stale'));if(process.argv[4]==='planning'){assert(data.planning.qualified_tasks>0);assert(ids.rows.allText().includes(data.planning.nodes.find(n=>n.parent_id===null).title));assert(ids.planning.allText().includes('reach every declared level'));}else{assert(ids.rows.allText().includes('Current producer-bound task'));assert(ids.rows.allText().includes('Working now'));assert(ids.rows.allText().includes('Historical artifact'));}}
+  const beforeClose=sent.filter(m=>m.method==='tools/call').length;deliver({id:9999,method:'ui/resource-teardown'});assert.equal(ids.refresh.disabled,true);await ids.refresh.handlers.click();documentEvents.visibilitychange();assert.equal(sent.filter(m=>m.method==='tools/call').length,beforeClose);assert(sent.some(m=>m.id===9999&&m.result));
   console.log('actual view bridge: transactional validation, bound scope, history, coverage, decisions, cancellation and refresh passed');
 })().catch(error=>{console.error(error);process.exit(1);});

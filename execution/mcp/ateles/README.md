@@ -58,7 +58,50 @@ explicit locators and historical metadata. Neither form establishes a lease or
 current execution. Invalid entries stay in cumulative history and produce one
 counted read-limit summary, grouped by the reason they could not be rendered.
 
+### Planning tree
+
+The view groups current session task membership along its actual `PART_OF`
+ascent. Planning levels come only from the registry's
+`schema_definition.planning = {level: <finite number>, read_only?: <boolean>}`
+declaration, projected by the compact schema summary. No planning type names or
+level order are built into the renderer. Task-parent prefixes remain task
+context, not a fabricated planning level. The source planning statements are
+not rewritten, and all aggregate counts cover **this session's membership**,
+never the whole plan or proof that it is complete.
+
+The declared level set must have complete, authenticated, unfiltered registry
+coverage. `GET /schemas?summary=true&limit=5000&offset=0` supplies compact rows
+and the versioned `registry_coverage` proof. An older server, fallback, partial
+page, ambiguous type or malformed declaration leaves planning coverage unknown.
+There is no fallback to type names, arbitrary registry metadata or the highest
+type encountered on one ascent. Missing, undeclared, conflicting and unreadable
+ascents remain under **Unplanned**, with their reasons and observed context.
+The read budget is a resource boundary, not a fixed number of planning levels;
+exhaustion remains explicit unknown coverage.
+
+Expand a planning record to inspect the tasks below it; their own current
+recorded status, assignment, lease, runner and next action remain distinct.
+Expansion and filters are temporary presentation state. The task-list view and
+unfiltered cumulative history remain available. Repeated unavailable-read
+classes are summarized with counts; full notices and per-row evidence stay
+accessible in collapsed detail.
+
 ### Inline workboard
+
+The existing bound component also declares the standard fullscreen and PiP
+modes. Controls are offered only when the host advertises those modes, and the
+actual response mode is honored. PiP is an overlay, not a portable side rail.
+No empty-argument conversation launcher or inferred session/plan binding is
+introduced. A host that opens the already-bound component beside the chat can
+keep that view; otherwise the inline/text fallback remains the supported path.
+
+Presentation does not establish freshness. The view retains the last successful
+read time, rejects foreign scope and stale responses, refreshes on a supported
+visibility restoration, and keeps manual Refresh. Failed reads retain visibly
+stale evidence. Teardown cancels requests and prevents further refreshes; no
+periodic polling, scheduled coordination job or parallel workboard store is
+created. Actual account-level rail opening and persistence require verification
+in that host.
 
 The same server declares a content-versioned `ui://ateles/workboard-<hash>.html`
 resource using `text/html;profile=mcp-app`, linked by the tool's

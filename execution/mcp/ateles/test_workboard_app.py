@@ -553,12 +553,16 @@ def test_workboard_request_performs_only_read_operations():
                 "entity_type": "plan",
                 "snapshot": {"title": "Current plan", "status": "draft"},
             }
+        if (method, path) == ("GET", "/schemas?summary=true&limit=5000&offset=0"):
+            return {"schemas": []}  # Older API: coverage stays explicitly unknown.
         raise AssertionError(f"unexpected operation {method} {path}")
 
     with patch.object(srv, "_request", side_effect=request):
         result = srv._get_session_workboard("synthetic:inbox", "ent_plan")
     assert not result.get("error")
-    assert requests == [("POST", "/entities/query"), ("GET", "/entities/ent_plan")]
+    assert result["planning"]["registry_complete"] is False
+    assert requests == [("POST", "/entities/query"), ("GET", "/entities/ent_plan"),
+                        ("GET", "/schemas?summary=true&limit=5000&offset=0")]
 
 
 @pytest.mark.parametrize(
