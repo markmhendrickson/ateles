@@ -69,6 +69,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from workboard_planning import session_planning_tree
+
 import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -1037,7 +1039,16 @@ def _planning_ascent(entity_id: str, cache: dict) -> tuple[list[dict], list[str]
             cache[path] = _get(path)
         return cache[path]
 
-    for _ in range(8):
+    # This is a request resource budget, not a number of planning levels.
+    # Cached reads do not consume it, and exhaustion remains explicit unknown
+    # coverage instead of inventing a root at the last record returned.
+    cache.setdefault("_planning_reads_remaining", 512)
+    while True:
+        relationship_path = f"/entities/{current}/relationships?expand_entities=true"
+        if relationship_path not in cache:
+            if cache["_planning_reads_remaining"] <= 0:
+                return ascent, ["Planning read budget exhausted; ascent coverage is unknown"]
+            cache["_planning_reads_remaining"] -= 1
         rels, error = _workboard_relationships(current, cache)
         if error or rels is None:
             return ascent, [error or "Planning relationships are unknown"]
@@ -1065,7 +1076,12 @@ def _planning_ascent(entity_id: str, cache: dict) -> tuple[list[dict], list[str]
             or parent in seen
         ):
             return ascent, ["The planning ascent has an invalid or repeated parent"]
-        record = read(f"/entities/{parent}")
+        record_path = f"/entities/{parent}"
+        if record_path not in cache:
+            if cache["_planning_reads_remaining"] <= 0:
+                return ascent, ["Planning read budget exhausted; ascent coverage is unknown"]
+            cache["_planning_reads_remaining"] -= 1
+        record = read(record_path)
         if not isinstance(record, dict) or not _entity_type(record):
             return ascent, [f"Planning parent {parent} could not be read"]
         ascent.append(
@@ -1077,7 +1093,16 @@ def _planning_ascent(entity_id: str, cache: dict) -> tuple[list[dict], list[str]
         )
         seen.add(parent)
         current = parent
-    return ascent, ["The planning ascent exceeded the eight-level read bound"]
+
+
+def _planning_registry(cache: dict) -> tuple[dict, bool, list[str]]:
+    """Read declared levels only when the registry qualifies full coverage.
+
+    The exact summary-read wire contract is supplied by the existing registry
+    implementation dependency. Until it is available, familiar type names do
+    not become fallback declarations.
+    """
+    return {}, False, ["The registry's complete planning-level declarations are unavailable"]
 
 
 def _claim_row(claim: Any, planning_cache: dict | None = None) -> dict | None:
@@ -1206,6 +1231,7 @@ def _claim_row(claim: Any, planning_cache: dict | None = None) -> dict | None:
         "entity_id": task_id,
         "read_gaps": read_gaps,
         "planning_ascent": ascent,
+        "planning_read_gaps": planning_gaps,
     }
 
 
@@ -1421,12 +1447,16 @@ def _get_session_workboard(
             str(row["priority"]), len(_WORKBOARD_ORDER)
         )
     )
+    declarations, registry_complete, registry_gaps = _planning_registry(planning_cache)
     result: dict[str, Any] = {
         "session_key": session_key,
         "harness": _text(digest.get("harness")),
         "digest_id": digest_entity.get("entity_id"),
         "display_plan_id": display_plan_id,
         "rows": rows,
+        "planning": session_planning_tree(
+            rows, declarations, complete=registry_complete, gaps=registry_gaps
+        ),
         "table": _format_workboard(rows),
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "read_gaps": [gap for row in rows for gap in row.get("read_gaps", [])]
@@ -1486,6 +1516,17 @@ def _format_workboard_result(result: dict) -> str:
                     for parent in row["planning_ascent"]
                 )
             )
+    planning = result.get("planning")
+    if isinstance(planning, dict):
+        sections.append(
+            "Planning coverage (this session only): "
+            f"{planning['qualified_tasks']}/{planning['unique_tasks']} task ascents "
+            "reach every declared level; "
+            f"{len(planning['unplanned'])} membership entries are under Unplanned. "
+            + planning["scope"]
+        )
+        if planning["registry_gaps"]:
+            sections.append("Planning registry limits:\n" + "\n".join(planning["registry_gaps"]))
     if "history" in result:
         sections.append(
             "Requested cumulative session history (not current status):\n"
