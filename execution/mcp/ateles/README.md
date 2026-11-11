@@ -19,6 +19,7 @@ Registered in `~/.claude.json` as the `ateles` server, launched via
 | `get_dispatch_health` | no | Dispatcher liveness, recent pipeline activity, recent dispatch failures |
 | `get_task_timeline` | no | One task's history, merged and time-ordered from every record the swarm writes, with each entry's source, plus what could not be joined |
 | `watch_swarm` | no | Bounded long-poll (≤45 s): what changed since a cursor for given tasks and checkpoints, and a new cursor |
+| `get_session_workboard` | no | On-demand derived read with a caller-selected display plan; optional cumulative history |
 
 ### Read-only by construction
 
@@ -33,6 +34,54 @@ observability handler can reach `_correct`. **Treat any diff that weakens or
 removes that test as a blocking architectural concern, not a QA nit.** A future
 mutating tool belongs behind the same operator-approval path as
 `resolve_checkpoint`, never as a free-form gate setter.
+
+`get_session_workboard` reads the existing `session_digest`, an explicit
+caller-selected display plan, and referenced task or plan snapshots. It has no
+harness argument or harness-specific configuration: a connected Claude, Codex,
+or Cursor session uses the same MCP read. It is an on-demand derived read, not
+a canonical projection or a session/authority binding. Stored task and plan
+fields render as **Recorded state**. **Working now** requires separately
+read, task-bound held-lease, qualified active runner lifecycle and recent
+activity records; interactive-session activity alone is insufficient. Operator attention requires a current open
+operator checkpoint for that task. The current adapter cannot qualify the
+canonical claimability predicate, so a stored `claimable` flag and pending/open
+states retain their recorded meaning. The table distinguishes assigned principal, lease holder, runner, and
+declared step owner rather than collapsing them into an executor.
+
+The optional history is deliberately unfiltered. Rows currently remain visible:
+a digest's cached completion, send or handoff flag does not prove that current
+obligations are discharged. Search and state filters only change visibility.
+Task rows follow current outgoing `PART_OF` relationships and expose missing,
+ambiguous, unreadable or bounded planning ascents rather than selecting a parent.
+
+### Inline workboard
+
+The same server declares a content-versioned `ui://ateles/workboard-<hash>.html`
+resource using `text/html;profile=mcp-app`, linked by the tool's
+`_meta.ui.resourceUri`. It follows the stable
+[MCP Apps protocol](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx).
+An MCP Apps host initializes the view and supplies the original tool input and
+structured result. Other hosts retain a readable table together with read
+limits, planning context and any requested cumulative history. The self-contained
+resource requests no external network, static assets, nested frames or browser
+permissions; record text renders as text. Refresh invokes only the read-only
+workboard tool through the same host/server connection. A failed refresh marks
+retained rows stale and preserves the last successful scope and read time.
+Requested history remains available across refreshes. Read coverage and adapter
+limits remain visible, and decision attention is labelled independently of the
+recorded lifecycle state. There is no automatic polling, browser storage or
+second status store.
+
+Selecting **Sessions** requests an optional page of up to 50 existing
+`agent_session` records. Native identity, kind, status, activity and holder stay
+distinct from task ownership, routing evidence and lease claims. Optional
+routing metadata can appear when provided by the existing registry; its absence
+does not block task delivery. Partial registry coverage is explicit.
+
+Wire tests and a synthetic bridge/DOM test exercise the tool, resource and view.
+Actual inline rendering still requires verification in the intended client's
+MCP Apps surface after qualified source deployment and targeted reconnection.
+A successful backend test alone is not client acceptance.
 
 ### Reads fail closed
 

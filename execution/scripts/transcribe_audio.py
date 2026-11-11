@@ -82,6 +82,7 @@ try:
         TRANSCRIPTION_ENGINE_LOCAL,
         VALID_BACKENDS,
         resolve_backend,
+        resolve_model_path as _resolve_local_model_path,
         transcribe_local,
     )
 except ImportError:  # pragma: no cover - path-dependent import
@@ -93,6 +94,7 @@ except ImportError:  # pragma: no cover - path-dependent import
         TRANSCRIPTION_ENGINE_LOCAL,
         VALID_BACKENDS,
         resolve_backend,
+        resolve_model_path as _resolve_local_model_path,
         transcribe_local,
     )
 
@@ -475,8 +477,13 @@ def _coerce_correction_pairs(data: object) -> list[tuple[str, str]]:
     return pairs
 
 
+_ACTIVE_CORRECTIONS: list[tuple[str, str]] | None = None
+
+
 def _proper_noun_corrections() -> list[tuple[str, str]]:
     """Merge the operator vocabulary from env + file + Neotoma (all optional)."""
+    if _ACTIVE_CORRECTIONS is not None:
+        return _ACTIVE_CORRECTIONS
     return (
         _proper_nouns_from_env()
         + _proper_nouns_from_file()
@@ -1035,9 +1042,64 @@ def _parse_elevenlabs_stt_response(
     return _postprocess_transcript(text), lang
 
 
+def _validate_elevenlabs_raw_body(body: object) -> None:
+    try:
+        _check_elevenlabs_raw_body(body)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise IncompleteTranscriptionResult(
+            "ERR_INCOMPLETE_TRANSCRIPTION_RESULT: invalid ElevenLabs raw evidence"
+        ) from exc
+
+
+def _check_elevenlabs_raw_body(body: object) -> None:
+    """Check the synchronous parser's consumed structure, including silent parts.
+
+    Text-only bodies and optional/null word metadata are supported. A body must
+    still retain an explicit content field; an absent body is not silence.
+    """
+    if not isinstance(body, dict):
+        raise ValueError("ElevenLabs body must be an object")
+    if "transcripts" in body:
+        transcripts = body["transcripts"]
+        if not isinstance(transcripts, list):
+            raise ValueError("ElevenLabs transcripts must be a list")
+        for transcript in transcripts:
+            if not isinstance(transcript, dict) or "transcripts" in transcript:
+                raise ValueError("ElevenLabs channel must be a content body")
+            _validate_elevenlabs_raw_body(transcript)
+        return
+    if not ({"text", "words"} & body.keys()):
+        raise ValueError("ElevenLabs body lacks text/words")
+    for field in ("text", "language_code"):
+        if body.get(field) is not None and not isinstance(body[field], str):
+            raise ValueError(f"ElevenLabs {field} must be a string or null")
+    words = body.get("words")
+    if words is None:
+        return
+    if not isinstance(words, list):
+        raise ValueError("ElevenLabs words must be a list or null")
+    for word in words:
+        if not isinstance(word, dict) or "text" not in word:
+            raise ValueError("ElevenLabs word must retain its text field")
+        for field in ("text", "type"):
+            if word.get(field) is not None and not isinstance(word[field], str):
+                raise ValueError(f"ElevenLabs word {field} must be a string or null")
+        # Both existing event parsers consume timestamps with float(). Keep
+        # numeric strings supported, but refuse malformed/nonfinite timing.
+        for field in ("start", "end"):
+            if word.get(field) is not None:
+                value = word[field]
+                if isinstance(value, bool) or not isinstance(value, (str, int, float)) or not math.isfinite(float(value)):
+                    raise ValueError("ElevenLabs word has invalid timing")
+        if word.get("start") is not None and word.get("end") is not None:
+            if float(word["end"]) < float(word["start"]):
+                raise ValueError("ElevenLabs word ends before it starts")
+
+
 def _parse_elevenlabs_stt_response_raw(
     body: object, language: str | None
 ) -> tuple[str, str]:
+    _validate_elevenlabs_raw_body(body)
     if isinstance(body, dict) and "message" in body and "request_id" in body:
         if "text" not in body and "transcripts" not in body:
             raise RuntimeError(
@@ -1253,6 +1315,7 @@ def transcribe_with_elevenlabs_speech_to_text(
                         shutil.rmtree(up_dir, ignore_errors=True)
                 raw_segments.append(body)
                 if isinstance(body, dict) and "transcripts" in body:
+                    _validate_elevenlabs_raw_body(body)
                     all_events.extend(
                         _multichannel_words_to_events(
                             body["transcripts"], time_offset=offset
@@ -2360,6 +2423,256 @@ def is_already_transcribed(audio_path: Path) -> bool:
     return _hit(str(audio_path.resolve()), "audio_file_path")
 
 
+def _pending_store_identity(audio_path: Path, mic_path: Path | None) -> dict:
+    identity = {}
+    for name, path in (("audio", audio_path), ("mic", mic_path)):
+        if path is not None:
+            digest = _audio_content_hash(path)
+            if digest is None:
+                raise RuntimeError("Cannot bind pending store to unreadable audio")
+            identity[name] = {"path": str(path.resolve()), "sha256": digest}
+    return identity
+
+
+def _processing_fingerprint() -> str:
+    """Bind cached output to resolved vocabulary, processing controls and setup.
+
+    Only non-secret processing settings are selected. Values/vocabulary are
+    hashed rather than copied into the pending result's context. Model/binary
+    metadata is inspected without loading a model or invoking a backend.
+    """
+    names = (
+        "TRANSCRIBE_BACKEND", "RECORD_MEETING_DIARIZE", "TRANSCRIBE_DEFAULT_LANGUAGE",
+        "TRANSCRIBE_CLEAN_STUTTERS", "TRANSCRIBE_LABEL_SYSTEM", "TRANSCRIBE_LABEL_MIC",
+        "TRANSCRIBE_UTTERANCE_GAP_SECONDS", "TRANSCRIBE_UTTERANCE_STITCH_SECONDS",
+        "TRANSCRIBE_TAG_AUDIO_EVENTS", "TRANSCRIBE_NUM_SPEAKERS",
+        "TRANSCRIBE_WHISPER_MODEL", "TRANSCRIBE_WHISPER_MODEL_NAME", "TRANSCRIBE_WHISPER_CLI",
+        "TRANSCRIBE_FLUID_CLI", "TRANSCRIBE_FLUID_COMPUTE_UNITS", "TRANSCRIBE_FFMPEG",
+        "ELEVENLABS_STT_MODEL_ID", "ELEVENLABS_STT_COMPRESS_THRESHOLD_MB",
+        "ELEVENLABS_STT_UPLOAD_MP3_BITRATE", "ELEVENLABS_STT_MULTICHANNEL_MAX_SECONDS",
+        "LIVE_TRANSCRIPT_SILENCE_THRESHOLD_DB",
+    )
+    def metadata(path: Path) -> dict:
+        try:
+            stat = path.stat()
+            return {"path": str(path.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        except OSError:
+            return {"path": str(path), "unavailable": True}
+
+    try:
+        model = metadata(_resolve_local_model_path())
+    except RuntimeError:
+        model = {"unavailable": True}
+    binaries = {}
+    for variable, default in (("TRANSCRIBE_WHISPER_CLI", "whisper-cli"),
+                              ("TRANSCRIBE_FLUID_CLI", "fluidaudiocli"),
+                              ("TRANSCRIBE_FFMPEG", "ffmpeg")):
+        configured = os.environ.get(variable, "").strip() or default
+        binaries[variable] = metadata(Path(shutil.which(configured) or configured))
+    payload = {
+        "settings": {name: os.environ.get(name) for name in names},
+        "vocabulary": _proper_noun_corrections(), "labels": _channel_labels(),
+        "gap": _utterance_gap_seconds(), "stitch": _utterance_stitch_seconds(),
+        "model": model, "binaries": binaries,
+        "source": {name: _audio_content_hash(Path(__file__).with_name(name)) for name in (
+            "transcribe_audio.py", "local_whisper.py", "local_fluid.py",
+            "transcript_utterances.py", "hallucination_filter.py", "silence_gate.py",
+        )},
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+class IncompleteTranscriptionResult(ValueError):
+    pass
+
+
+def _validate_transcription_result(result: object, *, paired: bool) -> None:
+    """Validate the actual supported constructors before preserving or storing.
+
+    Nullable measurements still require their keys where the constructor emits
+    them. Raw Whisper/OpenAI responses and paired Fluid silence/RMS are optional.
+    Extra JSON fields are retained; this is completeness validation, not signing.
+    """
+    def require(ok, field):
+        if not ok:
+            raise IncompleteTranscriptionResult(
+                f"ERR_INCOMPLETE_TRANSCRIPTION_RESULT: invalid or missing {field}"
+            )
+
+    def text(value):
+        return isinstance(value, str) and bool(value.strip())
+
+    def number(value, *, nullable=False, nonnegative=True):
+        try:
+            return (nullable and value is None) or (
+                not isinstance(value, bool) and isinstance(value, (int, float))
+                and math.isfinite(value) and (not nonnegative or value >= 0)
+            )
+        except OverflowError:
+            return False
+
+    def words(events, field):
+        require(isinstance(events, list), field)
+        for word in events:
+            require(isinstance(word, dict), field + "[]")
+            require(number(word.get("start")) and number(word.get("end"))
+                    and word["end"] >= word["start"], field + ".timing")
+            require(text(word.get("text")) and text(word.get("speaker")), field + ".text/speaker")
+            require(isinstance(word.get("speaker_candidates"), list)
+                    and all(text(speaker) for speaker in word["speaker_candidates"]), field + ".speaker_candidates")
+            require("confidence" in word, field + ".confidence")
+
+    def alignment_matches(actual, expected):
+        # Confidence is backend passthrough, not a newly constrained vocabulary.
+        fields = ("start", "end", "text", "speaker", "speaker_candidates")
+        return len(actual) == len(expected) and all(
+            all(left[field] == right[field] for field in fields)
+            for left, right in zip(actual, expected)
+        )
+
+    def fluid_raw(raw, *, two_tracks=False):
+        require(isinstance(raw, dict), "raw_response")
+        require(isinstance(raw.get("tracks"), list) and bool(raw["tracks"]), "raw_response.tracks")
+        require("aligned_words" in raw, "raw_response.aligned_words")
+        words(raw["aligned_words"], "raw_response.aligned_words")
+        expected_events = []
+        if two_tracks:
+            require(len(raw["tracks"]) == 2 and all(isinstance(track, dict) for track in raw["tracks"]),
+                    "raw_response.tracks paired originals")
+            require(all(text(track.get("channel")) for track in raw["tracks"]), "raw_response.tracks channels")
+            require({track.get("channel") for track in raw["tracks"]} == {"System", "Mic"},
+                    "raw_response.tracks channels")
+            for track in raw["tracks"]:
+                child_events = fluid_raw(track.get("result"))
+                expected_events.extend({**event, "speaker": f"{track['channel']}/{event['speaker']}"}
+                                       for event in child_events)
+            require(alignment_matches(raw["aligned_words"], expected_events), "raw_response.aligned_words consistency")
+            return expected_events
+        for track in raw["tracks"]:
+            require(isinstance(track, dict), "raw_response.tracks[]")
+            require("channel" in track and (track["channel"] is None or text(track["channel"])), "raw_response.channel")
+            diar, asr = track.get("diarization"), track.get("asr")
+            require(isinstance(diar, dict) and isinstance(diar.get("segments"), list), "raw_response.diarization.segments")
+            require(isinstance(asr, dict) and isinstance(asr.get("wordTimings"), list), "raw_response.asr.wordTimings")
+            if "text" in asr:
+                require(isinstance(asr["text"], str), "raw_response.asr.text")
+            for segment in diar["segments"]:
+                require(isinstance(segment, dict), "raw_response.segment")
+                require(number(segment.get("startTimeSeconds")) and number(segment.get("endTimeSeconds"))
+                        and segment["endTimeSeconds"] > segment["startTimeSeconds"]
+                        and text(segment.get("speakerId")), "raw_response.segment timing/speaker")
+            for word in asr["wordTimings"]:
+                require(isinstance(word, dict), "raw_response.wordTiming")
+                require(number(word.get("startTime")) and number(word.get("endTime"))
+                        and word["endTime"] >= word["startTime"] and text(word.get("word")), "raw_response.wordTiming")
+            # Reuse the producer's actual no-word/speech and overlap rules;
+            # presence of arrays alone cannot prove retained inference evidence.
+            from local_fluid import LocalFluidUnavailable, align_words
+            try:
+                expected_events.extend(align_words(asr, diar, channel=track["channel"]))
+            except LocalFluidUnavailable as exc:
+                raise IncompleteTranscriptionResult(
+                    "ERR_INCOMPLETE_TRANSCRIPTION_RESULT: inconsistent Fluid raw evidence"
+                ) from exc
+        require(alignment_matches(raw["aligned_words"], expected_events), "raw_response.aligned_words consistency")
+        return expected_events
+
+    require(isinstance(result, dict), "result")
+    backend = result.get("backend")
+    require(isinstance(backend, str) and backend in VALID_BACKENDS, "backend")
+    require(not paired or backend in (BACKEND_FLUID, BACKEND_ELEVENLABS), "paired backend")
+    engines = {BACKEND_LOCAL: TRANSCRIPTION_ENGINE_LOCAL, BACKEND_FLUID: "local_fluid_audio",
+               BACKEND_ELEVENLABS: "elevenlabs_stt", BACKEND_OPENAI: "openai_whisper_api"}
+    require(result.get("transcription_engine") == engines[backend], "transcription_engine")
+    require(text(result.get("transcription_model")), "transcription_model")
+    require(text(result.get("transcription_text")), "transcription_text")
+    require("language" in result and (text(result["language"]) or backend == BACKEND_OPENAI
+            and result["language"] is None), "language")
+    require(type(result.get("file_size_bytes")) is int and result["file_size_bytes"] >= 0, "file_size_bytes")
+    if not (paired and backend == BACKEND_ELEVENLABS and "audio_duration_seconds" not in result):
+        require("audio_duration_seconds" in result and number(result["audio_duration_seconds"],
+                nullable=backend != BACKEND_FLUID), "audio_duration_seconds")
+    if paired:
+        require(text(result.get("mic_file")) and text(result.get("remote_file")), "mic_file/remote_file")
+    if backend == BACKEND_LOCAL:
+        require("rms_db" in result and number(result["rms_db"], nullable=True, nonnegative=False), "rms_db")
+        require(type(result.get("silence")) is bool, "silence")
+    elif backend == BACKEND_FLUID:
+        events = fluid_raw(result.get("raw_response"), two_tracks=paired)
+        if not events:
+            require(result["transcription_text"] == format_events([]), "silent Fluid transcription_text")
+        if not paired:
+            require(type(result.get("silence")) is bool and result["silence"] == (not events), "silence")
+    elif backend == BACKEND_ELEVENLABS:
+        require(isinstance(result.get("raw_response"), dict), "raw_response")
+        raw = result["raw_response"]
+        try:
+            if "segments" in raw:
+                require(isinstance(raw["segments"], list) and bool(raw["segments"]), "raw_response.segments")
+                events = []
+                for segment in raw["segments"]:
+                    _validate_elevenlabs_raw_body(segment)
+                    require("transcripts" in segment, "raw_response.segment.transcripts")
+                    events.extend(_multichannel_words_to_events(segment["transcripts"]))
+                require(bool(events), "raw_response.segments content")
+            else:
+                parsed, _language = _parse_elevenlabs_stt_response_raw(raw, result["language"])
+                require(text(parsed), "raw_response content")
+        except (ValueError, TypeError, OverflowError, RuntimeError) as exc:
+            raise IncompleteTranscriptionResult(
+                "ERR_INCOMPLETE_TRANSCRIPTION_RESULT: invalid ElevenLabs raw evidence"
+            ) from exc
+    try:
+        json.dumps(result, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise IncompleteTranscriptionResult("ERR_INCOMPLETE_TRANSCRIPTION_RESULT: result is not finite JSON") from exc
+
+
+def _write_pending_store(
+    audio_path: Path, mic_path: Path | None, context: dict, result: dict,
+    *, identity: dict | None = None,
+) -> None:
+    """Durably retain the complete result before any store; never log its text."""
+    _validate_transcription_result(result, paired=mic_path is not None)
+    current = _pending_store_identity(audio_path, mic_path)
+    if identity is not None and current != identity:
+        raise RuntimeError("Audio changed during transcription; refusing pending store")
+    target = audio_path.with_suffix(audio_path.suffix + ".pending-store.json")
+    payload = {"version": 1, "identity": current, "context": context, "result": result}
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=target.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            os.chmod(temporary, 0o600)
+            json.dump(payload, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _read_pending_store(
+    audio_path: Path, mic_path: Path | None, context: dict, *, required: bool = False,
+) -> dict | None:
+    target = audio_path.with_suffix(audio_path.suffix + ".pending-store.json")
+    if not target.exists() and not required:
+        return None
+    try:
+        payload = json.loads(target.read_text())
+        if (payload.get("version") != 1
+                or payload.get("identity") != _pending_store_identity(audio_path, mic_path)
+                or payload.get("context") != context):
+            raise ValueError("source or context mismatch")
+        _validate_transcription_result(payload.get("result"), paired=mic_path is not None)
+        return payload["result"]
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        if isinstance(exc, IncompleteTranscriptionResult):
+            raise RuntimeError(f"{exc}; pending store retained; no ASR was run") from exc
+        raise RuntimeError("Missing, malformed or mismatched pending store; no ASR was run") from exc
+
+
 def _write_transcript_sidecars(
     audio_path: Path, result: dict, verbose: bool = False
 ) -> None:
@@ -2488,6 +2801,39 @@ def _verify_transcription_storage(entity_id, expected, source_id=None, declared_
         source = result.get("source", result)
         if source.get("content_hash") != expected["audio_content_sha256"]:
             raise RuntimeError("Transcription ingestion incomplete: audio source hash mismatch")
+
+
+def _verify_exact_transcription_storage(entity_id, expected, source_id, *, attachment_expected):
+    """Prove current-result equivalence independently of historical import lookup.
+
+    Dates are intentionally excluded: a later retry can resolve the same result.
+    Required identity/context fields cannot be waived by schema declarations.
+    The returned receipt values come from the actual persisted snapshot.
+    """
+    result = _neotoma_cli_json(["entities", "get", entity_id]) or {}
+    record = result.get("entity", result)
+    snapshot = record.get("snapshot") or {}
+    fields = [*_TRANSCRIPTION_REQUIRED_FIELDS, "audio_file_path", "language"]
+    fields += [field for field in ("transcription_model", "audio_duration_seconds", *_ATTACHMENT_STATUS_FIELDS)
+               if field in expected and expected[field] is not None]
+    missing = [field for field in fields
+               if field not in snapshot or snapshot[field] != expected[field]]
+    if missing:
+        raise RuntimeError("ERR_PERSISTED_RESULT_MISMATCH: persisted read-back mismatch for "
+                           + ", ".join(missing))
+    if attachment_expected:
+        if not source_id:
+            raise RuntimeError("ERR_PERSISTED_RESULT_MISMATCH: required audio source missing")
+        result = _neotoma_cli_json(["sources", "get", source_id]) or {}
+        source = result.get("source", result)
+        if source.get("content_hash") != expected["audio_content_sha256"]:
+            raise RuntimeError("ERR_PERSISTED_RESULT_MISMATCH: audio source hash mismatch")
+    return {
+        "exact_result_verified": True,
+        "capture_method": snapshot["capture_method"],
+        "engine": snapshot["transcription_engine"],
+        "transcription_text_sha256": hashlib.sha256(snapshot["transcription_text"].encode()).hexdigest(),
+    }
 
 
 def _find_existing_transcription(content_hash: str | None, resolved_audio: Path) -> str | None:
@@ -2631,6 +2977,8 @@ def save_transcription(
     idempotency_key: str | None = None,
     file_idempotency_key: str | None = None,
     attach_audio_file: bool = True,
+    require_audio_attachment: bool = False,
+    require_exact_result: bool = False,
     extra_entity_fields: dict | None = None,
     relate_contact_entity_ids: list[str] | None = None,
     relate_feedback_analysis_entity_id: str | None = None,
@@ -2700,6 +3048,8 @@ def save_transcription(
     # imports (attach_audio_file=False) may supply size/hash from the result.
     if attach_audio_file and not file_present:
         raise RuntimeError("Transcription ingestion incomplete: audio file missing")
+    if require_audio_attachment and not attach_audio_file:
+        raise RuntimeError("ERR_AUDIO_ATTACHMENT_REQUIRED: metadata-only storage is not accepted")
 
     content_hash = _audio_content_hash(audio_path) if file_present else None
     if not content_hash:
@@ -2792,6 +3142,11 @@ def save_transcription(
                 )
             remote_limit = _remote_upload_max_bytes()
             if wav_bytes > remote_limit and not _neotoma_target_is_localhost():
+                if require_audio_attachment:
+                    raise RuntimeError(
+                        "ERR_AUDIO_ATTACHMENT_REQUIRED: audio exceeds the remote upload limit; "
+                        "no metadata-only store was attempted"
+                    )
                 # The hosted transport cannot carry these bytes (the CLI
                 # refuses before any HTTP call), and it never will on retry.
                 # Store the transcript without the audio and record why, so
@@ -2876,15 +3231,21 @@ def save_transcription(
             pass
 
     raw = (proc.stdout or "").strip()
+    source_id = None
     if proc.returncode != 0 or not raw:
         err = (proc.stderr or "").strip() or raw or f"exit {proc.returncode}"
         if "ERR_IDEMPOTENCY_MISMATCH" not in err:
             raise RuntimeError(f"Neotoma store failed: {err}")
-        entity_id = _recover_prior_transcription_write(
-            entity,
-            resolved_audio,
-            attachment_expected=attach_wav,
-        )
+        if require_exact_result:
+            entity_id = _find_existing_transcription(entity["audio_content_sha256"], resolved_audio)
+            if not entity_id:
+                raise RuntimeError("ERR_PERSISTED_RESULT_MISMATCH: prior transcription cannot be resolved")
+        else:
+            entity_id = _recover_prior_transcription_write(
+                entity, resolved_audio, attachment_expected=attach_wav,
+            )
+        if attach_wav:
+            source_id = _find_audio_source(resolved_audio.name, entity["audio_content_sha256"])
     else:
         try:
             payload = json.loads(raw)
@@ -2903,11 +3264,15 @@ def save_transcription(
         source_id = (payload.get("unstructured") or {}).get("source_id")
         if attachment_requested and (not attach_wav or not source_id):
             raise RuntimeError("Transcription ingestion incomplete: audio attachment missing")
-        _verify_transcription_storage(
-            entity_id,
-            entity,
-            source_id if attach_wav else None,
-            declared_fields=_declared_transcription_fields(),
+        if not require_exact_result:
+            _verify_transcription_storage(
+                entity_id, entity, source_id if attach_wav else None,
+                declared_fields=_declared_transcription_fields(),
+            )
+    verified_result = None
+    if require_exact_result:
+        verified_result = _verify_exact_transcription_storage(
+            entity_id, entity, source_id, attachment_expected=attach_wav,
         )
     print(f"NEOTOMA_TRANSCRIPTION_ENTITY_ID={entity_id}", flush=True)
 
@@ -2929,6 +3294,9 @@ def save_transcription(
     return {
         "transcription_id": entity_id,
         "entity_id": entity_id,
+        "audio_source_id": source_id,
+        "audio_attachment_verified": bool(attach_wav and source_id),
+        "verified_result": verified_result,
         "audio_file_path": audio_file_path_rel,
         "audio_file_name": audio_path.name,
         "source_directory": source_directory,
@@ -2943,6 +3311,7 @@ def save_transcription(
 
 
 def main():
+    global _ACTIVE_CORRECTIONS
     parser = argparse.ArgumentParser(
         description="Transcribe locally with Whisper or FluidAudio speaker diarization"
     )
@@ -3035,7 +3404,20 @@ def main():
         "disclosure), voice_memo, import, unknown.",
     )
 
+    parser.add_argument(
+        "--store-only", action="store_true",
+        help="Store a source-bound pending result without running transcription. "
+        "Missing or changed source/context fails closed; there is no ASR fallback.",
+    )
+    parser.add_argument("--require-audio-attachment", action="store_true",
+                        help="Fail before storage if requested audio cannot be attached.")
+    parser.add_argument("--receipt-file", type=Path, default=None,
+                        help="Write a private structured verified storage receipt for a supervising caller.")
     args = parser.parse_args()
+    if args.store_only and args.no_store:
+        parser.error("--store-only cannot be combined with --no-store")
+    if args.receipt_file and args.no_store:
+        parser.error("--receipt-file requires storage")
 
     if args.no_diarize:
         use_diarization = False
@@ -3057,9 +3439,41 @@ def main():
             f"Warning: File extension {audio_path.suffix} may not be supported. Processing anyway..."
         )
 
+    previous_corrections = _ACTIVE_CORRECTIONS
     try:
+        _ACTIVE_CORRECTIONS = (
+            _proper_nouns_from_env() + _proper_nouns_from_file() + _proper_nouns_from_neotoma()
+        )
+        mic_path = Path(args.mic_file) if args.mic_file else None
+        if mic_path is not None and args.no_diarize:
+            parser.error("--mic-file requires speaker separation; remove --no-diarize")
+        relate_c, relate_fba = _merge_transcription_relate_targets(
+            audio_path, args.relate_contact_entity_id or None,
+            args.relate_feedback_analysis_entity_id,
+        ) if not args.no_store else ([], None)
+        extra_fields = {
+            "capture_method": (args.capture_method or "unknown").strip(),
+            "consent_basis": (args.consent_basis or "unknown").strip(),
+        }
+        context = {
+            "processing_fingerprint": _processing_fingerprint(),
+            "language": args.language, "backend": args.backend,
+            "diarization": use_diarization,
+            "backend_env": os.environ.get("TRANSCRIBE_BACKEND", ""),
+            "diarization_env": os.environ.get("RECORD_MEETING_DIARIZE", ""),
+            "original_source_file": args.original_source_file,
+            "extra_fields": extra_fields, "relate_contacts": relate_c,
+            "relate_feedback": relate_fba,
+        }
+        identity = _pending_store_identity(audio_path, mic_path) if not args.no_store else None
+        transcription_result = _read_pending_store(
+            audio_path, mic_path, context, required=args.store_only,
+        ) if not args.no_store else None
+        # Reuse a pending result only against both unchanged tracks and context.
+        if transcription_result is not None:
+            print("Reusing source-bound pending transcription; ASR skipped")
         # Two-file merge path (mic + remote)
-        if args.mic_file:
+        elif args.mic_file:
             if args.no_diarize:
                 parser.error("--mic-file requires speaker separation; remove --no-diarize")
             mic_path = Path(args.mic_file)
@@ -3085,7 +3499,8 @@ def main():
                 backend=args.backend,
             )
 
-        engine = (transcription_result.get("transcription_engine") or "unknown").strip()
+        _validate_transcription_result(transcription_result, paired=mic_path is not None)
+        engine = transcription_result["transcription_engine"]
         print(f"TRANSCRIPTION_ENGINE={engine}", flush=True)
 
         # Always drop sidecars next to the audio: a .txt of the merged transcript
@@ -3100,15 +3515,7 @@ def main():
                 print(text)
             return
 
-        relate_c, relate_fba = _merge_transcription_relate_targets(
-            audio_path,
-            args.relate_contact_entity_id or None,
-            args.relate_feedback_analysis_entity_id,
-        )
-        extra_fields = {
-            "capture_method": (args.capture_method or "unknown").strip(),
-            "consent_basis": (args.consent_basis or "unknown").strip(),
-        }
+        _write_pending_store(audio_path, mic_path, context, transcription_result, identity=identity)
         transcription_record = save_transcription(
             audio_path,
             transcription_result,
@@ -3117,7 +3524,32 @@ def main():
             relate_verbose=bool(args.relate_verbose),
             original_source_file=args.original_source_file or None,
             extra_entity_fields=extra_fields,
+            require_audio_attachment=args.require_audio_attachment,
+            require_exact_result=bool(args.receipt_file),
         )
+
+        if args.receipt_file:
+            if _pending_store_identity(audio_path, mic_path) != identity:
+                raise RuntimeError("Audio changed during store; verified receipt refused")
+            proof = transcription_record.get("verified_result") or {}
+            if proof.get("exact_result_verified") is not True:
+                raise RuntimeError("Verified receipt requires exact persisted-result proof")
+            receipt = {
+                "version": 2, "entity_id": transcription_record["entity_id"],
+                "identity": identity, **proof,
+                "audio_attachment_verified": transcription_record.get("audio_attachment_verified") is True,
+                "audio_source_id": transcription_record.get("audio_source_id"),
+            }
+            with tempfile.NamedTemporaryFile(mode="w", dir=args.receipt_file.parent, delete=False) as handle:
+                temporary = Path(handle.name)
+                try:
+                    os.chmod(temporary, 0o600)
+                    json.dump(receipt, handle)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    os.replace(temporary, args.receipt_file)
+                finally:
+                    temporary.unlink(missing_ok=True)
 
         print("\nTranscription complete:")
         print(f"  File: {audio_path.name}")
@@ -3137,6 +3569,8 @@ def main():
 
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        _ACTIVE_CORRECTIONS = previous_corrections
 
 
 if __name__ == "__main__":

@@ -7,6 +7,11 @@ import local_whisper as lw
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolated_compute_placement(monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_FLUID_COMPUTE_UNITS", raising=False)
+
+
 def test_diarization_never_selects_cloud_from_key_presence():
     for env in ({}, {"ELEVENLABS_API_KEY": "synthetic", "RECORD_MEETING_DIARIZE": "1"}):
         assert lw.resolve_backend(use_diarization=True, env=env) == "fluid"
@@ -87,7 +92,7 @@ def test_cli_commands_keep_audio_local_and_preserve_raw_results(tmp_path, monkey
     assert "[Speaker_1]" in result["transcription_text"]
     assert "Hola" in result["transcription_text"]
     assert result["raw_response"]["tracks"][0]["asr"]["text"] == "Hola"
-    assert calls[0][1:6] == ["process", str(audio), "--mode", "offline", "--output"]
+    assert calls[0][1:8] == ["process", str(audio), "--mode", "offline", "--compute-units", "cpu-only", "--output"]
     assert "--language" in calls[1] and "es" in calls[1]
 
 
@@ -169,3 +174,56 @@ def test_native_multichannel_keeps_both_channel_identities(tmp_path, monkeypatch
     assert "[Channel_0/S1]" in result["transcription_text"]
     assert "[Channel_1/S1]" in result["transcription_text"]
     assert not Path(commands[0][-1]).exists()
+
+
+def test_fluid_failure_identifies_stage_and_retains_gpu_failure_code(tmp_path, monkeypatch):
+    failed = type("Result", (), {"returncode": 1, "stderr":
+        "MTLCommandBufferErrorDomain Code=2 UCommandBufferCallbackErrorTimeout\n" + "profiling " * 500})()
+    monkeypatch.setattr(lf.subprocess, "run", lambda *a, **kw: failed)
+    with pytest.raises(lf.LocalFluidUnavailable) as caught:
+        lf._run_json("fluid", ["process", "synthetic.wav", "--mode", "offline", "--output"], tmp_path / "missing.json")
+    error = str(caught.value)
+    assert "stage=process" in error
+    assert "UCommandBufferCallbackErrorTimeout" in error
+    assert len(error) < 2600
+
+
+def test_fluid_asr_timeout_identifies_stage_without_cloud_retry(tmp_path, monkeypatch):
+    calls = []
+    def timeout(argv, **kwargs):
+        calls.append(argv)
+        raise lf.subprocess.TimeoutExpired(argv, 1)
+    monkeypatch.setattr(lf.subprocess, "run", timeout)
+    with pytest.raises(lf.LocalFluidUnavailable, match="stage=transcribe.*timed out"):
+        lf._run_json("fluid", ["transcribe", "synthetic.wav"], tmp_path / "missing.json")
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("units", ["cpu-only", "ane", "all"])
+def test_explicit_fluid_compute_units_are_forwarded(tmp_path, monkeypatch, units):
+    audio = tmp_path / "fixture.wav"
+    audio.write_bytes(b"fixture")
+    monkeypatch.setenv("TRANSCRIBE_FLUID_COMPUTE_UNITS", units)
+    monkeypatch.setattr(lf, "resolve_fluid_cli", lambda: "/fixture/fluid")
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        payload = {"segments": [], "durationSeconds": 0} if argv[1] == "process" else {"wordTimings": []}
+        Path(argv[-1]).write_text(json.dumps(payload))
+        return type("Result", (), {"returncode": 0, "stderr": ""})()
+    monkeypatch.setattr(lf.subprocess, "run", run)
+    lf.transcribe_fluid(audio)
+    index = calls[0].index("--compute-units")
+    assert calls[0][index + 1] == units
+    assert calls[1][1] == "transcribe"
+
+
+def test_invalid_fluid_compute_units_fail_before_inference(tmp_path, monkeypatch):
+    audio = tmp_path / "fixture.wav"
+    audio.write_bytes(b"fixture")
+    monkeypatch.setenv("TRANSCRIBE_FLUID_COMPUTE_UNITS", "unknown")
+    monkeypatch.setattr(lf, "resolve_fluid_cli", lambda: "/fixture/fluid")
+    with patch.object(lf.subprocess, "run") as run:
+        with pytest.raises(lf.LocalFluidUnavailable, match="COMPUTE_UNITS"):
+            lf.transcribe_fluid(audio)
+    run.assert_not_called()

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import transcribe_audio as ta
+from test_transcription_results import complete_result
 
 
 @pytest.fixture
@@ -50,6 +51,7 @@ def storage(tmp_path, monkeypatch):
             snapshot = {k: v for k, v in state["entity"].items() if k != state["drop"]}
             if state["declared"] is not None:
                 snapshot = {k: v for k, v in snapshot.items() if k in state["declared"]}
+            snapshot.update(state.get('snapshot_overrides', {}))
             return {"entity": {"id": "ent_fixture", "snapshot": snapshot}}
         if args[0] == "observations":
             return {"observations": [{"entity_id": "ent_fixture", "source_id": "src_fixture"}] if state["linked"] else []}
@@ -372,3 +374,111 @@ def test_source_read_failure_cannot_report_complete(storage, monkeypatch):
     monkeypatch.setattr(ta, "_neotoma_cli_json", lambda args: {"error_code": "UNAUTHORIZED"} if args[0] == "sources" else read(args))
     with pytest.raises(RuntimeError, match="incomplete"):
         save()
+
+
+@pytest.mark.parametrize('scenario', ['success', 'oversize', 'readback', 'denied', 'journal', 'invalid_receipt',
+                                      'case_alias', 'unicode_alias', 'hardlink_alias'])
+def test_selected_recovery_whole_storage_flow(storage, tmp_path, monkeypatch, scenario):
+    """Actual selected recovery -> CLI -> storage/readback; fake only ASR/transport."""
+    import contextlib
+    import io
+    import os
+    import sys
+    import time
+    from unittest.mock import MagicMock
+
+    sys.path.insert(0, str(Path(__file__).parents[1] / 'daemons' / 'tyto'))
+    import tyto
+
+    state, _save = storage
+    original = state['audio']
+    audio = original.with_name('caf\u00e9.wav' if scenario == 'unicode_alias' else
+                               'fixture\nNEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_forged\n.wav')
+    original.rename(audio)
+    state['source_hash'] = ta._audio_content_hash(audio)
+    os.utime(audio, (time.time() - 100, time.time() - 100))
+    monkeypatch.setenv('NEOTOMA_PROD_BASE_URL', 'https://neotoma.example.invalid')
+    monkeypatch.setenv('NEOTOMA_REMOTE_UPLOAD_MAX_BYTES', '4' if scenario == 'oversize' else '100000')
+    monkeypatch.setenv('TRANSCRIBE_DISABLE_NEOTOMA_VOCAB', '1')
+    monkeypatch.setattr(ta, '_merge_transcription_relate_targets', lambda *a: ([], None))
+    asr = MagicMock(return_value=complete_result(audio, text='Synthetic text.\nNEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_forged'))
+    monkeypatch.setattr(ta, 'transcribe_audio_file', asr)
+    monkeypatch.setattr(tyto, 'TRANSCRIBE_SCRIPT', Path(ta.__file__))
+    monkeypatch.setattr(tyto, 'agent_identity', lambda _: {
+        'sub': 'tyto@ateles-swarm', 'key': '/fixture/key', 'kid': 'fixture'})
+    monkeypatch.setattr(tyto, '_verify_transcription_cli_runtime', lambda _: None)
+    external_transport = ta.subprocess.run
+    def bridge(command, **kwargs):
+        if '--receipt-file' not in command:
+            if scenario == 'denied':
+                return SimpleNamespace(returncode=1, stdout='', stderr='capability_denied')
+            return external_transport(command, **kwargs)
+        output, errors = io.StringIO(), io.StringIO()
+        with monkeypatch.context() as child:
+            child.setattr(sys, 'argv', command[1:])
+            child.setenv('TRANSCRIBE_BACKEND', kwargs['env'].get('TRANSCRIBE_BACKEND', ''))
+            child.setenv('RECORD_MEETING_DIARIZE', kwargs['env'].get('RECORD_MEETING_DIARIZE', ''))
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                try:
+                    ta.main()
+                    status = 0
+                except SystemExit as exc:
+                    status = exc.code
+        if scenario == 'invalid_receipt' and status == 0:
+            receipt_path = Path(command[command.index('--receipt-file') + 1])
+            receipt = json.loads(receipt_path.read_text())
+            receipt['identity']['audio']['sha256'] = '0' * 64
+            receipt_path.write_text(json.dumps(receipt))
+        return SimpleNamespace(returncode=status, stdout=output.getvalue(), stderr=errors.getvalue())
+    monkeypatch.setattr(ta.subprocess, 'run', bridge)
+    if scenario == 'readback':
+        state['source_hash'] = '0' * 64
+    journal = tmp_path / 'retries.json'
+    watcher = tyto.RecordingWatcher(tmp_path, MagicMock(), paired=False,
+                                   capture_method='voice_memo', retry_state_path=journal)
+    watcher._mark_hard_failed(audio, 'capability_denied')
+    selected = audio
+    if scenario.endswith('_alias'):
+        if scenario == 'case_alias':
+            selected = audio.with_name(audio.name.upper())
+        elif scenario == 'unicode_alias':
+            import unicodedata
+            selected = audio.with_name(unicodedata.normalize('NFD', audio.name))
+        else:
+            selected = audio.with_name('hardlinked.wav')
+            os.link(audio, selected)
+        if not selected.exists() or not selected.samefile(audio):
+            pytest.skip('filesystem distinguishes this spelling')
+    monkeypatch.setenv('TYTO_RUNTIME_LOCK', str(tmp_path / 'runtime.lock'))
+    monkeypatch.setattr(tyto, 'load_agent_definition_or_exit', lambda _: {})
+    monkeypatch.setattr(tyto, 'enforce_status_or_exit', lambda *a: None)
+    monkeypatch.setattr(tyto, '_recording_watchers', lambda _: [watcher])
+    monkeypatch.setattr(sys, 'argv', ['tyto.py', '--recording-file', str(selected)] +
+                        ([] if scenario.endswith('_alias') else ['--recover-held']))
+    if scenario == 'journal':
+        monkeypatch.setattr(watcher, '_save_retry_state', lambda: False)
+    if scenario == 'success':
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            tyto.cli()
+        assert output.getvalue().strip() == 'NEOTOMA_TRANSCRIPTION_ENTITY_ID=ent_fixture'
+        assert json.loads(journal.read_text())['hard_failed'] == []
+        assert state['cmd'][1] == 'ingest'
+    else:
+        with pytest.raises(RuntimeError):
+            tyto.cli()
+        assert json.loads(journal.read_text())['hard_failed'][0]['path'] == str(audio)
+        assert audio in watcher._hard_failed
+        if scenario == 'oversize' or scenario.endswith('_alias'):
+            assert 'cmd' not in state  # no metadata-only write or alias bypass
+        if scenario.endswith('_alias'):
+            asr.assert_not_called()
+    assert audio.read_bytes() == b'RIFF-synthetic-audio'
+
+
+def test_required_audio_attachment_refuses_oversize_before_write(storage, monkeypatch):
+    state, save = storage
+    monkeypatch.setenv('NEOTOMA_PROD_BASE_URL', 'https://neotoma.example.invalid')
+    monkeypatch.setenv('NEOTOMA_REMOTE_UPLOAD_MAX_BYTES', '4')
+    with pytest.raises(RuntimeError, match='ERR_AUDIO_ATTACHMENT_REQUIRED'):
+        save(require_audio_attachment=True)
+    assert 'cmd' not in state

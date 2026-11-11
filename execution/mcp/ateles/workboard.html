@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ateles workboard</title>
+<style>
+:root{color-scheme:light dark;font-family:var(--font-sans,system-ui,sans-serif);color:var(--color-text-primary,light-dark(#25251f,#e9e9e2));background:var(--color-background-primary,light-dark(#fafaf7,#20211e));font-size:14px;line-height:1.45}
+*{box-sizing:border-box}h2,.row,p,pre{overflow-wrap:anywhere;min-width:0}pre{white-space:pre-wrap}.row-top h2{flex:1}body{margin:0;padding:20px;max-width:1100px}button,input,select{font:inherit;color:inherit;background:var(--color-background-secondary,light-dark(#fff,#292b26));border:1px solid var(--color-border-primary,light-dark(#d8d9d1,#50534a));border-radius:7px;padding:7px 10px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #80a16b;outline-offset:3px}h1{font-size:21px;letter-spacing:-.025em;margin:0}h2{font-size:16px;margin:0}p{margin:5px 0}header{display:flex;align-items:center;justify-content:space-between;gap:12px}.eyebrow{font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:var(--color-text-secondary,light-dark(#6a6e60,#adb39f));font-weight:650}.muted{color:var(--color-text-secondary,light-dark(#6c7065,#aab09f));font-size:12px}.plan{margin:18px 0;padding:14px 16px;border-left:3px solid #7b9968;background:var(--color-background-secondary,light-dark(#f0f3ea,#2a3025));border-radius:0 9px 9px 0}.toolbar{display:flex;gap:8px;margin:16px 0 12px}.toolbar input{flex:1;min-width:80px}.notice{padding:9px 11px;margin:10px 0;border:1px solid #b8873d;border-radius:7px;font-size:12px;white-space:pre-wrap}.row{border:1px solid var(--color-border-primary,light-dark(#dedfd7,#484c42));border-radius:9px;margin:9px 0;padding:13px 14px}.row-top{display:flex;gap:12px;justify-content:space-between;align-items:start}.state{max-width:100%;overflow-wrap:anywhere;font-size:11px;border-radius:5px;padding:3px 6px;background:var(--color-background-secondary,light-dark(#eeefe9,#34382f));white-space:normal}.operator-needed .state{background:light-dark(#fbecd2,#584025)}.blocked .state{background:light-dark(#f7e8df,#55382a)}.active .state{background:light-dark(#e3f0da,#344c2b)}.next{margin-top:9px;white-space:pre-wrap;overflow-wrap:anywhere}details{margin-top:9px;font-size:12px}summary{cursor:pointer;color:var(--color-text-secondary,light-dark(#686d5e,#adb39f))}.roles{display:grid;grid-template-columns:minmax(100px,auto) 1fr;gap:4px 14px;margin:9px 0;overflow-wrap:anywhere}.roles dt{color:var(--color-text-secondary,light-dark(#686d5e,#adb39f))}.roles dd{margin:0}.empty{padding:25px;text-align:center;color:var(--color-text-secondary,light-dark(#686d5e,#adb39f))}footer{font-size:11px;margin-top:16px;color:var(--color-text-secondary,light-dark(#686d5e,#adb39f))}.error{border-color:#bb7251}#status{min-height:18px}.count{font-size:12px;margin-left:6px;font-weight:400}.identifier{font-family:ui-monospace,monospace;font-size:10px;overflow-wrap:anywhere}
+@media(max-width:450px){body{padding:13px}.toolbar{flex-wrap:wrap}.toolbar input{width:100%;flex-basis:100%}.row-top{display:block}.state{display:inline-block;margin-top:6px}.roles{grid-template-columns:1fr}.roles dd{margin-bottom:5px}}
+</style>
+</head>
+<body>
+<header><div><div class="eyebrow">Ateles · current record</div><h1>Workboard<span id="count" class="count"></span></h1></div><button id="refresh" disabled>Refresh</button></header>
+<p id="status" class="muted" role="status" aria-live="polite">Connecting to this conversation…</p>
+<section id="primary" class="plan" hidden aria-label="Primary plan"></section>
+<div id="notice" class="notice" hidden role="status"></div>
+<div class="toolbar"><input id="search" aria-label="Find work" placeholder="Find work…" type="search"><select id="filter" aria-label="Filter work"><option value="all">All work</option><option value="operator-needed">Needs your decision</option><option value="blocked">Blocked</option><option value="active">Working now</option><option value="recorded">Recorded state</option><option value="session">Sessions</option></select></div>
+<main id="rows" aria-live="polite"><p class="empty">Waiting for the workboard read.</p></main>
+<footer>Read-only. The Primary plan sets display order. Session membership and recorded status do not establish authority, a lease or completion.</footer>
+<script>
+(() => {
+  "use strict";
+  const el = id => document.getElementById(id);
+  const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+  const strings = value => Array.isArray(value) && value.every(v => typeof v === "string");
+  function timestamp(value) {
+    if(typeof value!=="string")return false;
+    const match=value.match(/^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/);
+    if(!match || !Number.isFinite(Date.parse(value)))return false;
+    const year=Number(match[1]),month=Number(match[2]),day=Number(match[3]);
+    const leap=year%4===0 && (year%100!==0 || year%400===0);
+    return month>=1 && month<=12 && day>=1 && day<=[31,leap?29:28,31,30,31,30,31,31,30,31,30,31][month-1];
+  }
+  const entityId = value => typeof value === "string" && /^ent_[A-Za-z0-9_]+$/.test(value);
+  let nextId = 1, args = null, view = null, ready = false, hostTools = false;
+  let generation = 0, notificationPending = false, busy = false;
+  const pending = new Map();
+  const text = value => typeof value === "string" ? value : "unknown";
+  const send = message => window.parent.postMessage({jsonrpc:"2.0",...message}, "*");
+  const enabled = () => { el("refresh").disabled = !(ready && hostTools && args) || busy; };
+  function request(method, params) {
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { pending.delete(id); reject(new Error("The host did not answer.")); }, 45000);
+      pending.set(id, {resolve, reject, timer, method}); send({id,method,params});
+    });
+  }
+  function node(tag, value, cls) { const n = document.createElement(tag); if (value !== undefined) n.textContent = text(value); if(cls) n.className=cls; return n; }
+  function notice(message, error=false) { el("notice").hidden=!message; el("notice").textContent=message||""; el("notice").className=error?"notice error":"notice"; }
+  function size() { send({method:"ui/notifications/size-changed",params:{height:document.documentElement.scrollHeight}}); }
+  function failure(message) {
+    busy=false; enabled();
+    const previous=view ? " Last successful scope: "+view.session_key+" / "+view.display_plan_id+". Last successful read: "+view.observed_at+". Existing rows are stale." : " Current state is unknown.";
+    el("status").textContent=view ? "Stale · last read "+view.observed_at : "Current state unknown.";
+    const gaps=view ? [...view.read_gaps,...view.capability_gaps].join("\n") : "";
+    notice(message+previous+(gaps?"\nPrevious read limits: "+gaps:""),true);size();
+  }
+  function jsonValue(value, ancestors=new Set(), depth=0) {
+    if (depth>32) return false;
+    if (value===null || typeof value==="string" || typeof value==="boolean") return true;
+    if (typeof value==="number") return Number.isFinite(value);
+    if (!object(value) && !Array.isArray(value) || ancestors.has(value)) return false;
+    ancestors.add(value);
+    const valid=Object.values(value).every(child=>jsonValue(child,ancestors,depth+1));
+    ancestors.delete(value);return valid;
+  }
+  function validate(data) {
+    if (!jsonValue(data) || !object(data) || data.error || !args || data.session_key!==args.session_key || data.display_plan_id!==args.display_plan_id || !timestamp(data.observed_at) || !Array.isArray(data.rows) || !strings(data.read_gaps) || !strings(data.capability_gaps)) return false;
+    if (["harness","digest_id","refresh_rule","table"].some(k=>data[k]!=null && typeof data[k]!=="string")) return false;
+    if (data.session_coverage!==undefined && (!object(data.session_coverage) || Object.entries(data.session_coverage).some(([key,value])=>["requested","complete"].includes(key)?typeof value!=="boolean":["returned","limit"].includes(key)?!Number.isInteger(value)||value<0:true))) return false;
+    if ((args.include_history || data.history!==undefined) && (!object(data.history) || !Array.isArray(data.history.tasks_claimed) || !Array.isArray(data.history.artifacts))) return false;
+    let plans=0;
+    for (const row of data.rows) {
+      if (!object(row) || !["display-plan","operator-needed","blocked","active","recorded","queued"].includes(row.priority) || ["work","state","next_action"].some(k=>typeof row[k]!=="string")) return false;
+      if (row.priority==="display-plan") { plans++; if (row.entity_id!==undefined && row.entity_id!==args.display_plan_id) return false; }
+      if (row.entity_id!=null && !entityId(row.entity_id)) return false;
+      for (const key of ["kind","assigned_principal","lease_holder","runner","declared_step_owner","record_owner","recorded_executor","recorded_session_next_action","state_source","native_harness","native_session_id","native_kind","native_holder","native_task_id","routing_role"]) if (row[key]!=null && typeof row[key]!=="string") return false;
+      if (row.native_is_archived!=null && typeof row.native_is_archived!=="boolean") return false;
+      for (const key of ["native_last_activity_at","routing_observed_at"]) if (row[key]!=null && !timestamp(row[key])) return false;
+      if (row.read_gaps!==undefined && !strings(row.read_gaps)) return false;
+      if (row.evidence!==undefined && !strings(row.evidence)) return false;
+      if (row.planning_ascent!==undefined && (!Array.isArray(row.planning_ascent) || row.planning_ascent.some(parent=>!object(parent) || !entityId(parent.entity_id) || typeof parent.entity_type!=="string" || typeof parent.title!=="string"))) return false;
+    }
+    return plans<=1;
+  }
+  function render() {
+    if(!view)return;
+    const query=el("search").value.toLocaleLowerCase(), filter=el("filter").value;
+    const managed=view.rows.filter(r=>r.priority!=="display-plan");
+    const shown=managed.filter(r=>(filter==="all" || (filter==="session" ? r.kind==="session" : r.priority===filter)) && [r.work,r.next_action,r.state].join(" ").toLocaleLowerCase().includes(query));
+    const children=[];
+    if(!shown.length) children.push(node("p", managed.length ? "No work matches this filter." : view.read_gaps.length ? "No managed work is visible; coverage is unknown or partial." : "No managed work was returned by this read.","empty"));
+    for(const r of shown) {
+      const article=node("article",undefined,"row "+(["active","blocked","operator-needed"].includes(r.priority)?r.priority:"recorded"));
+      if(r.priority==="operator-needed") article.append(node("p","Needs your decision","eyebrow"));
+      const top=node("div",undefined,"row-top");top.append(node("h2",r.work),node("span",r.state,"state"));article.append(top,node("p",r.next_action,"next"));
+      const details=node("details"); details.addEventListener("toggle",size);details.append(node("summary","Roles and evidence")); const dl=node("dl",undefined,"roles");
+      for(const [label,key] of [["Assigned principal","assigned_principal"],["Lease holder","lease_holder"],["Runner","runner"],["Declared step owner","declared_step_owner"],["Record owner","record_owner"],["State source","state_source"]]) dl.append(node("dt",label),node("dd",r[key]));
+      if(r.kind==="session") { for(const [label,key] of [["Harness","native_harness"],["Native session","native_session_id"],["Native kind","native_kind"],["Native holder","native_holder"],["Native activity observed","native_last_activity_at"],["Routing role (recorded)","routing_role"],["Routing observed","routing_observed_at"]]) dl.append(node("dt",label),node("dd",r[key]));dl.append(node("dt","Native archive flag"),node("dd",typeof r.native_is_archived==="boolean"?String(r.native_is_archived):"unknown")); }
+      details.append(dl);
+      if(r.recorded_session_next_action)details.append(node("p","Session history next action: "+r.recorded_session_next_action,"muted"));
+      if(r.entity_id)details.append(node("p",r.entity_id,"identifier"));
+      for(const parent of r.planning_ascent||[])details.append(node("p","Planning context: "+parent.entity_type+": "+parent.title,"muted"));
+      for(const gap of r.read_gaps||[])details.append(node("p",gap,"muted"));
+      article.append(details);children.push(article);
+    }
+    if(view.history) {const history=node("details");history.addEventListener("toggle",size);history.append(node("summary","Cumulative session history (not current status)"),node("pre",JSON.stringify(view.history,null,2)));children.push(history);}
+    const plan=view.rows.find(r=>r.priority==="display-plan");const primary=[node("p","Display context: "+view.session_key+" · "+view.display_plan_id+". This selection creates no authority.","muted")];
+    if(plan)primary.unshift(node("div","Primary plan","eyebrow"),node("h2",plan.work),node("p",plan.state,"muted"),node("p",plan.next_action));
+    el("primary").replaceChildren(...primary);el("primary").hidden=false;
+    el("rows").replaceChildren(...children);el("count").textContent=` · ${shown.length}`;size();
+  }
+  function applyResult(result, version) {
+    if(version!==generation){failure("A superseded read was rejected.");return;}
+    const data=object(result)?result.structuredContent:null;
+    if(!object(result) || result.isError || !validate(data)){failure(object(data)&&typeof data.error==="string"?data.error:"The workboard response was incomplete, malformed or for another scope.");return;}
+    // Commit only after the entire result has passed validation.
+    view=data;busy=false;enabled();el("status").textContent="Read "+view.observed_at;
+    const gaps=[...view.read_gaps,...view.capability_gaps];notice(gaps.length?"Read limits: "+gaps.join("\n"):"");render();
+  }
+  function cancelPending(message){for(const [id,p] of pending)if(p.method==="tools/call"){clearTimeout(p.timer);pending.delete(id);p.reject(new Error(message));}}
+  function setArgs(value){
+    if(!object(value) || typeof value.session_key!=="string" || !value.session_key.trim() || value.session_key.length>256 || !entityId(value.display_plan_id) || ["include_history","include_sessions"].some(k=>value[k]!==undefined && typeof value[k]!=="boolean")){generation++;notificationPending=false;cancelPending("Invalid input");failure("The workboard input is invalid.");return;}
+    const candidate={session_key:value.session_key,display_plan_id:value.display_plan_id,include_history:value.include_history===true,include_sessions:value.include_sessions===true};
+    if(args && (candidate.session_key!==args.session_key || candidate.display_plan_id!==args.display_plan_id || candidate.include_history!==args.include_history)){generation++;notificationPending=false;cancelPending("Scope changed");failure("A different workboard scope was rejected. Open a new view for that scope.");return;}
+    args=candidate;generation++;notificationPending=true;cancelPending("Read superseded");busy=false;enabled();if(view)failure("A new read is pending.");
+  }
+  window.addEventListener("message",event=>{
+    if(event.source!==window.parent)return;const m=event.data;if(!object(m)||m.jsonrpc!=="2.0")return;
+    if(Number.isInteger(m.id) && pending.has(m.id) && (("result" in m)!=("error" in m)) && m.method===undefined){const p=pending.get(m.id);pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(new Error(text(m.error.message))):p.resolve(m.result);return;}
+    if(m.method==="ui/notifications/tool-input" && m.id===undefined)setArgs(m.params&&m.params.arguments);
+    else if(m.method==="ui/notifications/tool-result" && m.id===undefined){if(!notificationPending || busy){failure("An uncorrelated workboard result was rejected.");return;}notificationPending=false;applyResult(m.params,generation);}
+    else if(m.method==="ui/notifications/tool-cancelled" && m.id===undefined){generation++;notificationPending=false;cancelPending("Read cancelled");failure("The read was cancelled.");}
+    else if(m.method==="ui/notifications/host-context-changed" && m.id===undefined){if(m.params&&["dark","light"].includes(m.params.theme))document.documentElement.style.colorScheme=m.params.theme;size();}
+    else if(m.method==="ui/resource-teardown" && Number.isInteger(m.id)){generation++;for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error("View closed"));}pending.clear();failure("View closed.");send({id:m.id,result:{}});}
+  });
+  async function refresh(){
+    if(!args||!ready||!hostTools||el("refresh").disabled)return;
+    const version=++generation, requestArgs={...args};cancelPending("Read superseded");notificationPending=false;busy=true;enabled();el("status").textContent="Reading current records…";
+    try{const result=await request("tools/call",{name:"get_session_workboard",arguments:requestArgs});applyResult(result,version);}
+    catch(e){if(version===generation)failure(e.message);}
+    finally{if(version===generation){busy=false;enabled();}}
+  }
+  el("search").addEventListener("input",render);el("filter").addEventListener("change",()=>{render();if(el("filter").value==="session"&&args&&!args.include_sessions){args={...args,include_sessions:true};refresh();}});
+  el("refresh").addEventListener("click",refresh);
+  request("ui/initialize",{protocolVersion:"2026-01-26",appInfo:{name:"Ateles workboard",version:"1.0.0"},appCapabilities:{availableDisplayModes:["inline"]}}).then(result=>{
+    if(!object(result))throw new Error("Invalid host initialization");ready=true;hostTools=!!(object(result.hostCapabilities)&&object(result.hostCapabilities.serverTools));const context=result.hostContext||{};if(["light","dark"].includes(context.theme))document.documentElement.style.colorScheme=context.theme;
+    send({method:"ui/notifications/initialized"});enabled();if(!view)el("status").textContent="Connected. Waiting for current records…";size();
+  }).catch(e=>failure(e.message));
+})();
+</script>
+</body>
+</html>

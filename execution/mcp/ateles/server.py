@@ -2,7 +2,7 @@
 """
 ateles — MCP server for Ateles swarm routing and checkpoint management.
 
-Provides nine tools that wrap multi-step Neotoma/GitHub query patterns into
+Provides ten tools that wrap multi-step Neotoma/GitHub query patterns into
 single calls, so any connected agent gets reliable swarm interaction without
 re-deriving the roster/policy/checkpoint dance — or the entity-read plus
 log-grep dance — each session.
@@ -24,6 +24,8 @@ Tools:
                                                                   [read-only]
   watch_swarm         — bounded long-poll: what changed since a cursor for the
                         given tasks and checkpoints               [read-only]
+
+  get_session_workboard — one session digest’s derived task/plan view [read-only]
 
 The observability tools never write gate state — see the SELF-CERTIFICATION
 BOUNDARY note above their implementations. Their reads fail CLOSED: a failed
@@ -52,6 +54,7 @@ import asyncio
 import base64
 import contextvars
 import hmac
+import hashlib
 import inspect
 import json
 import logging
@@ -69,7 +72,10 @@ from urllib.parse import urlsplit
 import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
+from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.types import (
+    CallToolResult,
+    Resource,
     TextContent,
     Tool,
 )
@@ -89,7 +95,7 @@ from lib.daemon_runtime.action_type import (  # noqa: E402
     resolve_gate_action_type,
 )
 
-from lib.daemon_runtime.gating import _parse_policy  # noqa: E402
+from lib.daemon_runtime.gating import MAX_QUERY_OFFSET, _parse_policy  # noqa: E402
 
 log = logging.getLogger("ateles")
 
@@ -398,6 +404,7 @@ def _retrieve_page(
     limit: int = 100,
     include_snapshots: bool = True,
     cursor: str | None = None,
+    offset: int = 0,
 ) -> dict | None:
     """One page, WITH the response's own `total` and `next_cursor` preserved.
 
@@ -422,6 +429,8 @@ def _retrieve_page(
         body["snapshot_filters"] = snapshot_filters
     if cursor:
         body["cursor"] = cursor
+    if offset > 0:
+        body["offset"] = offset
     # POST /entities/query — NOT /retrieve, which 404s. The GET /entities list
     # endpoint does not exist either; see lib/daemon_runtime/agent_loader.py.
     return _post("/entities/query", body)
@@ -530,6 +539,939 @@ def _correct(
         encoded_body=encoded_body,
     )
     return result is not None
+
+
+# ── Session workboard ───────────────────────────────────────────────────────
+
+WORKBOARD_RESOURCE_MIME = "text/html;profile=mcp-app"
+_WORKBOARD_HTML_PATH = Path(__file__).with_name("workboard.html")
+_WORKBOARD_HTML = _WORKBOARD_HTML_PATH.read_text()
+WORKBOARD_RESOURCE_URI = (
+    "ui://ateles/workboard-"
+    + hashlib.sha256(_WORKBOARD_HTML.encode()).hexdigest()[:16]
+    + ".html"
+)
+_WORKBOARD_UI_META = {
+    "csp": {"connectDomains": [], "resourceDomains": [], "frameDomains": []},
+    "prefersBorder": True,
+}
+
+
+def _workboard_resource() -> Resource:
+    return Resource(
+        uri=WORKBOARD_RESOURCE_URI,
+        name="ateles_workboard",
+        title="Ateles workboard",
+        description="Read-only derived work and session history",
+        mimeType=WORKBOARD_RESOURCE_MIME,
+        **{"_meta": {"ui": _WORKBOARD_UI_META}},
+    )
+
+
+# This is an on-demand derived read, deliberately not another record.  A
+# session_digest is summarized history, never canonical live truth.  The
+# workboard labels ordinary task/plan fields as recorded state; only separate
+# live lease and activity evidence can support an ``active`` label.  A cached
+# or separately-written board would go stale in exactly the direction an
+# operator needs it to be current.
+_TERMINAL_TASK_STATES = {
+    "done",
+    "completed",
+    "verified",
+    "closed",
+    "failed",
+    "declined",
+    "superseded",
+    "cancelled",
+    "canceled",
+}
+_WORKBOARD_ORDER = {
+    "display-plan": 0,
+    "active": 1,
+    "queued": 2,
+    "blocked": 3,
+    "operator-needed": 4,
+    "recorded": 5,
+}
+
+
+def _text(value: Any) -> str | None:
+    """Return a non-blank string, never coercing a structured value to prose."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _as_snapshot(entity: dict | None) -> dict:
+    """Tolerate both `/entities/:id` and `/entities/query` response shapes."""
+    if not isinstance(entity, dict):
+        return {}
+    snap = entity.get("snapshot")
+    if isinstance(snap, dict):
+        nested = snap.get("snapshot")
+        return nested if isinstance(nested, dict) else snap
+    return entity
+
+
+def _entity_type(entity: dict | None) -> str | None:
+    return _text(entity.get("entity_type")) if isinstance(entity, dict) else None
+
+
+def _evidence_entity_ids(claim: dict) -> list[str]:
+    """Resolve only explicit entity locators; prose is not a live-state source."""
+    raw = claim.get("evidence_pointers")
+    raw = raw if isinstance(raw, list) else []
+    explicit_task = claim.get("task_entity_id")
+    if isinstance(explicit_task, str):
+        raw = [explicit_task, *raw]
+    return list(
+        dict.fromkeys(
+            pointer
+            for pointer in raw
+            if isinstance(pointer, str) and re.fullmatch(r"ent_[A-Za-z0-9_]+", pointer)
+        )
+    )
+
+
+def _find_session_digest(session_key: str) -> dict | None:
+    """Find by stored session_key, not by the current harness or worktree."""
+    page = _retrieve_page(
+        "session_digest",
+        snapshot_filters={"session_key": {"op": "eq", "value": session_key}},
+        limit=2,
+    )
+    if page is None:
+        raise ValueError(
+            _describe_transport_error() or "session_digest query could not be read"
+        )
+    rows = page.get("entities") if isinstance(page, dict) else None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("session_digest query returned malformed records")
+    total = page.get("total")
+    if (
+        not isinstance(total, int)
+        or isinstance(total, bool)
+        or total != len(rows)
+        or page.get("next_cursor")
+    ):
+        raise ValueError("session_digest query coverage is incomplete or ambiguous")
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and _entity_type(row) == "session_digest"
+        and _as_snapshot(row).get("session_key") == session_key
+    ]
+    if len(matches) > 1:
+        raise ValueError(
+            "session_key identifies multiple digests; select an unambiguous lineage"
+        )
+    if len(matches) != len(rows):
+        raise ValueError("session_digest query returned a different native lineage")
+    return matches[0] if matches else None
+
+
+def _claim_workboard(claim: dict) -> dict:
+    """Read optional workboard metadata without requiring a schema expansion."""
+    board = claim.get("workboard")
+    return board if isinstance(board, dict) else {}
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    text = _text(value)
+    if text is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else None
+
+
+def _workboard_relationships(
+    entity_id: str, cache: dict
+) -> tuple[list[dict] | None, str | None]:
+    path = f"/entities/{entity_id}/relationships?expand_entities=true"
+    if path not in cache:
+        cache[path] = _get(path)
+    data = cache[path]
+    if not isinstance(data, dict) or not isinstance(data.get("relationships"), list):
+        return None, f"Relationships for {entity_id} could not be read"
+    rels = data["relationships"]
+    if any(not isinstance(r, dict) for r in rels):
+        return None, f"Relationships for {entity_id} are malformed"
+    # The owning REST endpoint returns complete outgoing/incoming arrays,
+    # not a paginated collection with a `total` (Neotoma actions.ts).
+    outgoing, incoming = data.get("outgoing"), data.get("incoming")
+    full_arrays = (
+        isinstance(outgoing, list)
+        and isinstance(incoming, list)
+        and outgoing + incoming == rels
+    )
+    total = data.get("total")
+    counted_page = (
+        isinstance(total, int)
+        and not isinstance(total, bool)
+        and total == len(rels)
+        and not data.get("next_cursor")
+    )
+    contradictory = (
+        data.get("next_cursor") is not None
+        or ("total" in data and (type(total) is not int or total != len(rels)))
+        or ("complete" in data and data["complete"] is not True)
+        or ("has_more" in data and data["has_more"] is not False)
+        or (
+            "offset" in data
+            and (type(data["offset"]) is not int or data["offset"] != 0)
+        )
+        or (("outgoing" in data or "incoming" in data) and not full_arrays)
+    )
+    if contradictory or not (full_arrays or counted_page):
+        return None, f"Relationship coverage for {entity_id} is incomplete or unknown"
+    if any(
+        type(r.get("is_live")) not in (bool, int) or r.get("is_live") not in (0, 1)
+        for r in rels
+    ):
+        return None, f"Relationship liveness for {entity_id} is unknown"
+    return [r for r in rels if r["is_live"] == 1], None
+
+
+def _live_execution_evidence(
+    board: dict,
+    task_id: str | None = None,
+    cache: dict | None = None,
+    read_gaps: list[str] | None = None,
+) -> dict:
+    """Join a held canonical LEASE to its producer-linked recent runner session."""
+
+    def unknown(message):
+        if read_gaps is not None:
+            read_gaps.append(message + "; current execution is unknown")
+        return {}
+
+    if not task_id:
+        return {}
+    cache = cache if cache is not None else {}
+    rels, error = _workboard_relationships(task_id, cache)
+    if error or rels is None:
+        return unknown(error or "Task relationships could not be read")
+    now = datetime.now(timezone.utc)
+    held = []
+    for rel in rels:
+        if (
+            rel.get("relationship_type") != "LEASE"
+            or rel.get("target_entity_id") != task_id
+        ):
+            continue
+        fields = rel.get("snapshot")
+        if not isinstance(fields, dict):
+            return unknown("Lease fields are malformed")
+        claimed = _parse_timestamp(fields.get("claimed_at"))
+        expires = _parse_timestamp(fields.get("expires_at"))
+        if not (claimed and expires and claimed <= now and claimed < expires):
+            return unknown("Lease dates are malformed or inconsistent")
+        returned = fields.get("returned_at")
+        if returned is not None:
+            ended = _parse_timestamp(returned)
+            if not ended or not claimed <= ended <= now:
+                return unknown("Lease return date is malformed")
+            continue
+        if expires > now:
+            held.append((rel, fields, claimed))
+    if not held:
+        return {}
+    if len(held) != 1:
+        return unknown("More than one held task lease was returned")
+    rel, lease, claimed = held[0]
+    holder, runner = _text(rel.get("source_entity_id")), _text(lease.get("runner_id"))
+    if not holder or not re.fullmatch(r"ent_[A-Za-z0-9_]+", holder) or not runner:
+        return unknown("The held lease lacks its holder or runner")
+    # session_finalize.build_run_session_payload emits REFERS_TO and trigger_ref,
+    # not a task_id field on agent_session. Discover from that canonical join.
+    candidates = list(
+        dict.fromkeys(
+            r.get("source_entity_id")
+            for r in rels
+            if r.get("relationship_type") == "REFERS_TO"
+            and r.get("target_entity_id") == task_id
+        )
+    )
+    refs = board.get("live_execution_evidence")
+    locator = refs.get("activity_ref") if isinstance(refs, dict) else None
+    if locator is not None and (
+        not isinstance(locator, str)
+        or not re.fullmatch(r"ent_[A-Za-z0-9_]+", locator)
+        or locator not in candidates
+    ):
+        # Digest locators are history, never a veto on current canonical facts.
+        warning = "Historical activity locator cannot be used; current execution is derived independently"
+        if read_gaps is not None and warning not in read_gaps:
+            read_gaps.append(warning)
+    if (
+        any(
+            not isinstance(ref, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", ref)
+            for ref in candidates
+        )
+        or len(candidates) > 50
+    ):
+        return unknown(
+            "Activity relationship coverage is malformed or exceeds the read bound"
+        )
+    matched = []
+    incomplete = False
+    for reference in candidates:
+        path = f"/entities/{reference}"
+        if path not in cache:
+            cache[path] = _get(path)
+        record = cache[path]
+        if not isinstance(record, dict):
+            incomplete = True
+            continue
+        if _entity_type(record) != "agent_session":
+            continue
+        activity = record.get("snapshot")
+        if not isinstance(activity, dict):
+            incomplete = True
+            continue
+        if activity.get("native_session_id") != runner:
+            continue
+        # Require the lifecycle emitted by the active run producer as well as
+        # the independently qualified lease, task binding and recent activity.
+        if activity.get("status") != "active":
+            return unknown("The held runner's activity lifecycle is not qualified")
+        now = datetime.now(timezone.utc)
+        observed = _parse_timestamp(activity.get("last_activity_at"))
+        if (
+            activity.get("trigger_ref") != task_id
+            or activity.get("kind") not in {"autonomous", "subagent"}
+            or not observed
+            or not max(claimed, now - timedelta(minutes=5)) <= observed <= now
+        ):
+            incomplete = True
+            continue
+        matched.append(reference)
+    if incomplete or len(matched) != 1:
+        return unknown(
+            "A unique recent activity record for the held runner could not be verified"
+        )
+    if _parse_timestamp(lease.get("expires_at")) <= datetime.now(timezone.utc):
+        return unknown("The lease expired during the read")
+    return {
+        "lease_holder": holder,
+        "runner": runner,
+        "lease_ref": rel.get("relationship_key") or rel.get("id"),
+        "activity_ref": matched[0],
+    }
+
+
+def _open_operator_checkpoint(
+    snapshot: dict,
+    board: dict,
+    task_id: str | None = None,
+    read_gaps: list[str] | None = None,
+) -> bool:
+    """Validate every returned brief; a malformed read cannot prove absence."""
+    from lib.daemon_runtime.gating import (
+        CHECKPOINT_APPROVED_STATES,
+        CHECKPOINT_REJECTED_STATES,
+        CHECKPOINT_APPROVED_NO_RELEASE,
+        CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+    )
+
+    closed = (
+        CHECKPOINT_APPROVED_STATES
+        | CHECKPOINT_REJECTED_STATES
+        | {
+            CHECKPOINT_APPROVED_NO_RELEASE,
+            CHECKPOINT_REQUIRES_FRESH_APPROVAL,
+        }
+    )
+
+    def unknown(message):
+        if read_gaps is not None:
+            read_gaps.append(message + "; operator attention is unknown")
+
+    def inspect_record(record, *, filtered=False, reference=None):
+        if not isinstance(record, dict) or _entity_type(record) != "checkpoint_brief":
+            unknown("A checkpoint record could not be read as a checkpoint brief")
+            return False
+        identity = record.get("entity_id") or record.get("id")
+        if identity is not None and (not isinstance(identity, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", identity) or (reference is not None and identity != reference)):
+            unknown("A checkpoint identity is inconsistent with the requested record")
+            return False
+        fields = record.get("snapshot")
+        if not isinstance(fields, dict):
+            unknown("A checkpoint snapshot is malformed")
+            return False
+        bindings = [fields[k] for k in ("task_entity_id", "task_id") if k in fields]
+        status = fields.get("status")
+        dispatched = fields.get("resolved_dispatched")
+        resolved = fields.get("resolved_at")
+        if (
+            not bindings
+            or any(value != task_id for value in bindings)
+            or not isinstance(status, str)
+            or status not in closed | {"awaiting_operator"}
+            or (dispatched is not None and type(dispatched) is not bool)
+            or (resolved is not None and _parse_timestamp(resolved) is None)
+            or (filtered and status != "awaiting_operator")
+            or (
+                status == "awaiting_operator"
+                and (dispatched is True or resolved is not None)
+            )
+        ):
+            unknown("A checkpoint has inconsistent task, state or resolution fields")
+            return False
+        return status == "awaiting_operator"
+
+    found = False
+    for reference in dict.fromkeys(
+        value
+        for value in (
+            snapshot.get("operator_checkpoint_ref"),
+            snapshot.get("checkpoint_ref"),
+            snapshot.get("gate_ref"),
+            board.get("operator_checkpoint_ref"),
+        )
+        if value is not None and isinstance(value, str)
+    ):
+        if not re.fullmatch(r"ent_[A-Za-z0-9_]+", reference):
+            unknown("A checkpoint locator is malformed")
+            continue
+        found = inspect_record(_get(f"/entities/{reference}"), reference=reference) or found
+    for source, keys in (
+        (snapshot, ("operator_checkpoint_ref", "checkpoint_ref", "gate_ref")),
+        (board, ("operator_checkpoint_ref",)),
+    ):
+        if any(
+            k in source and source[k] is not None and not isinstance(source[k], str)
+            for k in keys
+        ):
+            unknown("A checkpoint locator is malformed")
+    if not task_id:
+        return found
+    page = _retrieve_page(
+        "checkpoint_brief",
+        snapshot_filters={
+            "task_entity_id": {"op": "eq", "value": task_id},
+            "status": {"op": "eq", "value": "awaiting_operator"},
+        },
+        limit=50,
+    )
+    malformed, partial = (
+        _filtered_read_problem(page, "this task's open checkpoints", 50)
+        if page is not None
+        else ("unavailable", None)
+    )
+    if malformed:
+        unknown(f"Checkpoints for {task_id} could not be read completely")
+        return found
+    if partial:
+        unknown(partial)
+    for checkpoint in page["entities"]:
+        found = inspect_record(checkpoint, filtered=True) or found
+    return found
+
+
+def _is_explicitly_claimable(snapshot: dict) -> bool:
+    """A stored flag is not the canonical claim predicate.
+
+    The current adapter has no qualified predicate read. Keep recorded state
+    until one is supplied by the owning record implementation; do not invent
+    lease/checkpoint absence from missing task fields.
+    """
+    return False
+
+
+def _bucket_for(
+    snapshot: dict,
+    board: dict,
+    status: str,
+    live_execution: dict,
+    task_id: str | None = None,
+    read_gaps: list[str] | None = None,
+) -> str:
+    if _open_operator_checkpoint(snapshot, board, task_id, read_gaps):
+        return "operator-needed"
+    if status == "blocked":
+        return "blocked"
+    if live_execution:
+        return "active"
+    if _is_explicitly_claimable(snapshot):
+        return "queued"
+    return "recorded"
+
+
+def _next_action(
+    snapshot: dict, claim: dict, bucket: str, has_live_record: bool
+) -> str:
+    board = _claim_workboard(claim)
+    candidates = (
+        snapshot.get("next_action"),
+        snapshot.get("next_steps"),
+        snapshot.get("blocked_reason"),
+    )
+    if not has_live_record:
+        candidates += (board.get("next_action"),)
+    for candidate in candidates:
+        value = _text(candidate)
+        if value:
+            return value
+    if bucket == "operator-needed":
+        return "Operator decision or review required"
+    if bucket == "blocked":
+        return "Resolve the recorded blocker"
+    if bucket == "active":
+        return "Continue the live lease"
+    if bucket == "queued":
+        return "Claim the explicitly claimable work"
+    return "Recorded next action unavailable"
+
+
+def _planning_ascent(entity_id: str, cache: dict) -> tuple[list[dict], list[str]]:
+    """Follow current outgoing PART_OF only, disclosing gaps and ambiguity."""
+    ascent: list[dict] = []
+    seen = {entity_id}
+    current = entity_id
+
+    def read(path):
+        if path not in cache:
+            cache[path] = _get(path)
+        return cache[path]
+
+    for _ in range(8):
+        rels, error = _workboard_relationships(current, cache)
+        if error or rels is None:
+            return ascent, [error or "Planning relationships are unknown"]
+        parents = list(
+            dict.fromkeys(
+                r.get("target_entity_id")
+                for r in rels
+                if isinstance(r, dict)
+                and r.get("source_entity_id") == current
+                and str(r.get("relationship_type", "")).upper() == "PART_OF"
+            )
+        )
+        if not parents:
+            return ascent, (
+                [] if ascent else [f"No planning parent is recorded for {current}"]
+            )
+        if len(parents) != 1:
+            return ascent, [
+                f"Multiple planning parents are recorded for {current}; no parent was selected"
+            ]
+        parent = parents[0]
+        if (
+            not isinstance(parent, str)
+            or not re.fullmatch(r"ent_[A-Za-z0-9_]+", parent)
+            or parent in seen
+        ):
+            return ascent, ["The planning ascent has an invalid or repeated parent"]
+        record = read(f"/entities/{parent}")
+        if not isinstance(record, dict) or not _entity_type(record):
+            return ascent, [f"Planning parent {parent} could not be read"]
+        ascent.append(
+            {
+                "entity_id": parent,
+                "entity_type": _entity_type(record),
+                "title": _text(_as_snapshot(record).get("title")) or parent,
+            }
+        )
+        seen.add(parent)
+        current = parent
+    return ascent, ["The planning ascent exceeded the eight-level read bound"]
+
+
+def _claim_row(claim: dict, planning_cache: dict | None = None) -> dict | None:
+    """Build one derived row without promoting digest history to live truth."""
+    evidence = _evidence_entity_ids(claim)
+    title = _text(claim.get("claim")) or (evidence[0] if evidence else None)
+    if not title:
+        return None
+    board = _claim_workboard(claim)
+    live_record: dict | None = None
+    read_gaps: list[str] = []
+    if "task_entity_id" in claim and (
+        not isinstance(claim["task_entity_id"], str)
+        or not re.fullmatch(r"ent_[A-Za-z0-9_]+", claim["task_entity_id"])
+    ):
+        read_gaps.append(
+            "The explicit task locator is malformed; current task state is unknown"
+        )
+        evidence = []
+    if "evidence_pointers" in claim and (
+        not isinstance(claim["evidence_pointers"], list)
+        or any(
+            not isinstance(v, str) or not re.fullmatch(r"ent_[A-Za-z0-9_]+", v)
+            for v in claim["evidence_pointers"]
+        )
+    ):
+        read_gaps.append(
+            "Some evidence locators are malformed; evidence coverage is partial"
+        )
+    if "workboard" in claim and not isinstance(claim["workboard"], dict):
+        read_gaps.append(
+            "The historical workboard metadata is malformed; evidence coverage is partial"
+        )
+    refs = board.get("live_execution_evidence")
+    if refs is not None and not isinstance(refs, dict):
+        read_gaps.append(
+            "Historical activity metadata is malformed; its recorded evidence cannot be verified"
+        )
+    elif (
+        isinstance(refs, dict)
+        and "activity_ref" in refs
+        and (
+            not isinstance(refs["activity_ref"], str)
+            or not re.fullmatch(r"ent_[A-Za-z0-9_]+", refs["activity_ref"])
+        )
+    ):
+        read_gaps.append(
+            "Historical activity locator cannot be used; current execution is derived independently"
+        )
+    task_id: str | None = None
+    for entity_id in evidence:
+        candidate = _get(f"/entities/{entity_id}")
+        if (
+            entity_id == claim.get("task_entity_id")
+            and _entity_type(candidate) != "task"
+        ):
+            read_gaps.append(
+                f"Explicit task {entity_id} could not be read as a task; its current state is unknown"
+            )
+            break
+        if _entity_type(candidate) in {"task", "plan"}:
+            live_record = candidate
+            task_id = entity_id
+            break
+        if candidate is None:
+            read_gaps.append(
+                f"Referenced record {entity_id} could not be read; its current state is unknown"
+            )
+    record_kind = _entity_type(live_record)
+    snapshot = _as_snapshot(live_record)
+    if live_record is not None and not isinstance(live_record.get("snapshot"), dict):
+        read_gaps.append(
+            "The current record snapshot is malformed; current state is unknown"
+        )
+        live_record = None
+        snapshot = {}
+    live_status = _text(snapshot.get("status"))
+    status = (
+        live_status
+        or _text(claim.get("recorded_status"))
+        or _text(claim.get("status_claimed"))
+        or "unknown"
+    )
+    # Historical completion, send, and handoff flags cannot discharge today's
+    # obligations. Keep the row until an owning verifier supplies actual
+    # completion/recovery evidence. UI filters change visibility only.
+    cache = planning_cache if planning_cache is not None else {}
+    live_execution = (
+        _live_execution_evidence(board, task_id, cache, read_gaps)
+        if record_kind == "task"
+        and snapshot.get("admission_class") == "workflow_entering"
+        and status.lower() not in _TERMINAL_TASK_STATES
+        else {}
+    )
+    bucket = (
+        _bucket_for(snapshot, board, status.lower(), live_execution, task_id, read_gaps)
+        if live_record is not None
+        else "recorded"
+    )
+    state = "Working now" if live_execution else f"Recorded state: {status}"
+    ascent, planning_gaps = _planning_ascent(task_id, cache) if task_id else ([], [])
+    read_gaps.extend(planning_gaps)
+    return {
+        "kind": record_kind or "task",
+        "priority": bucket,
+        "work": _text(snapshot.get("title")) or title,
+        "state": state,
+        "assigned_principal": _text(snapshot.get("assigned_to")) or "unknown",
+        "lease_holder": live_execution.get("lease_holder") or "unknown",
+        "runner": live_execution.get("runner") or "unknown",
+        "declared_step_owner": _text(snapshot.get("step_owner")) or "unknown",
+        "record_owner": _text(snapshot.get("owner")) or "unknown",
+        "recorded_executor": _text(snapshot.get("executor")) or "unknown",
+        "recorded_session_next_action": _text(claim.get("next_action")),
+        "next_action": _next_action(snapshot, claim, bucket, live_record is not None),
+        "evidence": evidence,
+        "state_source": "live_lease_and_activity"
+        if live_execution
+        else (f"recorded_{record_kind}" if live_record else "session_digest_history"),
+        "entity_id": task_id,
+        "read_gaps": read_gaps,
+        "planning_ascent": ascent,
+    }
+
+
+def _format_workboard(rows: list[dict]) -> str:
+    """One compact, copyable table for every MCP-connected harness."""
+    table = [
+        "| Priority | Work | State | Assigned principal | Lease holder | Runner | Declared step owner | Next action |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for row in rows:
+        cells = [
+            str(row["priority"]),
+            str(row["work"]),
+            str(row["state"]),
+            str(row.get("assigned_principal", "unknown")),
+            str(row.get("lease_holder", "unknown")),
+            str(row.get("runner", "unknown")),
+            str(row.get("declared_step_owner", "unknown")),
+            str(row["next_action"]),
+        ]
+        table.append(
+            "| "
+            + " | ".join(cell.replace("|", "\\|").replace("\n", " ") for cell in cells)
+            + " |"
+        )
+    return "\n".join(table)
+
+
+def _workboard_session_rows() -> tuple[list[dict], list[str], dict]:
+    """A bounded native-session read, never an ownership or liveness authority."""
+    page = _retrieve_page("agent_session", limit=50)
+    if not isinstance(page, dict) or not isinstance(page.get("entities"), list):
+        return (
+            [],
+            ["Session registry could not be read; session coverage is unknown"],
+            {"complete": False},
+        )
+    if len(page["entities"]) > 50:
+        return (
+            [],
+            ["Session registry exceeded its read bound; session coverage is unknown"],
+            {"complete": False},
+        )
+    rows = []
+    gaps = []
+    identities: set[tuple[str, str]] = set()
+    for record in page["entities"]:
+        fields = _as_snapshot(record)
+        harness = _text(fields.get("harness"))
+        native = _text(fields.get("native_session_id"))
+        if not harness or not native or _entity_type(record) != "agent_session":
+            gaps.append(
+                "A session row lacks its native identity; it was not assigned a routing identity"
+            )
+            continue
+        identity = (harness, native)
+        if identity in identities:
+            gaps.append(
+                "The bounded registry read contains a repeated native session identity; routing is ambiguous"
+            )
+        identities.add(identity)
+        rows.append(
+            {
+                "kind": "session",
+                "priority": "recorded",
+                "entity_id": record.get("entity_id") or record.get("id"),
+                "work": _text(fields.get("title")) or f"{harness}: {native}",
+                "state": "Native state: " + (_text(fields.get("status")) or "unknown"),
+                "native_harness": harness,
+                "native_session_id": native,
+                "native_kind": fields.get("kind"),
+                "native_holder": fields.get("holder"),
+                "native_task_id": fields.get("task_id"),
+                "native_last_activity_at": fields.get("last_activity_at"),
+                "native_is_archived": fields.get("is_archived"),
+                "routing_role": fields.get("coordination_role"),
+                "routing_observed_at": fields.get("routing_observed_at"),
+                "assigned_principal": "unknown",
+                "lease_holder": "unknown",
+                "runner": "unknown",
+                "declared_step_owner": "unknown",
+                "record_owner": "unknown",
+                "state_source": "recorded_agent_session",
+                "next_action": "Read the owning task and current routing evidence before a handoff.",
+                "read_gaps": [],
+                "evidence": [record.get("entity_id") or record.get("id")],
+            }
+        )
+    total = page.get("total")
+    complete = (
+        not gaps
+        and isinstance(total, int)
+        and not isinstance(total, bool)
+        and total == len(page["entities"])
+        and total <= 50
+        and not page.get("next_cursor")
+    )
+    if not complete:
+        gaps.append(
+            "Session rows are a bounded page; full registry coverage is not established"
+        )
+    return rows, gaps, {"complete": complete, "returned": len(rows), "limit": 50}
+
+
+def _get_session_workboard(
+    session_key: str,
+    display_plan_id: str,
+    include_history: bool = False,
+    include_sessions: bool = False,
+) -> dict:
+    """Derive an on-demand session summary with one explicitly selected plan.
+
+    `session_key` is deliberately harness-agnostic: a Codex session can inspect
+    a Claude or Cursor digest through the same MCP server.  The display plan is
+    explicit and affects table order only; it creates no authority or session
+    binding and no hidden default plan is inferred.
+    """
+    if (
+        not isinstance(session_key, str)
+        or not session_key.strip()
+        or len(session_key) > 256
+    ):
+        return {
+            "error": "session_key must be a nonempty string of at most 256 characters"
+        }
+    if not isinstance(display_plan_id, str) or not re.fullmatch(
+        r"ent_[A-Za-z0-9_]+", display_plan_id
+    ):
+        return {"error": "display_plan_id must be an entity id"}
+    try:
+        digest_entity = _find_session_digest(session_key)
+    except ValueError as exc:
+        return {"error": str(exc), "session_key": session_key}
+    if digest_entity is None:
+        detail = _describe_transport_error()
+        return {
+            "error": detail or "session_digest not found",
+            "session_key": session_key,
+        }
+    plan_entity = _get(f"/entities/{display_plan_id}")
+    if plan_entity is None:
+        detail = _describe_transport_error()
+        return {
+            "error": detail or "display plan not found",
+            "session_key": session_key,
+            "display_plan_id": display_plan_id,
+        }
+    if _entity_type(plan_entity) != "plan":
+        return {
+            "error": "display_plan_id does not identify a plan",
+            "session_key": session_key,
+            "display_plan_id": display_plan_id,
+        }
+
+    digest = _as_snapshot(digest_entity)
+    plan = _as_snapshot(plan_entity)
+    rows: list[dict] = [
+        {
+            "kind": "plan",
+            "priority": "display-plan",
+            "work": _text(plan.get("title")) or display_plan_id,
+            "state": f"Recorded state: {_text(plan.get('status')) or 'unknown'}",
+            "assigned_principal": _text(plan.get("assigned_to")) or "unknown",
+            "lease_holder": "unknown",
+            "runner": "unknown",
+            "declared_step_owner": _text(plan.get("step_owner")) or "unknown",
+            "record_owner": _text(plan.get("owner")) or "unknown",
+            "next_action": _text(plan.get("next_steps"))
+            or "Read the current plan next steps",
+            "evidence": [display_plan_id],
+            "state_source": "recorded_plan",
+            "entity_id": display_plan_id,
+            "read_gaps": [],
+        }
+    ]
+    claims = digest.get("tasks_claimed")
+    digest_gaps = (
+        []
+        if isinstance(claims, list)
+        else [
+            "The digest has no valid tasks_claimed list; managed-work coverage is unknown"
+        ]
+    )
+    planning_cache: dict = {}
+    if isinstance(claims, list):
+        for claim in claims:
+            row = _claim_row(claim, planning_cache) if isinstance(claim, dict) else None
+            if row is None:
+                digest_gaps.append("The digest contains an unrenderable claim; managed-work coverage is partial")
+            else:
+                rows.append(row)
+    session_gaps: list[str] = []
+    session_coverage: dict = {"requested": False}
+    if include_sessions:
+        sessions, session_gaps, session_coverage = _workboard_session_rows()
+        rows.extend(sessions)
+    rows.sort(
+        key=lambda row: _WORKBOARD_ORDER.get(
+            str(row["priority"]), len(_WORKBOARD_ORDER)
+        )
+    )
+    result: dict[str, Any] = {
+        "session_key": session_key,
+        "harness": _text(digest.get("harness")),
+        "digest_id": digest_entity.get("entity_id"),
+        "display_plan_id": display_plan_id,
+        "rows": rows,
+        "table": _format_workboard(rows),
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "read_gaps": [gap for row in rows for gap in row.get("read_gaps", [])]
+        + session_gaps
+        + digest_gaps,
+        "session_coverage": session_coverage,
+        "capability_gaps": [
+            "Canonical claimability is not qualified by this adapter; pending and open are recorded states.",
+            "Session membership and native activity do not prove a held task lease.",
+        ],
+        "refresh_rule": "Refresh after a material task, agent, or decision change and before substantial new intake. This is an on-demand derived read, not a canonical projection.",
+    }
+    if include_history:
+        # History remains unfiltered; this is the regular full-session digest,
+        # while `rows` is intentionally the routine live view.
+        result["history"] = {
+            "tasks_claimed": claims if isinstance(claims, list) else [],
+            "artifacts": digest.get("artifacts")
+            if isinstance(digest.get("artifacts"), list)
+            else [],
+        }
+    # Text-only hosts receive the same coverage, lineage and requested history.
+    result["table"] = _format_workboard_result(result)
+    return result
+
+
+def _format_workboard_result(result: dict) -> str:
+    if result.get("error"):
+        return json.dumps(result, indent=2, default=str)
+    sections = [
+        _format_workboard(result["rows"])
+        if "rows" in result
+        else str(result.get("table", ""))
+    ]
+    sections.append(
+        "Display context (not authority): session "
+        + str(result.get("session_key", "unknown"))
+        + "; Primary plan "
+        + str(result.get("display_plan_id", "unknown"))
+    )
+    for key, label in (
+        ("read_gaps", "Read coverage"),
+        ("capability_gaps", "Adapter limits"),
+    ):
+        if result.get(key):
+            sections.append(
+                label + ":\n" + "\n".join("- " + str(gap) for gap in result[key])
+            )
+    for row in result.get("rows", []):
+        if row.get("planning_ascent"):
+            sections.append(
+                "Planning context for "
+                + str(row.get("work"))
+                + ": "
+                + " > ".join(
+                    str(parent.get("entity_type")) + ": " + str(parent.get("title"))
+                    for parent in row["planning_ascent"]
+                )
+            )
+    if "history" in result:
+        sections.append(
+            "Requested cumulative session history (not current status):\n"
+            + json.dumps(result["history"], indent=2, default=str)
+        )
+    return "\n\n".join(sections)
 
 
 def _checkpoint_resolver_authority(
@@ -993,6 +1935,194 @@ def _action_blast_radius(action_type: str, policy: dict) -> str:
 #: as the queue.
 CHECKPOINT_PAGE_SIZE = 50
 
+# Neotoma refuses a `cursor` beside `snapshot_filters` (ERR_CURSOR_COMBINATION,
+# HTTP 400) yet still returns a `next_cursor` on a full filtered page, so the
+# filtered queue cannot be walked by a stable keyset cursor and is walked by
+# `offset` instead (see `query_entities` in lib/daemon_runtime/gating.py). The
+# `next_cursor` this tool hands out is its own opaque encoding, never the
+# server's: it carries only the next offset and the filter it belongs to.
+#
+# Offset paging over a queue that can change between calls cannot prove that a
+# walk across calls skipped nothing (one record resolved on a page already
+# read and one appended at the end leave the total and page one unchanged), and
+# a well-formed cursor the tool never issued can skip pages. So no page reached
+# through a cursor ever claims the queue was read in full: only a read that
+# fits on one page, with no cursor, may say `complete: true`.
+_CHECKPOINT_CURSOR_PREFIX = "list_checkpoints:walk:"
+
+_CHECKPOINT_QUEUE_FILTER = {"status": {"op": "eq", "value": "awaiting_operator"}}
+
+_MULTI_PAGE_NOT_PROVEN = (
+    "this listing was read across pages while the queue could change; offset "
+    "paging cannot prove no record was skipped. List again without a cursor, "
+    "with a larger limit if needed, to confirm"
+)
+
+
+def _encode_checkpoint_cursor(offset: int) -> str:
+    state = {"offset": offset, "filter": _CHECKPOINT_QUEUE_FILTER}
+    raw = (_CHECKPOINT_CURSOR_PREFIX + json.dumps(state, sort_keys=True)).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _is_count(value: Any) -> bool:
+    """A non-negative int that is not a bool posing as one."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _decode_checkpoint_cursor(cursor: str) -> dict | None:
+    """The walk state a well-formed cursor for this queue carries; None otherwise.
+
+    A cursor whose filter is not this request's queue filter is rejected. A
+    well-formed cursor cannot be told apart from one this tool issued; that is
+    safe because a page read through any cursor reports `complete: false`.
+    """
+    text = str(cursor or "").strip()
+    try:
+        raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode()
+    except Exception:
+        return None
+    if not raw.startswith(_CHECKPOINT_CURSOR_PREFIX):
+        return None
+    try:
+        state = json.loads(raw[len(_CHECKPOINT_CURSOR_PREFIX):])
+    except ValueError:
+        return None
+    if not isinstance(state, dict):
+        return None
+    if not _is_count(state.get("offset")) or state["offset"] < 1:
+        return None
+    if state.get("filter") != _CHECKPOINT_QUEUE_FILTER:
+        return None
+    return state
+
+
+# The page rule. A page read at a requested `offset` with a requested `limit`
+# is sound only when every signal it carries (the rows, their ids, `total`,
+# `next_cursor`, `offset` and the requested `limit`) agrees with every other.
+# It is malformed, and the read is reported as an error (never as empty, never
+# as complete), when any of these holds:
+#   a. the rows are not a list of objects;
+#   b. a row lacks its id (checkpoint pages);
+#   c. two rows on the page carry the same id (checkpoint: `entity_id` or `id`;
+#      observation: `id`, among rows that carry a string `id`);
+#   d. there are more rows than the requested `limit`;
+#   e. `total` is not a count, or is smaller than `offset + rows`;
+#   f. a short page (rows < `limit`) has a `total` reporting more;
+#   g. `next_cursor` is present and not a string;
+#   h. a short page carries a non-null `next_cursor`;
+#   i. a non-null `next_cursor` sits on a page where `total` is present and
+#      `offset + rows >= total`: the cursor says more and the total says none;
+#   j. `offset` is present and is not the requested offset.
+# Across pages: a reader that accumulates rows over several pages treats a row
+# id already seen on an earlier page of the same read as a malformed read
+# ("observations (id repeated across pages)"): the window shifted under it.
+
+
+def _checkpoint_page_problem(data: Any, offset: int, limit: int) -> str | None:
+    """Name the field that makes a page unusable for judging completeness.
+
+    Applies the page rule stated above (a to j) to a checkpoint-style entity
+    page read at *offset* with *limit*. A page missing `entities` or `total`
+    must not read as an empty, complete queue: that is a malformed answer, not
+    an all-clear.
+    """
+    if not isinstance(data, dict):
+        return "response (not an object)"
+    entities = data.get("entities")
+    if not isinstance(entities, list):
+        return "entities (missing or not a list)"
+    seen: set[str] = set()
+    for i, ent in enumerate(entities):
+        if not isinstance(ent, dict):
+            return f"entities[{i}] (not an object)"
+        eid = ent.get("entity_id") or ent.get("id")
+        if not isinstance(eid, str) or not eid.strip():
+            return f"entities[{i}].entity_id (missing)"
+        if eid in seen:
+            return "entities (duplicate entity_id)"
+        seen.add(eid)
+    rows = len(entities)
+    if rows > limit:
+        return "entities (more rows than the limit)"
+    if not _is_count(data.get("total")):
+        return "total (missing, not an integer, or negative)"
+    total = data["total"]
+    if total < offset + rows:
+        return "total (smaller than the rows returned)"
+    if rows < limit and total > offset + rows:
+        return "entities (short page while total reports more)"
+    next_cursor = data.get("next_cursor")
+    if next_cursor is not None and not isinstance(next_cursor, str):
+        return "next_cursor (not a string)"
+    if rows < limit and next_cursor is not None:
+        return "next_cursor (present on a short page)"
+    if next_cursor is not None and offset + rows >= total:
+        return "next_cursor (present when total says the read ended)"
+    if "offset" in data and data["offset"] is not None and (
+        not _is_count(data["offset"]) or data["offset"] != offset
+    ):
+        return f"offset (not the requested {offset})"
+    return None
+
+
+def _filtered_read_problem(
+    page: Any, read_what: str, limit: int
+) -> tuple[str | None, str | None]:
+    """Judge a single first-page filtered read: (malformed field, partial-read gap).
+
+    The rule `list_checkpoints` follows applies to every filtered read: it may
+    be presented as complete only when its page was well formed and it carried
+    the whole filtered set. A malformed page returns its field (the read must be
+    reported as an error, never as an empty set); a well-formed page with more
+    after it returns a gap naming how much was read.
+    """
+    problem = _checkpoint_page_problem(page, 0, limit)
+    if problem:
+        return problem, None
+    read = len(page["entities"])
+    total = page["total"]
+    if total > read or page.get("next_cursor"):
+        shown_total = total if total > read else f"more than {read}"
+        return None, f"only {read} of {shown_total} {read_what} were read"
+    return None, None
+
+
+def _malformed_checkpoint_page(field: str) -> dict:
+    return {
+        "error": (
+            f"Neotoma returned a malformed checkpoint page: {field}; the queue "
+            "could not be read, which is not the same as an empty queue"
+        ),
+        "malformed_field": field,
+        "total": None,
+        "checkpoints": [],
+    }
+
+
+def _read_checkpoint_page(offset: int, page_size: int) -> tuple[dict | None, dict | None]:
+    """One validated page, or the error result that replaces the listing."""
+    data = _retrieve_page(
+        "checkpoint_brief",
+        snapshot_filters=_CHECKPOINT_QUEUE_FILTER,
+        limit=page_size,
+        offset=offset,
+    )
+    # A failed read must NOT be spelled the same way as an empty queue. Reported
+    # as `count: 0` it would tell the operator they have nothing to decide,
+    # which is the most dangerous output this tool can produce.
+    if data is None:
+        return None, {
+            "error": "could not read the checkpoint queue from Neotoma",
+            "detail": _describe_transport_error(),
+            "total": None,
+            "checkpoints": [],
+        }
+    problem = _checkpoint_page_problem(data, offset, page_size)
+    if problem:
+        return None, _malformed_checkpoint_page(problem)
+    return data, None
+
 
 def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> dict:
     """Pending checkpoint briefs — the operator's decision queue.
@@ -1012,33 +2142,63 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
     than no list, because it is acted on with confidence. That is why
     `truncated` is stated explicitly rather than left to be inferred from
     comparing two numbers.
+
+    `complete` is the only field that says the queue was read in full. It is
+    true only when the call took no cursor and the whole filtered queue fit on
+    that one page. Every page read through a cursor, and any first page with
+    more after it, reports `complete: false`: offset paging over a queue that
+    can change between calls cannot prove a walk skipped nothing, so a
+    multi-page walk returns the records it read and says plainly that its
+    completeness is not proven (`completeness_reason` on its last page). A
+    queue larger than the largest allowed `limit` (500) therefore can never
+    return `complete: true` from this tool.
+
+    Every error response carries `error` and `checkpoints: []`, plus `detail`
+    or `malformed_field` where they apply, and `total` is `None` in every
+    error.
     """
     page_size = limit or CHECKPOINT_PAGE_SIZE
-    data = _retrieve_page(
-        "checkpoint_brief",
-        snapshot_filters={"status": {"op": "eq", "value": "awaiting_operator"}},
-        limit=page_size,
-        cursor=cursor,
-    )
-
-    # A failed read must NOT be spelled the same way as an empty queue. Reported
-    # as `count: 0` it would tell the operator they have nothing to decide,
-    # which is the most dangerous output this tool can produce.
-    if data is None:
+    offset = 0
+    walk: dict | None = None
+    if cursor:
+        walk = _decode_checkpoint_cursor(cursor)
+        if walk is None:
+            # Read as page one, a foreign cursor would silently restart the
+            # walk and repeat the first page as if it were the next one.
+            return {
+                "error": (
+                    "cursor is not one list_checkpoints issued; call without a "
+                    "cursor to start from the first page"
+                ),
+                "total": None,
+                "checkpoints": [],
+            }
+        offset = walk["offset"]
+    if offset > MAX_QUERY_OFFSET:
+        # The server refuses this page (ERR_OFFSET_TOO_DEEP). Say so, rather
+        # than report a short or empty page as the end of the queue.
         return {
-            "error": "could not read the checkpoint queue from Neotoma",
-            "detail": _describe_transport_error(),
+            "error": (
+                f"the next page starts at offset {offset}, past the "
+                f"{MAX_QUERY_OFFSET} Neotoma accepts; the rest of the queue "
+                "cannot be listed through this tool"
+            ),
+            "offset_limit": MAX_QUERY_OFFSET,
+            "total": None,
             "checkpoints": [],
         }
+    data, failure = _read_checkpoint_page(offset, page_size)
+    if failure is not None:
+        return failure
 
-    entities = data.get("entities", [])
-    total = data.get("total")
+    entities = data["entities"]
+    total = data["total"]
     next_cursor = data.get("next_cursor")
+    ids = [str(ent.get("entity_id") or ent.get("id")) for ent in entities]
 
     checkpoints = []
-    for ent in entities:
+    for ent, eid in zip(entities, ids):
         snap = _snapshot_of(ent)
-        eid = ent.get("entity_id", ent.get("id", ""))
 
         task_id = snap.get("task_entity_id")
         task_title = None
@@ -1064,10 +2224,9 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
         })
 
     returned = len(checkpoints)
-    if total is None:
-        # The endpoint did not report a total. Say so rather than substituting
-        # the page size, which is the exact conflation this fix exists to end.
-        total = returned if next_cursor is None else None
+    # The server's `next_cursor` only signals that more exists; it cannot be
+    # sent back beside the filter, so it is never passed to the caller.
+    has_more = bool(next_cursor) or offset + returned < total
 
     result: dict[str, Any] = {
         # The queue's real depth. Named `total` so a caller reading one field
@@ -1079,16 +2238,36 @@ def _list_checkpoints(cursor: str | None = None, limit: int | None = None) -> di
         # rather than to the page: `count` read as the queue size for months,
         # and leaving it meaning the page would preserve the defect under its
         # original name.
-        "count": total if total is not None else returned,
+        "count": total,
         "checkpoints": checkpoints,
     }
-    if next_cursor:
+
+    # An empty page that claims more is a short page whose `total` or
+    # `next_cursor` reports more rows, so the page rule has already refused it
+    # as malformed: `has_more` here always comes with rows to move past.
+    if has_more:
         result["truncated"] = True
-        result["next_cursor"] = next_cursor
+        result["complete"] = False
+        result["next_cursor"] = _encode_checkpoint_cursor(offset + returned)
         result["note"] = (
-            f"Showing {returned} of {total if total is not None else 'an unknown number of'} "
-            "pending checkpoints. Pass `cursor` to retrieve the next page."
+            f"Showing {returned} of {total} pending checkpoints. Pass `cursor` "
+            "to retrieve the next page."
         )
+    elif walk is not None:
+        # The last page of a walk across calls, or a page reached through a
+        # cursor the tool may never have issued: neither proves the walk saw
+        # every record.
+        result["complete"] = False
+        result["completeness_reason"] = _MULTI_PAGE_NOT_PROVEN
+    elif returned != total:
+        result["complete"] = False
+        result["completeness_reason"] = (
+            f"Neotoma reported {total} pending checkpoints but returned "
+            f"{returned} with no further page; list again to confirm"
+        )
+    else:
+        # One page, no cursor, and it carries the whole filtered queue.
+        result["complete"] = True
     return result
 
 
@@ -2292,11 +3471,95 @@ def _read_error(what: str) -> str:
     return f"{what}: {_describe_transport_error() or 'request failed'}"
 
 
+def _observation_page_problem(data: Any, offset: int, limit: int) -> str | None:
+    """The field that makes an observation page unreadable; None when it is sound.
+
+    Applies the page rule stated above `_checkpoint_page_problem` (a and c to
+    j) to an observation page read at *offset* with *limit*. `total`, `offset`
+    and `next_cursor` are optional here: a page with none of them is still
+    accepted, and the rules that compare one of them apply only when it is
+    present. Callers treat a short page as the end of the read, so a short page
+    claiming more rows would end it early and report an incomplete read as
+    complete; anything malformed is a failed read, never an empty or final
+    batch.
+    """
+    if not isinstance(data, dict):
+        return "response"
+    batch = data.get("observations")
+    if not isinstance(batch, list) or any(not isinstance(o, dict) for o in batch):
+        return "observations"
+    ids = [o["id"] for o in batch if isinstance(o.get("id"), str)]
+    if len(set(ids)) != len(ids):
+        return "observations (duplicate id)"
+    rows = len(batch)
+    if rows > limit:
+        return "observations (more rows than the limit)"
+    total = data.get("total") if "total" in data else None
+    if "total" in data:
+        if not _is_count(total):
+            return "total"
+        if total < offset + rows:
+            return "total (smaller than the rows returned)"
+        if rows < limit and total > offset + rows:
+            return "observations (short page while total reports more)"
+    next_cursor = data.get("next_cursor")
+    if next_cursor is not None and not isinstance(next_cursor, str):
+        return "next_cursor (not a string)"
+    if rows < limit and next_cursor is not None:
+        return "next_cursor (present on a short page)"
+    if next_cursor is not None and total is not None and offset + rows >= total:
+        return "next_cursor (present when total says the read ended)"
+    if "offset" in data and data["offset"] is not None and (
+        not _is_count(data["offset"]) or data["offset"] != offset
+    ):
+        return f"offset (not the requested {offset})"
+    return None
+
+
+_REPEATED_ACROSS_PAGES = "observations (id repeated across pages)"
+
+
+def _repeats_seen_id(batch: list[dict], seen: set[str]) -> bool:
+    """Whether *batch* repeats a row id seen on an earlier page; records its ids."""
+    ids = {o["id"] for o in batch if isinstance(o.get("id"), str)}
+    if ids & seen:
+        return True
+    seen.update(ids)
+    return False
+
+
+def _observation_read_ends(data: dict, offset: int, limit: int) -> bool:
+    """Whether the sound page read at *offset* with *limit* ends the read.
+
+    The one place an observation reader decides it has read everything; call it
+    only after `_observation_page_problem` has passed. With `total`, the read
+    ends exactly when `offset + len(observations) >= total`. Without it, the
+    read ends only on a short page (fewer rows than *limit*) that carries no
+    `next_cursor`. Rule (i) of the page rule guarantees it is never reached with
+    a `total` and a `next_cursor` that contradict each other.
+    """
+    batch = data["observations"]
+    total = data.get("total")
+    if total is not None:
+        return offset + len(batch) >= total
+    return len(batch) < limit and data.get("next_cursor") is None
+
+
+_PARTICIPATION_UNREAD_GAP = (
+    "participation records could not be read; this task's gate steps may be missing"
+)
+
+
+def _malformed_error(what: str, field: str) -> str:
+    return f"{what}: malformed response ({field})"
+
+
 def _observations_of(
     entity_id: str, *, since: str | None = None, max_rows: int = 1000
 ) -> tuple[list[dict] | None, str | None, bool]:
     """Observations of one entity. Returns (rows, error, truncated)."""
     rows: list[dict] = []
+    seen: set[str] = set()
     offset = 0
     while True:
         body: dict[str, Any] = {
@@ -2309,15 +3572,20 @@ def _observations_of(
         data = _obs_query(body)
         if data is None:
             return None, _read_error(f"observations of {entity_id}"), False
-        batch = data.get("observations") or []
+        problem = _observation_page_problem(data, offset, _ENTITY_OBS_PAGE)
+        if problem:
+            return None, _malformed_error(f"observations of {entity_id}", problem), False
+        batch = data["observations"]
+        if _repeats_seen_id(batch, seen):
+            return (
+                None,
+                _malformed_error(f"observations of {entity_id}", _REPEATED_ACROSS_PAGES),
+                False,
+            )
         rows.extend(batch)
+        ended = _observation_read_ends(data, offset, _ENTITY_OBS_PAGE)
         offset += len(batch)
-        total = data.get("total")
-        if (
-            not batch
-            or len(batch) < _ENTITY_OBS_PAGE
-            or (isinstance(total, int) and offset >= total)
-        ):
+        if ended:
             return rows, None, False
         if len(rows) >= max_rows:
             return rows, None, True
@@ -2325,10 +3593,10 @@ def _observations_of(
 
 def _obs_count(entity_type: str, since: str) -> int | None:
     data = _obs_query({"entity_type": entity_type, "created_since": since, "limit": 1})
-    if data is None:
+    if data is None or _observation_page_problem(data, 0, 1):
         return None
     total = data.get("total")
-    return int(total) if isinstance(total, (int, float)) else None
+    return total if _is_count(total) else None
 
 
 def _scan_type_window(
@@ -2350,6 +3618,7 @@ def _scan_type_window(
         return {"rows": [], "error": _read_error(f"{entity_type} count since {_iso(end)}")}
     offset = max(0, n_end - _SCAN_OFFSET_MARGIN)
     rows: list[dict] = []
+    seen: set[str] = set()
     scanned = 0
     complete = False
     while scanned < max_scan:
@@ -2367,14 +3636,28 @@ def _scan_type_window(
                 "rows": rows,
                 "error": _read_error(f"{entity_type} scan at offset {offset}"),
             }
-        batch = data.get("observations") or []
+        problem = _observation_page_problem(data, offset, limit)
+        if problem:
+            return {
+                "rows": rows,
+                "error": _malformed_error(f"{entity_type} scan at offset {offset}", problem),
+            }
+        batch = data["observations"]
+        if _repeats_seen_id(batch, seen):
+            return {
+                "rows": rows,
+                "error": _malformed_error(
+                    f"{entity_type} scan at offset {offset}", _REPEATED_ACROSS_PAGES
+                ),
+            }
+        ended = _observation_read_ends(data, offset, limit)
         scanned += len(batch)
         offset += len(batch)
         for obs in batch:
             at = _parse_ts(obs.get("observed_at"))
             if at is not None and start <= at <= end:
                 rows.append(obs)
-        if len(batch) < limit:
+        if ended:
             complete = True
             break
     return {
@@ -2621,7 +3904,16 @@ class _TimelineBuilder:
             self.source("checkpoint_brief", "error", detail=_read_error("checkpoint_brief"))
             self.gaps.append("checkpoints could not be read; an open checkpoint may be holding this task")
             return
-        entities = list(page.get("entities") or [])
+        malformed, partial = _filtered_read_problem(page, "this task's checkpoints", 50)
+        if malformed:
+            self.source(
+                "checkpoint_brief", "error", detail=f"malformed checkpoint page: {malformed}"
+            )
+            self.gaps.append("checkpoints could not be read; an open checkpoint may be holding this task")
+            return
+        if partial:
+            self.gaps.append(f"{partial}; an unread checkpoint may be holding this task")
+        entities = list(page["entities"])
         listed = {e.get("entity_id") for e in entities}
         # A checkpoint linked by edge but missing its task_entity_id field.
         for cid in sorted(self.rel_checkpoint_ids - listed):
@@ -2652,7 +3944,9 @@ class _TimelineBuilder:
                 }
             )
         status = "error" if errors else ("joined" if self.checkpoints else "none_found")
-        self.source("checkpoint_brief", status, len(self.checkpoints))
+        if partial and not errors:
+            status = "partial"
+        self.source("checkpoint_brief", status, len(self.checkpoints), detail=partial)
 
     def _scan_bounds(self) -> tuple[datetime, datetime] | None:
         created = _parse_ts(self.task.get("created_at")) or (
@@ -2774,8 +4068,18 @@ class _TimelineBuilder:
         )
         if page is None:
             self.source("participation_record", "error", detail=_read_error("participation_record"))
+            self.gaps.append(_PARTICIPATION_UNREAD_GAP)
             return
-        rows = page.get("entities") or []
+        malformed, partial = _filtered_read_problem(page, "this task's participation records", 100)
+        if malformed:
+            self.source(
+                "participation_record", "error", detail=f"malformed participation page: {malformed}"
+            )
+            self.gaps.append(_PARTICIPATION_UNREAD_GAP)
+            return
+        if partial:
+            self.gaps.append(f"{partial}; this task's gate steps may be missing")
+        rows = page["entities"]
         for ent in rows:
             psnap = _snapshot_of(ent)
             gate = psnap.get("gate_name")
@@ -2803,7 +4107,8 @@ class _TimelineBuilder:
                             "source": {"type": "participation_record", "entity_id": ent.get("entity_id")},
                         }
                     )
-        self.source("participation_record", "joined" if rows else "none_found", len(rows))
+        status = "partial" if partial else ("joined" if rows else "none_found")
+        self.source("participation_record", status, len(rows), detail=partial)
 
     def join_gate_status(self) -> None:
         if not self.refs:
@@ -2852,8 +4157,16 @@ class _TimelineBuilder:
         )
         if page is None:
             self.source("escalation", "error", detail=_read_error("escalation"))
+            self.gaps.append("escalations could not be read; an escalation about this task may be missing")
             return
-        rows = page.get("entities") or []
+        malformed, partial = _filtered_read_problem(page, "this task's escalations", 50)
+        if malformed:
+            self.source("escalation", "error", detail=f"malformed escalation page: {malformed}")
+            self.gaps.append("escalations could not be read; an escalation about this task may be missing")
+            return
+        if partial:
+            self.gaps.append(f"{partial}; an unread escalation about this task may be missing")
+        rows = page["entities"]
         for ent in rows:
             esnap = _snapshot_of(ent)
             self.timeline.append(
@@ -2865,7 +4178,8 @@ class _TimelineBuilder:
                     "source": {"type": "escalation", "entity_id": ent.get("entity_id")},
                 }
             )
-        self.source("escalation", "joined" if rows else "none_found", len(rows))
+        status = "partial" if partial else ("joined" if rows else "none_found")
+        self.source("escalation", status, len(rows), detail=partial)
 
     def current(self) -> dict:
         """What is happening now, derived from the joined records."""
@@ -3064,6 +4378,7 @@ def _advance_cursor(since: str, seen: set[str], rows: list[dict]) -> str:
 
 def _scan_since(entity_type: str, since: str, max_scan: int) -> tuple[list[dict] | None, str | None, bool]:
     rows: list[dict] = []
+    seen: set[str] = set()
     offset = 0
     while offset < max_scan:
         limit = min(_OBS_PAGE, max_scan - offset)
@@ -3072,10 +4387,20 @@ def _scan_since(entity_type: str, since: str, max_scan: int) -> tuple[list[dict]
         )
         if data is None:
             return None, _read_error(f"{entity_type} since {since}"), False
-        batch = data.get("observations") or []
+        problem = _observation_page_problem(data, offset, limit)
+        if problem:
+            return None, _malformed_error(f"{entity_type} since {since}", problem), False
+        batch = data["observations"]
+        if _repeats_seen_id(batch, seen):
+            return (
+                None,
+                _malformed_error(f"{entity_type} since {since}", _REPEATED_ACROSS_PAGES),
+                False,
+            )
         rows.extend(batch)
+        ended = _observation_read_ends(data, offset, limit)
         offset += len(batch)
-        if len(batch) < limit:
+        if ended:
             return rows, None, False
     return rows, None, True
 
@@ -3188,7 +4513,12 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
     newest = _obs_query({"limit": 1})
     if newest is None:
         return {"error": _read_error("could not read the record's newest observation")}
-    rows = newest.get("observations") or []
+    problem = _observation_page_problem(newest, 0, 1)
+    if problem:
+        return {
+            "error": _malformed_error("could not read the record's newest observation", problem)
+        }
+    rows = newest["observations"]
     if rows:
         cursor = _encode_cursor(str(rows[0].get("observed_at")), {str(rows[0].get("id"))})
     else:
@@ -3197,6 +4527,7 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
     tasks: list[dict] = []
     pending: list[dict] = []
     errors: list[str] = []
+    read_gaps: list[str] = []
     for tid in task_ids:
         ent = _get(f"/entities/{tid}")
         if ent is None:
@@ -3225,7 +4556,14 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
         if page is None:
             errors.append(_read_error(f"checkpoints of {tid}"))
             continue
-        for cp in page.get("entities") or []:
+        malformed, partial = _filtered_read_problem(page, f"pending checkpoints of {tid}", 20)
+        if malformed:
+            # A malformed page is a failed read, never an empty pending list.
+            errors.append(f"checkpoints of {tid}: malformed checkpoint page: {malformed}")
+            continue
+        if partial:
+            read_gaps.append(f"{partial}; pending_checkpoints is incomplete for that task")
+        for cp in page["entities"]:
             cid = cp.get("entity_id", "")
             full = _get(f"/entities/{cid}") or cp
             csnap = _snapshot_of(full)
@@ -3250,7 +4588,7 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
         "checkpoints": [],
         "terminal_subjects": sorted(t["id"] for t in tasks if t["terminal"]),
         "cursor": cursor,
-        "gaps": [_WITHHELD_FIELDS_GAP] if tasks else [],
+        "gaps": ([_WITHHELD_FIELDS_GAP] if tasks else []) + read_gaps,
     }
     if include_checkpoints:
         total_page = _retrieve_page(
@@ -3259,7 +4597,16 @@ def _watch_baseline(task_ids: list[str], include_checkpoints: bool) -> dict:
             limit=1,
             include_snapshots=False,
         )
-        result["pending_checkpoints_total"] = (total_page or {}).get("total")
+        if total_page is not None and _checkpoint_page_problem(total_page, 0, 1) is None:
+            result["pending_checkpoints_total"] = total_page["total"]
+        else:
+            # A failed or malformed count read must not be spelled as a count.
+            result["pending_checkpoints_total"] = None
+            result["gaps"].append(
+                "the pending checkpoint count could not be read"
+                + (f" ({_read_error('checkpoint count')})" if total_page is None else "")
+                + "; pending_checkpoints_total is unknown, not zero"
+            )
         result["note"] = (
             "Every checkpoint raised or resolved after this cursor is reported by the next "
             "call, ordered by when it was raised. The existing queue is list_checkpoints'."
@@ -3428,15 +4775,26 @@ TOOLS = [
             "and reason pre-joined. These are the operator's decision queue. "
             "`total` is the queue's real depth and `returned` is how many this page "
             "carries; when `truncated` is true, pass `next_cursor` back as `cursor` "
-            "to reach the rest. Never treat one page as the whole queue — it used to "
-            "say it returned 'all' while showing 50 of 372 (ateles#1037)."
+            "to reach the rest. Only `complete: true` means the queue was read in "
+            "full; it is set only when a call without a cursor fits the whole queue "
+            "on one page. Every page read through a cursor reports `complete: false`, "
+            "because offset paging over a changing queue cannot prove no record was "
+            "skipped (`completeness_reason` says so on the last page); to confirm, "
+            "list again without a cursor and a larger `limit`. A queue larger than "
+            "the largest allowed `limit` (500) can never return `complete: true` "
+            "from this tool. Every error carries `error` and `checkpoints: []`; "
+            "`total` is null in every error. Never treat one page as the whole queue — it "
+            "used to say it returned 'all' while showing 50 of 372 (ateles#1037)."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "cursor": {
                     "type": "string",
-                    "description": "Opaque cursor from a previous response's `next_cursor`.",
+                    "description": (
+                        "Opaque cursor from a previous response's `next_cursor`. "
+                        "A page read through a cursor never reports `complete: true`."
+                    ),
                 },
                 "limit": {
                     "type": "integer",
@@ -3619,6 +4977,45 @@ TOOLS = [
             "additionalProperties": False,
         },
     ),
+    Tool(
+        name="get_session_workboard",
+        **{"_meta": {"ui": {"resourceUri": WORKBOARD_RESOURCE_URI, "visibility": ["model", "app"]}}},
+        description=(
+            "Read-only. Derive an on-demand workboard from one stable session_digest. "
+            "It labels task and plan fields as recorded state unless separately read "
+            "live lease and activity evidence supports active execution. The compact "
+            "table puts the selected display plan first, then active, queued, blocked, "
+            "operator-needed, and recorded-state work. Pass include_history=true for the cumulative tasks_claimed and "
+            "artifacts ledger used by a full /digest. session_key is harness-agnostic, "
+            "so any MCP-connected harness can retrieve another supported harness's "
+            "session without local configuration."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_key": {
+                    "type": "string",
+                    "description": "Stable session_digest session_key, e.g. codex:<root-session-id>.",
+                },
+                "display_plan_id": {
+                    "type": "string",
+                    "description": "Plan entity id to display first for this call; it does not bind the session or grant authority.",
+                },
+                "include_history": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include the unfiltered cumulative tasks_claimed and artifacts ledger.",
+                },
+                "include_sessions": {
+                    "type": "boolean", "default": False,
+                    "description": "Also read a bounded page of native agent_session registry rows; native state is not task execution or routing authority.",
+                },
+            },
+            "required": ["session_key", "display_plan_id"],
+            "additionalProperties": False,
+        },
+    ),
+
 ]
 
 TOOL_HANDLERS = {
@@ -3649,27 +5046,52 @@ TOOL_HANDLERS = {
         bool(args.get("include_checkpoints", False)),
         args.get("wait_seconds", 0),
     ),
+    "get_session_workboard": lambda args: asyncio.to_thread(
+        _get_session_workboard, args["session_key"], args["display_plan_id"], bool(args.get("include_history", False)), bool(args.get("include_sessions", False))
+    ),
 }
 
 
-async def main():
-    denial_store = _require_checkpoint_release_state()
-    log.info("Checkpoint denial store ready at %s", denial_store)
+def create_server() -> Server:
+    """Build the existing server; static UI discovery requires no data credentials."""
     server = Server("ateles", instructions=render_server_instructions())
 
     @server.list_tools()
     async def handle_list_tools() -> list[Tool]:
         return TOOLS
 
+    @server.list_resources()
+    async def handle_list_resources() -> list[Resource]:
+        return [_workboard_resource()]
+
+    @server.read_resource()
+    async def handle_read_resource(uri):
+        if str(uri) != WORKBOARD_RESOURCE_URI:
+            raise ValueError("Unknown Ateles UI resource")
+        return [ReadResourceContents(content=_WORKBOARD_HTML,
+                                     mime_type=WORKBOARD_RESOURCE_MIME, meta={"ui": _WORKBOARD_UI_META})]
+
     @server.call_tool()
-    async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    async def handle_call_tool(name: str, arguments: dict):
         handler = TOOL_HANDLERS.get(name)
         if not handler:
             return [TextContent(type="text", text=json.dumps({"error": f"unknown tool: {name}"}))]
         result = handler(arguments or {})
         if inspect.isawaitable(result):
             result = await result
+        if name == "get_session_workboard":
+            return CallToolResult(content=[TextContent(type="text", text=_format_workboard_result(result))],
+                                  structuredContent=result, isError=bool(result.get("error")),
+                                  **{"_meta": {"ui": {"resourceUri": WORKBOARD_RESOURCE_URI}}})
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+    return server
+
+
+async def main():
+    denial_store = _require_checkpoint_release_state()
+    log.info("Checkpoint denial store ready at %s", denial_store)
+    server = create_server()
 
     options = server.create_initialization_options()
     async with stdio_server() as (read_stream, write_stream):
