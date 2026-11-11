@@ -173,8 +173,8 @@ def test_stall_outlasts_a_fly_queue_wait_plus_the_run():
     assert stall_seconds(base) == 3600
     fly = {**base, "APIS_FLY_RUNNER_CLASSES": "carry_forward_check",
            "APIS_FLY_QUEUE_MAX_WAIT_SECONDS": "1800"}  # fmt: skip
-    assert stall_seconds(fly) == 1800 + 600 + 1800 + 120
-    assert stall_seconds(fly) > 1800 + 1800 + 120  # queue + run + Apis grace
+    assert stall_seconds(fly) == 1800 + 600 + 1800 + 300 + 120
+    assert stall_seconds(fly) > 1800 + 1800 + 300 + 120  # queue + run + delivery + grace
 
 
 # ── Fly run in flight: the watchdog writes nothing ───────────────────────────

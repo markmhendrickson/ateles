@@ -3124,7 +3124,11 @@ async def _run_skill_once(
     """
     model = model_tiering.validate_model_selector(model)
     _role = (role or skill).lower()
-    timeout = timeout or DISPATCH_TIMEOUT_SECONDS
+    # Whether the caller supplied a timeout is kept: a Fly job resolves its
+    # own timeout once it is bound for Fly (APIS_FLY_DISPATCH_TIMEOUT), and a
+    # local run, including a fallback from Fly, uses the shared one.
+    _caller_timeout = timeout
+    timeout = _local_timeout = timeout or DISPATCH_TIMEOUT_SECONDS
 
     if inference_only and not (provider == INFERENCE_ONLY_PROVIDER and local_review):
         # The tool-free control exists for one adapter only. Any other provider
@@ -3990,7 +3994,8 @@ async def _run_skill_once(
                 role=_role,
                 cmd=cmd,
                 stdin=stdin_payload if stdin_payload is not None else prompt.encode(),
-                timeout=timeout,
+                timeout=_caller_timeout or None,  # 0 meant "no timeout given"
+                default_timeout=DISPATCH_TIMEOUT_SECONDS,
                 repository=repository,
                 github_requested=github_token is not None or include_github_contract,
                 mcp_config_path=_mcp_tmp_path,
@@ -4015,6 +4020,8 @@ async def _run_skill_once(
         except fly_runner.FlyConfigInvalid as exc:
             _fly_reason = str(exc)
             _fly_disabled = True
+        else:
+            timeout = _fly_job.timeout  # the Fly-only timeout build_job resolved
 
     def _fly_refusal_or_fallback(
         reason: str, provider_specific: bool = False
@@ -4211,6 +4218,7 @@ async def _run_skill_once(
                             "local run with its normal tools."
                         )
                     _fly_job = None
+                    timeout = _local_timeout  # a local run keeps the shared timeout
                     _start_ns = time.monotonic_ns()
                     returncode, stdout, stderr = await _run_local()
                 except (fly_runner.FlyUncertainLaunch, Exception) as exc:

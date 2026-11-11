@@ -74,20 +74,40 @@ def stall_seconds(env=None) -> int:
     """How long an in-flight task may sit before the watchdog re-dispatches
     it. It must outlast one whole dispatch. With the Fly executor enabled
     that includes a login-machine queue wait (APIS_FLY_QUEUE_MAX_WAIT_SECONDS,
-    not counted against the dispatch timeout) and the Apis deadline grace,
-    or the watchdog would re-dispatch a run that is still in flight."""
+    not counted against the dispatch timeout), the Fly-only timeout
+    (APIS_FLY_DISPATCH_TIMEOUT) when it is longer than the local one, the
+    delivery reserve and the Apis deadline grace, or the watchdog would
+    re-dispatch a run that is still in flight."""
     env = os.environ if env is None else env
-    base = int(env.get("APIS_DISPATCH_TIMEOUT", "1800")) + 600
+    local = int(env.get("APIS_DISPATCH_TIMEOUT", "1800"))
+    base = local + 600
     if (env.get("APIS_FLY_RUNNER_CLASSES") or "").strip():
-        # The same strict parser the executor uses. An invalid setting
-        # disables Fly (every launch refused), so nothing queues: no wait.
-        from fly_runner import APIS_DEADLINE_GRACE_SECONDS, LIMITS, FlyConfigInvalid, parse_setting
+        # The same strict parsers the executor uses. An invalid setting
+        # disables Fly (every launch refused), so nothing queues or runs
+        # there: no Fly term is added, and the local paths are unchanged.
+        from fly_runner import (
+            APIS_DEADLINE_GRACE_SECONDS,
+            DELIVERY_RESERVE_SECONDS,
+            FLY_DISPATCH_TIMEOUT,
+            LIMITS,
+            FlyConfigInvalid,
+            parse_optional_setting,
+            parse_setting,
+        )
 
         queue = next(lim for lim in LIMITS if lim.attr == "queue_max_wait_seconds")
         try:
-            base += int(parse_setting(queue, env)) + APIS_DEADLINE_GRACE_SECONDS
+            wait = int(parse_setting(queue, env))
+            fly_timeout = parse_optional_setting(FLY_DISPATCH_TIMEOUT, env)
         except FlyConfigInvalid:
             pass
+        else:
+            # A Fly run's whole span: the queue wait, its own timeout (the
+            # Fly-only one when set, which may be longer than the local one),
+            # a delivery's push and pull-request steps, and the Apis grace.
+            run = local if fly_timeout is None else max(local, int(fly_timeout))
+            base = (wait + run + DELIVERY_RESERVE_SECONDS + APIS_DEADLINE_GRACE_SECONDS
+                    + 600)  # fmt: skip
     return max(base, int(env.get("APIS_STALL_SECONDS", "3600")))
 
 

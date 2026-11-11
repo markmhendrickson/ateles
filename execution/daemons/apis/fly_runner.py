@@ -407,6 +407,18 @@ FIXED_LIMITS: tuple[Limit, ...] = (
     Limit("rootfs_gb", "rootfs_gb", float, 0.1, 500.0, DEFAULT_ROOTFS_GB),
 )
 
+# Settings that may be left unset with no default: unset means "no setting of
+# this kind", never a value. A supplied value is parsed exactly like a LIMITS
+# one, and an invalid one disables Fly the same way.
+#
+# APIS_FLY_DISPATCH_TIMEOUT is the Fly-only execution timeout and ceiling.
+# Unset, a Fly job keeps the shared dispatch timeout (APIS_DISPATCH_TIMEOUT)
+# exactly as before; set, a Fly job with no caller timeout runs with it, and a
+# shorter caller timeout is kept. Local runs never read it.
+FLY_DISPATCH_TIMEOUT = Limit("APIS_FLY_DISPATCH_TIMEOUT", "dispatch_timeout_seconds", int, 1,
+                             MAX_JOB_TIMEOUT_SECONDS, None)  # fmt: skip
+OPTIONAL_LIMITS: tuple[Limit, ...] = (FLY_DISPATCH_TIMEOUT,)
+
 _SETTING_PATTERN = {int: re.compile(r"[0-9]{1,12}", re.ASCII),
                     float: re.compile(r"[0-9]{1,12}(\.[0-9]{1,12})?", re.ASCII)}  # fmt: skip
 
@@ -433,6 +445,39 @@ def parse_setting(limit: Limit, env: Any) -> float:
     if not _finite_number(value, limit.low, limit.high):
         raise FlyConfigInvalid(f"{limit.env} is outside {_limit_range(limit)}")
     return value if limit.scale == 1 else value / limit.scale
+
+
+def parse_optional_setting(limit: Limit, env: Any) -> float | None:
+    """``parse_setting`` for an ``OPTIONAL_LIMITS`` setting: None when it is
+    unset, otherwise the same strict parse (``FlyConfigInvalid`` naming the
+    setting, never its value)."""
+    if limit.env not in env:
+        return None
+    return parse_setting(limit, env)
+
+
+def resolve_dispatch_timeout(config: "FlyConfig", caller_timeout: int | None,
+                             shared_default: int | None = None) -> int:  # fmt: skip
+    """The timeout a Fly job runs with, decided once the job is bound for Fly.
+
+    With ``APIS_FLY_DISPATCH_TIMEOUT`` unset this is the prior behaviour: the
+    caller's timeout, else the shared dispatch timeout. Set, it is the
+    default for a caller that gave none (None) and the ceiling for one that
+    did: a shorter caller timeout is kept, a longer one is lowered to the
+    ceiling (logged), so no caller runs past it. A caller value that is not
+    a valid number is returned unchanged for ``build_job`` to refuse.
+    ``config`` must already have passed ``require_valid_limits``."""
+    shared = DISPATCH_TIMEOUT_DEFAULT if shared_default is None else shared_default
+    ceiling = config.dispatch_timeout_seconds
+    if caller_timeout is None:
+        return shared if ceiling is None else int(ceiling)
+    if ceiling is None:
+        return caller_timeout
+    if _finite_number(caller_timeout, 1, MAX_JOB_TIMEOUT_SECONDS) and caller_timeout > ceiling:
+        log.warning(f"[fly] caller timeout {int(caller_timeout)}s is above "
+                    f"{FLY_DISPATCH_TIMEOUT.env}; the Fly job runs with {int(ceiling)}s")  # fmt: skip
+        return int(ceiling)
+    return caller_timeout
 
 
 def _csv(raw: str) -> list[str]:
@@ -534,6 +579,8 @@ class FlyConfig:
     login_volume_gb: float = DEFAULT_LOGIN_VOLUME_GB
     rootfs_gb: float = DEFAULT_ROOTFS_GB
     cursor_login_dirs: tuple[str, ...] = (".cursor", ".config/cursor")
+    # The Fly-only dispatch timeout (FLY_DISPATCH_TIMEOUT), or None when unset.
+    dispatch_timeout_seconds: int | None = None
     # Problems found while loading the limit settings (names, never values).
     setting_problems: tuple[str, ...] = ()
 
@@ -549,6 +596,12 @@ class FlyConfig:
                 problems.append(str(exc))
                 # Never a default: a NaN fails every limit check, and
                 # admission refuses on ``problems`` before any check runs.
+                limits[limit.attr] = math.nan
+        for limit in OPTIONAL_LIMITS:
+            try:
+                limits[limit.attr] = parse_optional_setting(limit, env)
+            except FlyConfigInvalid as exc:
+                problems.append(str(exc))
                 limits[limit.attr] = math.nan
         login = {}
         for provider in sorted(LOGIN_PROVIDERS):
@@ -594,10 +647,12 @@ class FlyConfig:
         the problems found when loading, plus a check of the fields
         themselves (a config may be constructed directly)."""
         out = list(self.setting_problems)
-        for limit in (*LIMITS, *FIXED_LIMITS):
+        for limit in (*LIMITS, *FIXED_LIMITS, *OPTIONAL_LIMITS):
             if any(p.startswith(limit.env + " ") for p in out):
                 continue
             value = getattr(self, limit.attr)
+            if value is None and limit in OPTIONAL_LIMITS:
+                continue  # unset: no setting of this kind
             if limit.kind is int and (isinstance(value, bool) or not isinstance(value, int)):
                 out.append(f"{limit.env} is not an int")
             elif not _finite_number(value, limit.low / limit.scale, limit.high / limit.scale):
@@ -612,6 +667,15 @@ class FlyConfig:
                 "Fly is disabled: " + "; ".join(problems)
                 + ". Fix the setting; no Fly launches until then."
             )
+
+    def longest_default_run_seconds(self) -> int:
+        """The dispatch timeout charged for a Fly machine whose own window is
+        unknown: the longer of the shared default and the Fly-only timeout,
+        so a longer Fly timeout is never under-charged."""
+        ceiling = self.dispatch_timeout_seconds
+        if ceiling is None or not _finite_number(ceiling, 1, MAX_JOB_TIMEOUT_SECONDS):
+            return DISPATCH_TIMEOUT_DEFAULT
+        return max(DISPATCH_TIMEOUT_DEFAULT, int(ceiling))
 
     def monthly_storage_usd(self) -> float:
         """Volume plus stopped-rootfs storage of the long-lived login machines."""
@@ -1318,7 +1382,8 @@ class FlyLedger:
             snap = self._snapshot(now)
             if run_id not in snap.entries:
                 return 0.0
-            cost = _charged_seconds(snap.entries[run_id], now) * config.rate_per_second_usd
+            cost = (_charged_seconds(snap.entries[run_id], now, config.longest_default_run_seconds())
+                    * config.rate_per_second_usd)
             if not _finite_number(cost, 0, MAX_RECORD_NUMBER):
                 # Keep the reservation (and its full reserved cost) rather
                 # than charge an unreadable amount.
@@ -2284,7 +2349,7 @@ def build_job(
     role: str,
     cmd: list[str],
     stdin: bytes,
-    timeout: int,
+    timeout: int | None,
     repository: str,
     github_requested: bool,
     mcp_config_path: str | None,
@@ -2299,9 +2364,15 @@ def build_job(
     neotoma_tools_granted: bool = False,
     github_delivery_contract: bool = False,
     github_read_only: bool = False,
+    default_timeout: int | None = None,
 ) -> FlyJob:
     """Check eligibility and assemble the job, minus the GitHub token (which
     is minted at launch). Raises ``FlyIneligible`` with the reason.
+
+    ``timeout`` is the caller's own timeout, or None when it gave none;
+    ``default_timeout`` is the shared dispatch timeout a local run would use.
+    The job's timeout is resolved here, once the config is validated, by
+    ``resolve_dispatch_timeout`` and carried on ``FlyJob.timeout``.
 
     ``delivery``: a builder's delivery spec (``DELIVERY_SPEC_KEYS``). The job
     then carries no read-class token; a delivery token for the one repository
@@ -2315,6 +2386,7 @@ def build_job(
     # Configured but with an invalid limit: Fly is disabled, and this is a
     # refusal (no local fallback), not an ineligibility.
     config.require_valid_limits()
+    timeout = resolve_dispatch_timeout(config, timeout, default_timeout)
     if not _finite_number(timeout, 1, MAX_JOB_TIMEOUT_SECONDS):
         raise FlyConfigInvalid(
             f"the dispatch timeout is outside 1 to {MAX_JOB_TIMEOUT_SECONDS} seconds")
@@ -3969,7 +4041,7 @@ class FlyExecutor:
             if (mid in login_ids or mid in tracked_machines or machine.get("state") == "destroyed"
                     or (run_id and (run_id in current or run_id in self._active))):  # fmt: skip
                 continue
-            cap = DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS
+            cap = self.config.longest_default_run_seconds() + APIS_DEADLINE_GRACE_SECONDS
             created = _parse_ts(machine["created_at"]) if "created_at" in machine else None
             key = self.ledger.record_untracked(
                 machine_id=mid, run_id=run_id, owner=self.instance_id, config=self.config,
@@ -4133,14 +4205,16 @@ def _has_job_config(config: dict) -> bool:
 DISPATCH_TIMEOUT_DEFAULT = 1800
 
 
-def _charged_seconds(entry: dict, now: float) -> float:
+def _charged_seconds(entry: dict, now: float,
+                     default_timeout: int = DISPATCH_TIMEOUT_DEFAULT) -> float:  # fmt: skip
     """Machine-seconds to charge for an entry released after the fact: its
     elapsed time, capped at its reserved window. An entry whose times cannot
-    be read is charged the whole default window, never nothing."""
+    be read is charged the whole default window (default_timeout plus
+    the grace), never nothing."""
     try:
         entry = validate("ledger_entry", entry)
     except FlyInvalid:
-        return float(DISPATCH_TIMEOUT_DEFAULT + APIS_DEADLINE_GRACE_SECONDS)
+        return float(default_timeout + APIS_DEADLINE_GRACE_SECONDS)
     window = entry["deadline"] - entry["started_at"]  # not negative: validated
     if not now >= entry["started_at"]:
         # The clock reads earlier than the start: the elapsed time is
