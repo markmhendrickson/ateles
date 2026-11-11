@@ -1080,8 +1080,14 @@ def _planning_ascent(entity_id: str, cache: dict) -> tuple[list[dict], list[str]
     return ascent, ["The planning ascent exceeded the eight-level read bound"]
 
 
-def _claim_row(claim: dict, planning_cache: dict | None = None) -> dict | None:
+def _claim_row(claim: Any, planning_cache: dict | None = None) -> dict | None:
     """Build one derived row without promoting digest history to live truth."""
+    # Older digests store membership as bare task ids, while newer writers
+    # attach historical metadata. Both are locators, never execution evidence.
+    if isinstance(claim, str) and re.fullmatch(r"ent_[A-Za-z0-9_]+", claim):
+        claim = {"task_entity_id": claim}
+    if not isinstance(claim, dict):
+        return None
     evidence = _evidence_entity_ids(claim)
     title = _text(claim.get("claim")) or (evidence[0] if evidence else None)
     if not title:
@@ -1385,12 +1391,26 @@ def _get_session_workboard(
     )
     planning_cache: dict = {}
     if isinstance(claims, list):
+        invalid_claims: dict[str, int] = {}
         for claim in claims:
-            row = _claim_row(claim, planning_cache) if isinstance(claim, dict) else None
+            row = _claim_row(claim, planning_cache)
             if row is None:
-                digest_gaps.append("The digest contains an unrenderable claim; managed-work coverage is partial")
+                reason = (
+                    "invalid entity locator"
+                    if isinstance(claim, str)
+                    else "missing claim text or entity locator"
+                    if isinstance(claim, dict)
+                    else "unsupported claim shape"
+                )
+                invalid_claims[reason] = invalid_claims.get(reason, 0) + 1
             else:
                 rows.append(row)
+        if invalid_claims:
+            counts = "; ".join(f"{reason}: {count}" for reason, count in invalid_claims.items())
+            digest_gaps.append(
+                f"{sum(invalid_claims.values())} digest claims could not be rendered "
+                f"({counts}); managed-work coverage is partial"
+            )
     session_gaps: list[str] = []
     session_coverage: dict = {"requested": False}
     if include_sessions:

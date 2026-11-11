@@ -107,7 +107,7 @@
     }
     if(view.history) {const history=node("details");history.addEventListener("toggle",size);history.append(node("summary","Cumulative session history (not current status)"),node("pre",JSON.stringify(view.history,null,2)));children.push(history);}
     const plan=view.rows.find(r=>r.priority==="display-plan");const primary=[node("p","Display context: "+view.session_key+" · "+view.display_plan_id+". This selection creates no authority.","muted")];
-    if(plan)primary.unshift(node("div","Primary plan","eyebrow"),node("h2",plan.work),node("p",plan.state,"muted"),node("p",plan.next_action));
+    if(plan)primary.unshift(node("div","Primary plan","eyebrow"),node("h2",plan.work),node("p",plan.state,"muted"),node("p",plan.next_action,"next"));
     el("primary").replaceChildren(...primary);el("primary").hidden=false;
     el("rows").replaceChildren(...children);el("count").textContent=` · ${shown.length}`;size();
   }
