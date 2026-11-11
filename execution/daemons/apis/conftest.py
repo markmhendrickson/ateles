@@ -15,6 +15,20 @@ for p in (str(_REPO_ROOT), str(_DAEMON_DIR)):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_operator_profile(monkeypatch):
+    """Ownership tests never read the host's live operator profile.
+
+    A profile-specific test replaces this inert read after the fixture runs.
+    Other tests retain the established no-profile/unknown-assignee control.
+    """
+    from lib.capabilities import neotoma_http
+
+    monkeypatch.setattr(neotoma_http, "request_json", lambda *_a, **_k: {"entities": [], "total": 0})
+    monkeypatch.delenv("OPERATOR_NAME", raising=False)
+    monkeypatch.delenv("APIS_OPERATOR_LOGIN", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_dispatch_failure_logs(monkeypatch, tmp_path):
     """Never let a test write diagnostics into the operator's real log directory.
 

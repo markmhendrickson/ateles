@@ -13,6 +13,38 @@ vocabulary alone.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
+
+
+def operator_names(requester: Callable) -> tuple[frozenset[str], str | None]:
+    """Read the operator's task-assignee names from its configured instance.
+
+    Shared with the decision-queue reader: identity is context, never a
+    hardcoded personal name or a guess that any two words describe a person.
+    The caller owns transport/time limits; failures contain a category only.
+    """
+    try:
+        response = requester(
+            "POST", "/entities/query",
+            {"entity_type": "operator_profile", "include_snapshots": True, "limit": 5},
+        )
+        rows = response.get("entities")
+        if not isinstance(rows, list):
+            return frozenset(), "malformed_operator_profiles"
+        names: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                return frozenset(), "malformed_operator_profiles"
+            snapshot = row.get("snapshot", row)
+            if not isinstance(snapshot, dict):
+                return frozenset(), "malformed_operator_profiles"
+            for field in ("first_name", "display_name", "handle"):
+                value = snapshot.get(field)
+                if isinstance(value, str) and (value := value.strip().lower()):
+                    names.add(value)
+    except Exception as exc:  # noqa: BLE001 - category only, never raw text
+        return frozenset(), type(exc).__name__
+    return (frozenset(names), None) if names else (frozenset(), "no_operator_profile")
 
 # Values that encode "nobody owns this" as a STRING rather than as absence.
 # They are worse than an empty field: `bool(assigned_to)` is True for them, so

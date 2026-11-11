@@ -590,6 +590,7 @@ GITHUB_WEBHOOK_SECRET_NEXT = os.environ.get("APIS_GITHUB_WEBHOOK_SECRET_NEXT", "
 from routing import (  # noqa: E402
     DOMAIN_ROUTES as _DOMAIN_ROUTES,
     HUMAN_OWNED as _HUMAN_OWNED,
+    OperatorIdentityUnavailable,
     SESSION_OWNED as _SESSION_OWNED,
     canonical_assignee as _canonical_assignee,
     deciding_assignee as _deciding_assignee,
@@ -2878,21 +2879,29 @@ async def _dispatch_task(
         or snapshot.get("task_type") == "existing_pr_correction"
         else snapshot.get("owner")
     )
-    skill = _resolve_skill(
-        existing_tags, assigned_to=assigned_to, owner=owner_for_routing
-    )
-    # resolve_role returns the same string as resolve_skill in this codebase;
-    # computed here for explicitness and to thread through to skill_runner so
-    # agent_definition loading asks for "the role" rather than "the skill".
-    role = _resolve_role(
-        existing_tags, assigned_to=assigned_to, owner=owner_for_routing
-    )
+    try:
+        skill = _resolve_skill(
+            existing_tags, assigned_to=assigned_to, owner=owner_for_routing
+        )
+        # Skill and role share the router's ownership answer.
+        role = _resolve_role(
+            existing_tags, assigned_to=assigned_to, owner=owner_for_routing
+        )
+    except OperatorIdentityUnavailable:
+        # An unread identity source is not evidence that a named assignee
+        # has no owner. Keep its state and effects untouched until a real
+        # routing answer is available; never guess another agent from tags.
+        log.warning(
+            "[%s] task %s operator identity is unreadable; leaving as filed, "
+            "not routing, gating or marking no route/owner", DAEMON_NAME, entity_id,
+        )
+        return
 
     # ── Human-owned: a routing ANSWER, not a routing failure ─────────────────
     # Must come before EVERY truthy-skill path (activity, ROUTED, readiness,
     # execution gate, spawn) and before the `skill is None` escalation, because
-    # it is neither: the task has an owner, that owner is a person. Parking it
-    # for the operator is the correct terminal state — spawning an agent onto
+    # it is neither: the task has an owner, that owner is a person. Its state
+    # belongs to that person — spawning an agent onto
     # work the operator deliberately reserved (merge approvals, auth-path
     # changes) is the failure this closes. `gate_override` does NOT bypass this:
     # operator approval of some earlier checkpoint is not consent to hand a
@@ -2900,24 +2909,9 @@ async def _dispatch_task(
     if skill == _HUMAN_OWNED:
         log.info(
             f"[{DAEMON_NAME}] task {entity_id!r} is human-owned "
-            f"(assigned_to={assigned_to}) — parking for the operator, not spawning"
+            f"(assigned_to={assigned_to}) — leaving as filed, not spawning"
         )
-        set_task_status(
-            entity_id,
-            TaskStatus.AWAITING_INPUT,
-            handler=DAEMON_NAME,
-            from_status=current_status,
-            reason=f"human-owned (assigned_to={assigned_to})",
-            key_suffix=trigger,
-        )
-        # Title + id + reason only. The body may carry auth or merge details,
-        # and this page is a notification channel, not a place to echo them.
-        notifier.send(
-            f"Human-owned task awaiting you: {title[:70]}\n"
-            f"  assigned_to={assigned_to} task={entity_id}",
-            priority=Priority.OPERATOR_DECISION,
-            handler=DAEMON_NAME,
-        )
+        _unroutable.forget(entity_id)
         return
 
     # ── Session-owned: an interactive session owns this, so leave it alone ───

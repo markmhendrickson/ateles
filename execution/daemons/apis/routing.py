@@ -504,18 +504,19 @@ def infer_tags_from_text(title: str, body: str = "") -> list[str]:
 # source, so the router and the delivery check give one answer; re-exported here
 # so `routing.SENTINEL_ASSIGNEES` and `routing.canonical_assignee` keep resolving.
 from lib.daemon_runtime.task_ownership import (  # noqa: E402
-    SENTINEL_ASSIGNEES,
+    SENTINEL_ASSIGNEES as SENTINEL_ASSIGNEES,
     canonical_assignee,
     deciding_assignee,
     names_a_session,
+    operator_names,
 )
 
 # ── Human ownership is a routing ANSWER, not a routing miss ──────────────────
 #
 # `resolve_skill` returns this when `assigned_to` names a person rather than an
 # agent. It is deliberately NOT a key in ASSIGNED_TO_ROUTES and never names a
-# skill: `dispatch_task` branches on it before any spawn path, parks the task in
-# AWAITING_INPUT, and notifies at OPERATOR_DECISION. Correctly-assigned human
+# skill: `dispatch_task` branches on it before any spawn path and leaves the
+# task exactly as its human owner filed it. Correctly-assigned human
 # work is not a defect to page about, so it must not travel the BLOCKED +
 # BLOCKER unroutable path either.
 HUMAN_OWNED = "HUMAN_OWNED"
@@ -541,10 +542,26 @@ def _human_assignee_keys() -> frozenset[str]:
     is env-sourced per the operator-config rule).
     """
     keys = {"operator"}
-    login = os.environ.get("APIS_OPERATOR_LOGIN", "").strip().lower()
-    if login:
-        keys.add(login)
+    for variable in ("APIS_OPERATOR_LOGIN", "OPERATOR_NAME"):
+        value = canonical_assignee(os.environ.get(variable))
+        if value:
+            keys.add(value)
     return frozenset(keys)
+
+
+class OperatorIdentityUnavailable(RuntimeError):
+    """A profile read failed; ownership is unknown, not absent."""
+
+
+def _profile_operator_names() -> frozenset[str]:
+    from functools import partial
+
+    from lib.capabilities.neotoma_http import request_json
+
+    names, reason = operator_names(partial(request_json, timeout=5))
+    if reason and reason != "no_operator_profile":
+        raise OperatorIdentityUnavailable("operator profile could not be read")
+    return names
 
 
 def resolve_skill(
@@ -558,7 +575,7 @@ def resolve_skill(
     Returns one of four things:
 
       * an agent skill name — a resolved owner the dispatcher may spawn;
-      * ``HUMAN_OWNED``    — a person owns this; park it, never spawn;
+      * ``HUMAN_OWNED``    — a person owns this; leave as filed, never spawn;
       * ``SESSION_OWNED``  — an interactive session owns this; leave it as
                              filed, never spawn, never mark it blocked;
       * ``None``           — nobody owns this; escalate it loudly.
@@ -591,6 +608,8 @@ def resolve_skill(
             return HUMAN_OWNED
         if names_a_session(key):
             return SESSION_OWNED
+        if key in _profile_operator_names():
+            return HUMAN_OWNED
         # A named owner that is neither an agent, the operator nor a session.
         # Stop here: tag inference would reassign work its creator explicitly
         # gave to someone else, and a confident wrong owner reads as covered
