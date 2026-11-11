@@ -162,6 +162,22 @@ unreadable ledger state refuses admission. The ledger is an estimate for this
 dispatcher, not a provider invoice or proof that a billing alert exists.
 A provider billing alert is a separate backstop, not the admission mechanism.
 
+Fly jobs may have their own execution timeout, `APIS_FLY_DISPATCH_TIMEOUT`
+(seconds), without widening `APIS_DISPATCH_TIMEOUT`, which every local run
+keeps. Unset, a Fly job uses the shared timeout exactly as before. Set, a Fly
+job with no timeout of its own runs with it, a caller's shorter timeout (a lens
+review, for example) is kept, and a caller's longer one is lowered to it, so no
+Fly job runs past it. It is resolved only once a job is bound for Fly: a job
+that falls back to the Mac keeps the shared timeout. An invalid value (zero,
+negative, not a plain decimal, or out of range) disables Fly like any other
+invalid limit: every launch is refused before a token is minted or a machine
+requested, with no local fallback, and the error names the setting, never the
+value. A delivering job must still end within its one-hour GitHub token, so a
+45-minute timeout fits and a 60-minute one is refused before the token is
+minted. The task watchdog waits out the queue wait, the longer of the two
+timeouts, the delivery reserve and the Apis grace before it treats a Fly run as
+stalled.
+
 The accepted Fly usage ruling exempts remote jobs from the dispatcher's local
 subscription pace and weekly-usage ceilings because the Fly logins are separate.
 Local runs retain their local usage rules. The Fly dollar cap still applies;

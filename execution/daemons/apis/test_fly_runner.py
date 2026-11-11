@@ -4257,7 +4257,7 @@ def test_the_watchdog_never_crashes_on_an_invalid_queue_wait():
             "APIS_FLY_RUNNER_CLASSES": "carry_forward_check"}  # fmt: skip
     valid = stall_seconds({**base, "APIS_FLY_QUEUE_MAX_WAIT_SECONDS": "900"})
     for bad in ("NaN", "-5", "abc", "1e9", ""):
-        assert stall_seconds({**base, "APIS_FLY_QUEUE_MAX_WAIT_SECONDS": bad}) == valid - 900 - 120
+        assert stall_seconds({**base, "APIS_FLY_QUEUE_MAX_WAIT_SECONDS": bad}) == valid - 900 - 300 - 120
 
 
 # ── Ledger values arriving from disk ─────────────────────────────────────────
