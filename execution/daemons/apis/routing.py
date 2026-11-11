@@ -553,15 +553,12 @@ class OperatorIdentityUnavailable(RuntimeError):
     """A profile read failed; ownership is unknown, not absent."""
 
 
-def _profile_operator_names() -> frozenset[str]:
+def _profile_operator_names() -> tuple[frozenset[str], str | None]:
     from functools import partial
 
     from lib.capabilities.neotoma_http import request_json
 
-    names, reason = operator_names(partial(request_json, timeout=5))
-    if reason and reason != "no_operator_profile":
-        raise OperatorIdentityUnavailable("operator profile could not be read")
-    return names
+    return operator_names(partial(request_json, timeout=5))
 
 
 def resolve_skill(
@@ -608,8 +605,11 @@ def resolve_skill(
             return HUMAN_OWNED
         if names_a_session(key):
             return SESSION_OWNED
-        if key in _profile_operator_names():
+        names, reason = _profile_operator_names()
+        if key in names:
             return HUMAN_OWNED
+        if reason and reason != "no_operator_profile":
+            raise OperatorIdentityUnavailable("operator profile could not be read")
         # A named owner that is neither an agent, the operator nor a session.
         # Stop here: tag inference would reassign work its creator explicitly
         # gave to someone else, and a confident wrong owner reads as covered

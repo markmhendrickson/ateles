@@ -16,43 +16,147 @@ import re
 from collections.abc import Callable
 
 
-def operator_names(requester: Callable) -> tuple[frozenset[str], str | None]:
-    """Read the operator's task-assignee names from its configured instance.
+def _profile_scope_compatible(response: dict) -> bool:
+    """An explicit response contradiction cannot establish even an identity."""
+    if any(response.get(key) is not None for key in ("error", "error_code", "errors", "detail")):
+        return False
+    if "success" in response and response["success"] is not True:
+        return False
+    if "read_contract" not in response:
+        return True  # compatibility with the earlier counted HTTP envelope
+    contract = response["read_contract"]
+    if not isinstance(contract, dict):
+        return False
+    for key, expected in (("version", "1"), ("surface", "entity_collection")):
+        if key in contract and contract[key] != expected:
+            return False
+    if "applied_scope" in contract:
+        scope = contract["applied_scope"]
+        if not isinstance(scope, dict):
+            return False
+        for key, expected in (("owner", "authenticated"), ("entity_types", ["operator_profile"]),
+                              ("include_merged", False), ("include_deleted", False),
+                              ("include_snapshots", True), ("predicates", [])):
+            if key in scope and (type(scope[key]) is not type(expected) or scope[key] != expected):
+                return False
+    if "request_options" in contract:
+        options = contract["request_options"]
+        if not isinstance(options, dict) or ("ignored" in options and options["ignored"] != []):
+            return False
+    return True
 
-    Shared with the decision-queue reader: identity is context, never a
-    hardcoded personal name or a guess that any two words describe a person.
-    The caller owns transport/time limits; failures contain a category only.
+
+def _profile_page_problem(response: dict, count: int) -> str | None:
+    """Only a coherent complete read can disprove an unmatched assignee.
+
+    Counted legacy envelopes remain supported. When the current API includes
+    its read contract, its explicit uncertainty and scope-exhaustion markers
+    govern; separate-acquisition/read-interval coherence is supported.
+    """
+    total = response.get("total")
+    if type(total) is not int or total < 0:
+        return "malformed_operator_profiles"
+    if total != count:
+        return "partial_operator_profiles"
+    for key in ("next_cursor", "next_offset"):
+        if key in response and response[key] is not None:
+            return "partial_operator_profiles"
+    for key, expected in (("complete", True), ("has_more", False), ("truncated", False)):
+        if key in response and response[key] is not expected:
+            return "partial_operator_profiles"
+    if "offset" in response and (type(response["offset"]) is not int or response["offset"] != 0):
+        return "partial_operator_profiles"
+    if "limit" in response and (type(response["limit"]) is not int or response["limit"] < max(1, count)):
+        return "malformed_operator_profiles"
+    if "read_contract" not in response:
+        return None
+    contract = response["read_contract"]
+    coverage = contract.get("coverage")
+    if not isinstance(coverage, dict) or coverage.get("state") != "complete":
+        return "partial_operator_profiles"
+    if "kind" in coverage and coverage["kind"] != "predicate_population":
+        return "partial_operator_profiles"
+    if "reasons" in coverage and coverage["reasons"] != []:
+        return "partial_operator_profiles"
+    for key in ("scope_exhausted", "page_exhausted"):
+        if key in coverage and coverage[key] is not True:
+            return "partial_operator_profiles"
+    if "returned_count" in coverage and (type(coverage["returned_count"]) is not int
+                                          or coverage["returned_count"] != count):
+        return "partial_operator_profiles"
+    if "total" in coverage:
+        claimed = coverage["total"]
+        if (not isinstance(claimed, dict) or type(claimed.get("value")) is not int
+                or claimed["value"] != total or claimed.get("relation") != "exact"
+                or claimed.get("unit") != "entities"):
+            return "partial_operator_profiles"
+    if "continuation" in coverage:
+        continuation = coverage["continuation"]
+        if (not isinstance(continuation, dict) or continuation.get("kind") != "none"
+                or any(continuation.get(key) is not None for key in ("next_cursor", "next_offset"))):
+            return "partial_operator_profiles"
+    scope = contract.get("applied_scope", {})
+    if "pagination" in scope:
+        pagination = scope["pagination"]
+        if (not isinstance(pagination, dict)
+                or ("kind" in pagination and pagination["kind"] not in ("keyset", "offset"))
+                or ("offset" in pagination and (type(pagination["offset"]) is not int or pagination["offset"] != 0))
+                or ("limit" in pagination and (type(pagination["limit"]) is not int
+                                               or pagination["limit"] < max(1, count)
+                                               or ("limit" in response and pagination["limit"] != response["limit"])))):
+            return "partial_operator_profiles"
+    return None
+
+
+def operator_names(requester: Callable) -> tuple[frozenset[str], str | None]:
+    """Observed valid identities, plus any uncertainty about negative matches.
+
+    A returned name is positive evidence even when collection exhaustion is
+    unknown. An unmatched name proves absence only when the reason is None
+    (or no_operator_profile for a complete empty collection). Malformed rows
+    cannot supply identities, and their uncertainty survives other valid rows.
     """
     try:
         response = requester(
             "POST", "/entities/query",
             {"entity_type": "operator_profile", "include_snapshots": True, "limit": 5},
         )
+        if not isinstance(response, dict) or not _profile_scope_compatible(response):
+            return frozenset(), "malformed_operator_profiles"
         rows = response.get("entities")
         if not isinstance(rows, list):
             return frozenset(), "malformed_operator_profiles"
-        total = response.get("total")
-        if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < 0):
-            return frozenset(), "malformed_operator_profiles"
-        if (response.get("next_cursor") or (total is not None and total != len(rows))
-                or (total is None and len(rows) >= 5)):
-            return frozenset(), "partial_operator_profiles"
+        reason = _profile_page_problem(response, len(rows))
         names: set[str] = set()
+        ids: set[str] = set()
         for row in rows:
-            if not isinstance(row, dict):
-                return frozenset(), "malformed_operator_profiles"
+            if (not isinstance(row, dict)
+                    or ("entity_type" in row and row["entity_type"] != "operator_profile")):
+                reason = "malformed_operator_profiles"
+                continue
+            if "entity_id" in row:
+                entity_id = row["entity_id"]
+                if (not isinstance(entity_id, str)
+                        or not re.fullmatch(r"ent_[A-Za-z0-9_]+", entity_id) or entity_id in ids):
+                    reason = "malformed_operator_profiles"
+                    continue
+                ids.add(entity_id)
             snapshot = row.get("snapshot", row)
             if not isinstance(snapshot, dict):
-                return frozenset(), "malformed_operator_profiles"
-            for field in ("first_name", "display_name", "handle"):
-                value = snapshot.get(field)
-                if isinstance(value, str) and (value := value.strip().lower()):
-                    names.add(value)
+                reason = "malformed_operator_profiles"
+                continue
+            fields = [snapshot[field] for field in ("first_name", "display_name", "handle") if field in snapshot]
+            if any(not isinstance(value, str) for value in fields):
+                reason = "malformed_operator_profiles"
+                continue
+            row_names = {value.strip().lower() for value in fields if value.strip()}
+            if not row_names:
+                reason = "operator_profile_has_no_names"
+                continue
+            names.update(row_names)
     except Exception as exc:  # noqa: BLE001 - category only, never raw text
         return frozenset(), type(exc).__name__
-    if names:
-        return frozenset(names), None
-    return frozenset(), "operator_profile_has_no_names" if rows else "no_operator_profile"
+    return frozenset(names), reason or (None if rows else "no_operator_profile")
 
 # Values that encode "nobody owns this" as a STRING rather than as absence.
 # They are worse than an empty field: `bool(assigned_to)` is True for them, so
