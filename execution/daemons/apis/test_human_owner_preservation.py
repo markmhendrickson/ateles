@@ -146,3 +146,26 @@ def test_incomplete_identity_read_is_not_no_owner(_world, _isolated_ledger, monk
     ))
     assert _world == {"statuses": [], "started": [], "spawns": []}
     assert len(notifier.sent) == 1 and "ownership could not be verified" in notifier.sent[0]
+
+
+@pytest.mark.parametrize("human_first", [True, False])
+def test_one_identity_read_decides_both_skill_and_role(
+    _world, _isolated_ledger, monkeypatch, human_first,
+):
+    calls = []
+    human = {"entities": [{"snapshot": {"display_name": "Example Person"}}], "total": 1}
+    absent = {"entities": [], "total": 0}
+
+    def changing_read(*_a, **_k):
+        calls.append(True)
+        return human if (len(calls) == 1) == human_first else absent
+
+    monkeypatch.setattr(neotoma_http, "request_json", changing_read)
+    asyncio.run(apis.dispatch_task(
+        "ent_one_identity_read", {"title": "Review notes", "status": "open",
+                                 "assigned_to": "Example Person", "tags": []},
+        trigger="created", notifier=_Notifier(), snapshot_hydrated=True,
+    ))
+    assert len(calls) == 1, "skill and role must share the same ownership answer"
+    assert _world["started"] == [] and _world["spawns"] == []
+    assert [status for status, _ in _world["statuses"]] == ([] if human_first else [apis.TaskStatus.BLOCKED])

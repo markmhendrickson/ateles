@@ -2883,8 +2883,9 @@ async def _dispatch_task(
         skill = _resolve_skill(
             existing_tags, assigned_to=assigned_to, owner=owner_for_routing
         )
-        # Skill and role share the router's ownership answer.
-        role = _resolve_role(
+        # A non-agent ownership answer is one read, not two possibly
+        # contradictory profile reads. Real agents keep role resolution.
+        role = skill if skill in (None, _HUMAN_OWNED, _SESSION_OWNED) else _resolve_role(
             existing_tags, assigned_to=assigned_to, owner=owner_for_routing
         )
     except OperatorIdentityUnavailable:
