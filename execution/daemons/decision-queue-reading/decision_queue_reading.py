@@ -59,7 +59,6 @@ for _p in (_REPO_ROOT, _REPO_ROOT / "execution" / "scripts"):
 
 import decision_queue as dq  # noqa: E402
 from execution.scripts.metrics import definitions, neotoma_io, schemas  # noqa: E402
-from lib.daemon_runtime.task_ownership import operator_names  # noqa: E402
 
 Requester = Callable[..., "dict[str, Any]"]
 
@@ -242,6 +241,28 @@ def drift_margin(server_total: int) -> int:
 
 def instrument_ok(client_count: int, server_total: int) -> bool:
     return abs(client_count - server_total) <= drift_margin(server_total)
+
+
+def operator_names(requester: Requester) -> tuple[frozenset[str], str | None]:
+    """Lowercased names from ``operator_profile``; (empty, reason) if unreadable."""
+    try:
+        res = requester(
+            "POST",
+            "/entities/query",
+            {"entity_type": "operator_profile", "include_snapshots": True, "limit": 5},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return frozenset(), type(exc).__name__
+    names: set[str] = set()
+    for row in res.get("entities") or []:
+        snap = neotoma_io.snapshot_fields(row)
+        for field in ("first_name", "display_name", "handle"):
+            value = str(snap.get(field) or "").strip().lower()
+            if value:
+                names.add(value)
+    if not names:
+        return frozenset(), "no_operator_profile"
+    return frozenset(names), None
 
 
 # ── numbers ──────────────────────────────────────────────────────────────────
