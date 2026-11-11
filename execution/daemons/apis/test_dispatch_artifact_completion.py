@@ -67,6 +67,9 @@ class _Notifier:
     def send(self, message, priority=None, handler=None):
         self.sent.append(message)
 
+    def clear_dedupe(self, key):
+        pass
+
 
 @dataclass
 class _SpawnResult:

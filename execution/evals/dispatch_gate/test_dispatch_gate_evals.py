@@ -10,6 +10,7 @@ Run: pytest execution/evals/dispatch_gate/ -v
 
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 
@@ -18,6 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import dispatch_gate_harness as harness  # noqa: E402
+from lib.capabilities import neotoma_http  # noqa: E402
 
 DATA = harness.load()
 SCENARIOS = DATA["scenarios"]
@@ -156,3 +158,64 @@ def test_checks_go_red_if_the_dispatcher_counts_as_an_owner(scenario):
 
 def test_dispatcher_scenarios_are_present():
     assert len(DISPATCHER_SCENARIOS) == 2
+
+
+_IDENTITY_SCENARIOS = {
+    "profile_owned_person_is_left_as_filed",
+    "profile_owned_person_with_session_word_is_left_as_filed",
+    "unreadable_operator_profile_preserves_unknown_ownership",
+    "partial_operator_profile_preserves_unknown_ownership",
+}
+
+
+@pytest.mark.parametrize("scenario", [s for s in SCENARIOS if s["id"] in _IDENTITY_SCENARIOS], ids=lambda s: s["id"])
+def test_profile_contrasts_are_inert_at_the_real_dispatch_boundary(scenario):
+    observed = harness.run_scenario(scenario, BASE)
+    assert harness.check(scenario, observed) == []
+    assert len(observed["profile_reads"]) == 1
+    for field in ("statuses", "briefs", "spawns", "runner_calls", "persisted", "assessments"):
+        assert observed[field] == [], field
+
+
+@pytest.mark.parametrize("scenario_id", ["unknown_named_assignee_still_blocks", "person_named_like_a_session_word_still_blocks"])
+def test_original_negative_expectations_have_explicit_complete_identity_evidence(scenario_id, monkeypatch):
+    scenario = next(s for s in SCENARIOS if s["id"] == scenario_id)
+    assert scenario["expect"]["outcome"] == "blocked"
+    assert scenario["expect"]["any_notification_contains"] == ["unroutable"]
+    # The invoking operator's settings cannot change the synthetic identity.
+    monkeypatch.setenv("OPERATOR_NAME", scenario["task"]["assigned_to"])
+    monkeypatch.setenv("APIS_OPERATOR_LOGIN", scenario["task"]["assigned_to"])
+    observed = harness.run_scenario(scenario, BASE)
+    assert len(observed["profile_reads"]) == 1
+    assert harness.check(scenario, observed) == []
+    assert [getattr(status, "value", status) for _id, status, _why in observed["statuses"]] == ["blocked"]
+    for field in ("briefs", "spawns", "runner_calls", "persisted", "assessments"):
+        assert observed[field] == [], field
+
+
+@pytest.mark.parametrize("mode", ["unreadable", "partial"])
+@pytest.mark.parametrize("scenario_id", ["unknown_named_assignee_still_blocks", "person_named_like_a_session_word_still_blocks"])
+def test_negative_scenarios_contrast_with_unqualified_identity(mode, scenario_id):
+    scenario = copy.deepcopy(next(s for s in SCENARIOS if s["id"] == scenario_id))
+    scenario["config"]["operator_profile"] = {"kind": mode}
+    observed = harness.run_scenario(scenario, BASE)
+    assert len(observed["profile_reads"]) == 1
+    for field in ("statuses", "briefs", "spawns", "runner_calls", "persisted", "assessments"):
+        assert observed[field] == [], field
+    assert len(observed["notifications"]) == 1
+    assert "ownership could not be verified" in observed["notifications"][0]
+    assert harness.check(scenario, observed), "the original blocked expectation must not pass under uncertainty"
+
+
+@pytest.mark.parametrize("method,path,body", [
+    ("GET", "/entities/query", {"entity_type": "operator_profile"}),
+    ("POST", "/store", {"entity_type": "operator_profile"}),
+    ("POST", "/entities/query", {"entity_type": "task"}),
+])
+def test_profile_boundary_rejects_unexpected_external_calls(monkeypatch, method, path, body):
+    async def wrong_request(*_a, **_k):
+        neotoma_http.request_json(method, path, body)
+
+    monkeypatch.setattr(harness.apis, "dispatch_task", wrong_request)
+    with pytest.raises(pytest.fail.Exception, match="unexpected operator-profile external request"):
+        harness.run_scenario({"task": {"assigned_to": "Example Person"}}, BASE)

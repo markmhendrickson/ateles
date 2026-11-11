@@ -1,4 +1,4 @@
-"""Who owns a task: the one recognizer for "an interactive session owns this".
+"""Task ownership helpers for session recognition and legacy Apis routing.
 
 Interactive sessions (a chat, a coordinator, a subagent) own many tasks, and no
 dispatcher can spawn one. A task naming a session as its owner is therefore
@@ -13,6 +13,144 @@ vocabulary alone.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
+
+
+def _required_profile_fields(value: object, expected: dict) -> bool:
+    """Require this consumer's evidence, including explicit null end markers."""
+    return isinstance(value, dict) and all(
+        key in value and type(value[key]) is type(wanted) and value[key] == wanted
+        for key, wanted in expected.items()
+    )
+
+
+def _profile_scope_compatible(response: dict) -> bool:
+    """A current-contract identity needs affirmative, nonforeign scope proof."""
+    if any(response.get(key) is not None for key in ("error", "error_code", "errors", "detail")):
+        return False
+    if "success" in response and response["success"] is not True:
+        return False
+    if "read_contract" not in response:
+        return True  # compatibility with the earlier counted HTTP envelope
+    contract = response["read_contract"]
+    return (
+        _required_profile_fields(contract, {"version": "1", "surface": "entity_collection"})
+        and _required_profile_fields(contract.get("applied_scope"), {
+            "owner": "authenticated", "entity_types": ["operator_profile"],
+            "include_merged": False, "include_deleted": False,
+            "include_snapshots": True, "predicates": [],
+        })
+        and _required_profile_fields(contract.get("request_options"), {"ignored": []})
+    )
+
+
+def _complete_current_profile_contract(response: dict, count: int) -> bool:
+    """The complete v1 negative proof, as constructed by the current producer.
+
+    A sparse present contract is never the counted-legacy branch. Required
+    scope, mode, population counts and explicit exhaustion/continuation must
+    agree as a whole. Ordering, timestamps and common_view are not this proof.
+    """
+    contract = response["read_contract"]
+    limit = response.get("limit")
+    if type(limit) is not int or not 0 <= count < limit:
+        return False
+    if not _profile_scope_compatible(response):
+        return False
+    coverage = contract.get("coverage")
+    return (
+        _required_profile_fields(response, {"total": count, "offset": 0})
+        and _required_profile_fields(contract.get("mode"), {"actual": "structured", "fallback_reason": None})
+        and _required_profile_fields(contract["applied_scope"].get("pagination"), {
+            "kind": "keyset", "limit": limit, "offset": 0,
+        })
+        and _required_profile_fields(coverage, {
+            "kind": "predicate_population", "state": "complete", "reasons": [],
+            "returned_count": count, "page_exhausted": True, "scope_exhausted": True,
+        })
+        and _required_profile_fields(coverage.get("total"), {"value": count, "relation": "exact", "unit": "entities"})
+        and _required_profile_fields(coverage.get("continuation"), {
+            "kind": "none", "next_cursor": None, "next_offset": None,
+        })
+    )
+
+
+def _profile_page_problem(response: dict, count: int) -> str | None:
+    """Only a coherent complete read can disprove an unmatched assignee.
+
+    Counted legacy envelopes remain supported. When the current API includes
+    its read contract, its explicit uncertainty and scope-exhaustion markers
+    govern; separate-acquisition/read-interval coherence is supported.
+    """
+    total = response.get("total")
+    if type(total) is not int or total < 0:
+        return "malformed_operator_profiles"
+    if total != count:
+        return "partial_operator_profiles"
+    for key in ("next_cursor", "next_offset"):
+        if key in response and response[key] is not None:
+            return "partial_operator_profiles"
+    for key, expected in (("complete", True), ("has_more", False), ("truncated", False)):
+        if key in response and response[key] is not expected:
+            return "partial_operator_profiles"
+    if "offset" in response and (type(response["offset"]) is not int or response["offset"] != 0):
+        return "partial_operator_profiles"
+    if "limit" in response and (type(response["limit"]) is not int or response["limit"] < max(1, count)):
+        return "malformed_operator_profiles"
+    if "read_contract" not in response:
+        return None
+    return None if _complete_current_profile_contract(response, count) else "partial_operator_profiles"
+
+
+def operator_names(requester: Callable) -> tuple[frozenset[str], str | None]:
+    """Observed valid identities, plus any uncertainty about negative matches.
+
+    A returned name is positive evidence even when collection exhaustion is
+    unknown. An unmatched name proves absence only when the reason is None
+    (or no_operator_profile for a complete empty collection). Malformed rows
+    cannot supply identities, and their uncertainty survives other valid rows.
+    """
+    try:
+        response = requester(
+            "POST", "/entities/query",
+            {"entity_type": "operator_profile", "include_snapshots": True, "limit": 5},
+        )
+        if not isinstance(response, dict) or not _profile_scope_compatible(response):
+            return frozenset(), "malformed_operator_profiles"
+        rows = response.get("entities")
+        if not isinstance(rows, list):
+            return frozenset(), "malformed_operator_profiles"
+        reason = _profile_page_problem(response, len(rows))
+        names: set[str] = set()
+        ids: set[str] = set()
+        for row in rows:
+            if (not isinstance(row, dict)
+                    or ("entity_type" in row and row["entity_type"] != "operator_profile")):
+                reason = "malformed_operator_profiles"
+                continue
+            if "entity_id" in row:
+                entity_id = row["entity_id"]
+                if (not isinstance(entity_id, str)
+                        or not re.fullmatch(r"ent_[A-Za-z0-9_]+", entity_id) or entity_id in ids):
+                    reason = "malformed_operator_profiles"
+                    continue
+                ids.add(entity_id)
+            snapshot = row.get("snapshot", row)
+            if not isinstance(snapshot, dict):
+                reason = "malformed_operator_profiles"
+                continue
+            fields = [snapshot[field] for field in ("first_name", "display_name", "handle") if field in snapshot]
+            if any(not isinstance(value, str) for value in fields):
+                reason = "malformed_operator_profiles"
+                continue
+            row_names = {value.strip().lower() for value in fields if value.strip()}
+            if not row_names:
+                reason = "operator_profile_has_no_names"
+                continue
+            names.update(row_names)
+    except Exception as exc:  # noqa: BLE001 - category only, never raw text
+        return frozenset(), type(exc).__name__
+    return frozenset(names), reason or (None if rows else "no_operator_profile")
 
 # Values that encode "nobody owns this" as a STRING rather than as absence.
 # They are worse than an empty field: `bool(assigned_to)` is True for them, so

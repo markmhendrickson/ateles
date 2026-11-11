@@ -421,14 +421,14 @@ def test_genuinely_unroutable_tags_still_escalate():
     assert "unroutable" in n.sent[0]
 
 
-# ── human-owned tasks park, never spawn (ateles#702, defect a) ────────────────
+# ── human-owned tasks stay as filed, never spawn ────────────────────────────
 
 
 def test_operator_assigned_task_is_not_spawned(monkeypatch):
     """The blast-radius case, through the dispatcher.
 
     An `operator`-assigned task whose text keyword-matches an agent used to be
-    marked ROUTED and spawned. It must now park in AWAITING_INPUT — and must not
+    marked ROUTED and spawned. Its human-owned state must be preserved — and must not
     travel the unroutable BLOCKER path either, because it is not a defect.
     """
     statuses: list = []
@@ -449,8 +449,7 @@ def test_operator_assigned_task_is_not_spawned(monkeypatch):
         n,
     )
     assert spawned == [], f"an agent was spawned onto human-owned work: {spawned}"
-    assert statuses and statuses[0][0] == apis.TaskStatus.AWAITING_INPUT, statuses
-    assert "human-owned" in (statuses[0][1] or "")
+    assert statuses == []
     assert not any("unroutable" in m for m in n.sent), n.sent
 
 
@@ -557,7 +556,7 @@ def test_person_assignee_with_session_owner_is_still_human_owned(_world):
     n = _Notifier()
     _dispatch_with({"title": "Approve it", "assigned_to": "operator",
                     "owner": "Codex session", "tags": []}, n)
-    assert [s for s, _r in _world["statuses"]] == [apis.TaskStatus.AWAITING_INPUT]
+    assert _world["statuses"] == []
     assert _world["spawns"] == []
 
 

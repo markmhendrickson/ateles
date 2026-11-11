@@ -17,6 +17,7 @@ The scenarios are synthetic and public-safe: no operator data of any kind.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import sys
 from pathlib import Path
@@ -34,6 +35,7 @@ import apis  # noqa: E402
 import model_tiering  # noqa: E402
 import producer_confidence  # noqa: E402
 from lib.daemon_runtime import gating  # noqa: E402
+from lib.capabilities import neotoma_http  # noqa: E402
 from lib.daemon_runtime.gating import ExecutionPolicy  # noqa: E402
 from unroutable_ledger import UnroutableLedger  # noqa: E402
 
@@ -93,15 +95,45 @@ def run_scenario(scenario: dict, base_task: dict, *, mutation: str = "none") -> 
     obs: dict = {
         "briefs": [], "spawns": [], "statuses": [], "runner_calls": [],
         "notifications": [], "persisted": [], "scorer_tier": None,
-        "assessments": [], "events": [],
+        "assessments": [], "events": [], "profile_reads": [],
     }
     config = scenario.get("config") or {}
     scorer = scenario.get("scorer") or {"kind": "none"}
     task = build_task(base_task, scenario.get("task"))
     gate_override = bool((scenario.get("dispatch") or {}).get("gate_override"))
     assessment_mode = config.get("assessment", "ok")
+    profile = config.get("operator_profile", {"kind": "complete_negative"})
+    if not isinstance(profile, dict) or profile.get("kind") not in {
+        "complete_negative", "response", "unreadable", "partial",
+    }:
+        raise ValueError("unsupported synthetic operator-profile mode")
 
     with pytest.MonkeyPatch.context() as mp:
+        # Identity belongs to this synthetic scenario, never the invoking
+        # operator or a sibling test directory's autouse fixtures.
+        mp.setenv("OPERATOR_NAME", "Eval Operator")
+        mp.setenv("APIS_OPERATOR_LOGIN", "eval-operator")
+
+        def _profile_read(method, path, body=None, **kwargs):
+            if (method, path, body, kwargs) != (
+                "POST", "/entities/query",
+                {"entity_type": "operator_profile", "include_snapshots": True, "limit": 5},
+                {"timeout": 5},
+            ):
+                # pytest.fail is not swallowed by the production transport's
+                # Exception-to-unknown boundary. An unexpected read fails the
+                # eval instead of quietly looking like a simulated outage.
+                pytest.fail("unexpected operator-profile external request", pytrace=False)
+            obs["profile_reads"].append((method, path, copy.deepcopy(body)))
+            if profile["kind"] == "unreadable":
+                raise neotoma_http.NeotomaConfigError("synthetic profile unavailable")
+            if profile["kind"] == "partial":
+                return {"entities": [], "total": 1}
+            if profile["kind"] == "response":
+                return copy.deepcopy(profile["response"])
+            return {"entities": [], "total": 0}
+
+        mp.setattr(neotoma_http, "request_json", _profile_read)
         mp.setattr(apis, "_unroutable", UnroutableLedger(path=_tmp_ledger()))
         mp.setattr(apis, "_created_seen", {})
         mp.setattr(apis, "READINESS_GATE", False)

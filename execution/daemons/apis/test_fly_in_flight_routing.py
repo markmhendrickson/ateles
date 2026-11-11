@@ -46,6 +46,9 @@ class _Notifier:
     def send(self, *args, **kwargs):
         self.sent.append((args, kwargs))
 
+    def clear_dedupe(self, key):
+        pass
+
 
 def _event(action: str) -> apis.NeotomaEvent:
     event = apis.NeotomaEvent(
