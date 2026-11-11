@@ -27,7 +27,13 @@ if str(_DAEMON_DIR) not in sys.path:
 
 import fly_runner  # noqa: E402
 import skill_runner  # noqa: E402
-from test_fly_runner import _job, _once, fly_env, seam  # noqa: E402,F401 -- fixtures
+from test_fly_runner import _job, _once  # noqa: E402
+from test_fly_runner import fly_env as _fly_env_fixture  # noqa: E402
+from test_fly_runner import seam as _seam_fixture  # noqa: E402
+
+# The shared fixtures, re-exported so pytest finds them here.
+fly_env = _fly_env_fixture
+seam = _seam_fixture
 
 LOCAL = 1800
 FLY = 2700
