@@ -116,6 +116,9 @@ class _Notifier:
         assert "never launched" not in str(message), message
         self.sent.append(str(message))
 
+    def clear_dedupe(self, key):
+        pass
+
 
 def _task(**over) -> dict:
     snap = {

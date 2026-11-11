@@ -901,6 +901,9 @@ def test_pending_task_beyond_the_first_query_page_reaches_dispatch(monkeypatch):
         def send(self, *args, **kwargs):
             raise AssertionError("the high-confidence local edit should not be held")
 
+        def clear_dedupe(self, key):
+            pass
+
     class BlastRadius:
         value = "low"
 

@@ -26,6 +26,9 @@ class _Notifier:
     def send(self, *_args, **_kwargs):
         self.messages.append((_args, _kwargs))
 
+    def clear_dedupe(self, key):
+        pass
+
 
 class _Job:
     def __init__(self):
