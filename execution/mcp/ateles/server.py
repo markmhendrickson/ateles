@@ -69,8 +69,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from workboard_planning import session_planning_tree
-
 import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -91,6 +89,11 @@ from mcp.types import (
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+from execution.mcp.ateles.workboard_planning import (  # noqa: E402
+    planning_declaration,
+    session_planning_tree,
+)
 
 from lib.daemon_runtime.action_type import (  # noqa: E402
     AGENT_ACTION_TYPE_PRIOR,
@@ -1084,6 +1087,9 @@ def _planning_ascent(entity_id: str, cache: dict) -> tuple[list[dict], list[str]
         record = read(record_path)
         if not isinstance(record, dict) or not _entity_type(record):
             return ascent, [f"Planning parent {parent} could not be read"]
+        returned_id = record.get("entity_id", record.get("id"))
+        if returned_id is not None and returned_id != parent:
+            return ascent, [f"Planning parent {parent} returned a contradictory identity"]
         ascent.append(
             {
                 "entity_id": parent,
@@ -1098,11 +1104,76 @@ def _planning_ascent(entity_id: str, cache: dict) -> tuple[list[dict], list[str]
 def _planning_registry(cache: dict) -> tuple[dict, bool, list[str]]:
     """Read declared levels only when the registry qualifies full coverage.
 
-    The exact summary-read wire contract is supplied by the existing registry
-    implementation dependency. Until it is available, familiar type names do
-    not become fallback declarations.
+    The compact summary projects SchemaDefinition.planning. An older server,
+    code fallback, filtered page or malformed declaration cannot establish the
+    highest level by omission. This cache lasts only for this one board read.
     """
-    return {}, False, ["The registry's complete planning-level declarations are unavailable"]
+    key = "_planning_registry_result"
+    if key in cache:
+        return cache[key]
+
+    def unknown(reason):
+        result = ({}, False, [reason])
+        cache[key] = result
+        return result
+
+    limit = 5000
+    page = _get(f"/schemas?summary=true&limit={limit}&offset=0")
+    if not isinstance(page, dict) or not isinstance(page.get("schemas"), list):
+        return unknown("The registry planning declarations could not be read")
+    rows = page["schemas"]
+    coverage = page.get("registry_coverage")
+    if not isinstance(coverage, dict):
+        return unknown("This registry read does not qualify planning-declaration coverage")
+    scope = coverage.get("scope")
+    if (
+        coverage.get("version") != "1"
+        or coverage.get("state") != "complete"
+        or coverage.get("source") != "registry"
+        or coverage.get("reasons") != []
+        or coverage.get("exhausted") is not True
+        or type(coverage.get("total")) is not int
+        or type(coverage.get("returned_count")) is not int
+        or coverage["total"] != len(rows)
+        or coverage["returned_count"] != len(rows)
+        or not isinstance(scope, dict)
+        or scope.get("owner") != "authenticated"
+        or "keyword" not in scope or scope["keyword"] is not None
+        or "entity_type" not in scope or scope["entity_type"] is not None
+        or type(page.get("total")) is not int or page["total"] != len(rows)
+        or type(page.get("limit")) is not int or page["limit"] != limit
+        or type(page.get("offset")) is not int or page["offset"] != 0
+        or len(rows) > limit
+    ):
+        return unknown("The registry's complete, authenticated planning-level set is unknown")
+    for field, expected in (("next_cursor", None), ("next_offset", None), ("cursor", None),
+                            ("next_page", None), ("has_more", False), ("complete", True),
+                            ("exhausted", True)):
+        if field in page and (page[field] != expected or type(page[field]) is not type(expected)):
+            return unknown("Registry continuation metadata contradicts complete coverage")
+    declarations = {}
+    seen = set()
+    for row in rows:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("entity_type"), str) or not row["entity_type"].strip()
+            or row["entity_type"] in seen
+            or not isinstance(row.get("schema_version"), str) or not row["schema_version"].strip()
+            or type(row.get("field_count")) is not int or row["field_count"] < 0
+            or "planning_error" in row
+        ):
+            return unknown("The registry contains an invalid or ambiguous planning declaration")
+        seen.add(row["entity_type"])
+        if "planning" in row:
+            mark = planning_declaration(row["planning"])
+            if mark is None:
+                return unknown("The registry contains an invalid planning-level mark")
+            if row["entity_type"] == "task":
+                return unknown("The execution-task type cannot supply a planning-record level")
+            declarations[row["entity_type"]] = mark
+    result = declarations, True, []
+    cache[key] = result
+    return result
 
 
 def _claim_row(claim: Any, planning_cache: dict | None = None) -> dict | None:
@@ -1519,6 +1590,9 @@ def _format_workboard_result(result: dict) -> str:
     planning = result.get("planning")
     if isinstance(planning, dict):
         qualification = (
+            "no planning levels are declared"
+            if planning["registry_complete"] and not planning["level_coverage"]
+            else
             f"{planning['qualified_tasks']}/{planning['unique_tasks']} task ascents reach every declared level"
             if planning["registry_complete"]
             else f"planning-level coverage is unknown for {planning['membership_entries']} session entries"
@@ -1531,6 +1605,13 @@ def _format_workboard_result(result: dict) -> str:
         )
         if planning["registry_gaps"]:
             sections.append("Planning registry limits:\n" + "\n".join(planning["registry_gaps"]))
+        for node in planning["nodes"]:
+            if node["parent_id"] is None:
+                sections.append(
+                    "Session subtree: " + node["title"] + " — "
+                    + json.dumps(node["counts"], sort_keys=True)
+                    + "; these counts do not establish whole-plan completion."
+                )
     if "history" in result:
         sections.append(
             "Requested cumulative session history (not current status):\n"

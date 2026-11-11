@@ -67,6 +67,8 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
     {...treePayload,planning:{...treePayload.planning,unplanned:[{row_index:1,reason:'Duplicate placement',unknown:false}]}},
   ]){present(malformed);assert.equal(ids.rows.allText(),treeSaved);assert(ids.notice.allText().includes('stale'));}
   const unplanned={...treePayload,planning:{...treePayload.planning,registry_complete:false,registry_gaps:['Levels are unknown'],qualified_tasks:0,unknown_tasks:1,level_coverage:[],nodes:[],roots:[],unplanned:[{row_index:1,reason:'The registry could not be read',unknown:true}]}};
+  const unknownCount={...unplanned,planning:{...unplanned.planning,level_coverage:[{level:20,entity_types:['purpose'],reached_tasks:0,complete_tasks:0}]}};
+  const beforeUnknown=ids.rows.allText();present(unknownCount);assert.equal(ids.rows.allText(),beforeUnknown);assert(ids.notice.allText().includes('stale'),'unknown coverage cannot report a false completed zero');
   present(unplanned);assert(ids.rows.allText().includes('Unplanned'));assert(ids.rows.allText().includes('The registry could not be read'));assert(ids.planning.allText().includes('coverage is unknown'));
   present({...payload,read_gaps:Array.from({length:59},(_,i)=>`Explicit task ent_${i} could not be read as a task; its current state is unknown`)});
   assert(ids.notice.children[0].allText().includes('59 × Explicit task [record]'));
@@ -135,7 +137,7 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
   run=ids.refresh.handlers.click();latest=sent.filter(m=>m.method==='tools/call').at(-1);deliver({method:'ui/notifications/tool-input',params:{arguments:{session_key:3,display_plan_id:'ent_plan'}}});await run;deliver({id:latest.id,result:{structuredContent:payload}});assert(ids.notice.allText().includes('stale'));
   const circular={};circular.child=circular;present({...payload,history:{tasks_claimed:[circular],artifacts:[]}});assert(ids.notice.allText().includes('stale'));
   assert(html.includes('overflow-wrap:anywhere'));
-  if(process.argv[3]) {const data=JSON.parse(fs.readFileSync(process.argv[3],'utf8'));present(data);assert(!ids.notice.allText().includes('stale'));assert(ids.rows.allText().includes('Current producer-bound task'));assert(ids.rows.allText().includes('Working now'));assert(ids.rows.allText().includes('Historical artifact'));}
+  if(process.argv[3]) {const data=JSON.parse(fs.readFileSync(process.argv[3],'utf8'));present(data);assert(!ids.notice.allText().includes('stale'));if(process.argv[4]==='planning'){assert(data.planning.qualified_tasks>0);assert(ids.rows.allText().includes(data.planning.nodes.find(n=>n.parent_id===null).title));assert(ids.planning.allText().includes('reach every declared level'));}else{assert(ids.rows.allText().includes('Current producer-bound task'));assert(ids.rows.allText().includes('Working now'));assert(ids.rows.allText().includes('Historical artifact'));}}
   const beforeClose=sent.filter(m=>m.method==='tools/call').length;deliver({id:9999,method:'ui/resource-teardown'});assert.equal(ids.refresh.disabled,true);await ids.refresh.handlers.click();documentEvents.visibilitychange();assert.equal(sent.filter(m=>m.method==='tools/call').length,beforeClose);assert(sent.some(m=>m.id===9999&&m.result));
   console.log('actual view bridge: transactional validation, bound scope, history, coverage, decisions, cancellation and refresh passed');
 })().catch(error=>{console.error(error);process.exit(1);});

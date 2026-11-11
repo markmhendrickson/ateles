@@ -145,6 +145,16 @@ def session_planning_tree(
             if position == 0:
                 node["row_indexes"].append(index)
 
+    descendant_indexes: dict[str, set[int]] = {node_id: set() for node_id in nodes}
+    for node in nodes.values():
+        for index in node["row_indexes"]:
+            current = node
+            while current is not None:
+                descendant_indexes[current["entity_id"]].add(index)
+                current = nodes.get(current["parent_id"])
+    for node_id, node in nodes.items():
+        node["counts"] = session_state_counts(rows, list(descendant_indexes[node_id]))
+
     task_ids = {row["entity_id"] for _, row in memberships if isinstance(row.get("entity_id"), str)}
     return {
         "version": 1,

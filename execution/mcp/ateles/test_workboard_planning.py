@@ -5,6 +5,12 @@ import os
 os.environ["ATELES_SKIP_DOTENV"] = "1"
 
 import sys
+import copy
+import asyncio
+import json
+import shutil
+import socket
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -33,6 +39,7 @@ def test_arbitrary_registered_names_form_one_high_to_low_tree():
     assert nodes["ent_purpose"]["read_only"] is True
     assert nodes["ent_sprint"]["parent_id"] == "ent_purpose"
     assert nodes["ent_work"]["parent_id"] == "ent_sprint"
+    assert nodes["ent_purpose"]["counts"] == {"tasks": 1, "recorded": 1}
     assert tree["qualified_tasks"] == tree["unique_tasks"] == 1
 
 
@@ -123,3 +130,108 @@ def test_duplicate_task_coverage_cannot_select_a_convenient_parent():
     assert not tree["nodes"] and not tree["qualified_tasks"]
     assert len(tree["unplanned"]) == 2
     assert tree["level_coverage"][0]["complete_tasks"] == 0
+
+
+def registry_page():
+    rows = [{"entity_type": "purpose", "schema_version": "1.0", "field_count": 3,
+             "planning": {"level": 2.5, "read_only": True}},
+            {"entity_type": "contact", "schema_version": "1.0", "field_count": 7}]
+    return {"schemas": rows, "total": 2, "limit": 5000, "offset": 0,
+            "registry_coverage": {"version": "1", "state": "complete", "source": "registry",
+                "reasons": [], "exhausted": True, "total": 2, "returned_count": 2,
+                "scope": {"owner": "authenticated", "keyword": None, "entity_type": None}}}
+
+
+def test_registry_summary_uses_one_scoped_complete_declaration_location():
+    response = registry_page()
+    response["schemas"][1]["metadata"] = {"planning": {"level": 900}}
+    with patch.object(srv, "_get", return_value=response) as read:
+        cache = {}
+        marks, complete, gaps = srv._planning_registry(cache)
+        assert srv._planning_registry(cache) == (marks, complete, gaps)
+    read.assert_called_once_with("/schemas?summary=true&limit=5000&offset=0")
+    assert marks == {"purpose": {"level": 2.5, "read_only": True}}
+    assert complete and not gaps
+
+
+def test_partial_or_malformed_registry_never_qualifies_a_highest_level():
+    mutations = [
+        lambda p: p.pop("registry_coverage"),
+        lambda p: p["registry_coverage"].update(state="unknown"),
+        lambda p: p["registry_coverage"].update(source="code_fallback"),
+        lambda p: p["registry_coverage"].update(reasons=["Unknown acquisition"]),
+        lambda p: p["registry_coverage"].update(exhausted=False),
+        lambda p: p["registry_coverage"].pop("exhausted"),
+        lambda p: p["registry_coverage"].update(total=None),
+        lambda p: p["registry_coverage"].update(total=True),
+        lambda p: p["registry_coverage"].update(returned_count=1),
+        lambda p: p["registry_coverage"]["scope"].update(owner="global"),
+        lambda p: p["registry_coverage"]["scope"].update(keyword="purpose"),
+        lambda p: p["registry_coverage"]["scope"].pop("entity_type"),
+        lambda p: p["registry_coverage"]["scope"].update(entity_type="purpose"),
+        lambda p: p.update(total=3),
+        lambda p: p.update(offset=1),
+        lambda p: p.update(next_cursor=""),
+        lambda p: p.update(next_cursor=False),
+        lambda p: p.update(has_more=True),
+        lambda p: p.update(complete=False),
+        lambda p: p["schemas"][0].update(planning={"level": True}),
+        lambda p: p["schemas"][0].update(planning={"level": 2, "read_only": "yes"}),
+        lambda p: p["schemas"][0].update(planning_error=None),
+        lambda p: p["schemas"][1].update(entity_type="purpose"),
+        lambda p: p["schemas"][0].update(entity_type="task"),
+    ]
+    for mutate in mutations:
+        response = copy.deepcopy(registry_page())
+        mutate(response)
+        with patch.object(srv, "_get", return_value=response):
+            marks, complete, gaps = srv._planning_registry({})
+        assert marks == {} and complete is False and gaps
+
+
+def test_registry_through_actual_mcp_handler_and_bundled_view(tmp_path):
+    from mcp.types import CallToolRequest, CallToolRequestParams
+    from lib.daemon_runtime.agent_loader import AgentLoader
+
+    digest = {"entity_type": "session_digest", "entity_id": "ent_digest",
+              "snapshot": {"session_key": "synthetic:inbox", "tasks_claimed": ["ent_work"]}}
+    registry = registry_page()
+    records = {
+        "/schemas?summary=true&limit=5000&offset=0": registry,
+        "/entities/ent_plan": {"entity_type": "plan", "snapshot": {"title": "Display context"}},
+        "/entities/ent_work": {"entity_type": "task", "snapshot": {"title": "Current task", "status": "open"}},
+        "/entities/ent_purpose": {"entity_type": "purpose", "snapshot": {"title": "Registered direction"}},
+    }
+    for key, edges in {
+        "ent_work": [{"relationship_type": "PART_OF", "source_entity_id": "ent_work", "target_entity_id": "ent_purpose", "is_live": 1}],
+        "ent_purpose": [],
+    }.items():
+        records[f"/entities/{key}/relationships?expand_entities=true"] = {"relationships": edges, "total": len(edges)}
+
+    async def read():
+        with patch.object(socket.socket, "connect", side_effect=AssertionError("Network denied")), \
+             patch.object(AgentLoader, "render_policy_prompt", return_value=""), \
+             patch.object(srv, "render_server_instructions", return_value="Synthetic"), \
+             patch.object(srv, "_find_session_digest", return_value=digest), \
+             patch.object(srv, "_get", side_effect=records.get), \
+             patch.object(srv, "_retrieve_page", return_value={"entities": [], "total": 0}):
+            server = srv.create_server()
+            response = await server.request_handlers[CallToolRequest](CallToolRequest(
+                method="tools/call", params=CallToolRequestParams(name="get_session_workboard",
+                    arguments={"session_key": "synthetic:inbox", "display_plan_id": "ent_plan", "include_history": True})))
+            return response.root
+
+    result = asyncio.run(read())
+    assert not result.isError
+    data = result.structuredContent
+    assert data["planning"]["roots"] == ["ent_purpose"]
+    assert data["planning"]["qualified_tasks"] == 1
+    assert data["rows"][1]["state"] == "Recorded state: open"
+    assert "Only this session" in result.content[0].text
+    node = shutil.which("node")
+    if node:
+        fixture = tmp_path / "planning-result.json"
+        fixture.write_text(json.dumps(data))
+        here = Path(__file__).parent
+        view = subprocess.run([node, str(here / "test_workboard_bridge.cjs"), str(here / "workboard.html"), str(fixture), "planning"], capture_output=True, text=True, timeout=15)
+        assert view.returncode == 0, view.stdout + view.stderr
