@@ -1,4 +1,4 @@
-"""Who owns a task: the one recognizer for "an interactive session owns this".
+"""Task ownership helpers for session recognition and legacy Apis routing.
 
 Interactive sessions (a chat, a coordinator, a subagent) own many tasks, and no
 dispatcher can spawn one. A task naming a session as its owner is therefore

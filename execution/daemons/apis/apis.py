@@ -2879,6 +2879,7 @@ async def _dispatch_task(
         or snapshot.get("task_type") == "existing_pr_correction"
         else snapshot.get("owner")
     )
+    ownership_read_condition = f"{DAEMON_NAME}:ownership-read-unavailable:{entity_id}"
     try:
         skill = _resolve_skill(
             existing_tags, assigned_to=assigned_to, owner=owner_for_routing
@@ -2905,8 +2906,16 @@ async def _dispatch_task(
             "its dispatch needs rechecking when that read recovers.",
             priority=Priority.WARN,
             handler=DAEMON_NAME,
+            dedupe_key=ownership_read_condition,
         )
         return
+
+    # A qualified ownership answer closes this condition, including a known
+    # person/agent/session or a complete negative read. An unread task is not
+    # recovery evidence. Clearing the existing notifier key permits a later
+    # genuine recurrence without another notification ledger.
+    if snapshot_hydrated is not False:
+        notifier.clear_dedupe(ownership_read_condition)
 
     # ── Human-owned: a routing ANSWER, not a routing failure ─────────────────
     # Must come before EVERY truthy-skill path (activity, ROUTED, readiness,

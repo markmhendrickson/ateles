@@ -1,5 +1,5 @@
 {
-  "_comment": "Public-safe synthetic scenarios for the Apis execution gate's pre-gate producer score. Each drives the real apis.dispatch_task; only Neotoma writes, the agent spawn and the model call are stubbed. The base task is a routable, low-blast, unscored task. Includes content escalation, effective-policy parity and checkpoint-driver scenarios (ateles#682).",
+  "_comment": "Public-safe synthetic scenarios for the Apis execution gate's pre-gate producer score. Each drives the real apis.dispatch_task; Neotoma reads and writes, the agent spawn and the model call are stubbed at their external boundaries. The base task is a routable, low-blast, unscored task. Includes content escalation, effective-policy parity and checkpoint-driver scenarios (ateles#682).",
   "base_task": {
     "title": "Tidy the notes index",
     "body": "Re-sort the local notes index alphabetically. Local file only.",
@@ -989,6 +989,9 @@
       "task": {
         "assigned_to": "Jane Doe"
       },
+      "config": {
+        "operator_profile": {"kind": "complete_negative"}
+      },
       "expect": {
         "outcome": "blocked",
         "notifications": 1,
@@ -1004,6 +1007,9 @@
       "task": {
         "assigned_to": "Claude Martin"
       },
+      "config": {
+        "operator_profile": {"kind": "complete_negative"}
+      },
       "expect": {
         "outcome": "blocked",
         "notifications": 1,
@@ -1012,6 +1018,34 @@
         ],
         "scorer_called": false
       }
+    },
+    {
+      "id": "profile_owned_person_is_left_as_filed",
+      "why": "a valid returned operator identity preserves the person's task without a gate or worker",
+      "task": {"assigned_to": "Example Person", "status": "open", "tags": ["finance"]},
+      "config": {"operator_profile": {"kind": "response", "response": {"entities": [{"entity_type": "operator_profile", "snapshot": {"display_name": "Example Person"}}], "total": 1}}},
+      "expect": {"outcome": "left_as_filed", "scorer_called": false, "notifications": 0}
+    },
+    {
+      "id": "profile_owned_person_with_session_word_is_left_as_filed",
+      "why": "a session marker word alone is not ownership evidence; a valid profile supplies person ownership",
+      "task": {"assigned_to": "Claude Martin", "status": "open", "tags": ["finance"]},
+      "config": {"operator_profile": {"kind": "response", "response": {"entities": [{"entity_type": "operator_profile", "snapshot": {"display_name": "Claude Martin"}}], "total": 1}}},
+      "expect": {"outcome": "left_as_filed", "scorer_called": false, "notifications": 0}
+    },
+    {
+      "id": "unreadable_operator_profile_preserves_unknown_ownership",
+      "why": "an unread identity source is uncertainty, not proof that the named assignee is unowned",
+      "task": {"assigned_to": "Example Person", "status": "open", "tags": ["finance"]},
+      "config": {"operator_profile": {"kind": "unreadable"}},
+      "expect": {"outcome": "left_as_filed", "scorer_called": false, "notifications": 1, "any_notification_contains": ["ownership could not be verified"]}
+    },
+    {
+      "id": "partial_operator_profile_preserves_unknown_ownership",
+      "why": "an incomplete profile collection cannot justify a no-owner task-status write",
+      "task": {"assigned_to": "Example Person", "status": "open", "tags": ["finance"]},
+      "config": {"operator_profile": {"kind": "partial"}},
+      "expect": {"outcome": "left_as_filed", "scorer_called": false, "notifications": 1, "any_notification_contains": ["ownership could not be verified"]}
     },
     {
       "id": "approved_session_task_is_not_spawned",
