@@ -129,6 +129,56 @@ def test_current_id_only_digest_rows_are_not_dropped_or_promoted():
     assert row["recorded_session_next_action"] == "Historical follow-up"
 
 
+def test_bare_task_locator_claim_reads_current_record_without_inventing_a_lease():
+    task = {
+        "entity_type": "task",
+        "snapshot": {"title": "Current task", "status": "blocked"},
+    }
+    with patch.object(
+        srv, "_get", side_effect=lambda path: task if path == "/entities/ent_task" else None
+    ):
+        row = srv._claim_row("ent_task")
+    assert row["entity_id"] == "ent_task"
+    assert row["work"] == "Current task"
+    assert row["state"] == "Recorded state: blocked"
+    assert row["state_source"] == "recorded_task"
+    assert row["runner"] == row["lease_holder"] == "unknown"
+
+
+def test_mixed_legacy_claims_render_and_report_one_counted_explanation():
+    claims = ["ent_task", {"task_entity_id": "ent_other"}, "not-an-id", {}, [], None]
+    digest = {
+        "entity_id": "ent_digest",
+        "entity_type": "session_digest",
+        "snapshot": {"session_key": "synthetic:inbox", "tasks_claimed": claims},
+    }
+    records = {
+        "/entities/ent_plan": {
+            "entity_type": "plan", "snapshot": {"title": "Plan"}
+        },
+        "/entities/ent_task": {
+            "entity_type": "task", "snapshot": {"title": "First task", "status": "open"}
+        },
+        "/entities/ent_other": {
+            "entity_type": "task", "snapshot": {"title": "Second task", "status": "done"}
+        },
+    }
+    with (
+        patch.object(srv, "_find_session_digest", return_value=digest),
+        patch.object(srv, "_get", side_effect=records.get),
+        patch.object(srv, "_retrieve_page", return_value={"entities": [], "total": 0}),
+    ):
+        result = srv._get_session_workboard("synthetic:inbox", "ent_plan", include_history=True)
+    assert [row["entity_id"] for row in result["rows"][1:]] == ["ent_task", "ent_other"]
+    gaps = [gap for gap in result["read_gaps"] if "digest claims" in gap]
+    assert len(gaps) == 1
+    assert "4 digest claims" in gaps[0]
+    assert "invalid entity locator: 1" in gaps[0]
+    assert "missing claim text or entity locator: 1" in gaps[0]
+    assert "unsupported claim shape: 2" in gaps[0]
+    assert result["history"]["tasks_claimed"] == claims
+
+
 def test_unreadable_id_only_digest_row_keeps_explicit_history():
     with patch.object(srv, "_get", return_value=None):
         row = srv._claim_row(

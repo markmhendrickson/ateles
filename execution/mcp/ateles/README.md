@@ -53,6 +53,10 @@ a digest's cached completion, send or handoff flag does not prove that current
 obligations are discharged. Search and state filters only change visibility.
 Task rows follow current outgoing `PART_OF` relationships and expose missing,
 ambiguous, unreadable or bounded planning ascents rather than selecting a parent.
+Digest membership accepts both a bare task entity id and an object carrying
+explicit locators and historical metadata. Neither form establishes a lease or
+current execution. Invalid entries stay in cumulative history and produce one
+counted read-limit summary, grouped by the reason they could not be rendered.
 
 ### Inline workboard
 
@@ -71,6 +75,8 @@ Requested history remains available across refreshes. Read coverage and adapter
 limits remain visible, and decision attention is labelled independently of the
 recorded lifecycle state. There is no automatic polling, browser storage or
 second status store.
+Primary-plan next steps retain source spaces and line breaks. The view does not
+guess word boundaries or rewrite compressed prose already stored in a plan.
 
 Selecting **Sessions** requests an optional page of up to 50 existing
 `agent_session` records. Native identity, kind, status, activity and holder stay

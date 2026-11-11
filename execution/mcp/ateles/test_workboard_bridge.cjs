@@ -50,6 +50,12 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
   assert(ids.notice.allText().includes('Claimability is unknown'));
   assert(ids.primary.allText().includes('synthetic:inbox'));
   assert(ids.rows.allText().includes('Historical work'));
+  const spacedPlan='First planning step.  Keep these spaces.\n\nSecond planning step.';
+  present({...payload,rows:[{...payload.rows[0],next_action:spacedPlan},payload.rows[1]]});
+  const planNext=ids.primary.children.find(n=>n.textContent===spacedPlan);
+  assert(planNext,'Primary text must preserve the source string, including spaces and line breaks');
+  assert.equal(planNext.className,'next','Primary text must use the whitespace-preserving paragraph style');
+  present(payload);
   const saved=ids.rows.allText(), time=ids.status.allText();
   for(const malformed of [null, [], 3, {...payload,rows:[null]}, {...payload,rows:[{...payload.rows[1],planning_ascent:[null]}]}, {...payload,read_gaps:[{}]}, {...payload,capability_gaps:[null]}, {...payload,history:null}, {...payload,rows:[{...payload.rows[1],read_gaps:[null]}]}, {...payload,rows:[{...payload.rows[1],native_last_activity_at:'invalid'}]}, {...payload,session_coverage:[]}, {...payload,observed_at:'invalid'}, {...payload,observed_at:'2026-02-30T00:00:00Z'}, {...payload,session_key:'synthetic:foreign'}, {...payload,display_plan_id:'ent_other'}]) {
     present(malformed);
