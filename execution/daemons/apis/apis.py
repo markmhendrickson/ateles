@@ -2895,6 +2895,16 @@ async def _dispatch_task(
             "[%s] task %s operator identity is unreadable; leaving as filed, "
             "not routing, gating or marking no route/owner", DAEMON_NAME, entity_id,
         )
+        # Created events may already be deduped, so a log alone would leave
+        # no recovery signal. Use the notifier's existing deduped warning
+        # path; neither task content nor the server's error text is echoed.
+        notifier.send(
+            f"Task ownership could not be verified: {entity_id}\n"
+            "  The operator profile is unreadable. The task was left as filed; "
+            "its dispatch needs rechecking when that read recovers.",
+            priority=Priority.WARN,
+            handler=DAEMON_NAME,
+        )
         return
 
     # ── Human-owned: a routing ANSWER, not a routing failure ─────────────────

@@ -535,8 +535,8 @@ SESSION_OWNED = "SESSION_OWNED"
 def _human_assignee_keys() -> frozenset[str]:
     """Assignee values that mean "a person owns this", in canonical form.
 
-    Always includes the generic `operator`. The operator's own login is read
-    from `APIS_OPERATOR_LOGIN` at CALL time (not import time) so a test can
+    Always includes the generic `operator`. The operator's login and display
+    name come from `APIS_OPERATOR_LOGIN` and `OPERATOR_NAME` at CALL time so a test can
     monkeypatch it, and so a fork supplies its own identity — this file must
     never hardcode a personal login (the repo is public, and operator identity
     is env-sourced per the operator-config rule).

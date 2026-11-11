@@ -106,14 +106,18 @@ def test_unreadable_profile_is_not_no_owner(_world, _isolated_ledger, monkeypatc
         raise TimeoutError("synthetic private response must not be logged")
 
     monkeypatch.setattr(neotoma_http, "request_json", unavailable)
+    notifier = _Notifier()
     asyncio.run(apis.dispatch_task(
         "ent_unknown_profile", {"title": "Review payment", "status": "open",
                                 "assigned_to": "Example Person", "tags": ["finance"]},
-        trigger="created", notifier=_Notifier(), snapshot_hydrated=True,
+        trigger="created", notifier=notifier, snapshot_hydrated=True,
     ))
     assert _world == {"statuses": [], "started": [], "spawns": []}
     assert "operator identity is unreadable" in caplog.text
     assert "synthetic private response" not in caplog.text
+    assert len(notifier.sent) == 1 and "ent_unknown_profile" in notifier.sent[0]
+    assert "ownership could not be verified" in notifier.sent[0]
+    assert "synthetic private response" not in notifier.sent[0]
 
 
 def test_human_branch_forgets_previously_unroutable_task(_world, _isolated_ledger, profile):
