@@ -44,6 +44,12 @@ class CoordinateSessionsSandbox:
         elif method == 'find_tasks':
             result = {'ids': [t for t, row in self.tasks.items()
                               if params['text'].lower() in row.get('title', '').lower()]}
+        elif method == 'list_plans':
+            result = {'plans': [dict(id=pid, **copy.deepcopy(row))
+                                for pid, row in d['plan_records'].items()]}
+        elif method == 'plan_tasks':
+            result = {'tasks': [dict(id=tid, **copy.deepcopy(row)) for tid, row in self.tasks.items()
+                                if params['plan'] in row['part_of']]}
         elif method == 'dated_work':
             result = copy.deepcopy(d['dated_work'].get(params['id']))
         elif method == 'create_task':

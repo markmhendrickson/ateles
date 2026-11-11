@@ -4,19 +4,43 @@
     "claude-registry": {
       "covered": "partial",
       "reason": "listing returns the most recent sessions only",
-      "sessions": ["c-open", "c-clean", "c-dirty-shared", "c-unknown-shared", "c-unapproved", "c-no-capture", "c-no-task"]
+      "sessions": [
+        "c-open",
+        "c-clean",
+        "c-dirty-shared",
+        "c-unknown-shared",
+        "c-unapproved",
+        "c-no-capture",
+        "c-no-task"
+      ]
     },
     "claude-transcript-search": {
       "covered": "full",
-      "sessions": ["c-open", "c-aged"]
+      "sessions": [
+        "c-open",
+        "c-aged"
+      ]
     },
     "claude-transcript-files": {
       "covered": "full",
-      "sessions": ["c-open", "c-aged", "c-clean", "c-dirty-shared", "c-unknown-shared", "c-unapproved", "c-no-capture", "c-no-task"]
+      "sessions": [
+        "c-open",
+        "c-aged",
+        "c-clean",
+        "c-dirty-shared",
+        "c-unknown-shared",
+        "c-unapproved",
+        "c-no-capture",
+        "c-no-task"
+      ]
     },
     "codex-threads": {
       "covered": "full",
-      "sessions": ["x-open", "x-archived-dated", "x-archived-done"]
+      "sessions": [
+        "x-open",
+        "x-archived-dated",
+        "x-archived-done"
+      ]
     },
     "cursor-composers": {
       "covered": "none",
@@ -25,38 +49,212 @@
     }
   },
   "sessions": {
-    "c-open": {"harness": "claude", "archived": false, "last_turn": "Waiting on review; task-chain-child carries it."},
-    "c-aged": {"harness": "claude", "archived": false, "last_turn": "Paused before the vendor reply arrived."},
-    "c-clean": {"harness": "claude", "archived": false, "checkout": "own-worktree", "last_turn": "Done; PR merged."},
-    "c-dirty-shared": {"harness": "claude", "archived": false, "checkout": "shared", "touched": ["docs/notes.md"], "last_turn": "Edited notes."},
-    "c-unknown-shared": {"harness": "claude", "archived": false, "checkout": "shared", "touched": null, "last_turn": "Transcript truncated."},
-    "c-unapproved": {"harness": "claude", "archived": false, "checkout": "own-worktree", "last_turn": "Done."},
-    "c-no-capture": {"harness": "claude", "archived": false, "checkout": "own-worktree", "last_turn": "Done."},
-    "c-no-task": {"harness": "claude", "archived": false, "checkout": "own-worktree", "last_turn": "Left a follow-up for later."},
-    "x-open": {"harness": "codex", "archived": false, "last_turn": "Working on the importer."},
-    "x-archived-dated": {"harness": "codex", "archived": true, "archived_at": "2026-11-06", "last_turn": "Draft ready; the filing is due 2026-11-20 and nothing is booked yet."},
-    "x-archived-done": {"harness": "codex", "archived": true, "archived_at": "2026-11-05", "last_turn": "All done; nothing remains."}
+    "c-open": {
+      "harness": "claude",
+      "archived": false,
+      "last_turn": "Waiting on review; task-chain-child carries it."
+    },
+    "c-aged": {
+      "harness": "claude",
+      "archived": false,
+      "last_turn": "Paused before the vendor reply arrived."
+    },
+    "c-clean": {
+      "harness": "claude",
+      "archived": false,
+      "checkout": "own-worktree",
+      "last_turn": "Done; PR merged."
+    },
+    "c-dirty-shared": {
+      "harness": "claude",
+      "archived": false,
+      "checkout": "shared",
+      "touched": [
+        "docs/notes.md"
+      ],
+      "last_turn": "Edited notes."
+    },
+    "c-unknown-shared": {
+      "harness": "claude",
+      "archived": false,
+      "checkout": "shared",
+      "touched": null,
+      "last_turn": "Transcript truncated."
+    },
+    "c-unapproved": {
+      "harness": "claude",
+      "archived": false,
+      "checkout": "own-worktree",
+      "last_turn": "Done."
+    },
+    "c-no-capture": {
+      "harness": "claude",
+      "archived": false,
+      "checkout": "own-worktree",
+      "last_turn": "Done."
+    },
+    "c-no-task": {
+      "harness": "claude",
+      "archived": false,
+      "checkout": "own-worktree",
+      "last_turn": "Left a follow-up for later."
+    },
+    "x-open": {
+      "harness": "codex",
+      "archived": false,
+      "last_turn": "Working on the importer."
+    },
+    "x-archived-dated": {
+      "harness": "codex",
+      "archived": true,
+      "archived_at": "2026-11-06",
+      "last_turn": "Draft ready; the filing is due 2026-11-20 and nothing is booked yet."
+    },
+    "x-archived-done": {
+      "harness": "codex",
+      "archived": true,
+      "archived_at": "2026-11-05",
+      "last_turn": "All done; nothing remains."
+    }
   },
   "checkouts": {
-    "own-worktree": {"dirty": [], "ahead": 0},
-    "shared": {"dirty": ["docs/notes.md", "lib/other.py"], "ahead": 0}
+    "own-worktree": {
+      "dirty": [],
+      "ahead": 0
+    },
+    "shared": {
+      "dirty": [
+        "docs/notes.md",
+        "lib/other.py"
+      ],
+      "ahead": 0
+    }
   },
   "archive_evidence": {
-    "c-clean": {"approved": true, "capture": true, "task": "task-chain-child"},
-    "c-dirty-shared": {"approved": true, "capture": true, "task": "task-chain-child"},
-    "c-unknown-shared": {"approved": true, "capture": true, "task": "task-chain-child"},
-    "c-unapproved": {"approved": false, "capture": true, "task": "task-chain-child"},
-    "c-no-capture": {"approved": true, "capture": false, "task": "task-chain-child"},
-    "c-no-task": {"approved": true, "capture": true, "task": null}
+    "c-clean": {
+      "approved": true,
+      "capture": true,
+      "task": "task-chain-child"
+    },
+    "c-dirty-shared": {
+      "approved": true,
+      "capture": true,
+      "task": "task-chain-child"
+    },
+    "c-unknown-shared": {
+      "approved": true,
+      "capture": true,
+      "task": "task-chain-child"
+    },
+    "c-unapproved": {
+      "approved": false,
+      "capture": true,
+      "task": "task-chain-child"
+    },
+    "c-no-capture": {
+      "approved": true,
+      "capture": false,
+      "task": "task-chain-child"
+    },
+    "c-no-task": {
+      "approved": true,
+      "capture": true,
+      "task": null
+    }
   },
-  "plans": ["plan-filing", "plan-platform"],
+  "plans": [
+    "plan-filing",
+    "plan-platform",
+    "plan-hiring",
+    "plan-old",
+    "plan-closed"
+  ],
   "tasks": {
-    "task-chain-parent": {"part_of": ["plan-platform"], "status": "open", "notes": ""},
-    "task-chain-child": {"part_of": ["task-chain-parent"], "status": "open", "notes": "Existing note."},
-    "task-orphan-unlocated": {"part_of": [], "status": "open", "notes": "", "locator": null, "candidates": ["plan-filing", "plan-platform"]},
-    "task-orphan-located": {"part_of": [], "status": "open", "notes": "", "locator": "plan-platform"}
+    "task-chain-parent": {
+      "part_of": [
+        "plan-platform"
+      ],
+      "status": "open",
+      "notes": ""
+    },
+    "task-chain-child": {
+      "part_of": [
+        "task-chain-parent"
+      ],
+      "status": "open",
+      "notes": "Existing note."
+    },
+    "task-orphan-unlocated": {
+      "part_of": [],
+      "status": "open",
+      "notes": "",
+      "locator": null,
+      "candidates": [
+        "plan-filing",
+        "plan-platform"
+      ]
+    },
+    "task-orphan-located": {
+      "part_of": [],
+      "status": "open",
+      "notes": "",
+      "locator": "plan-platform"
+    },
+    "task-hiring-offer": {
+      "part_of": [
+        "plan-hiring"
+      ],
+      "status": "failed",
+      "owner": null,
+      "due": "2026-11-15",
+      "notes": ""
+    },
+    "task-old-someday": {
+      "part_of": [
+        "plan-old"
+      ],
+      "status": "open",
+      "owner": "someone",
+      "due": null,
+      "notes": ""
+    }
   },
   "dated_work": {
-    "x-archived-dated": {"title": "File the quarterly return", "due": "2026-11-20", "plan": "plan-filing"}
+    "x-archived-dated": {
+      "title": "File the quarterly return",
+      "due": "2026-11-20",
+      "plan": "plan-filing"
+    }
+  },
+  "plan_records": {
+    "plan-filing": {
+      "status": "active",
+      "changed": "2026-11-06",
+      "sessions": [
+        "x-archived-dated"
+      ]
+    },
+    "plan-platform": {
+      "status": "active",
+      "changed": "2026-11-10",
+      "sessions": [
+        "c-open"
+      ]
+    },
+    "plan-hiring": {
+      "status": "active",
+      "changed": "2026-10-20",
+      "sessions": []
+    },
+    "plan-old": {
+      "status": "active",
+      "changed": "2026-08-01",
+      "sessions": []
+    },
+    "plan-closed": {
+      "status": "completed",
+      "changed": "2026-11-09",
+      "sessions": []
+    }
   }
 }

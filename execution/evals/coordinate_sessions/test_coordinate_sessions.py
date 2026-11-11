@@ -68,6 +68,24 @@ def recover_archived(s, session_ids, window_start='2026-10-28'):
     return recovered
 
 
+def live_plans_without_session(s, open_sessions, changed_since='2026-10-12', due_by='2026-12-11'):
+    """Step 1b: live plans with no open session, and near-dated stuck tasks for the priority list."""
+    report, priority = [], []
+    for plan in s.call('list_plans')['plans']:
+        if plan['status'] not in ('active', 'in_progress'):
+            continue
+        tasks = s.call('plan_tasks', plan=plan['id'])['tasks']
+        dated = [t for t in tasks if t.get('due') and t['due'] <= due_by]
+        if plan['changed'] < changed_since and not dated:
+            continue
+        if set(plan['sessions']) & open_sessions:
+            continue
+        report.append(plan['id'])
+        priority += [t['id'] for t in dated
+                     if t['status'] == 'failed' or not t.get('owner')]
+    return report, priority
+
+
 def eligible(s, sid, shared_passes=False):
     """Step 6 archive eligibility. `shared_passes` is the rule the skill replaced."""
     ev = s.call('archive_evidence', id=sid)
@@ -115,6 +133,34 @@ def test_archived_dated_work_is_recovered_with_one_ascent():
     assert ascents(s, tid) == ['plan-filing']
     # A finished archived session yields nothing, and nothing is unarchived.
     assert not effects(s, 'archive_session')
+
+
+def test_recovery_reuses_the_recovered_task_on_a_rerun():
+    s = Sandbox()
+    found, _ = discover(s, ALL_SOURCES)
+    first = recover_archived(s, found)
+    second = recover_archived(s, found)
+    assert second == first
+    assert len(effects(s, 'create_task')) == 1
+
+
+def test_live_plan_without_open_session_is_reported_with_dated_task():
+    s = Sandbox()
+    found, _ = discover(s, ALL_SOURCES)
+    open_sessions = {sid for sid in found if not s.call('read_session', id=sid)['archived']}
+    report, priority = live_plans_without_session(s, open_sessions)
+    # plan-filing's only session is archived; plan-hiring has none. plan-platform has
+    # an open session, plan-old is stale with no near date, plan-closed is not live.
+    assert sorted(report) == ['plan-filing', 'plan-hiring']
+    assert priority == ['task-hiring-offer']
+    assert not [e for e in s.events if e['method'] not in
+                {'list_source', 'read_session', 'list_plans', 'plan_tasks'}]
+
+
+def test_plan_sweep_that_trusts_any_mapped_session_misses_the_archived_one():
+    s = Sandbox()
+    report, _ = live_plans_without_session(s, set(s.data['sessions']))
+    assert 'plan-filing' not in report
 
 
 def test_parent_task_chain_counts_as_one_ascent_and_is_not_flattened():
