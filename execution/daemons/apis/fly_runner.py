@@ -75,8 +75,9 @@ RESULT_ENTITY_TYPE = "fly_runner_result"
 # asserted by a test, since the image does not import this module.
 EXIT_RECORD_REFUSED = 92
 RECORD_REFUSED_MESSAGE = (
-    "result record refused by Neotoma (HTTP 403): the role's agent grant likely "
-    f"lacks store_structured {RESULT_ENTITY_TYPE}"
+    "result record refused by Neotoma (HTTP 401/403): for 401 the signature or key "
+    "was not accepted; for 403 the role's agent grant likely lacks "
+    f"store_structured {RESULT_ENTITY_TYPE}"
 )
 # run_job.py keeps the LAST this-many bytes of stdout (STDOUT_CAP_BYTES there).
 RUNNER_STDOUT_CAP_BYTES = 256 * 1024

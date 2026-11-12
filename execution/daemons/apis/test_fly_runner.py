@@ -5714,7 +5714,7 @@ def test_a_refused_result_record_is_named_not_reported_as_lost(fly_env):
     rc, _, err = _collect_without_record(fly_env, events=_exit(fly_runner.EXIT_RECORD_REFUSED))
     assert rc == 1
     assert b"no result recorded" in err
-    assert b"result record refused by Neotoma (HTTP 403)" in err
+    assert b"result record refused by Neotoma (HTTP 401/403)" in err
     assert b"store_structured fly_runner_result" in err
 
 

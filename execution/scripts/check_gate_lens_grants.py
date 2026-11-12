@@ -55,13 +55,20 @@ FIXTURE_PATH = (
 sys.path.insert(0, str(REPO_ROOT / "execution" / "daemons" / "apis"))
 from review_panel import LENSES  # noqa: E402
 
+# The Fly role set is fly_lens_review.LENS_ROLES (the lenses that run on Fly
+# first), imported rather than copied so a role added there is checked here.
+sys.path.insert(0, str(REPO_ROOT / "execution" / "scripts"))
+from fly_lens_review import LENS_ROLES  # noqa: E402
+
 
 # Roles launched on Fly Machines. Each job writes its `fly_runner_result` as
 # the role's own principal, so its agent_grant must admit store_structured on
 # that type. Without it Neotoma answers 403, the run's review is lost, and the
-# job exits 92/95. Add a role here when it is opted onto Fly.
+# job exits 92/95. The roles are derived from fly_lens_review.LENS_ROLES, never
+# hand-listed. Builder roles opted onto Fly through APIS_FLY_RUNNER_CLASSES are
+# a runtime setting and are not covered here.
 FLY_RESULT_ENTITY_TYPE = "fly_runner_result"
-FLY_ROLES: tuple[str, ...] = ("accipiter", "phoenicurus")
+FLY_ROLES: tuple[str, ...] = tuple(dict.fromkeys(LENS_ROLES.values()))
 
 
 def fly_result_problems(caps_by_agent: dict[str, dict[str, list[str]]]) -> list[str]:
@@ -256,6 +263,8 @@ def check(live: dict[str, dict]) -> tuple[list[str], list[dict]]:
             }
         )
 
+    # Every Fly role is read from the live map directly, including roles that
+    # own no gate (falco): the gate loop above is not the source of this set.
     live_caps: dict[str, dict[str, list[str]]] = {}
     for agent in FLY_ROLES:
         row = live.get(f"{agent}@ateles-swarm")

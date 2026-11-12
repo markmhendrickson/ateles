@@ -1519,6 +1519,12 @@ def test_a_refused_record_write_logs_the_reason_and_exits_92(capsys):
     assert run_job.EXIT_RECORD_REFUSED == 92 and run_job.EXIT_RECORD_REFUSED != run_job.EXIT_RECORD_FAILED
 
 
+def test_exit_record_refused_matches_the_parent_constant():
+    import fly_runner
+
+    assert run_job.EXIT_RECORD_REFUSED == fly_runner.EXIT_RECORD_REFUSED
+
+
 def test_record_write_gives_up_after_about_three_minutes():
     world = _RecordWorld([])  # 503 forever
     assert _write(world) is False
