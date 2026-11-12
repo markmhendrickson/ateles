@@ -119,6 +119,7 @@ REASON_MISSING_LABEL = "missing_label"
 REASON_BAD_PAYMENT_TYPE = "unknown_payment_type"
 REASON_BAD_AMOUNT = "invalid_amount"
 REASON_BAD_LEGAL_TYPE = "invalid_wise_legal_type"
+REASON_BAD_RECIPIENT_ID = "invalid_wise_recipient_id"
 # Not a per-profile defect: the whole profile fetch failed, so *every* profile
 # is stranded and the daemon cannot even enumerate them. Logged 1,753 times as
 # a bare WARNING and 102 times as an ERROR, and never escalated once.

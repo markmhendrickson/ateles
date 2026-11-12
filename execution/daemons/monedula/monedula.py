@@ -84,6 +84,10 @@ def _notify(
     separately.
     """
     if _notifier is None:
+        log.error(
+            "operator alert could not be delivered (no notifier available): "
+            f"{message[:160]}"
+        )
         return
     try:
         from lib.notify import Priority
@@ -96,8 +100,56 @@ def _notify(
             dedupe_key=dedupe_key,
             email_eligible=email_eligible,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.error(
+            f"operator alert could not be delivered ({type(exc).__name__}): "
+            f"{message[:160]}"
+        )
+
+
+# The lowest priority the Notifier actually delivers is WARN: INFO is dropped
+# there unconditionally (lib/notify/notifier.py, _send_locked), so the "payment
+# sent" confirmation is sent as WARN, not INFO.
+_OUTCOME_CATEGORIES = {"sent", "manual_required", "failed"}
+
+
+def _outcome_alert(item: Any, result: Any) -> tuple[str, str]:
+    """(priority, body) telling the operator what became of an approved payment.
+
+    Fixed fields only: handler, session date, amount, currency, the obligation's
+    short id and one fixed outcome category (sent / manual_required / failed /
+    unreported). The result's free-text ``error`` and any payee detail stay in
+    the daemon log; third-party error text is unbounded and cannot be scrubbed
+    reliably, so none of it is copied into an alert. Only ``sent`` reads as paid.
+    """
+    from consent_email import CURRENCY
+
+    status = (
+        str(result.get("status") or "").strip().lower()
+        if isinstance(result, dict)
+        else ""
+    )
+    category = status if status in _OUTCOME_CATEGORIES else "unreported"
+    who = (
+        f"{item.handler_name} session {item.payment_date} "
+        f"{item.amount_eur} {CURRENCY} [{str(item.obligation)[:12]}]"
+    )
+    if category == "sent":
+        return "warn", f"monedula: payment SENT for {who}."
+    if category == "manual_required":
+        return (
+            "blocker",
+            f"monedula: payment NOT made for {who}: manual payment required. "
+            "Nothing was sent; pay it by hand using the payee details in the "
+            "payment profile (not repeated here). It will not be retried "
+            "automatically. Details are in the daemon log.",
+        )
+    return (
+        "blocker",
+        f"monedula: payment did NOT complete for {who} (outcome: {category}). "
+        "Check the rail before paying by hand; it will not be retried "
+        "automatically. Details are in the daemon log.",
+    )
 
 
 def _clear_notify_dedupe(dedupe_key: str) -> None:
@@ -224,61 +276,210 @@ def _yesterday() -> date:
     return date.today() - timedelta(days=1)
 
 
-def fetch_yesterday_events() -> list[dict] | None:
-    """
-    Use gws CLI to fetch all calendar events for yesterday.
-    Returns list of event dicts (each with at least 'summary').
+MADRID_TZ = "Europe/Madrid"
 
-    Returns None on FAILURE, which is distinct from [] meaning "yesterday had
-    no events". Callers must not treat a failed fetch as an empty day: the
-    calendar leg runs at most once per day, so a failure that reads as "no
-    sessions" silently skips a real payment obligation (this is what caused
-    the 2026-07-30 therapy session to go unnotified and unpaid).
-    """
-    import shutil
+# Sessions that ended within this many hours are evaluated on every tick.
+DEFAULT_SESSION_WINDOW_HOURS = 24.0
+# A still-pending session widens the lookback so it can be rebuilt from the
+# calendar; never further back than this.
+MAX_LOOKBACK_HOURS = 14 * 24.0
 
-    gws = shutil.which("gws")
-    if not gws:
-        log.error("gws CLI not found in PATH — cannot check calendar")
+
+def _now():
+    """Current time, timezone-aware. Patched in tests."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
+
+
+def _session_window_hours() -> float:
+    raw = (os.environ.get("MONEDULA_SESSION_WINDOW_HOURS") or "").strip()
+    if raw:
+        try:
+            value = float(raw)
+            if 0 < value <= MAX_LOOKBACK_HOURS:
+                return value
+        except ValueError:
+            pass
+        log.warning(
+            f"MONEDULA_SESSION_WINDOW_HOURS={raw!r} invalid — using "
+            f"{DEFAULT_SESSION_WINDOW_HOURS}"
+        )
+    return DEFAULT_SESSION_WINDOW_HOURS
+
+
+def _event_end(event: dict):
+    """Aware end time of an event, or None when it carries none.
+
+    An all-day event ends at the start of the (exclusive) end date in Madrid.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    end = event.get("end")
+    if not isinstance(end, dict):
         return None
+    try:
+        if end.get("dateTime"):
+            dt = datetime.fromisoformat(str(end["dateTime"]).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=ZoneInfo(MADRID_TZ))
+            return dt
+        if end.get("date"):
+            return datetime.fromisoformat(str(end["date"])[:10]).replace(
+                tzinfo=ZoneInfo(MADRID_TZ)
+            )
+    except ValueError:
+        return None
+    return None
 
-    yest = _yesterday()
-    time_min = yest.strftime("%Y-%m-%dT00:00:00+02:00")
-    time_max = yest.strftime("%Y-%m-%dT23:59:59+02:00")
 
-    params = {
-        "calendarId": "primary",
-        "singleEvents": True,
-        "orderBy": "startTime",
-        "timeMin": time_min,
-        "timeMax": time_max,
-    }
+def _pending_lookback_hours(now) -> float:
+    """Hours back to the oldest still-pending session, so it stays visible."""
+    try:
+        import payment_journal
+        from consent_email import journal_path
 
+        data = payment_journal.load(journal_path())
+    except Exception:
+        return 0.0
+    oldest = None
+    for entry in payment_journal.pending_sessions(data).values():
+        ended = entry.get("ended_at")
+        if isinstance(ended, (int, float)) and (oldest is None or ended < oldest):
+            oldest = ended
+    if oldest is None:
+        return 0.0
+    return max(0.0, (now.timestamp() - oldest) / 3600.0 + 1.0)
+
+
+def _gws_json(gws: str, args: list[str], params: dict) -> dict | None:
+    """One gws call. None on any failure (never an empty result)."""
     try:
         result = subprocess.run(
-            [gws, "calendar", "events", "list", "--params", json.dumps(params)],
+            [gws, *args, "--params", json.dumps(params)],
             capture_output=True,
             text=True,
             timeout=30,
             env=os.environ,
         )
         if result.returncode != 0:
-            log.error(f"gws calendar events list failed: {result.stderr.strip()[:300]}")
+            log.error(f"gws {' '.join(args)} failed: {result.stderr.strip()[:300]}")
             return None
-
         data = json.loads(result.stdout)
-        items = data.get("items") or []
-        log.info(f"Fetched {len(items)} calendar event(s) for {yest.isoformat()}")
-        for item in items:
-            log.debug(f"  Event: {item.get('summary', '(no title)')!r}")
-        return items
-
+        if not isinstance(data, dict):
+            log.error(f"gws {' '.join(args)} returned unexpected shape")
+            return None
+        return data
     except json.JSONDecodeError as exc:
         log.error(f"Failed to parse gws output: {exc}")
         return None
     except Exception as exc:
         log.error(f"Calendar fetch error: {exc}")
         return None
+
+
+def _gws_pages(gws: str, args: list[str], params: dict) -> list[dict] | None:
+    """All items across pages; None if any page fails."""
+    items: list[dict] = []
+    page = ""
+    for _ in range(50):
+        page_params = dict(params)
+        if page:
+            page_params["pageToken"] = page
+        data = _gws_json(gws, args, page_params)
+        if data is None:
+            return None
+        items.extend(i for i in (data.get("items") or []) if isinstance(i, dict))
+        page = data.get("nextPageToken") or ""
+        if not page:
+            return items
+    log.error(f"gws {' '.join(args)}: too many pages")
+    return None
+
+
+def fetch_recent_events(lookback_hours: float | None = None) -> list[dict] | None:
+    """Events, from EVERY calendar on the list, that have already ended within
+    the lookback window (Europe/Madrid).
+
+    agent_policy ent_191732791f866fd8262b27cd: read ``calendarList list`` then
+    ``events list`` per calendar id, never just ``primary``.
+
+    Returns None on FAILURE, which is distinct from [] meaning "no sessions".
+    A failure reading ANY one calendar fails the whole fetch: a calendar that
+    could not be read must not look like a calendar with no sessions. Callers
+    must not treat a failed fetch as an empty day (the 2026-07-30 therapy
+    session went unnotified and unpaid that way). Events are de-duplicated by
+    id across calendars.
+    """
+    import shutil
+    from datetime import timedelta as _td
+    from zoneinfo import ZoneInfo
+
+    gws = shutil.which("gws")
+    if not gws:
+        log.error("gws CLI not found in PATH — cannot check calendar")
+        return None
+
+    now = _now()
+    hours = lookback_hours if lookback_hours is not None else _session_window_hours()
+    hours = min(max(hours, _pending_lookback_hours(now)), MAX_LOOKBACK_HOURS)
+    start = now - _td(hours=hours)
+    madrid = ZoneInfo(MADRID_TZ)
+
+    calendars = _gws_pages(gws, ["calendar", "calendarList", "list"], {})
+    if calendars is None:
+        return None
+    ids = [
+        str(c["id"])
+        for c in calendars
+        if c.get("id") and c.get("accessRole") != "freeBusyReader"
+    ]
+    if not ids:
+        ids = ["primary"]
+
+    seen: set[str] = set()
+    out: list[dict] = []
+    for cal_id in ids:
+        params = {
+            "calendarId": cal_id,
+            "singleEvents": True,
+            "orderBy": "startTime",
+            "timeMin": start.astimezone(madrid).isoformat(),
+            "timeMax": now.astimezone(madrid).isoformat(),
+            "timeZone": MADRID_TZ,
+        }
+        items = _gws_pages(gws, ["calendar", "events", "list"], params)
+        if items is None:
+            log.error(
+                "Calendar read FAILED for one calendar — failing the whole fetch "
+                "rather than treating it as having no sessions."
+            )
+            return None
+        for item in items:
+            if item.get("status") == "cancelled":
+                continue
+            ended = _event_end(item)
+            if ended is not None and not (start <= ended <= now):
+                continue  # not yet ended, or ended before the window
+            eid = str(item.get("id") or "")
+            if eid:
+                if eid in seen:
+                    continue
+                seen.add(eid)
+            out.append(item)
+    log.info(
+        f"Fetched {len(out)} ended calendar event(s) from {len(ids)} calendar(s) "
+        f"over the last {hours:.1f}h"
+    )
+    return out
+
+
+def fetch_yesterday_events() -> list[dict] | None:
+    """Historical name, kept because the tick calls it: returns the ended
+    sessions in the rolling window (see :func:`fetch_recent_events`), not
+    calendar-yesterday. None on failure, [] for a genuinely empty window."""
+    return fetch_recent_events()
 
 
 # ---------------------------------------------------------------------------
@@ -868,56 +1069,26 @@ def _emit_consent_escalation(
     return _post_escalation_entity(entity, idempotency_key)
 
 
-def _resolve_consent_channel() -> tuple[str | None, str]:
-    """Select email vs Telegram consent channel from config.
+def _resolve_consent_channel() -> tuple[str, str]:
+    """Select the payment consent channel.
 
-    Returns ``(channel, source)`` where channel is ``\"email\"`` | ``\"telegram\"``
-    | ``None`` (misconfigured) and source is ``env`` | ``binding`` | ``automatic``.
+    Returns ``(channel, source)``. The default, and the only automatic, channel
+    is ``"payment_approval"``: a per-payment ``payment_approval`` record in Neotoma
+    that the coordinator session resolves with the operator's literal answer
+    (operator ruling 2026-11-12; see ``payment_approval.py``). It needs no
+    Telegram or email credentials.
 
-    Order: explicit ``MONEDULA_CONSENT_CHANNEL`` → optional vendor_binding
-    (fall-through only; Monedula has no loader on main today) → automatic
-    (email when Telegram creds absent and lib.approval email armed; else
-    Telegram when both creds + operator principal resolve).
+    ``MONEDULA_CONSENT_CHANNEL=email|telegram`` still selects the legacy
+    break-glass channels, explicitly and only explicitly; they are never
+    chosen automatically any more. ``checkpoint`` is accepted as an alias of
+    ``payment_approval`` (the channel's earlier name).
     """
     override = (os.environ.get("MONEDULA_CONSENT_CHANNEL") or "").strip().lower()
     if override in ("email", "telegram"):
         return override, "env"
-
-    # Binding fall-through: no inventing defaults. A future loader may set
-    # source=binding when a concrete value is read; absent today → continue.
-    tg_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    tg_chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
-
-    if not tg_token or not tg_chat:
-        try:
-            from lib.approval.email_channel import email_enabled, operator_email
-
-            if email_enabled() and operator_email():
-                return "email", "automatic"
-        except Exception:
-            pass
-        missing = []
-        if not tg_token:
-            missing.append("TELEGRAM_BOT_TOKEN")
-        if not tg_chat:
-            missing.append("TELEGRAM_CHAT_ID")
-        # Also note email arming fields when automatic email could not select.
-        return None, "automatic"
-
-    # Both Telegram creds present.
-    principal, err = _resolve_operator_principal()
-    if principal is not None:
-        return "telegram", "automatic"
-    # Telegram creds present but principal broken — try email fallback before
-    # declaring unconfigured, so email can still be selected when armed.
-    try:
-        from lib.approval.email_channel import email_enabled, operator_email
-
-        if email_enabled() and operator_email():
-            return "email", "automatic"
-    except Exception:
-        pass
-    return None, "automatic"
+    if override in ("payment_approval", "checkpoint"):
+        return "payment_approval", "env"
+    return "payment_approval", "automatic"
 
 
 def _consent_failure_notify_body(
@@ -1175,6 +1346,156 @@ def escalate_strandings(strandings: list) -> list:
 # ---------------------------------------------------------------------------
 
 
+class _SessionJournalError(Exception):
+    pass
+
+
+def _profile_load_degraded(handlers_loaded: list, strandings: list) -> bool:
+    """True when profiles could not be loaded: the fetch failed, or every
+    profile was stranded (strandings present and no handler loaded)."""
+    from strandings import REASON_FETCH_FAILED
+
+    if any(getattr(st, "reason", None) == REASON_FETCH_FAILED for st in strandings):
+        return True
+    return bool(strandings) and not handlers_loaded
+
+
+def _has_pending_sessions() -> bool:
+    try:
+        import payment_journal
+        from consent_email import journal_path
+
+        data = payment_journal.load(journal_path())
+        return bool(payment_journal.pending_sessions(data))
+    except Exception:
+        # Unreadable journal: assume something is pending (fail closed).
+        return True
+
+
+def _match_ended_at(match: Any) -> float | None:
+    event = match.get("event") if isinstance(match, dict) else None
+    if isinstance(event, dict):
+        ended = _event_end(event)
+        if ended is not None:
+            return ended.timestamp()
+    return None
+
+
+def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[tuple]:
+    """Drop matches whose session is already resolved; record the rest as
+    pending. With ``reconcile`` (profiles loaded cleanly and the calendar read
+    succeeded), a pending session no longer matched by any handler has lost
+    its event or profile and is dropped so it cannot pin the lookback."""
+    import payment_journal
+    from consent_email import (
+        event_id_of,
+        event_session_date,
+        journal_path,
+        legacy_obligation_keys,
+        obligation_key,
+    )
+
+    jpath = journal_path()
+    try:
+        data = payment_journal.load(jpath)
+        kept: list[tuple] = []
+        seen_keys: set[str] = set()
+        for handler, matches in triggered:
+            keep = []
+            for match in matches:
+                eid = event_id_of(match)
+                if not eid:
+                    # No event id to key a session on (legacy shape). The
+                    # obligation itself is the dedupe: an already-paid one is
+                    # never raised again.
+                    if len(matches) == 1 and payment_journal.obligation_state(
+                        data,
+                        obligation_key(
+                            handler,
+                            event_session_date(match) or _yesterday().isoformat(),
+                            "",
+                        ),
+                    ) == payment_journal.STATE_DONE:
+                        continue
+                    keep.append(match)
+                    continue
+                key = payment_journal.session_key(handler.name, eid)
+                state = payment_journal.session_state(data, key)
+                if state in payment_journal.SESSION_TERMINAL:
+                    continue
+                if state is None and any(
+                    payment_journal.obligation_state(data, legacy) is not None
+                    for legacy in legacy_obligation_keys(
+                        handler, match, matches, _yesterday().isoformat()
+                    )
+                ):
+                    # Cutover guard: paid (or intent recorded) under the key the
+                    # pre-session-window code used. Never raise it again.
+                    log.warning(
+                        f"session {key} already has a journaled obligation under "
+                        "the legacy key — marking settled, not raising"
+                    )
+                    payment_journal.note_pending(
+                        jpath, key, ended_at=_match_ended_at(match)
+                    )
+                    payment_journal.set_session_state(
+                        jpath, key, payment_journal.SESSION_SETTLED
+                    )
+                    continue
+                seen_keys.add(key)
+                if state is None:
+                    payment_journal.note_pending(
+                        jpath, key, ended_at=_match_ended_at(match)
+                    )
+                keep.append(match)
+            if keep:
+                kept.append((handler, keep))
+        if reconcile:
+            for key in payment_journal.pending_sessions(data):
+                if key not in seen_keys:
+                    log.warning(
+                        "Pending session no longer matches an event/profile — dropping."
+                    )
+                    payment_journal.set_session_state(
+                        jpath, key, payment_journal.SESSION_DROPPED
+                    )
+        return kept
+    except payment_journal.JournalError as exc:
+        raise _SessionJournalError(str(exc)) from exc
+
+
+def _resolve_item_session(item: Any, state: str) -> None:
+    import payment_journal
+    from consent_email import event_id_of, journal_path
+
+    eid = event_id_of(item.match)
+    if not eid:
+        return
+    try:
+        payment_journal.set_session_state(
+            journal_path(), payment_journal.session_key(item.handler_name, eid), state
+        )
+    except payment_journal.JournalError as exc:
+        log.error(f"could not record session {state}: {exc}")
+
+
+def _resolve_sessions(triggered: list[tuple], state: str) -> None:
+    import payment_journal
+    from consent_email import event_id_of, journal_path
+
+    for handler, matches in triggered:
+        for match in matches:
+            eid = event_id_of(match)
+            if not eid:
+                continue
+            try:
+                payment_journal.set_session_state(
+                    journal_path(), payment_journal.session_key(handler.name, eid), state
+                )
+            except payment_journal.JournalError as exc:
+                log.error(f"could not record session {state}: {exc}")
+
+
 def main() -> bool:
     """Run one Monedula tick. Returns True for a clean run.
 
@@ -1228,14 +1549,28 @@ def main() -> bool:
     #
     # Now the guard scopes to the calendar fetch, and one-offs are evaluated
     # on every ~15-minute tick.
-    calendar_done = _check_already_ran_today()
+    #
+    # The calendar leg is no longer gated on the day (defect 5): every tick
+    # evaluates the sessions that ended in the rolling window, and a session
+    # is raised once, deduped per (handler, event id) in the payment journal.
+    # The day marker is still written when a tick finishes with nothing open,
+    # but only as a record; it never skips the calendar read.
     calendar_fetch_ok = False
-    if calendar_done:
-        log.info("Calendar leg already ran today — one-off profiles only.")
-        events: list | None = []
-    else:
-        log.info(f"Checking calendar for yesterday: {yesterday_str}")
-        events = None  # set by the fetch below
+    log.info(f"Checking calendar for sessions that ended recently ({yesterday_str})")
+    events: list | None = None  # set by the fetch below
+
+    # A profile-load failure (Neotoma timeout / rejection), or a tick where
+    # every profile is stranded, says nothing about whether payments are
+    # owed. It must not claim the day and must not clear pending consent: on
+    # 2026-11-12 a profile fetch timeout loaded zero handlers, the empty
+    # pending set cleared the consent state, and the 11 Nov session consent
+    # was dropped.
+    profile_load_degraded = _profile_load_degraded(all_handlers, strandings)
+    if profile_load_degraded:
+        log.error(
+            "Payment profiles could not be loaded (fetch failed or every profile "
+            "stranded) — this tick will not claim the day or clear pending consent."
+        )
 
     # Fetch yesterday's events BEFORE claiming the day.
     #
@@ -1248,32 +1583,31 @@ def main() -> bool:
     #
     # Now a failed fetch leaves the day unclaimed, so the next launchd tick
     # (~15 min) retries until the network is back.
-    if not calendar_done:
-        events = fetch_yesterday_events()
+    events = fetch_yesterday_events()
 
-        if events is None:
-            log.error(
-                "Calendar fetch FAILED — leaving today unclaimed so the next tick "
-                "retries. Not treating this as 'no sessions yesterday'."
-            )
-            _notify(
-                f"monedula: calendar fetch failed for {yesterday_str} — "
-                "recurring payment detection is DOWN; will retry next tick",
-                priority="blocker",
-                dedupe_key=_CALENDAR_FETCH_DEDUPE_KEY,
-            )
-            # Do NOT return: a calendar outage says nothing about whether an
-            # invoice is due. Recurring payments are skipped this tick (no
-            # events to attend-gate against), one-offs continue below.
-            events = []
-            calendar_fetch_ok = False
-        else:
-            # Fetch succeeded. Defer the daily claim until we know whether any
-            # calendar payments still need consent (email replies arrive on a
-            # later tick). Claiming here made later ticks see events=[] and
-            # clear consent state before the operator replied (ateles#1178).
-            calendar_fetch_ok = True
-            _clear_notify_dedupe(_CALENDAR_FETCH_DEDUPE_KEY)
+    if events is None:
+        log.error(
+            "Calendar fetch FAILED — leaving today unclaimed so the next tick "
+            "retries. Not treating this as 'no sessions yesterday'."
+        )
+        _notify(
+            f"monedula: calendar fetch failed for {yesterday_str} — "
+            "recurring payment detection is DOWN; will retry next tick",
+            priority="blocker",
+            dedupe_key=_CALENDAR_FETCH_DEDUPE_KEY,
+        )
+        # Do NOT return: a calendar outage says nothing about whether an
+        # invoice is due. Recurring payments are skipped this tick (no
+        # events to attend-gate against), one-offs continue below.
+        events = []
+        calendar_fetch_ok = False
+    else:
+        # Fetch succeeded. Defer the daily claim until we know whether any
+        # calendar payments still need consent (email replies arrive on a
+        # later tick). Claiming here made later ticks see events=[] and
+        # clear consent state before the operator replied (ateles#1178).
+        calendar_fetch_ok = True
+        _clear_notify_dedupe(_CALENDAR_FETCH_DEDUPE_KEY)
 
     # Find triggered handlers from calendar
     triggered: list[tuple] = []  # [(handler, [match, ...]), ...]
@@ -1282,10 +1616,31 @@ def main() -> bool:
         if matches:
             triggered.append((handler, matches))
 
+    # Raise-once: drop sessions already resolved, and persist the rest as
+    # pending BEFORE any consent request, so a later tick that cannot see
+    # them (profile timeout, window, restart, midnight) still holds them.
+    try:
+        triggered = _apply_session_journal(
+            triggered,
+            reconcile=calendar_fetch_ok and not strandings,
+        )
+    except _SessionJournalError as exc:
+        log.error(f"payment_journal_unreadable — payments held: {exc}")
+        _notify(
+            "monedula: payment journal could not be read or written "
+            "(payment_journal_unreadable). No further payment will execute "
+            "until it is readable. Inspect the journal before anything is paid.",
+            priority="blocker",
+            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
+            email_eligible=True,
+        )
+        return False
+
     if triggered:
         log.info(f"Triggered handlers: {[h.name for h, _ in triggered]}")
-    elif calendar_fetch_ok:
-        # Successful fetch, nothing calendar-triggered — claim the day now.
+    elif calendar_fetch_ok and not profile_load_degraded and not _has_pending_sessions():
+        # Successful fetch, nothing calendar-triggered, nothing pending —
+        # record the day now.
         _mark_ran_today()
 
     # Fetch due payment tasks from Neotoma, scoped to profile-linked task IDs only.
@@ -1296,6 +1651,11 @@ def main() -> bool:
         log.info(
             "No payment handlers triggered and no due payment tasks — nothing to do."
         )
+        if profile_load_degraded or _has_pending_sessions():
+            # Nothing visible this tick does not mean nothing is owed: keep
+            # the outstanding consent request and the pending sessions.
+            log.info("Pending consent preserved (profiles degraded or sessions open).")
+            return not strandings
         # Empty pending set: clear consent fingerprint + consent-failure dedupe.
         try:
             from consent_email import clear_consent_state
@@ -1324,6 +1684,8 @@ def main() -> bool:
             log.info("Sending payment preview to Telegram...")
             telegram_send(preview_msg)
         log.info("Task reminders sent — no calendar payments to approve. Done.")
+        if profile_load_degraded or _has_pending_sessions():
+            return not strandings
         try:
             from consent_email import clear_consent_state
 
@@ -1357,44 +1719,15 @@ def main() -> bool:
     handler_names = list(dict.fromkeys([h.name for h, _ in triggered]))
     summaries = _pending_summaries(triggered)
 
-    if channel is None:
-        streak = _record_gate_failure("consent_channel_unconfigured")
-        log.error(
-            "consent_channel_unconfigured — naming missing fields only; "
-            f"missing_fields={missing} — blocking payments, not silent no-op."
-        )
-        failure = types.SimpleNamespace(
-            kind="channel_error",
-            error_code=None,
-            error_detail="consent_channel_unconfigured",
-        )
-        _emit_consent_escalation(
-            failure,
-            pending_handler_names=handler_names,
-            yesterday_str=yesterday_str,
-            gate_failure_streak=streak,
-        )
-        _notify(
-            _consent_failure_notify_body(
-                reason_code="consent_channel_unconfigured",
-                pending_summaries=summaries,
-                recovery_hint=(
-                    "set MONEDULA_CONSENT_CHANNEL=email and arm ATELES_NOTIFY_EMAIL=1 "
-                    "plus OPERATOR_EMAIL, or set Telegram break-glass vars"
-                ),
-            ),
-            priority="blocker",
-            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
-            email_eligible=True,
-        )
-        return False
-
     if channel == "telegram" and calendar_fetch_ok:
-        # Break-glass polls in the same tick — claim the calendar leg now
-        # (email path defers the claim until consent is terminal).
-        _mark_ran_today()
+        # Break-glass polls in the same tick — the request is raised exactly
+        # once, so resolve these sessions now (email path defers this until
+        # consent is terminal).
+        if not profile_load_degraded:
+            _mark_ran_today()
+        _resolve_sessions(triggered, "settled")
 
-    if channel == "email":
+    if channel in ("email", "payment_approval"):
         import payment_journal
         from consent_email import (
             needs_swarm_mailbox_hint,
@@ -1406,16 +1739,23 @@ def main() -> bool:
             request_and_collect,
         )
 
-        consent = request_and_collect(
-            triggered,
-            yesterday_str,
-            clear_failure_dedupe=lambda: _clear_notify_dedupe(
-                _CONSENT_CHANNEL_DEDUPE_KEY
-            ),
-            on_unauthenticated_reply=lambda msg, key: _notify_unauthenticated_reply(
-                msg, key, handler_names=handler_names, yesterday_str=yesterday_str
-            ),
-        )
+        if channel == "payment_approval":
+            import payment_approval
+
+            consent = payment_approval.collect(
+                triggered, yesterday_str, _parse_reply, notify=_notify
+            )
+        else:
+            consent = request_and_collect(
+                triggered,
+                yesterday_str,
+                clear_failure_dedupe=lambda: _clear_notify_dedupe(
+                    _CONSENT_CHANNEL_DEDUPE_KEY
+                ),
+                on_unauthenticated_reply=lambda msg, key: _notify_unauthenticated_reply(
+                    msg, key, handler_names=handler_names, yesterday_str=yesterday_str
+                ),
+            )
         if consent.reason_code != REASON_NEEDS_SWARM_MAILBOX:
             _clear_notify_dedupe(_NEEDS_SWARM_MAILBOX_DEDUPE_KEY)
         if not consent.channel_ok:
@@ -1438,6 +1778,11 @@ def main() -> bool:
                 ),
                 "consent_reply_read_failed": (
                     "replies could not be checked; check gws/mailbox; no payment executed"
+                ),
+                "payment_approval_unavailable": (
+                    "Neotoma could not be read or written for the payment approval; "
+                    "no payment executed; the sessions stay pending and the next "
+                    "tick retries"
                 ),
                 "payment_journal_unreadable": (
                     "the payment journal could not be read or written; no payment "
@@ -1486,6 +1831,7 @@ def main() -> bool:
         settled: set[str] = set()  # obligation already has a recorded outcome
         unknown: list[str] = []  # intent recorded, outcome never recorded
         terms_changed: set[str] = set()
+        held_preflight: list[str] = []
         for item in consent.pending_items:
             key = match_key(item)
             label = f"{item.handler_name}:{item.match_id or 'solo'}"
@@ -1526,7 +1872,35 @@ def main() -> bool:
                     "current payee/amount; holding and re-requesting."
                 )
                 terms_changed.add(key)
+                _notify(
+                    f"monedula: approval no longer covers {item.handler_name} "
+                    f"session {item.payment_date} [{str(item.obligation)[:12]}]: "
+                    "the payee or amount changed after you approved it. Nothing "
+                    "was paid; a fresh request is raised on the current terms.",
+                    priority="blocker",
+                    dedupe_key=f"monedula:payment_terms_changed:{item.obligation}",
+                    email_eligible=True,
+                )
                 continue
+            # Preflight BEFORE intent: a payee that cannot be paid safely
+            # (inactive/unknown recipient, unresolved payee) fails closed
+            # without poisoning the journal, and is retried once fixed.
+            preflight = getattr(handler, "preflight", None)
+            if callable(preflight):
+                try:
+                    preflight(match)
+                except Exception as exc:
+                    log.error(f"payment_preflight_failed {label}: {exc}")
+                    _notify(
+                        f"monedula: payment held for {handler.name} — preflight "
+                        "failed (see the daemon log). No transfer was attempted; "
+                        "fix the payee and it retries.",
+                        priority="blocker",
+                        dedupe_key=f"monedula:preflight:{handler.name}",
+                        email_eligible=True,
+                    )
+                    held_preflight.append(label)
+                    continue
             try:
                 payment_journal.record_intent(
                     jpath, item.obligation, key, generation=item.generation
@@ -1564,6 +1938,15 @@ def main() -> bool:
                 return _journal_failure(str(exc))
             all_results.append((handler, result))
             newly_executed.add(key)
+            if not (isinstance(result, dict) and result.get("status") == "sent"):
+                log.error(f"payment_not_completed {label}: {result}")
+            _outcome_priority, _outcome_body = _outcome_alert(item, result)
+            _notify(
+                _outcome_body,
+                priority=_outcome_priority,
+                dedupe_key=f"monedula:payment_outcome:{item.obligation}",
+                email_eligible=True,
+            )
             log.info(f"{label} result: {result}")
             if _job:
                 _job.finished(f"{handler.name} payment executed")
@@ -1581,6 +1964,12 @@ def main() -> bool:
             clear_consent_state()
 
         terminal = settled | newly_executed | consent.skipped
+        for i in consent.pending_items:
+            k = match_key(i)
+            if k in consent.skipped:
+                _resolve_item_session(i, "skipped")
+            elif k in settled or k in newly_executed:
+                _resolve_item_session(i, "settled")
         still_open = any(match_key(i) not in terminal for i in consent.pending_items)
         if still_open:
             log.info(
@@ -1593,8 +1982,12 @@ def main() -> bool:
             )
             return not strandings and not unknown
 
-        # Every match is terminal (approved or skipped). Claim the day and
-        # clear the fingerprint so a future pending set can re-email.
+        # Every match is terminal (approved or skipped). Record the day and
+        # clear the fingerprint so a future pending set can re-email — unless
+        # the profiles were degraded this tick, when other sessions may still
+        # be owed.
+        if profile_load_degraded or _has_pending_sessions():
+            return not strandings
         _mark_ran_today()
         clear_consent_state()
         _clear_notify_dedupe(_CONSENT_CHANNEL_DEDUPE_KEY)

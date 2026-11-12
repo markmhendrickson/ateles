@@ -46,7 +46,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
 # User-Agent with a 1010 "browser signature" 403. Any explicit UA passes.
@@ -76,6 +76,10 @@ class PaymentProfile:
     # bank details directly instead of requiring a contacts.parquet row.
     wise_iban: str = ""
     wise_recipient_name: str = ""
+    # The Wise recipient account to pay, when the profile pins one. Stored as
+    # a number or a numeric string; always normalised to an int. When set, the
+    # handler pays exactly this account and never creates a recipient.
+    wise_recipient_id: int | None = None
 
     # BTC-specific
     btc_address: str = ""
@@ -95,6 +99,33 @@ class PaymentProfile:
     def name(self) -> str:
         """Unique slug used as handler name and in Telegram replies."""
         return self.prefix.lower()
+
+
+def parse_wise_recipient_id(raw: Any) -> int | None:
+    """Normalise a stored ``wise_recipient_id`` to a positive int.
+
+    Accepts an int, an integral float, or a numeric string. Empty/None means
+    "not set" (returns None). Anything else raises ``ValueError``: a recipient
+    id that does not parse must fail closed, never be guessed at.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise ValueError(f"wise_recipient_id {raw!r} is not a number")
+    if isinstance(raw, float):
+        if raw != int(raw):
+            raise ValueError(f"wise_recipient_id {raw!r} is not an integer")
+        raw = int(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        if not text.isdigit():
+            raise ValueError("wise_recipient_id is not numeric")
+        raw = int(text)
+    if not isinstance(raw, int) or raw <= 0:
+        raise ValueError("wise_recipient_id must be a positive integer")
+    return raw
 
 
 def load_profiles_from_neotoma(
@@ -131,6 +162,7 @@ def load_profiles_from_neotoma(
         REASON_BAD_AMOUNT,
         REASON_BAD_LEGAL_TYPE,
         REASON_BAD_PAYMENT_TYPE,
+        REASON_BAD_RECIPIENT_ID,
         REASON_FETCH_FAILED,
         REASON_MISSING_LABEL,
         REASON_UNREACHABLE,
@@ -356,6 +388,18 @@ def load_profiles_from_neotoma(
             )
             continue
 
+        try:
+            recipient_id = parse_wise_recipient_id(snap.get("wise_recipient_id"))
+        except ValueError as exc:
+            log.error(f"payment_profile {label!r}: {exc} — skipped")
+            _strand(
+                item.get("entity_id"),
+                label,
+                REASON_BAD_RECIPIENT_ID,
+                f"{exc}. Payments for this profile are held until it is fixed.",
+            )
+            continue
+
         profiles.append(
             PaymentProfile(
                 prefix=prefix,
@@ -370,6 +414,7 @@ def load_profiles_from_neotoma(
                 wise_legal_type=legal_type_raw,
                 wise_iban=str(snap.get("wise_iban") or "").strip(),
                 wise_recipient_name=str(snap.get("wise_recipient_name") or "").strip(),
+                wise_recipient_id=recipient_id,
                 btc_address=snap.get("btc_address", ""),
                 due_date=due_date,
                 one_off=one_off,
@@ -409,10 +454,10 @@ def load_profiles_with_neotoma_fallback(
         return profiles
 
     log.info("No Neotoma payment profiles found — falling back to env vars")
-    return load_profiles()
+    return load_profiles(strandings)
 
 
-def load_profiles() -> list[PaymentProfile]:
+def load_profiles(strandings: list | None = None) -> list[PaymentProfile]:
     """
     Load all PaymentProfiles from env vars.
     Driven by MONEDULA_PROFILES (comma-separated prefix list).
@@ -430,7 +475,7 @@ def load_profiles() -> list[PaymentProfile]:
     profiles: list[PaymentProfile] = []
 
     for prefix in prefixes:
-        profile = _load_profile(prefix)
+        profile = _load_profile(prefix, strandings)
         if profile:
             profiles.append(profile)
 
@@ -438,8 +483,14 @@ def load_profiles() -> list[PaymentProfile]:
     return profiles
 
 
-def _load_profile(prefix: str) -> PaymentProfile | None:
-    """Load a single PaymentProfile from env vars for the given prefix."""
+def _load_profile(
+    prefix: str, strandings: list | None = None
+) -> PaymentProfile | None:
+    """Load a single PaymentProfile from env vars for the given prefix.
+
+    A bad ``WISE_RECIPIENT_ID`` is recorded in ``strandings`` (when supplied),
+    exactly as the Neotoma loader does, so it alerts instead of only logging.
+    """
 
     def env(key: str, default: str = "") -> str:
         return os.environ.get(f"{prefix}_{key}", default).strip()
@@ -479,6 +530,23 @@ def _load_profile(prefix: str) -> PaymentProfile | None:
     task_kw_raw = env("TASK_KEYWORDS", keywords_raw)
     task_keywords = [k.strip().lower() for k in task_kw_raw.split(",") if k.strip()]
 
+    try:
+        recipient_id = parse_wise_recipient_id(env("WISE_RECIPIENT_ID"))
+    except ValueError as exc:
+        log.error(f"[{prefix}] {exc} — profile skipped")
+        if strandings is not None:
+            from strandings import REASON_BAD_RECIPIENT_ID, Stranding
+
+            strandings.append(
+                Stranding(
+                    entity_id="",
+                    label=label,
+                    reason=REASON_BAD_RECIPIENT_ID,
+                    detail=f"{exc}. Payments for this profile are held until it is fixed.",
+                )
+            )
+        return None
+
     return PaymentProfile(
         prefix=prefix,
         label=label,
@@ -493,6 +561,7 @@ def _load_profile(prefix: str) -> PaymentProfile | None:
         wise_legal_type=(env("WISE_LEGAL_TYPE") or "PRIVATE").strip().upper(),
         wise_iban=env("WISE_IBAN"),
         wise_recipient_name=env("WISE_RECIPIENT_NAME"),
+        wise_recipient_id=recipient_id,
         due_date=env("DUE_DATE"),
         one_off=env("ONE_OFF") == "1",
         # btc

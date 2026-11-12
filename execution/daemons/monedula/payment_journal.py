@@ -48,7 +48,13 @@ class JournalError(Exception):
 
 
 def _empty() -> dict[str, Any]:
-    return {"version": 1, "generation": 0, "obligations": {}, "consumed_tokens": {}}
+    return {
+        "version": 1,
+        "generation": 0,
+        "obligations": {},
+        "consumed_tokens": {},
+        "sessions": {},
+    }
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -66,6 +72,12 @@ def load(path: Path) -> dict[str, Any]:
         or not isinstance(data.get("obligations"), dict)
         or not isinstance(data.get("consumed_tokens"), dict)
     ):
+        raise JournalError("payment journal malformed")
+    # ``sessions`` was added after the first journals were written: absent is
+    # an empty map, present-but-wrong-shape is malformed (fail closed).
+    if "sessions" not in data:
+        data["sessions"] = {}
+    elif not isinstance(data["sessions"], dict):
         raise JournalError("payment journal malformed")
     return data
 
@@ -165,3 +177,71 @@ def record_outcome(path: Path, obligation: str, status: str) -> None:
     _write(path, data)
     if obligation_state(load(path), obligation) != STATE_DONE:
         raise JournalError("payment outcome did not persist")
+
+
+# ---------------------------------------------------------------------------
+# Raised sessions (one consent request per calendar session)
+# ---------------------------------------------------------------------------
+#
+# A calendar session is raised for consent once, keyed on (handler, event id).
+# The entry persists until the session is resolved, so a tick that cannot see
+# the session (Neotoma timeout, event out of the lookback window, restart,
+# midnight) neither loses it nor raises it a second time. Only the handler
+# name, event id and the event's end time (epoch seconds, used to size the
+# next calendar lookback) are stored: no titles, payees or amounts.
+
+SESSION_PENDING = "pending"
+# Terminal states: the session is never raised again.
+SESSION_SETTLED = "settled"  # paid, or already recorded as paid
+SESSION_SKIPPED = "skipped"  # explicit operator SKIP
+SESSION_DROPPED = "dropped"  # event or profile no longer exists
+SESSION_TERMINAL = frozenset({SESSION_SETTLED, SESSION_SKIPPED, SESSION_DROPPED})
+
+
+def session_key(handler_name: str, event_id: str) -> str:
+    return f"{handler_name}:{event_id}"
+
+
+def session_state(data: dict[str, Any], key: str) -> str | None:
+    entry = data["sessions"].get(key)
+    if not isinstance(entry, dict):
+        return None
+    return str(entry.get("state") or SESSION_PENDING)
+
+
+def pending_sessions(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        k: v
+        for k, v in data["sessions"].items()
+        if isinstance(v, dict) and (v.get("state") or SESSION_PENDING) == SESSION_PENDING
+    }
+
+
+def note_pending(path: Path, key: str, *, ended_at: float | None = None) -> None:
+    """Record a session as raised-and-unresolved. Idempotent; never reopens a
+    terminal session. Read back after writing."""
+    data = load(path)
+    if isinstance(data["sessions"].get(key), dict):
+        return  # already pending or terminal: raise-once
+    data["sessions"][key] = {
+        "state": SESSION_PENDING,
+        "first_seen": time.time(),
+        "ended_at": ended_at,
+    }
+    _write(path, data)
+    if session_state(load(path), key) != SESSION_PENDING:
+        raise JournalError("pending session did not persist")
+
+
+def set_session_state(path: Path, key: str, state: str) -> None:
+    """Move a session to a new state and read it back."""
+    data = load(path)
+    entry = data["sessions"].get(key)
+    if not isinstance(entry, dict):
+        entry = {"first_seen": time.time(), "ended_at": None}
+    entry["state"] = state
+    entry["resolved_at"] = time.time()
+    data["sessions"][key] = entry
+    _write(path, data)
+    if session_state(load(path), key) != state:
+        raise JournalError("session state did not persist")

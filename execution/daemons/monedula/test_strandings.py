@@ -110,6 +110,28 @@ def test_non_positive_amount_is_recorded_as_stranded(monkeypatch):
     assert [s.reason for s in strandings] == [REASON_BAD_AMOUNT]
 
 
+@pytest.mark.parametrize("raw", ["abc", 1.5, True, -3, 0, "1e3"])
+def test_non_integer_wise_recipient_id_strands_the_profile(monkeypatch, raw):
+    """A pinned recipient id that is not a positive integer must hold the
+    payment, never be coerced or ignored (then looked up by IBAN)."""
+    from strandings import REASON_BAD_RECIPIENT_ID
+
+    _serve(monkeypatch, {"entities": [_profile(wise_recipient_id=raw)]})
+    strandings: list = []
+    profiles = load_profiles_from_neotoma(strandings)
+    assert profiles == []
+    assert [s.reason for s in strandings] == [REASON_BAD_RECIPIENT_ID]
+
+
+@pytest.mark.parametrize("raw,want", [(42, 42), ("42", 42), (" 42 ", 42), ("", None)])
+def test_valid_or_blank_wise_recipient_id_is_loaded(monkeypatch, raw, want):
+    _serve(monkeypatch, {"entities": [_profile(wise_recipient_id=raw)]})
+    strandings: list = []
+    profiles = load_profiles_from_neotoma(strandings)
+    assert strandings == []
+    assert [p.wise_recipient_id for p in profiles] == [want]
+
+
 def test_failed_fetch_strands_every_profile(monkeypatch):
     """A transport failure is not 'no profiles configured'.
 
