@@ -117,7 +117,8 @@ def test_derived_key_is_stable_across_digits_and_hex():
 def test_two_entity_ids_collapse_to_one_key():
     a = sink.derive_key("apis", "Task ent_99ace4dd6673aa36ed08b1fe stalled 42m")
     b = sink.derive_key("apis", "Task ent_abcdef0123456789abcdef01 stalled 17m")
-    assert a == b and "ent_#" in a and "99ace" not in a
+    c = sink.derive_key("apis", "Task ent_abcdefabcdefabcdefabcdef stalled 3m")  # letters only
+    assert a == b == c and "ent_#" in a and "99ace" not in a
     u1 = sink.derive_key("apis", "run 123e4567-e89b-12d3-a456-426614174000 failed")
     u2 = sink.derive_key("apis", "run 00000000-e89b-12d3-a456-426614174999 failed")
     assert u1 == u2
@@ -240,7 +241,10 @@ def test_a_still_open_entity_is_updated_in_place_after_the_window(on, monkeypatc
     time.sleep(0.1)
     sink.record(message="still bad", level="warn", handler="a", dedupe_key="k")
     sink.flush()
-    assert len({p["entities"][0]["title"] for p in on.stores()}) == 1
+    stores = on.stores()
+    assert len({p["entities"][0]["title"] for p in stores}) == 1
+    assert len({p["idempotency_key"] for p in stores}) == 2  # a replay must not swallow the update
+    assert len({r["entity_id"] for r in _read("stored")}) == 2  # the replaying fake saw two real writes
 
 
 def test_keyless_alerts_auto_resolve_after_expiry_but_keyed_ones_do_not(on, monkeypatch):
