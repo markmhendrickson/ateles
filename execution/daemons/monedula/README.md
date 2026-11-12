@@ -75,6 +75,15 @@ ruling 2026-11-12). The default and only automatic channel is `payment_approval`
   payee changes the key). Bound fields are never re-bound in place.
 - **One bad record holds only its own payment**; other payees proceed. Only when
   no record can be read at all (Neotoma down) is the tick left unclaimed.
+- **Approver identity (this deployment):** the resolver principal is
+  `payment-approver@ateles-swarm`, key thumbprint
+  `LmdMZ-VRVsRCt-daCQTWfMBUx92kfMZ3L32tsYxYfPU` (a public thumbprint), with the key
+  minted at `ateles-private/keys/payment-approver.jwk.json`. Set
+  `MONEDULA_PAYMENT_APPROVER_SUB` / `MONEDULA_PAYMENT_APPROVER_JKT` on the Monedula
+  daemon to those two values. The resolver writes its corrections with
+  `neotoma request --aauth`, with `NEOTOMA_AAUTH_PRIVATE_JWK_PATH`,
+  `NEOTOMA_AAUTH_SUB` and `NEOTOMA_AAUTH_ISS` set for that key. These values are
+  configuration only; nothing in the code carries them.
 - **Schema first:** run
   `python3 execution/scripts/register_payment_approval_schema.py` (dry run) then
   `--apply` before Monedula first runs with this channel; without the schema every

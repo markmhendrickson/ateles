@@ -291,7 +291,7 @@ def test_apis_never_subscribes_to_payment_approval():
             subscribed = ast.literal_eval(node.value)
     assert subscribed is not None
     assert payment_approval.ENTITY_TYPE not in subscribed
-    assert set(subscribed) == {"task", "checkpoint_brief"}
+    assert set(subscribed) == {"task", "checkpoint_brief"}  # vocab-ok: live type Apis subscribes to; pins that payment_approval is not among them
 
 
 def test_record_has_no_task_or_dispatch_fields(env):
