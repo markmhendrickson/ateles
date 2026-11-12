@@ -22,7 +22,10 @@ Mapping onto the existing ``escalation`` type (declared fields only):
                   operator_decision->warning, warn->warning, info->info
                   (warning is shared: filter on the ``level:`` tag to tell
                   operator_decision from warn)
-    status        "open"; "resolved" when cleared or expired
+    status        "open"; "resolved" when cleared or expired. A close made for
+                  bookkeeping (eviction, stale pruning, key-less expiry) also
+                  adds the tag ``resolution:expired``: resolved, NOT confirmed
+                  fixed. A normal ``clear_dedupe`` close has no such tag.
     source_agent  "<daemon>@ateles-swarm"
     tags          "notify", "level:<level>", "daemon:<name>", "shape:<hash>"
 The inbox filter is: entity_type escalation, tag ``notify``, status ``open``,
@@ -114,6 +117,7 @@ RETENTION_DAYS = 7
 TOMB_DAYS = 30
 TOMB_MAX = 2000
 RETENTION_ENV = "ATELES_NOTIFY_SINK_RETENTION_SECONDS"
+EXPIRED_TAG = "resolution:expired"
 LEVEL_RANK = {"info": 0, "warn": 1, "operator_decision": 2, "blocker": 3, "critical": 4}
 EXPIRE_BATCH = 5
 LOCK_WAIT_SECONDS = 0.25
@@ -467,8 +471,11 @@ def record(*, message: str, level: str, handler: str = "", dedupe_key: str | Non
                     and st["hour_count"] >= MAX_NEW_KEYS_PER_HOUR
                 )
                 if capped:
-                    drops = st.setdefault("dropped", {})
-                    drops[level] = drops.get(level, 0) + 1
+                    day = datetime.now().strftime("%Y%m%d")
+                    days = st.setdefault("dropped_days", {})
+                    days.setdefault(day, {})[level] = days.get(day, {}).get(level, 0) + 1
+                    for old in sorted(days)[:-14]:  # keep two weeks
+                        days.pop(old)
                     _warn_once("new-key-rate", f"{daemon}: more than {MAX_NEW_KEYS_PER_HOUR} new alert shapes in an hour; extras are not recorded")
                 else:
                     if e is None:
@@ -527,7 +534,16 @@ def resolve(key: str) -> None:
 
 
 def _resolve_job(daemon: str, e: dict[str, Any], why: str) -> dict[str, Any]:
+    tags = None
+    if why == "expired":
+        # Closed for bookkeeping, not because the condition cleared: say so on
+        # the entity (declared field `tags`; escalation has no resolution field)
+        # so the inbox never reads it as "fixed". The inbox filter is unchanged.
+        level = e.get("level")
+        skey = f"{level}\0{e.get('key')}"
+        tags = ["notify", f"level:{level}", f"daemon:{daemon}", f"shape:{_shape(skey)}", EXPIRED_TAG]
     return {
+        "tags": tags,
         "kind": "resolve",
         "ts": datetime.now(timezone.utc).isoformat(),
         "key": e.get("key"),
@@ -693,8 +709,12 @@ def _do_resolve(base: str, token: str, rec: dict[str, Any]) -> None:
     if not title:
         return
     resolved_at = rec["ts"]
+    tags = rec.get("tags")  # set only for bookkeeping closes (eviction, pruning, expiry)
     if rec.get("entity_id"):
-        for field, value in (("status", "resolved"), ("resolved_at", resolved_at)):
+        fields = [("status", "resolved"), ("resolved_at", resolved_at)]
+        if tags:
+            fields.insert(0, ("tags", tags))  # marker first: never a resolved entity without it
+        for field, value in fields:
             _http_post(
                 f"{base}/correct",
                 token,
@@ -715,7 +735,15 @@ def _do_resolve(base: str, token: str, rec: dict[str, Any]) -> None:
             {
                 "idempotency_key": _idem("resolve", title, 0),
                 "observation_source": "workflow_state",
-                "entities": [{"entity_type": "escalation", "title": title, "status": "resolved", "resolved_at": resolved_at}],
+                "entities": [
+                    {
+                        "entity_type": "escalation",
+                        "title": title,
+                        "status": "resolved",
+                        "resolved_at": resolved_at,
+                        **({"tags": tags} if tags else {}),
+                    }
+                ],
             },
         )
 
@@ -737,11 +765,14 @@ _SOURCE_LABEL = {"shadow": "would store", "spool": "spooled", "stored": "stored"
 def summarize(days: int = 7, directory: Path | None = None) -> dict[str, Any]:
     d = directory or sink_dir()
     cutoff = (datetime.now() - timedelta(days=max(days, 1) - 1)).strftime("%Y%m%d")
-    out: dict[str, Any] = {"files": 0, "rows": [], "dropped": Counter()}
+    out: dict[str, Any] = {"files": 0, "rows": [], "dropped": Counter(), "days": days}
     for sp in d.glob("state-*.json"):
+        daemon = sp.stem.split("-", 2)[-1]
         try:
-            for lvl, n in (json.loads(sp.read_text()).get("dropped") or {}).items():
-                out["dropped"][lvl] += int(n)
+            for day, per_level in (json.loads(sp.read_text()).get("dropped_days") or {}).items():
+                if day >= cutoff:
+                    for lvl, n in per_level.items():
+                        out["dropped"][(daemon, lvl)] += int(n)
         except (OSError, ValueError, AttributeError, TypeError):
             pass
     for prefix in ("shadow", "spool", "stored"):
@@ -766,7 +797,10 @@ def _format_summary(s: dict[str, Any], top: int = 10) -> str:
     rows = s["rows"]
     lines = [f"notify sink records ({len(rows)} rows from {s['files']} files)"]
     if s.get("dropped"):
-        lines.append("dropped by the new-key rate cap: " + ", ".join(f"{k} {v}" for k, v in sorted(s["dropped"].items())))
+        lines.append(
+            f"dropped by the new-key rate cap (last {s.get('days', 7)} days): "
+            + ", ".join(f"{dm} {lv} {n}" for (dm, lv), n in sorted(s["dropped"].items()))
+        )
     if not rows:
         return lines[0] + "\nnothing recorded yet"
     sections = (

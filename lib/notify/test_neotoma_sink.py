@@ -508,8 +508,9 @@ def test_eviction_resolves_open_entities_and_prefers_resolved_and_low_levels(on,
     sink.record(message="new2", level="warn", handler="a", dedupe_key="n2")
     sink.flush()
     expired = on.corrections()[before:]
-    assert [c["field"] for c in expired] == ["status", "resolved_at"]
+    assert [c["field"] for c in expired] == ["tags", "status", "resolved_at"]
     assert expired[0]["entity_id"] == "ent_fake2"  # the info alert, not the critical one
+    assert "resolution:expired" in expired[0]["value"] and "notify" in expired[0]["value"]
     state = json.loads((sink.sink_dir() / "state-on-a.json").read_text())
     assert "c" in {e["key"] for e in state["entries"].values()}
     # a recurrence of an evicted shape starts a new generation, never a reopen
@@ -527,7 +528,7 @@ def test_pruning_a_stale_state_file_resolves_open_alerts_and_keeps_generations(o
     os.utime(lock_file, (1, 1))
     sink._prune(force=True)
     sink.flush()
-    assert [c["field"] for c in on.corrections()] == ["status", "resolved_at"]
+    assert [c["field"] for c in on.corrections()] == ["tags", "status", "resolved_at"]
     assert lock_file.exists()  # a lock is never aged out on its own
     assert json.loads(state_file.read_text())["entries"] == {}
     sink.record(message="quiet daemon alert", level="blocker", handler="quiet", dedupe_key="q")
@@ -569,7 +570,7 @@ def test_flood_of_lesser_alerts_cannot_block_critical_or_blocker(on, monkeypatch
     assert len(titles) == 5
     assert any("critical thing" in t for t in titles) and any("blocker thing" in t for t in titles)
     assert sink.main(["--summary"]) == 0
-    assert "dropped by the new-key rate cap: info 7" in capsys.readouterr().out
+    assert "dropped by the new-key rate cap (last 7 days): apis info 7" in capsys.readouterr().out
 
 
 def test_scrub_covers_prefixed_tokens_url_userinfo_and_encoded_bearer(on):
@@ -615,3 +616,53 @@ def test_expiry_also_runs_when_the_triggering_call_is_suppressed(on, monkeypatch
     sink.flush()
     resolved = [c for c in on.corrections() if c["field"] == "status"]
     assert len(resolved) >= 1 and resolved[0]["entity_id"] == "ent_fake1"
+
+
+def test_expired_closes_carry_a_visible_marker_but_a_normal_resolve_does_not(on, monkeypatch):
+    # keyless alert expiring (bookkeeping close) vs keyed alert cleared by the caller
+    monkeypatch.setenv(sink.EXPIRE_ENV, "0.05")
+    sink.record(message="keyless", level="warn", handler="a")
+    sink.record(message="keyed", level="warn", handler="a", dedupe_key="kk")
+    sink.flush()
+    sink.resolve("kk")  # a genuine clear
+    sink.flush()
+    assert [c["field"] for c in on.corrections()] == ["status", "resolved_at"]
+    assert not any(c["field"] == "tags" for c in on.corrections())
+    time.sleep(0.1)
+    sink._last_maintenance_expire = 0.0
+    sink.record(message="other", level="warn", handler="a")
+    sink.flush()
+    tag_fixes = [c for c in on.corrections() if c["field"] == "tags"]
+    assert len(tag_fixes) == 1 and tag_fixes[0]["entity_id"] == "ent_fake1"
+    assert tag_fixes[0]["value"][:3] == ["notify", "level:warn", "daemon:a"] and "resolution:expired" in tag_fixes[0]["value"]
+
+
+def test_expired_close_without_an_entity_id_marks_the_same_title_store(on, monkeypatch):
+    monkeypatch.setattr(sink, "STATE_MAX_KEYS", 1)
+    sink.record(message="first", level="info", handler="a", dedupe_key="f")
+    sink.record(message="second", level="warn", handler="a", dedupe_key="s")  # evicts "f" before its id was recorded
+    sink.flush()
+    # Depending on whether the worker had recorded the entity id before the
+    # eviction, the close is a same-title store or a /correct; both carry the marker.
+    via_store = [
+        p for p in on.stores()
+        if p["entities"][0].get("status") == "resolved" and "resolution:expired" in p["entities"][0]["tags"]
+    ]
+    via_correct = [c for c in on.corrections() if c["field"] == "tags" and "resolution:expired" in c["value"]]
+    assert len(via_store) + len(via_correct) == 1
+
+
+def test_summary_drop_counts_are_per_daemon_and_scoped_to_the_days_window(on, monkeypatch, capsys):
+    monkeypatch.setattr(sink, "MAX_NEW_KEYS_PER_HOUR", 1)
+    for i in range(3):
+        sink.record(message=f"m{i}", level="info", handler="apis", dedupe_key=f"i{i}")
+    sink.record(message="x", level="warn", handler="formica", dedupe_key="a")
+    sink.record(message="y", level="warn", handler="formica", dedupe_key="b")
+    sink.flush()
+    path = sink.sink_dir() / "state-on-apis.json"
+    st = json.loads(path.read_text())
+    st["dropped_days"]["20200101"] = {"info": 99}  # an old day, outside the window
+    path.write_text(json.dumps(st))
+    assert sink.main(["--summary", "--days", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "apis info 2" in out and "formica warn 1" in out and "99" not in out
