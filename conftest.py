@@ -79,6 +79,9 @@ def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
     atexit.register(shutil.rmtree, state, ignore_errors=True)
     os.environ["ATELES_DIGEST_QUEUE_PATH"] = str(Path(state) / "digest.json")
     os.environ["ATELES_DEDUPE_JOURNAL_PATH"] = str(Path(state) / "dedupe.json")
+    # The Neotoma alert sink (lib/notify/neotoma_sink.py) records to a local
+    # directory in its default shadow mode; keep that out of the live one.
+    os.environ["ATELES_NOTIFY_SINK_DIR"] = str(Path(state) / "notify-sink")
 
 
 @pytest.fixture(autouse=True)
@@ -103,3 +106,7 @@ def _isolate_notifier_state(monkeypatch, tmp_path_factory):
     root = tmp_path_factory.mktemp("notify-state")
     monkeypatch.setenv("ATELES_DIGEST_QUEUE_PATH", str(root / "digest.json"))
     monkeypatch.setenv("ATELES_DEDUPE_JOURNAL_PATH", str(root / "dedupe.json"))
+    monkeypatch.setenv("ATELES_NOTIFY_SINK_DIR", str(root / "notify-sink"))
+    from lib.notify import neotoma_sink  # noqa: PLC0415
+
+    neotoma_sink._reset_for_tests()

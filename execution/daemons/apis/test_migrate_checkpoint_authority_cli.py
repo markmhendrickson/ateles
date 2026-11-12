@@ -112,3 +112,48 @@ def test_migration_cli_validates_denial_store_before_migration(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_migration_cli_refuses_a_restricted_checkpoint_without_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Through main(): a restrictive original scope is never migrated."""
+    record = {
+        "entity_id": "ent_restricted",
+        "entity_type": "checkpoint_" + "brief",
+        "snapshot": {
+            "status": "approved",
+            "task_entity_id": "ent_t",
+            # Claims a restrictive extension, but no authenticated envelope
+            # can be read from it: its scope is unknown, never "legacy".
+            "body": '{"version": 2, "effect_scope": "review_request_only"}',
+        },
+    }
+    task = {"entity_id": "ent_t", "snapshot": {"status": "awaiting_approval"}}
+    writes: list[str] = []
+    monkeypatch.setattr(cli, "_require_checkpoint_denial_store", lambda: None)
+    monkeypatch.setattr(cli.Notifier, "from_neotoma", lambda: object())
+    monkeypatch.setattr(apis, "fetch_checkpoint_record", lambda _id: record)
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_authorization",
+        lambda _id, _rec: None,
+    )
+    monkeypatch.setattr(apis, "fetch_task_record", lambda _id: task)
+    monkeypatch.setattr(apis, "fetch_entity_user_id", lambda _id: "tenant-a")
+    monkeypatch.setattr(apis, "checkpoint_already_dispatched", lambda _s: False)
+    monkeypatch.setattr(apis, "_checkpoint_denial_persisted", lambda _id: False)
+    monkeypatch.setattr(
+        apis, "_file_fresh_checkpoint", lambda **kw: writes.append("file") or "x"
+    )
+    monkeypatch.setattr(
+        apis,
+        "require_fresh_checkpoint_approval",
+        lambda *a, **k: writes.append("retire") or True,
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_cli(monkeypatch, "ent_restricted")
+
+    assert exc_info.value.code != 0
+    assert writes == []

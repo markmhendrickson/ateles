@@ -30,7 +30,10 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -98,6 +101,10 @@ async def handle_event(event: NeotomaEvent) -> None:
     )
 
     if event.entity_type == "escalation" and event.action in ("created", "updated"):
+        # The SSE stream carries only event metadata, so the snapshot (tags,
+        # title, status) must be fetched before anything is read from it.
+        if not await _hydrate_escalation(event):
+            return
         await _handle_escalation(event)
     elif event.entity_type == "daemon_report":
         await _handle_daemon_report(event)
@@ -726,43 +733,152 @@ async def _fetch_comments(snap: dict) -> list:
         return []
 
 
+# Hydration of an escalation is retried within this bound. If it still fails
+# the event is NOT pushed: with the tags unknown, the escalation might be a
+# daemon alert stored by the notifier's Neotoma sink, and pushing it would
+# re-send it through the notifier, which stores the re-send again. The entity
+# stays in Neotoma, and a later update event for it is handled normally.
+# Known follow-up: a dropped push is visible only in this log; a degraded
+# "could not fetch" push is deliberately not sent, since it would reopen the loop.
+ESCALATION_HYDRATE_ATTEMPTS = 3
+ESCALATION_HYDRATE_BACKOFF_SECONDS = 1.0
+
+
+async def _hydrate_escalation(event: NeotomaEvent) -> bool:
+    """Fetch the escalation snapshot with a bounded retry; True when it is known."""
+    for attempt in range(1, ESCALATION_HYDRATE_ATTEMPTS + 1):
+        await hydrate_snapshot(event)
+        if event.hydrated:
+            return True
+        if attempt < ESCALATION_HYDRATE_ATTEMPTS:
+            await asyncio.sleep(ESCALATION_HYDRATE_BACKOFF_SECONDS * attempt)
+    log.error(
+        f"[{DAEMON_NAME}] escalation {_safe_entity_id(event.entity_id)}: no push, "
+        f"because Neotoma could not be read {ESCALATION_HYDRATE_ATTEMPTS} times "
+        "(see the hydrate_snapshot warning above for the cause) and its tags are "
+        "unknown, which is what keeps notifier-sink alerts from being re-sent. "
+        "The escalation is still in Neotoma. Check that Neotoma is reachable; "
+        "saving the escalation again re-triggers this handler."
+    )
+    return False
+
+
+# ── Validated values only ─────────────────────────────────────────────────────
+# An escalation is agent-authored free text, written by anything that can write
+# to Neotoma. Nothing read from it is shown to the operator except values
+# validated against a fixed vocabulary or pattern: the severity (allow-list) and
+# the entity id. The title, summary, reason and task title are NEVER placed in a
+# push, Telegram or email message or in the log; the push points at the
+# escalation in the Ateles inbox instead. (Rich sanitized text is a follow-up.)
+_ENTITY_ID_RE = re.compile(r"ent_[0-9a-f]{24}")
+_SEVERITIES = frozenset(
+    {"info", "low", "medium", "warning", "warn", "high", "error", "blocker", "critical"}
+)
+
+
+def _safe_entity_id(entity_id: object) -> str:
+    eid = str(entity_id or "")
+    return eid if _ENTITY_ID_RE.fullmatch(eid) else "invalid-id"
+
+
+def _safe_severity(value: object) -> str:
+    v = str(value or "").strip().lower()
+    return v if v in _SEVERITIES else "unknown"
+
+
+def _tag_list(tags: object) -> list[str]:
+    """Tags as a list, whether Neotoma returned a list, a JSON string or a comma string."""
+    if isinstance(tags, (list, tuple)):
+        return [str(t) for t in tags]
+    if isinstance(tags, str):
+        raw = tags.strip()
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return [str(t) for t in parsed]
+            except ValueError:
+                pass
+        return [t.strip() for t in raw.split(",") if t.strip()]
+    return []
+
+
+# The notifier's Neotoma sink (lib/notify/neotoma_sink.py, PR #1723) stores each
+# daemon alert as an escalation with an exact shape: title
+# "[<daemon>/<level>] <text> · <hash>[ (#N)]", tags notify + level:<level> +
+# daemon:<daemon> + shape:<hash> (+ resolution:expired when closed for
+# bookkeeping), source_agent "<daemon>@ateles-swarm".
+_SINK_TITLE_RE = re.compile(
+    r"\[(?P<daemon>[a-z0-9_.-]{1,40})/(?P<level>critical|blocker|operator_decision|warn|info)\] "
+    r".+ \u00b7 (?P<hash>[0-9a-f]{10,16})(?: \(#\d+\))?"
+)
+
+
+def _is_notifier_sink_alert(snapshot: dict) -> bool:
+    """True only for an escalation with the sink's exact shape, not for any
+    escalation that merely carries the ``notify`` tag.
+
+    The tag alone is forgeable by any escalation writer and would silence a
+    real escalation. The Neotoma entity snapshot does not expose the writing
+    agent's authenticated identity, so this checks the whole shape instead: the
+    tag, the title pattern, the exact tag set agreeing with the title, and the
+    source_agent. That stops accidental or casual suppression; it does not stop
+    a deliberate forger who copies the full shape (see the PR body)."""
+    tags = _tag_list(snapshot.get("tags"))
+    if "notify" not in tags:
+        return False
+    m = _SINK_TITLE_RE.fullmatch(str(snapshot.get("title") or ""))
+    if not m:
+        return False
+    daemon, level, digest = m.group("daemon"), m.group("level"), m.group("hash")
+    if snapshot.get("source_agent") != f"{daemon}@ateles-swarm":
+        return False
+    expected = {"notify", f"level:{level}", f"daemon:{daemon}"}
+    extra = set(tags) - expected
+    shape = [t for t in extra if t.startswith("shape:")]
+    other = extra - set(shape)
+    if len(shape) != 1 or not (other <= {"resolution:expired"}):
+        return False
+    tag_hash = shape[0][len("shape:"):]
+    return bool(tag_hash) and (digest.startswith(tag_hash) or tag_hash.startswith(digest))
+
+
 async def _handle_escalation(event: NeotomaEvent) -> None:
-    """Surface escalation entities to Ateles via Notifier."""
-    status = (event.snapshot.get("status") or "").lower()
-    dedupe_key = f"escalation:{event.entity_id}"
+    """Surface an escalation to Ateles via Notifier, with validated values only."""
+    # Daemon alerts the notifier's Neotoma sink stored are already alerts:
+    # re-sending them would feed them back through the notifier, which stores the
+    # re-send again (lib/notify/neotoma_sink.py).
+    if _is_notifier_sink_alert(event.snapshot):
+        return
+    status = str(event.snapshot.get("status") or "").lower()
+    safe_id = _safe_entity_id(event.entity_id)
+    # The dedupe key is never shown; hash an id that fails validation so distinct
+    # invalid ids still get distinct keys.
+    dedupe_key = (
+        f"escalation:{safe_id}"
+        if safe_id != "invalid-id"
+        else "escalation:invalid:" + hashlib.sha1(str(event.entity_id).encode("utf-8", "replace")).hexdigest()[:12]
+    )
     if status in ("resolved", "closed"):
         _notifier.clear_dedupe(dedupe_key)
         return
 
-    severity = event.snapshot.get("severity", "unknown")
-    blocking = event.snapshot.get("blocking", False)
-    summary = (event.snapshot.get("summary") or "").strip()
-    title = (event.snapshot.get("title") or "").strip()
-    reason = (event.snapshot.get("reason") or "").strip()
-    linked_task = (event.snapshot.get("linked_task_title") or "").strip()
-
-    text = summary or title or reason or linked_task
+    severity = _safe_severity(event.snapshot.get("severity"))
+    blocking = event.snapshot.get("blocking", False) is True
     priority = Priority.BLOCKER if blocking else Priority.OPERATOR_DECISION
-    email_eligible = bool(text)
-    if not text:
-        log.warning(
-            f"[{DAEMON_NAME}] escalation {event.entity_id} has no actionable "
-            "text; email_eligible=False"
-        )
-        text = f"Escalation {event.entity_id} (no summary in snapshot)"
-    else:
-        text = f"{text} (escalation {event.entity_id})"
-
     log.info(
-        f"[{DAEMON_NAME}] escalation {event.entity_id}: severity={severity} "
+        f"[{DAEMON_NAME}] escalation {safe_id}: severity={severity} "
         f"blocking={blocking} — notifying"
     )
     _notifier.send(
-        f"Escalation [{severity}]: {text}",
+        f"Escalation [{severity}]: New escalation {safe_id} in the Ateles inbox. "
+        "Open it there to read it.",
         priority=priority,
         handler=DAEMON_NAME,
         dedupe_key=dedupe_key,
-        email_eligible=email_eligible,
+        # The message carries no content to act on, so it is a pointer, never an
+        # inbox item of its own (same as main's empty-snapshot behaviour).
+        email_eligible=False,
     )
 
 
