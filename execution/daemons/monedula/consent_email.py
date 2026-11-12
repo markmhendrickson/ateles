@@ -230,6 +230,67 @@ def _profile_fields(handler: Any) -> tuple[str, int, bool]:
     return label, amount, is_calendar
 
 
+def event_id_of(match: Any) -> str:
+    """The calendar event id of a match, or ``""`` when it has none."""
+    event = (match or {}).get("event") if isinstance(match, dict) else None
+    if isinstance(event, dict):
+        return str(event.get("id") or "")
+    return ""
+
+
+def event_session_date(match: Any) -> str:
+    """The Madrid-local date a matched event started on, or ``""``."""
+    event = (match or {}).get("event") if isinstance(match, dict) else None
+    if not isinstance(event, dict):
+        return ""
+    start = event.get("start")
+    if not isinstance(start, dict):
+        return ""
+    if start.get("date"):
+        return str(start["date"])[:10]
+    raw = str(start.get("dateTime") or "")
+    if not raw:
+        return ""
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return dt.date().isoformat()
+        return dt.astimezone(ZoneInfo("Europe/Madrid")).date().isoformat()
+    except (ValueError, KeyError):
+        return ""
+
+
+def legacy_obligation_keys(
+    handler: Any,
+    match: Any,
+    matches: list,
+    yesterday_str: str,
+) -> set[str]:
+    """Obligation keys the pre-session-window code could have journaled for
+    this match.
+
+    That code keyed on the run's own "yesterday" date and an empty match id
+    (single match) or ``event_id`` / ``id`` / list index (several matches),
+    never on the calendar event id. A session paid just before the new keying
+    went live is recorded only under those keys, so the new key alone cannot
+    see it and the session would be raised and paid a second time. Used as a
+    read-only cutover guard; nothing writes under these keys any more.
+    """
+    dates = {d for d in (event_session_date(match), yesterday_str) if d}
+    ids: set[str] = {""}
+    if len(matches) > 1:
+        top = match if isinstance(match, dict) else {}
+        for candidate in (top.get("event_id"), top.get("id"), event_id_of(match)):
+            if candidate:
+                ids.add(str(candidate))
+        # The old code fell back to the match's own position in the list.
+        ids.update(str(i) for i, m in enumerate(matches) if m is match)
+    return {obligation_key(handler, d, i) for d in dates for i in ids}
+
+
 def build_pending_items(
     triggered: list[tuple[Any, list]],
     yesterday_str: str,
@@ -243,15 +304,19 @@ def build_pending_items(
         match_list = matches or [None]
         multi = len(match_list) > 1
         for idx, match in enumerate(match_list):
-            match_id = ""
-            if multi:
+            # A real calendar event id always identifies the session, so the
+            # obligation is the same on every tick however many sessions the
+            # handler matched and whenever the tick runs.
+            match_id = event_id_of(match)
+            if not match_id and multi:
                 match_id = str(
                     (match or {}).get("event_id")
                     or (match or {}).get("id")
                     or idx
                 )
-            session = yesterday_str if not match_id else f"{yesterday_str}:{match_id}"
-            obligation = obligation_key(handler, yesterday_str, match_id)
+            session_date = event_session_date(match) or yesterday_str
+            session = session_date if not match_id else f"{session_date}:{match_id}"
+            obligation = obligation_key(handler, session_date, match_id)
             token = token_for(
                 handler.name,
                 session=f"{session}|{obligation}|g{int(generation)}",
@@ -261,7 +326,7 @@ def build_pending_items(
                     handler_name=handler.name,
                     label=label,
                     amount_eur=amount,
-                    payment_date=yesterday_str,
+                    payment_date=session_date,
                     is_calendar=is_calendar,
                     token=token,
                     match_id=match_id,

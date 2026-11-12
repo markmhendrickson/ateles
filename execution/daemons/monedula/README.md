@@ -22,6 +22,99 @@ consent), executes approved payments, and confirms.
 > at all, holds every payment, and raises one deduped blocker,
 > `consent_email_needs_swarm_mailbox`, naming the variable to fix.
 
+## Payment consent: per-payment approval record (default)
+
+Payment consent no longer travels over Telegram or email replies (operator
+ruling 2026-11-12). The default and only automatic channel is `payment_approval`
+(`MONEDULA_CONSENT_CHANNEL=checkpoint` is still accepted as an alias):
+
+1. For each session, Monedula writes one Neotoma `payment_approval` entity
+   (handler, session, amount, currency, payee display name, rail, reference;
+   never an IBAN, BTC address or recipient id; no memo for BTC) and reads it
+   back. It is raised once per payment.
+2. The coordinator session lists `payment_approval` entities with
+   `status == "awaiting_operator"`, puts each to the operator, and corrects
+   two fields: `operator_answer` (the literal answer, written FIRST) and then
+   `status` (`approved` / `rejected`).
+3. Monedula pays only for `approved` with an answer that passes the
+   attendance parser (`attended <handler>` / `yes <handler>`; a bare `yes`
+   does not approve) and whose stored fields match the payment about to be
+   made. Anything else, or Neotoma being unreachable, pays nothing.
+
+### Coordinator resolver contract
+
+- **Entity and filter:** `entity_type: payment_approval`, `status == "awaiting_operator"`.
+- **Order of corrections:** `operator_answer` (the operator's literal text) first,
+  then `status` (`approved` or `rejected`). Writing `status` first leaves an
+  approval with no authenticated answer, which is held.
+- **Identity:** both corrections must be made by the resolver principal whose AAuth
+  sub and key thumbprint are configured for Monedula as
+  `MONEDULA_PAYMENT_APPROVER_SUB` and `MONEDULA_PAYMENT_APPROVER_JKT` (both
+  required; the thumbprint is the 43-character RFC 7638 value). Monedula does not
+  trust the snapshot: it reads `status` and `operator_answer` through the
+  observations their field provenance names, with the same verifier the
+  checkpoint release path uses
+  (`gating.read_authenticated_field_value`, a field-name-parameterised form of
+  `read_authenticated_checkpoint_resolution`). A write by any other principal,
+  an untrusted attribution tier, a different tenant, or an unset approver
+  configuration holds the payment. Any later write to either field by someone
+  else withdraws the approval.
+- **Recovery:** a record with `status` approved but no (or a wrong) answer is held and
+  alerted per payment; correct `operator_answer` on the SAME record (as the
+  configured resolver), then it is re-read on the next tick.
+- **Operator alerts (all deduped per payment key):** a blocker when a record is raised
+  (handler, session date, amount, short key), a blocker when it has been
+  `awaiting_operator` longer than `MONEDULA_APPROVAL_STALE_HOURS` (default 24), a
+  blocker per held payment naming the reason, and an info when a rejection skips a
+  session. A coordinator that is not watching therefore shows up as an alert, not
+  silence.
+- **A changed record stays blocked.** If the amount, payee, reference, session
+  or rail of the payment changes after the record was raised, the record no
+  longer matches and the payment is held permanently; reject the stale record
+  and a fresh one is raised under the new obligation key (a changed amount or
+  payee changes the key). Bound fields are never re-bound in place.
+- **One bad record holds only its own payment**; other payees proceed. Only when
+  no record can be read at all (Neotoma down) is the tick left unclaimed.
+- **Approver identity (this deployment):** the resolver principal is
+  `payment-approver@ateles-swarm`, key thumbprint
+  `LmdMZ-VRVsRCt-daCQTWfMBUx92kfMZ3L32tsYxYfPU` (a public thumbprint), with the key
+  minted at `ateles-private/keys/payment-approver.jwk.json`. Set
+  `MONEDULA_PAYMENT_APPROVER_SUB` / `MONEDULA_PAYMENT_APPROVER_JKT` on the Monedula
+  daemon to those two values. The resolver writes its corrections with
+  `neotoma request --aauth`, with `NEOTOMA_AAUTH_PRIVATE_JWK_PATH`,
+  `NEOTOMA_AAUTH_SUB` and `NEOTOMA_AAUTH_ISS` set for that key. These values are
+  configuration only; nothing in the code carries them.
+- **Schema first:** run
+  `python3 execution/scripts/register_payment_approval_schema.py` (dry run) then
+  `--apply` before Monedula first runs with this channel; without the schema every
+  raise fails its read-back and all payments are held.
+- **Surfacing check (before enabling):** with the coordinator session open, let
+  Monedula raise one record (or create a synthetic `awaiting_operator` record) and
+  confirm the coordinator lists it and puts it to the operator in the session the
+  operator is using; record the result. Until that is shown, sessions sit in
+  `awaiting` with nothing alerting anyone.
+- **Calendars:** every calendar the account can read is scanned, including shared
+  calendars others can write to. Events on them can raise approval requests;
+  nothing is paid without the operator's per-payment answer.
+- **Cutover:** a session already paid under the pre-window obligation key is
+  recognised by that legacy key and marked settled, never raised again.
+
+`payment_approval` is deliberately not a `checkpoint_brief`: approving a brief
+releases its task to the Apis dispatcher. Apis subscribes only to `task` and
+`checkpoint_brief` and the record carries no task reference, so only Monedula
+consumes the approval. `MONEDULA_CONSENT_CHANNEL=email|telegram` remains as an
+explicit legacy break-glass override and is never chosen automatically.
+
+## Session timing
+
+Every tick reads all calendars (`calendarList list`, then `events list` per
+calendar, Europe/Madrid) and evaluates sessions that ended within
+`MONEDULA_SESSION_WINDOW_HOURS` (default 24). A session is raised once,
+recorded as pending in the payment journal keyed on (handler, event id), and
+stays pending until approved, skipped or paid, even across restarts, midnight
+and a failed profile load. A failed read of any one calendar fails the whole
+fetch (never "no sessions").
+
 ## Swarm mailbox
 
 | Variable | What it is |

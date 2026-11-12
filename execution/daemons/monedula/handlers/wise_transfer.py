@@ -38,6 +38,71 @@ log = logging.getLogger(__name__)
 WISE_BASE_URL = "https://api.transferwise.com"
 
 
+class WiseRecipientError(RuntimeError):
+    """The payee cannot be paid safely. Fail closed: raised to the operator,
+    never worked around by creating a recipient."""
+
+
+def _describe_wise_error(exc: BaseException) -> str:
+    """Operator-facing cause for a failed Wise read. A 401/403 names the token,
+    the usual cause, instead of reading as a generic lookup failure."""
+    code = getattr(exc, "code", None)
+    if code == 401:
+        return (
+            "Wise rejected the API token (HTTP 401): WISE_API_TOKEN is most "
+            "likely invalid or expired"
+        )
+    if code == 403:
+        return "Wise refused the request (HTTP 403): the token lacks permission"
+    if code is not None:
+        return f"Wise API error (HTTP {code})"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _fetch_recipient_status(token: str, recipient_id: int) -> dict | None:
+    """Look up one Wise recipient account: ``{"id": int, "active": bool}``.
+
+    Returns None when Wise says the account does not exist (404). Any other
+    failure raises. Injectable: tests replace this function, and a handler may
+    carry its own ``recipient_status_lookup``.
+    """
+    import urllib.error
+
+    try:
+        data = _wise_get(token, f"/v2/accounts/{int(recipient_id)}")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise WiseRecipientError(
+            f"Wise recipient lookup failed — {_describe_wise_error(exc)}"
+        ) from exc
+    except Exception as exc:
+        raise WiseRecipientError(
+            f"Wise recipient lookup failed — {_describe_wise_error(exc)}"
+        ) from exc
+    if not isinstance(data, dict) or "active" not in data:
+        raise WiseRecipientError("Wise recipient lookup returned an unexpected shape")
+    return {"id": data.get("id", recipient_id), "active": bool(data["active"])}
+
+
+def verify_recipient_active(
+    token: str, recipient_id: int, lookup=None
+) -> None:
+    """Raise :class:`WiseRecipientError` unless the pinned recipient exists and
+    is active."""
+    status = (lookup or _fetch_recipient_status)(token, recipient_id)
+    if status is None:
+        raise WiseRecipientError(
+            "the pinned Wise recipient is unknown to Wise — not paying, and "
+            "not creating a new recipient"
+        )
+    if not status.get("active"):
+        raise WiseRecipientError(
+            "the pinned Wise recipient is inactive — not paying, and not "
+            "creating a new recipient"
+        )
+
+
 class WiseTransferHandler(PaymentHandler):
     """Generic Wise transfer handler parameterised by a PaymentProfile."""
 
@@ -82,7 +147,13 @@ class WiseTransferHandler(PaymentHandler):
         summary = match.get("summary", self.profile.label)
         if match.get("trigger") == "due_date":
             summary = f"due {match.get('due_date', '?')} (one-off invoice)"
-        contact = _load_contact(self.profile)
+        if self.profile.wise_recipient_id:
+            contact = {
+                "name": self.profile.wise_recipient_name or "[recipient]",
+                "iban": "recipient on file",
+            }
+        else:
+            contact = _load_contact(self.profile)
         name = contact.get("name", "[recipient]") if contact else "[recipient]"
         iban = contact.get("iban", "…") if contact else "…"
         task_id = _find_task_id(self.profile)
@@ -98,16 +169,53 @@ class WiseTransferHandler(PaymentHandler):
         """The payee ``execute`` would pay, resolved the same way, for binding
         consent to it. Hashed by the caller; never logged. None when the payee
         cannot be resolved (``execute`` would then return manual_required)."""
+        if self.profile.wise_recipient_id:
+            return (
+                f"wise|recipient|{int(self.profile.wise_recipient_id)}|"
+                f"{self.profile.wise_recipient_name}"
+            )
         contact = _load_contact(self.profile)
         if not contact or not contact.get("iban"):
             return None
         return f"wise|{contact.get('name', '')}|{contact.get('iban', '')}"
 
+    # Injectable recipient-status lookup (tests). None → module default.
+    recipient_status_lookup = None
+
+    def preflight(self, match: dict) -> None:
+        """Checks that must pass BEFORE the payment intent is journaled.
+
+        Raises :class:`WiseRecipientError` when the payee cannot be paid
+        safely: token missing, payee unresolved, the pinned recipient
+        unknown/inactive, or an IBAN lookup that failed or is ambiguous. No
+        money has moved and nothing was recorded, so it is retried once fixed.
+        """
+        token = os.environ.get("WISE_API_TOKEN", "").strip()
+        if not token:
+            raise WiseRecipientError("WISE_API_TOKEN not set")
+        rid = self.profile.wise_recipient_id
+        if rid:
+            verify_recipient_active(token, rid, self.recipient_status_lookup)
+            return
+        contact = _load_contact(self.profile)
+        if not contact or not contact.get("iban"):
+            raise WiseRecipientError(
+                "payee unresolved: profile has neither wise_recipient_id nor a "
+                "complete wise_iban + wise_recipient_name"
+            )
+        # Lookup errors and ambiguity raise; a clean no-match is allowed (the
+        # recipient is created only on this no-recipient-id path).
+        _find_existing_recipient(token, _get_wise_profile_id(token), contact["iban"])
+
     def execute(self, match: dict) -> dict[str, Any]:
         """Execute Wise transfer. Returns result dict with status and details."""
         log.info(f"[{self.name}] Executing Wise payment...")
 
-        contact = _load_contact(self.profile)
+        rid = self.profile.wise_recipient_id
+        if rid:
+            contact = {"name": self.profile.wise_recipient_name, "iban": ""}
+        else:
+            contact = _load_contact(self.profile)
         if not contact:
             return {
                 "status": "manual_required",
@@ -120,7 +228,7 @@ class WiseTransferHandler(PaymentHandler):
         iban = contact.get("iban", "")
         recipient_name = contact.get("name", "")
 
-        if not iban:
+        if not iban and not rid:
             return {
                 "status": "manual_required",
                 "handler": self.name,
@@ -152,7 +260,13 @@ class WiseTransferHandler(PaymentHandler):
                 self.profile.wise_reference,
                 label=self.name,
                 legal_type=self.profile.wise_legal_type,
+                recipient_id=rid,
+                recipient_status_lookup=self.recipient_status_lookup,
             )
+        except WiseRecipientError:
+            # Fail closed and raise: never converted into a create or a
+            # quiet manual_required. Preflight normally catches this first.
+            raise
         except Exception as exc:
             log.error(f"[{self.name}] Wise transfer exception: {exc}")
             result = {
@@ -269,14 +383,23 @@ def _load_contact(profile: PaymentProfile) -> dict | None:
         log.info(f"[{profile.name}] payee resolved from profile (no contacts lookup)")
         return {"name": name_on_profile, "iban": iban_on_profile}
     if iban_on_profile or name_on_profile:
-        log.warning(
+        # A half-filled payee must not fall through to a contacts lookup that
+        # could resolve a DIFFERENT payee than the profile intended.
+        log.error(
             f"[{profile.name}] profile carries only one of wise_iban/"
-            f"wise_recipient_name — both are required; falling back to contacts"
+            f"wise_recipient_name — both are required. Refusing to guess a "
+            f"payee: payment held until the profile is completed"
         )
+        return None
 
     data_dir = os.environ.get("DATA_DIR", "").strip()
     if not data_dir:
-        log.warning(f"[{profile.name}] DATA_DIR not set — cannot load contacts")
+        log.error(
+            f"[{profile.name}] DATA_DIR not set, so the contacts file cannot be "
+            f"read and the profile names no payee of its own (no "
+            f"wise_recipient_id, no wise_iban + wise_recipient_name) — payee "
+            f"unresolved, payment held"
+        )
         return None
 
     contacts_path = Path(data_dir) / "contacts" / "contacts.parquet"
@@ -405,37 +528,56 @@ def _normalize_iban(iban: str) -> str:
 
 
 def _find_existing_recipient(token: str, profile_id: int, iban: str) -> int | None:
-    """Return an existing recipient account id for this IBAN, or None.
+    """Return the ACTIVE recipient account id for this IBAN, or None.
 
     Matching is by IBAN, not by name. The IBAN is the account's identity; the
     account-holder name is a label that varies in spacing, accents and
     abbreviation between what a payee tells you and what their bank stores.
 
-    A lookup failure is not fatal: the caller falls back to creating the
-    recipient, which is the pre-existing behaviour.
+    None means a lookup that SUCCEEDED and found no active match: the only
+    case in which the caller may create a recipient. A failed lookup (HTTP
+    error, unexpected shape) raises :class:`WiseRecipientError` — it used to
+    read as "not found" and fall through to creating a recipient, which is how
+    a 401 turned into new recipients. Inactive accounts are ignored; more than
+    one active match is ambiguous and raises.
     """
     try:
         accounts = _wise_get(token, f"/v1/accounts?profile={profile_id}&currency=EUR")
-    except Exception as exc:  # network, auth, schema drift — all non-fatal here
-        log.warning(f"Wise recipient lookup failed ({exc}) — will attempt create")
-        return None
+    except Exception as exc:  # network, auth, schema drift
+        raise WiseRecipientError(
+            f"Wise recipient lookup failed — {_describe_wise_error(exc)}. "
+            "Not creating a recipient."
+        ) from exc
 
     if isinstance(accounts, dict):
         accounts = accounts.get("content") or accounts.get("accounts") or []
     if not isinstance(accounts, list):
-        log.warning(f"Wise /v1/accounts returned unexpected shape: {type(accounts)}")
-        return None
+        raise WiseRecipientError(
+            f"Wise /v1/accounts returned an unexpected shape ({type(accounts).__name__}). "
+            "Not creating a recipient."
+        )
 
     want = _normalize_iban(iban)
+    active: list[int] = []
     for acct in accounts:
         if not isinstance(acct, dict):
             continue
         details = acct.get("details") or {}
-        if _normalize_iban(str(details.get("iban") or "")) == want:
-            account_id = acct.get("id")
-            if account_id:
-                log.info(f"Reusing existing Wise recipient {account_id} for this IBAN")
-                return int(account_id)
+        if _normalize_iban(str(details.get("iban") or "")) != want:
+            continue
+        if acct.get("active") is False:
+            continue  # an inactive account is never a payable recipient
+        account_id = acct.get("id")
+        if account_id:
+            active.append(int(account_id))
+    if len(active) > 1:
+        raise WiseRecipientError(
+            f"{len(active)} active Wise recipients match this IBAN — ambiguous, "
+            "not paying. Pin wise_recipient_id on the profile."
+        )
+    if active:
+        log.info(f"Reusing existing Wise recipient {active[0]} for this IBAN")
+        return active[0]
     return None
 
 
@@ -445,19 +587,24 @@ def _get_or_create_recipient(
     iban: str,
     name: str,
     legal_type: str = "PRIVATE",
+    recipient_id: int | None = None,
+    recipient_status_lookup=None,
 ) -> int:
-    """Return an existing Wise IBAN recipient for this IBAN, or create one.
+    """Return the Wise recipient to pay.
 
-    Looks up first. Creating unconditionally would add a duplicate recipient
-    every run for a payee that already exists — and recipient creation is the
-    step Wise runs Verification of Payee against, so a needless create is also
-    a needless chance to be blocked by a name mismatch on an account that is
-    already known-good.
+    * ``recipient_id`` set: use EXACTLY that account. It must exist and be
+      active, else :class:`WiseRecipientError`. Never creates.
+    * otherwise: look up by IBAN (active accounts only). A failed or ambiguous
+      lookup raises. Only a successful lookup with no match creates one.
 
     legal_type must be PRIVATE (individual) or BUSINESS (company). Sending
     PRIVATE for a company-held account risks the transfer being returned on a
     name/legal-type mismatch — after the funds have already left the balance.
     """
+    if recipient_id:
+        verify_recipient_active(token, int(recipient_id), recipient_status_lookup)
+        return int(recipient_id)
+
     existing = _find_existing_recipient(token, profile_id, iban)
     if existing is not None:
         return existing
@@ -533,15 +680,30 @@ def _execute_wise_transfer(
     reference: str,
     label: str = "payment",
     legal_type: str = "PRIVATE",
+    recipient_id: int | None = None,
+    recipient_status_lookup=None,
 ) -> dict:
     """Full Wise transfer flow. Returns result dict with status and details."""
-    log.info(f"[{label}] Starting Wise transfer: €{amount_eur} to IBAN {iban[:10]}…")
+    log.info(
+        f"[{label}] Starting Wise transfer: €{amount_eur} to "
+        + ("pinned recipient" if recipient_id else f"IBAN {iban[:10]}…")
+    )
+
+    if recipient_id:
+        # Verify the pinned recipient before anything else is called.
+        verify_recipient_active(token, int(recipient_id), recipient_status_lookup)
 
     profile_id = _get_wise_profile_id(token)
     log.info(f"[{label}] Wise profile_id: {profile_id}")
 
     account_id = _get_or_create_recipient(
-        token, profile_id, iban, recipient_name, legal_type
+        token,
+        profile_id,
+        iban,
+        recipient_name,
+        legal_type,
+        recipient_id=recipient_id,
+        recipient_status_lookup=recipient_status_lookup,
     )
     log.info(f"[{label}] Wise recipient account_id: {account_id}")
 
