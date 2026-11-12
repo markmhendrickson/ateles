@@ -72,3 +72,24 @@ def test_real_tree_is_clean():
         assert lint.main([]) == 0
     finally:
         os.chdir(cwd)
+
+
+def test_flags_nonexistent_corrections_route(tmp_path):
+    hits = _scan(tmp_path, 'client.post(f"{NEOTOMA_BASE_URL}/corrections", json=p)\n')
+    assert len(hits) == 1
+    assert hits[0][1] == "/corrections"
+    assert "POST /correct" in hits[0][2]
+
+
+def test_flags_entity_scoped_corrections_route(tmp_path):
+    hits = _scan(tmp_path, 'base = f"{NEOTOMA_BASE_URL}/entities/{entity_id}/corrections"\n')
+    assert len(hits) == 1
+
+
+def test_correct_route_and_corrections_variable_not_flagged(tmp_path):
+    body = (
+        'client.post(f"{NEOTOMA_BASE_URL}/correct", json=p)\n'
+        "for correction in corrections:\n"
+        '    x = {"corrections": 1}\n'
+    )
+    assert _scan(tmp_path, body) == []

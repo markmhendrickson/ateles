@@ -76,6 +76,26 @@ _PATH_RE = re.compile(
 )
 
 
+# URL paths that do NOT exist on the Neotoma server, mapped to the real route.
+# POST /corrections (and /entities/<id>/corrections) 404 on hosted Neotoma; each
+# call silently lost the correction it was meant to make. The route is
+# POST /correct with one field per call. A path is flagged when it is a string
+# literal that is only a (base-prefixed) slash path ending in `/corrections`.
+NONEXISTENT_ROUTES = {
+    "corrections": "POST /correct ({entity_id, entity_type, field, value, idempotency_key}, one field per call)",
+}
+_ROUTE_RE = re.compile(
+    r"""["']                         # opening quote
+        (?:\{[A-Za-z_.]+\})?          # optional {NEOTOMA_BASE_URL}-style prefix
+        /(?:entities/(?:\{[^}]*\}|[\w<>-]+)/)?
+        (?P<name>%s)
+        ["']                         # closing quote
+    """
+    % "|".join(NONEXISTENT_ROUTES),
+    re.VERBOSE,
+)
+
+
 def iter_files(argv: list[str]) -> list[Path]:
     if argv:
         return [Path(a) for a in argv if a.endswith(".py")]
@@ -113,6 +133,10 @@ def scan(path: Path) -> list[tuple[int, str, str]]:
         if m:
             name = m.group("name")
             hits.append((lineno, name, TOOL_NAME_TO_REST[name]))
+        r = _ROUTE_RE.search(line)
+        if r:
+            name = r.group("name")
+            hits.append((lineno, "/" + name, NONEXISTENT_ROUTES[name]))
     return hits
 
 
@@ -135,7 +159,7 @@ def main(argv: list[str]) -> int:
                     file=sys.stderr,
                 )
             total += 1
-            print(f"  {path}:{lineno}: {name!r} is an MCP tool, not a route", file=sys.stderr)
+            print(f"  {path}:{lineno}: {name!r} is not a Neotoma REST route (MCP tool name or nonexistent path)", file=sys.stderr)
             print(f"      fix: use {correct}", file=sys.stderr)
     if total:
         print(
