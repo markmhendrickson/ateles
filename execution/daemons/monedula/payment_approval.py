@@ -84,6 +84,7 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
@@ -111,6 +112,26 @@ LEGACY_CHANNEL_ALIAS = "checkpoint"
 STATUS_FIELD = "status"
 ANSWER_FIELD = "operator_answer"
 KEY_FIELD = "payment_key"
+RAISED_AT_FIELD = "raised_at"
+
+# Operator-visible alerting. A raised record that nobody resolves must never
+# wait silently: one blocker when it is raised, one more when it has been
+# awaiting longer than this many hours (default 24).
+STALE_HOURS_ENV = "MONEDULA_APPROVAL_STALE_HOURS"
+DEFAULT_STALE_HOURS = 24.0
+Notify = Callable[..., None]  # notify(message, priority=..., dedupe_key=...)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def stale_hours() -> float:
+    try:
+        value = float(os.environ.get(STALE_HOURS_ENV, "") or DEFAULT_STALE_HOURS)
+    except ValueError:
+        return DEFAULT_STALE_HOURS
+    return value if value > 0 else DEFAULT_STALE_HOURS
 
 # Fields compared between the stored record and the payment about to be made.
 BOUND_FIELDS = (
@@ -145,6 +166,7 @@ FIELD_SPECS: dict[str, tuple[str, str]] = {
     "reference": ("string", "Payment reference; empty for BTC (no memo/OP_RETURN)"),
     STATUS_FIELD: ("string", "awaiting_operator, approved or rejected; written by the resolver"),
     ANSWER_FIELD: ("string", "The operator's literal answer; written by the resolver before status"),
+    RAISED_AT_FIELD: ("string", "UTC ISO time the record was raised; drives the stale alert"),
     "blocking": ("boolean", "Always true"),
     "confidence_threshold": ("number", "Always 1.0"),
     "title": ("string", "Human-readable title"),
@@ -358,6 +380,7 @@ def raise_request(item: Any) -> dict:
         "status": STATUS_AWAITING,
         "blocking": True,
         "confidence_threshold": 1.0,
+        RAISED_AT_FIELD: _now().isoformat(),
         **fields,
     }
     assert not (FORBIDDEN_FIELD_NAMES & set(entity)), "payment_approval leaks a payee detail"
@@ -422,12 +445,38 @@ def judge(item: Any, entity: dict, parse_reply: Callable[[str | None, list[str]]
     return Verdict("approved")
 
 
+def _currency() -> str:
+    from consent_email import CURRENCY
+
+    return CURRENCY
+
+
+def _is_stale(entity: dict) -> bool:
+    raised = _snapshot(entity).get(RAISED_AT_FIELD)
+    if not isinstance(raised, str) or not raised:
+        return False
+    try:
+        when = datetime.fromisoformat(raised)
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (_now() - when).total_seconds() > stale_hours() * 3600
+
+
 def collect(
     triggered: list[tuple[Any, list]],
     yesterday_str: str,
     parse_reply: Callable[[str | None, list[str]], set[str]],
+    notify: Notify | None = None,
 ):
     """Raise one pending record per payment (once) and read each back.
+
+    ``notify`` (the daemon's notifier) makes every state the operator must act
+    on visible: a blocker when a record is raised, a stale blocker when it has
+    awaited longer than ``MONEDULA_APPROVAL_STALE_HOURS``, a blocker per held
+    payment with the reason and the record's short key, and an info when a
+    rejection skips a session. All are deduped per ``payment_key``.
 
     Returns a ``ConsentEmailResult`` so the existing execute loop in
     ``monedula.main`` is reused unchanged: ``approved`` only for an approved
@@ -464,13 +513,34 @@ def collect(
         result.channel_ok = False
         return result
 
+    def say(item: Any, kind: str, message: str, priority: str) -> None:
+        if notify is None:
+            return
+        try:
+            notify(
+                message,
+                priority=priority,
+                dedupe_key=f"monedula:payment_approval_{kind}:{item.obligation}",
+                email_eligible=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - alerting must not break the tick
+            log.error(f"payment_approval notify failed: {type(exc).__name__}")
+
+    def describe(item: Any) -> str:
+        return (
+            f"{item.handler_name} session {item.payment_date} "
+            f"{item.amount_eur} {_currency()} [{str(item.obligation)[:12]}]"
+        )
+
     unavailable = 0
     for item in items:
         key = match_key(item)
+        raised_now = False
         try:
             entity = find_entity(str(item.obligation))
             if entity is None:
                 raise_request(item)
+                raised_now = True
                 log.info(
                     f"payment_approval_raised handler={item.handler_name} "
                     f"session={item.match_id or item.payment_date}"
@@ -478,6 +548,15 @@ def collect(
                 entity = find_entity(str(item.obligation))
                 if entity is None:
                     raise ApprovalError("payment_approval did not read back after write")
+            if raised_now:
+                say(
+                    item,
+                    "raised",
+                    f"monedula: payment approval needed for {describe(item)}. "
+                    "It awaits your answer via the coordinator session; nothing "
+                    "is paid until you answer.",
+                    "blocker",
+                )
         except ApprovalError as exc:
             # Fail closed for THIS item only; unrelated payees are unaffected.
             log.error(
@@ -496,6 +575,13 @@ def collect(
         elif verdict.state == "skipped":
             result.states[key] = "skipped"
             result.skipped.add(key)
+            say(
+                item,
+                "skipped",
+                f"monedula: payment skipped (rejected) for {describe(item)}. "
+                "No payment was made.",
+                "info",
+            )
         elif verdict.state == "blocked":
             log.error(
                 f"payment_approval_not_accepted handler={item.handler_name} — "
@@ -505,9 +591,27 @@ def collect(
             result.blocked.add(key)
             if result.reason_code != "payment_approval_unavailable":
                 result.reason_code = "payment_approval_not_accepted"
+            say(
+                item,
+                "not_accepted",
+                f"monedula: payment approval does not permit payment for "
+                f"{describe(item)}: {verdict.reason}. That payment is held; "
+                "others are unaffected. Fix the same record (for status "
+                "approved with no answer, correct operator_answer on it).",
+                "blocker",
+            )
         else:
             result.states[key] = "awaiting_approval"
             result.awaiting.add(key)
+            if _is_stale(entity):
+                say(
+                    item,
+                    "stale",
+                    f"monedula: payment approval for {describe(item)} has been "
+                    f"awaiting your answer for over {stale_hours():g}h. Is the "
+                    "coordinator session watching payment_approval records?",
+                    "blocker",
+                )
     if items and unavailable == len(items):
         # Nothing could be read at all (Neotoma down): treat as a channel
         # failure so the tick is not claimed and the next one retries.

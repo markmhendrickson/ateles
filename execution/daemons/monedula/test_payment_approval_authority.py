@@ -205,6 +205,88 @@ def test_multi_match_legacy_index_key_is_also_recognised(env):
     assert len(neo.rows) == 1
 
 
+# ── Operator visibility: no silent wait ──────────────────────────────────────
+
+
+@pytest.fixture
+def alerts(monkeypatch):
+    import monedula
+
+    calls: list[dict] = []
+
+    def record(message, priority="info", dedupe_key=None, email_eligible=True):
+        calls.append({"message": message, "priority": priority, "key": dedupe_key})
+
+    monkeypatch.setattr(monedula, "_notify", record)
+    return calls
+
+
+def _kind(alerts, kind):
+    return [a for a in alerts if f"_{kind}:" in (a["key"] or "")]
+
+
+def test_a_raised_record_notifies_the_operator_once(env, alerts):
+    """Red against caf09b51: raising a record told the operator nothing."""
+    w, neo = env
+    w.tick()
+    w.tick(minutes=15)
+    raised = _kind(alerts, "raised")
+    assert len(raised) == 1
+    first = raised[0]
+    assert first["priority"] == "blocker"
+    assert first["key"].endswith(neo.only["payment_key"])
+    assert "yoga" in first["message"] and "2026-11-11" in first["message"]
+    assert "10 EUR" in first["message"] and neo.only["payment_key"][:12] in first["message"]
+    assert "coordinator" in first["message"]
+
+
+def test_a_record_awaiting_past_the_threshold_alerts_as_stale(env, alerts, monkeypatch):
+    from datetime import timedelta
+
+    w, neo = env
+    w.tick()
+    assert not _kind(alerts, "stale")
+    real = payment_approval._now
+    monkeypatch.setattr(payment_approval, "_now", lambda: real() + timedelta(hours=25))
+    w.tick(minutes=15)
+    stale = _kind(alerts, "stale")
+    assert stale and stale[0]["priority"] == "blocker"
+    assert stale[0]["key"].endswith(neo.only["payment_key"])
+
+
+def test_stale_threshold_is_configurable(env, alerts, monkeypatch):
+    from datetime import timedelta
+
+    w, neo = env
+    w.tick()
+    monkeypatch.setenv("MONEDULA_APPROVAL_STALE_HOURS", "2")
+    real = payment_approval._now
+    monkeypatch.setattr(payment_approval, "_now", lambda: real() + timedelta(hours=3))
+    w.tick(minutes=15)
+    assert _kind(alerts, "stale")
+
+
+def test_a_held_payment_alert_names_the_payment_reason_and_is_keyed_per_payment(env, alerts):
+    w, neo = env
+    w.tick()
+    _approve(neo, sub=OTHER_SUB)
+    w.tick(minutes=15)
+    held = _kind(alerts, "not_accepted")
+    assert held
+    msg = held[0]["message"]
+    assert "not authenticated" in msg and "yoga" in msg and "[" in msg
+    assert held[0]["key"].endswith(neo.only["payment_key"])
+
+
+def test_a_rejection_that_skips_a_session_sends_an_info(env, alerts):
+    w, neo = env
+    w.tick()
+    neo.resolve(neo.only["payment_key"], "rejected", "no")
+    w.tick(minutes=15)
+    skipped = _kind(alerts, "skipped")
+    assert skipped and skipped[0]["priority"] == "info"
+
+
 # ── Schema registration contract ─────────────────────────────────────────────
 
 

@@ -1722,21 +1722,9 @@ def main() -> bool:
         if channel == "payment_approval":
             import payment_approval
 
-            consent = payment_approval.collect(triggered, yesterday_str, _parse_reply)
-            if consent.channel_ok and consent.reason_code in (
-                "payment_approval_not_accepted",
-                "payment_approval_unavailable",
-            ):
-                _notify(
-                    "monedula: a payment approval does not permit payment (answer "
-                    "unparseable, bare yes, not written by the configured approver, "
-                    "unreadable, or it does not match the payment). That payment "
-                    "was held; the others are unaffected. Correct or re-resolve "
-                    "the approval record.",
-                    priority="blocker",
-                    dedupe_key="monedula:payment_approval_not_accepted",
-                    email_eligible=True,
-                )
+            consent = payment_approval.collect(
+                triggered, yesterday_str, _parse_reply, notify=_notify
+            )
         else:
             consent = request_and_collect(
                 triggered,

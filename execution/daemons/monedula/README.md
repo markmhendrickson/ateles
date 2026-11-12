@@ -59,6 +59,15 @@ ruling 2026-11-12). The default and only automatic channel is `payment_approval`
   an untrusted attribution tier, a different tenant, or an unset approver
   configuration holds the payment. Any later write to either field by someone
   else withdraws the approval.
+- **Recovery:** a record with `status` approved but no (or a wrong) answer is held and
+  alerted per payment; correct `operator_answer` on the SAME record (as the
+  configured resolver), then it is re-read on the next tick.
+- **Operator alerts (all deduped per payment key):** a blocker when a record is raised
+  (handler, session date, amount, short key), a blocker when it has been
+  `awaiting_operator` longer than `MONEDULA_APPROVAL_STALE_HOURS` (default 24), a
+  blocker per held payment naming the reason, and an info when a rejection skips a
+  session. A coordinator that is not watching therefore shows up as an alert, not
+  silence.
 - **A changed record stays blocked.** If the amount, payee, reference, session
   or rail of the payment changes after the record was raised, the record no
   longer matches and the payment is held permanently; reject the stale record
