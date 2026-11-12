@@ -172,7 +172,9 @@ def test_shadow_writes_the_file_and_makes_no_network_call(monkeypatch):
 
 def test_off_writes_nothing(monkeypatch):
     monkeypatch.setenv(sink.MODE_ENV, "off")
+    monkeypatch.setattr(sink, "_http_post", lambda *a: pytest.fail("network call while off"))
     sink.record(message="hello", level="critical", handler="apis")
+    sink.flush()
     assert list(sink.sink_dir().glob("*.jsonl")) == []
 
 
