@@ -119,3 +119,22 @@ def test_anthus_escalation_resolved_clears_dedupe(tmp_path):
         )
     )
     assert len(sent) == 2
+
+
+def test_anthus_skips_escalations_stored_by_the_notifier_sink(tmp_path):
+    # An alert the notifier's Neotoma sink stored (tag "notify") must not be
+    # re-sent: the re-send would be stored again by the sink and nest forever.
+    sent = []
+    _install_notifier(tmp_path, sent)
+    snap = {
+        "title": "[apis/info] routine thing",
+        "severity": "info",
+        "status": "open",
+        "tags": ["notify", "level:info", "daemon:apis", "shape:abc"],
+    }
+    asyncio.run(anthus._handle_escalation(_event(snapshot=snap)))
+    asyncio.run(anthus._handle_escalation(_event(snapshot={**snap, "status": "resolved"}, action="updated")))
+    assert sent == []
+    # A genuine escalation (no notify tag) is still surfaced.
+    asyncio.run(anthus._handle_escalation(_event(snapshot={"title": "real", "tags": ["other"]})))
+    assert len(sent) == 1
