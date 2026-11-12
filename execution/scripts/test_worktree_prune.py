@@ -2233,7 +2233,7 @@ def test_the_low_disk_alert_reaches_the_neotoma_sink(monkeypatch):
     assert len(rows) == 1
     ent = rows[0]["entity"]
     assert ent["body"].endswith("Your Mac is low on disk space: 9 GB free.")
-    assert ent["title"] == "[worktree-prune/critical] Your Mac is low on disk space: 9 GB free."
+    assert ent["title"].startswith("[worktree-prune/critical] Your Mac is low on disk space: 9 GB free.")
     assert ent["severity"] == "critical"
     assert {"notify", "level:critical", "daemon:worktree-prune"} <= set(ent["tags"])
 

@@ -24,6 +24,11 @@ NO_SILENCE = {"silence_start": "", "silence_end": "", "timezone": "Europe/Madrid
 FAKE_CRED = ("https://neotoma.invalid", "fake-credential-value")
 
 
+def T(daemon, level, text, key, gen=1):
+    """Expected title for a shape (key is the dedupe key or derived key)."""
+    return sink.build_title(daemon, level, text, gen, sink.title_shape(f"{level}\0{key}"))
+
+
 def _read(prefix: str) -> list[dict]:
     rows: list[dict] = []
     for p in sorted(sink.sink_dir().glob(f"{prefix}-*.jsonl")):
@@ -89,7 +94,7 @@ def test_level_maps_to_severity_and_tags(on, level, severity):
     assert ent["severity"] == severity
     assert ent["status"] == "open"
     assert ent["source_agent"] == "apis@ateles-swarm"
-    assert ent["title"] == f"[apis/{level}] disk low"
+    assert ent["title"] == T("apis", level, "disk low", "k")
     assert ent["body"] == f"{sink.UNTRUSTED_MARKER}\ndisk low"
     assert ent["tags"][:3] == ["notify", f"level:{level}", "daemon:apis"]
     assert ent["tags"][3].startswith("shape:")
@@ -129,14 +134,17 @@ def test_title_is_the_readable_first_occurrence_and_stays_stable(on):
     sink.record(message="PR #1724 blocked: CI red\nsecond line", level="blocker", handler="apis")
     sink.flush()
     assert len(on.stores()) == 1  # same shape, collapsed
-    assert on.stores()[0]["entities"][0]["title"] == "[apis/blocker] PR #1723 blocked: CI red"
+    key = sink.derive_key("apis", "PR #1724 blocked: CI red\nsecond line")
+    assert on.stores()[0]["entities"][0]["title"] == T("apis", "blocker", "PR #1723 blocked: CI red", key)
 
 
 def test_caller_dedupe_key_groups_alerts_and_title_stays_readable(on):
     sink.record(message="Consent channel down since 10:01", level="warn", handler="monedula", dedupe_key="monedula:consent")
     sink.record(message="Consent channel down since 10:42", level="warn", handler="monedula", dedupe_key="monedula:consent")
     sink.flush()
-    assert [p["entities"][0]["title"] for p in on.stores()] == ["[monedula/warn] Consent channel down since 10:01"]
+    assert [p["entities"][0]["title"] for p in on.stores()] == [
+        T("monedula", "warn", "Consent channel down since 10:01", "monedula:consent")
+    ]
 
 
 def test_at_most_one_write_per_key_per_window(on):
@@ -219,7 +227,7 @@ def test_recurrence_after_resolve_in_the_same_window_reaches_a_replaying_server(
     stores = on.stores()
     assert len(stores) == 2
     assert stores[0]["idempotency_key"] != stores[1]["idempotency_key"]
-    assert stores[1]["entities"][0]["title"] == "[a/warn] m (#2)"
+    assert stores[1]["entities"][0]["title"] == T("a", "warn", "m", "k", 2)
     assert len({r["entity_id"] for r in _read("stored")}) == 2  # the replaying fake made a NEW entity
 
 
@@ -231,7 +239,10 @@ def test_a_hand_resolved_entity_is_not_reopened(on, monkeypatch):
     monkeypatch.setattr(sink, "_http_get", lambda url, token: {"snapshot": {"status": "resolved"}})
     sink.record(message="still bad", level="warn", handler="a", dedupe_key="k")
     sink.flush()
-    assert [p["entities"][0]["title"] for p in on.stores()] == ["[a/warn] still bad", "[a/warn] still bad (#2)"]
+    assert [p["entities"][0]["title"] for p in on.stores()] == [
+        T("a", "warn", "still bad", "k"),
+        T("a", "warn", "still bad", "k", 2),
+    ]
 
 
 def test_a_still_open_entity_is_updated_in_place_after_the_window(on, monkeypatch):
@@ -455,4 +466,142 @@ def test_summary_cli_counts_by_day_level_daemon_and_top_titles(monkeypatch, caps
     out = capsys.readouterr().out
     assert "3 rows" in out and "top 10 titles" in out and "would store" in out
     assert "[apis/warn] a" in out and "formica" in out and "info" in out
+    assert "dropped by the new-key rate cap" not in out
     assert sink.main([]) == 2
+
+
+# ── round 2 ──────────────────────────────────────────────────────────────────
+
+
+def test_different_shapes_with_the_same_first_line_never_share_an_entity(on):
+    long_prefix = "x" * 130
+    sink.record(message="Disk check failed\nvolume: data", level="critical", handler="tyto", dedupe_key="disk-data")
+    sink.record(message="Disk check failed\nvolume: smart", level="critical", handler="tyto", dedupe_key="disk-smart")
+    sink.record(message="Disk check failed\nno key at all", level="critical", handler="tyto")
+    sink.record(message=long_prefix + " alpha", level="warn", handler="tyto", dedupe_key="long-a")
+    sink.record(message=long_prefix + " beta", level="warn", handler="tyto", dedupe_key="long-b")
+    sink.flush()
+    titles = [p["entities"][0]["title"] for p in on.stores()]
+    assert len(titles) == 5 and len(set(titles)) == 5
+    sink.resolve("disk-data")
+    sink.flush()
+    assert {c["entity_id"] for c in on.corrections()} == {"ent_fake1"}  # only the first entity closes
+    state = json.loads((sink.sink_dir() / "state-on-tyto.json").read_text())
+    status = {e["key"]: e["status"] for e in state["entries"].values()}
+    assert status["disk-data"] == "resolved" and status["disk-smart"] == "open"
+    bodies = {p["entities"][0]["title"]: p["entities"][0]["body"] for p in on.stores()}
+    assert any("volume: smart" in b for b in bodies.values())
+
+
+def test_eviction_resolves_open_entities_and_prefers_resolved_and_low_levels(on, monkeypatch):
+    monkeypatch.setattr(sink, "STATE_MAX_KEYS", 3)
+    sink.record(message="crit", level="critical", handler="a", dedupe_key="c")
+    sink.record(message="info1", level="info", handler="a", dedupe_key="i1")
+    sink.record(message="done", level="warn", handler="a", dedupe_key="w")
+    sink.flush()
+    sink.resolve("w")  # entity 3 is now resolved: it goes first
+    sink.flush()
+    before = len(on.corrections())
+    sink.record(message="new1", level="warn", handler="a", dedupe_key="n1")
+    sink.flush()
+    assert len(on.corrections()) == before  # the resolved entry was evicted; nothing open was dropped
+    sink.record(message="new2", level="warn", handler="a", dedupe_key="n2")
+    sink.flush()
+    expired = on.corrections()[before:]
+    assert [c["field"] for c in expired] == ["status", "resolved_at"]
+    assert expired[0]["entity_id"] == "ent_fake2"  # the info alert, not the critical one
+    state = json.loads((sink.sink_dir() / "state-on-a.json").read_text())
+    assert "c" in {e["key"] for e in state["entries"].values()}
+    # a recurrence of an evicted shape starts a new generation, never a reopen
+    sink.record(message="info1", level="info", handler="a", dedupe_key="i1")
+    sink.flush()
+    assert on.stores()[-1]["entities"][0]["title"] == T("a", "info", "info1", "i1", 2)
+
+
+def test_pruning_a_stale_state_file_resolves_open_alerts_and_keeps_generations(on, monkeypatch):
+    sink.record(message="quiet daemon alert", level="blocker", handler="quiet", dedupe_key="q")
+    sink.flush()
+    state_file = sink.sink_dir() / "state-on-quiet.json"
+    lock_file = sink.sink_dir() / "state-on-quiet.json.lock"
+    os.utime(state_file, (1, 1))
+    os.utime(lock_file, (1, 1))
+    sink._prune(force=True)
+    sink.flush()
+    assert [c["field"] for c in on.corrections()] == ["status", "resolved_at"]
+    assert lock_file.exists()  # a lock is never aged out on its own
+    assert json.loads(state_file.read_text())["entries"] == {}
+    sink.record(message="quiet daemon alert", level="blocker", handler="quiet", dedupe_key="q")
+    sink.flush()
+    assert on.stores()[-1]["entities"][0]["title"] == T("quiet", "blocker", "quiet daemon alert", "q", 2)
+
+
+def test_an_empty_state_file_is_eventually_removed_with_its_lock(on):
+    sink.record(message="m", level="warn", handler="gone", dedupe_key="k")
+    sink.flush()
+    state_file = sink.sink_dir() / "state-on-gone.json"
+    lock_file = sink.sink_dir() / "state-on-gone.json.lock"
+    os.utime(state_file, (1, 1))
+    sink._prune(force=True)  # converts to tombstones (file refreshed)
+    assert state_file.exists()
+    os.utime(state_file, (1, 1))
+    sink._prune(force=True)  # nothing left and untouched for TOMB_DAYS
+    assert not state_file.exists() and not lock_file.exists()
+
+
+def test_flood_of_lesser_alerts_cannot_block_critical_or_blocker(on, monkeypatch, capsys):
+    monkeypatch.setattr(sink, "MAX_NEW_KEYS_PER_HOUR", 3)
+    for i in range(10):
+        sink.record(message=f"i{i}", level="info", handler="apis", dedupe_key=f"i{i}")
+    sink.record(message="critical thing", level="critical", handler="apis", dedupe_key="crit")
+    sink.record(message="blocker thing", level="blocker", handler="apis", dedupe_key="blk")
+    sink.flush()
+    titles = [p["entities"][0]["title"] for p in on.stores()]
+    assert len(titles) == 5
+    assert any("critical thing" in t for t in titles) and any("blocker thing" in t for t in titles)
+    assert sink.main(["--summary"]) == 0
+    assert "dropped by the new-key rate cap: info 7" in capsys.readouterr().out
+
+
+def test_scrub_covers_prefixed_tokens_url_userinfo_and_encoded_bearer(on):
+    tok = "gh" + "p_" + "q" * 30
+    msg = (
+        f"NAME_{tok} and https://deploy:" + "pa55" + "word@example.invalid/x and "
+        + "Bearer" + "%20" + "z" * 20 + " but disk-check-failed-badly stays"
+    )
+    sink.record(message=msg, level="warn", handler="apis")
+    sink.flush()
+    ent = on.stores()[0]["entities"][0]
+    text = ent["title"] + ent["body"]
+    assert tok not in text and "pa55" + "word" not in text and "z" * 20 not in text
+    assert "disk-check-failed-badly" in text
+
+
+def test_a_state_update_failure_after_a_landed_write_is_not_spooled_as_failed(on, monkeypatch):
+    import threading
+
+    real = sink._state
+
+    def flaky(m, daemon, path=None):
+        if threading.current_thread().name == "notify-neotoma-sink":
+            raise TimeoutError("sink state lock busy")
+        return real(m, daemon, path)
+
+    monkeypatch.setattr(sink, "_state", flaky)
+    sink.record(message="m", level="warn", handler="apis")
+    sink.flush()
+    assert len(on.stores()) == 1
+    assert _read("spool") == []
+    assert len(_read("stored")) == 1
+
+
+def test_expiry_also_runs_when_the_triggering_call_is_suppressed(on, monkeypatch):
+    monkeypatch.setenv(sink.EXPIRE_ENV, "0.05")
+    sink.record(message="old keyless", level="warn", handler="a")
+    sink.record(message="fresh keyless", level="warn", handler="a")
+    sink.flush()
+    time.sleep(0.1)
+    sink._last_maintenance_expire = 0.0
+    sink.record(message="fresh keyless", level="warn", handler="a")  # suppressed in-window
+    sink.flush()
+    resolved = [c for c in on.corrections() if c["field"] == "status"]
+    assert len(resolved) >= 1 and resolved[0]["entity_id"] == "ent_fake1"
