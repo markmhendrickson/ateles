@@ -100,18 +100,23 @@ def _key_for(handler, match, yesterday: str) -> str:
 # ── Channel select ───────────────────────────────────────────────────────────
 
 
-def test_default_channel_is_the_payment_checkpoint_needing_no_credentials(monkeypatch):
+def test_default_channel_is_payment_approval_needing_no_credentials(monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     monkeypatch.delenv("MONEDULA_CONSENT_CHANNEL", raising=False)
     monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
     monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
     channel, source = monedula._resolve_consent_channel()
-    assert channel == "checkpoint"
+    assert channel == "payment_approval"
     assert source == "automatic"
     # Telegram credentials and TELEGRAM_ALLOWED_USER_ID are not required.
     monkeypatch.delenv("TELEGRAM_ALLOWED_USER_ID", raising=False)
-    assert monedula._resolve_consent_channel() == ("checkpoint", "automatic")
+    assert monedula._resolve_consent_channel() == ("payment_approval", "automatic")
+
+
+def test_checkpoint_is_accepted_as_an_alias_of_payment_approval(monkeypatch):
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", "checkpoint")
+    assert monedula._resolve_consent_channel() == ("payment_approval", "env")
 
 
 def test_env_override_email_source_env(monkeypatch):

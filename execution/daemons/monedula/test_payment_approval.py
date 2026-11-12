@@ -14,18 +14,52 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import payment_approval  # noqa: E402
 import payment_journal  # noqa: E402
 from test_session_payments import _event, _Handler, _World  # noqa: E402,F401
 
 
+OWNER = "11111111-2222-3333-4444-555555555555"
+APPROVER_SUB = "coordinator@ateles-swarm"
+APPROVER_JKT = "A" * 43
+OTHER_SUB = "intruder@ateles-swarm"
+
+
 class FakeNeotoma:
+    """In-memory Neotoma: entities, per-field provenance and observations."""
+
     def __init__(self) -> None:
-        self.rows: dict[str, dict] = {}
+        self.rows: dict[str, dict] = {}  # payment_key -> snapshot
+        self.ids: dict[str, str] = {}
+        self.prov: dict[str, dict] = {}  # payment_key -> {field: observation id}
+        self.obs: dict[str, list] = {}  # entity_id -> observations
         self.down = False
         self.writes = 0
+        self.queries: list[dict] = []
         self.drop_fields: set[str] = set()  # simulate undeclared fields
+        self.fail_query_for: set[str] = set()
+        self._n = 0
+
+    def _observe(self, key, fields, sub, jkt, tier="software"):
+        self._n += 1
+        oid = f"obs_{self._n}"
+        eid = self.ids[key]
+        self.obs.setdefault(eid, []).append(
+            {
+                "id": oid,
+                "fields": dict(fields),
+                "user_id": OWNER,
+                "provenance": {
+                    "agent_sub": sub,
+                    "agent_thumbprint": jkt,
+                    "attribution_tier": tier,
+                },
+            }
+        )
+        for name in fields:
+            self.prov.setdefault(key, {})[name] = oid
 
     def request(self, method, path, body=None):
         if self.down:
@@ -35,23 +69,46 @@ class FakeNeotoma:
             for ent in body["entities"]:
                 key = ent["payment_key"]
                 if key not in self.rows:
-                    self.rows[key] = {
-                        k: v for k, v in ent.items() if k not in self.drop_fields
+                    fields = {
+                        k: v
+                        for k, v in ent.items()
+                        if k not in self.drop_fields and k != "entity_type"
                     }
+                    self.rows[key] = fields
+                    self.ids[key] = f"ent_{len(self.ids)}"
+                    self._observe(key, fields, "monedula@ateles-swarm", "M" * 43)
             return {"ok": True}
         if path == "/entities/query":
+            self.queries.append(body)
+            want = (body.get("snapshot_filters") or {}).get("payment_key")
+            if want in self.fail_query_for:
+                raise payment_approval.ApprovalError("query failed")
             return {
                 "entities": [
-                    {"entity_id": f"ent_{i}", "snapshot": dict(r)}
-                    for i, r in enumerate(self.rows.values())
-                ]
+                    {"entity_id": self.ids[k], "snapshot": dict(r)}
+                    for k, r in self.rows.items()
+                    if want is None or k == want
+                ][: body.get("limit", 100)]
             }
+        if path.startswith("/entities/"):
+            eid = path.rsplit("/", 1)[1]
+            for key, ident in self.ids.items():
+                if ident == eid:
+                    return {
+                        "entity_id": eid,
+                        "user_id": OWNER,
+                        "snapshot": {"snapshot": dict(self.rows[key])},
+                        "provenance": dict(self.prov.get(key, {})),
+                    }
+            raise payment_approval.ApprovalError("not found")
         raise AssertionError(path)
 
-    def resolve(self, key, status, answer):
+    def resolve(self, key, status, answer, sub=APPROVER_SUB, jkt=APPROVER_JKT, tier="software"):
         """What the coordinator does: answer first, then status."""
         self.rows[key]["operator_answer"] = answer
+        self._observe(key, {"operator_answer": answer}, sub, jkt, tier)
         self.rows[key]["status"] = status
+        self._observe(key, {"status": status}, sub, jkt, tier)
 
     @property
     def only(self) -> dict:
@@ -61,13 +118,20 @@ class FakeNeotoma:
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
+    from lib.daemon_runtime import gating
+
     w = _World(monkeypatch, tmp_path, _Handler())
     w.handler.profile.payment_type = "wise"
     w.handler.profile.wise_reference = "ref"
     w.handler.profile.wise_recipient_name = "Test Payee"
-    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", "checkpoint")
+    monkeypatch.setenv("MONEDULA_CONSENT_CHANNEL", "payment_approval")
+    monkeypatch.setenv("MONEDULA_PAYMENT_APPROVER_SUB", APPROVER_SUB)
+    monkeypatch.setenv("MONEDULA_PAYMENT_APPROVER_JKT", APPROVER_JKT)
     neo = FakeNeotoma()
     monkeypatch.setattr(payment_approval, "_request", neo.request)
+    monkeypatch.setattr(
+        gating, "_fetch_entity_observations", lambda eid, **k: list(neo.obs.get(eid, []))
+    )
     w.calendars["primary"] = [_event("evt-1")]
     return w, neo
 

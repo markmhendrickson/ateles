@@ -25,7 +25,8 @@ consent), executes approved payments, and confirms.
 ## Payment consent: per-payment approval record (default)
 
 Payment consent no longer travels over Telegram or email replies (operator
-ruling 2026-11-12). The default and only automatic channel is `checkpoint`:
+ruling 2026-11-12). The default and only automatic channel is `payment_approval`
+(`MONEDULA_CONSENT_CHANNEL=checkpoint` is still accepted as an alias):
 
 1. For each session, Monedula writes one Neotoma `payment_approval` entity
    (handler, session, amount, currency, payee display name, rail, reference;
@@ -39,6 +40,46 @@ ruling 2026-11-12). The default and only automatic channel is `checkpoint`:
    attendance parser (`attended <handler>` / `yes <handler>`; a bare `yes`
    does not approve) and whose stored fields match the payment about to be
    made. Anything else, or Neotoma being unreachable, pays nothing.
+
+### Coordinator resolver contract
+
+- **Entity and filter:** `entity_type: payment_approval`, `status == "awaiting_operator"`.
+- **Order of corrections:** `operator_answer` (the operator's literal text) first,
+  then `status` (`approved` or `rejected`). Writing `status` first leaves an
+  approval with no authenticated answer, which is held.
+- **Identity:** both corrections must be made by the resolver principal whose AAuth
+  sub and key thumbprint are configured for Monedula as
+  `MONEDULA_PAYMENT_APPROVER_SUB` and `MONEDULA_PAYMENT_APPROVER_JKT` (both
+  required; the thumbprint is the 43-character RFC 7638 value). Monedula does not
+  trust the snapshot: it reads `status` and `operator_answer` through the
+  observations their field provenance names, with the same verifier the
+  checkpoint release path uses
+  (`gating.read_authenticated_field_value`, a field-name-parameterised form of
+  `read_authenticated_checkpoint_resolution`). A write by any other principal,
+  an untrusted attribution tier, a different tenant, or an unset approver
+  configuration holds the payment. Any later write to either field by someone
+  else withdraws the approval.
+- **A changed record stays blocked.** If the amount, payee, reference, session
+  or rail of the payment changes after the record was raised, the record no
+  longer matches and the payment is held permanently; reject the stale record
+  and a fresh one is raised under the new obligation key (a changed amount or
+  payee changes the key). Bound fields are never re-bound in place.
+- **One bad record holds only its own payment**; other payees proceed. Only when
+  no record can be read at all (Neotoma down) is the tick left unclaimed.
+- **Schema first:** run
+  `python3 execution/scripts/register_payment_approval_schema.py` (dry run) then
+  `--apply` before Monedula first runs with this channel; without the schema every
+  raise fails its read-back and all payments are held.
+- **Surfacing check (before enabling):** with the coordinator session open, let
+  Monedula raise one record (or create a synthetic `awaiting_operator` record) and
+  confirm the coordinator lists it and puts it to the operator in the session the
+  operator is using; record the result. Until that is shown, sessions sit in
+  `awaiting` with nothing alerting anyone.
+- **Calendars:** every calendar the account can read is scanned, including shared
+  calendars others can write to. Events on them can raise approval requests;
+  nothing is paid without the operator's per-payment answer.
+- **Cutover:** a session already paid under the pre-window obligation key is
+  recognised by that legacy key and marked settled, never raised again.
 
 `payment_approval` is deliberately not a `checkpoint_brief`: approving a brief
 releases its task to the Apis dispatcher. Apis subscribes only to `task` and

@@ -41,6 +41,30 @@ Resolve: put the operator's literal answer to him, then correct two fields on
          then ``status`` = ``approved`` or ``rejected``.
          Monedula pays only for ``approved`` plus an answer such as
          ``attended <handler>`` / ``yes <handler>``; a bare ``yes`` does not pay.
+Identity: both corrections must be made by the resolver principal configured as
+         ``MONEDULA_PAYMENT_APPROVER_SUB`` / ``MONEDULA_PAYMENT_APPROVER_JKT``.
+
+WHO MAY APPROVE (authenticated, not trusted from the snapshot)
+--------------------------------------------------------------
+A snapshot value is reducer output: it says what value won, not who wrote it,
+so any principal able to write Neotoma could otherwise approve a payment.
+``status`` and ``operator_answer`` are therefore each read through the
+observation their field provenance names, using the SAME verifier the
+checkpoint release path uses
+(``lib.daemon_runtime.gating.read_authenticated_field_value``): the observation
+must carry the configured approver sub and key thumbprint, a trusted AAuth
+attribution tier and the entity's tenant. Missing, untrusted, wrong-principal
+or unconfigured approver identity holds the payment. A later write to either
+field by anyone else moves the provenance to that write and withdraws the
+approval.
+
+BOUND FIELDS ARE FINAL
+----------------------
+If a profile's amount, payee, reference, session or rail changes after the record
+was raised, an approved record no longer matches and the item is held
+("blocked") permanently: a bound field is never re-bound in place. The operator
+rejects the stale record and a fresh record is raised under the new obligation
+key once the terms are stable (a changed amount or payee changes the key).
 
 FAIL CLOSED
 -----------
@@ -56,6 +80,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -69,7 +94,23 @@ STATUS_APPROVED = "approved"
 STATUS_REJECTED = "rejected"
 
 NEOTOMA_USER_AGENT = "ateles-neotoma-sync/1.0"
-QUERY_LIMIT = 200
+# An identifier lookup, not a listing: at most a handful of rows can share a key.
+LOOKUP_LIMIT = 5
+
+# Resolver identity (set by the coordinator session). Both are required; an
+# unset value means no approval can ever be authenticated.
+APPROVER_SUB_ENV = "MONEDULA_PAYMENT_APPROVER_SUB"
+APPROVER_JKT_ENV = "MONEDULA_PAYMENT_APPROVER_JKT"
+
+# The channel label ("checkpoint" before the rename; kept accepted as an alias).
+CHANNEL = "payment_approval"
+LEGACY_CHANNEL_ALIAS = "checkpoint"
+
+# Fields the resolver writes, and the rest of the record's contract. The schema
+# registration script derives its field list from these (no second copy).
+STATUS_FIELD = "status"
+ANSWER_FIELD = "operator_answer"
+KEY_FIELD = "payment_key"
 
 # Fields compared between the stored record and the payment about to be made.
 BOUND_FIELDS = (
@@ -87,6 +128,29 @@ BOUND_FIELDS = (
 FORBIDDEN_FIELD_NAMES = frozenset(
     {"iban", "wise_iban", "btc_address", "recipient_id", "wise_recipient_id", "memo"}
 )
+
+
+# Field -> (type, description). The record contract: the schema registration
+# script and the contract test both read this, and raise_request builds records
+# from the same names, so registration and writes cannot drift.
+FIELD_SPECS: dict[str, tuple[str, str]] = {
+    KEY_FIELD: ("string", "Obligation key (hash) identifying the payment; no payee data"),
+    "handler": ("string", "Monedula handler (payment profile) name"),
+    "session": ("string", "Calendar event id, or the session date when there is none"),
+    "session_date": ("string", "Session date (Madrid-local, ISO)"),
+    "amount": ("number", "Whole-unit amount to pay"),
+    "currency": ("string", "ISO currency code"),
+    "rail": ("string", "wise or btc"),
+    "payee_display_name": ("string", "Payee name for display; never an IBAN or address"),
+    "reference": ("string", "Payment reference; empty for BTC (no memo/OP_RETURN)"),
+    STATUS_FIELD: ("string", "awaiting_operator, approved or rejected; written by the resolver"),
+    ANSWER_FIELD: ("string", "The operator's literal answer; written by the resolver before status"),
+    "blocking": ("boolean", "Always true"),
+    "confidence_threshold": ("number", "Always 1.0"),
+    "title": ("string", "Human-readable title"),
+}
+CANONICAL_NAME_FIELDS = [KEY_FIELD]
+ENTITY_SCHEMA_VERSION = "1.0"
 
 
 class ApprovalError(Exception):
@@ -158,6 +222,8 @@ def expected_fields(item: Any) -> dict[str, Any]:
 
 def _snapshot(entity: dict) -> dict:
     snap = entity.get("snapshot") or entity.get("fields") or entity
+    if isinstance(snap, dict) and isinstance(snap.get("snapshot"), dict):
+        snap = snap["snapshot"]  # /entities/{id} nests the snapshot one level
     return snap if isinstance(snap, dict) else {}
 
 
@@ -168,17 +234,25 @@ def _title(item: Any) -> str:
     )
 
 
-def find_record(payment_key: str) -> dict | None:
-    """The stored snapshot for ``payment_key``, or None if there is none.
+def find_entity(payment_key: str) -> dict | None:
+    """The full stored entity (with ``entity_id`` and field provenance) for
+    ``payment_key``, or None if there is none.
 
-    Raises :class:`ApprovalError` when Neotoma cannot be read: an unreadable
-    record is never "no record" (that would re-raise and could mask a prior
-    approval), and never an approval.
+    A server-side filter on ``payment_key``, never a client-side scan of a
+    capped listing. Raises :class:`ApprovalError` when Neotoma cannot be read,
+    on an unexpected shape, or when more than one entity claims the key: an
+    unreadable or ambiguous record is never "no record" (that would re-raise
+    and could mask a prior approval), and never an approval.
     """
     data = _request(
         "POST",
         "/entities/query",
-        {"entity_type": ENTITY_TYPE, "limit": QUERY_LIMIT, "include_snapshots": True},
+        {
+            "entity_type": ENTITY_TYPE,
+            "snapshot_filters": {KEY_FIELD: payment_key},
+            "limit": LOOKUP_LIMIT,
+            "include_snapshots": True,
+        },
     )
     if isinstance(data, dict):
         rows = data.get("entities") or data.get("items") or data.get("results") or []
@@ -188,10 +262,86 @@ def find_record(payment_key: str) -> dict | None:
         raise ApprovalError("Neotoma query returned an unexpected shape")
     if not isinstance(rows, list):
         raise ApprovalError("Neotoma query returned an unexpected shape")
-    for row in rows:
-        if isinstance(row, dict) and _snapshot(row).get("payment_key") == payment_key:
-            return _snapshot(row)
-    return None
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, dict) and _snapshot(row).get(KEY_FIELD) == payment_key
+    ]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise ApprovalError("more than one payment_approval carries this payment_key")
+    row = matches[0]
+    entity_id = str(row.get("entity_id") or "")
+    if not entity_id:
+        raise ApprovalError("payment_approval row has no entity_id")
+    # The listing row may not carry field provenance; the entity read does.
+    full = _request("GET", f"/entities/{entity_id}")
+    if not isinstance(full, dict):
+        raise ApprovalError("Neotoma entity read returned an unexpected shape")
+    full.setdefault("entity_id", entity_id)
+    if _snapshot(full).get(KEY_FIELD) != payment_key:
+        raise ApprovalError("payment_approval read does not match the key looked up")
+    return full
+
+
+def find_record(payment_key: str) -> dict | None:
+    """The stored snapshot for ``payment_key`` (see :func:`find_entity`)."""
+    entity = find_entity(payment_key)
+    return None if entity is None else _snapshot(entity)
+
+
+def approver_identity() -> tuple[str, str] | None:
+    """The configured resolver (sub, JKT), or None when either is unset or the
+    thumbprint is not an RFC 7638 SHA-256 value."""
+    sub = os.environ.get(APPROVER_SUB_ENV, "").strip()
+    jkt = os.environ.get(APPROVER_JKT_ENV, "").strip()
+    if not sub or not re.fullmatch(r"[A-Za-z0-9_-]{43}", jkt):
+        return None
+    return sub, jkt
+
+
+def authenticated_resolution(entity: dict) -> tuple[str, str | None] | None:
+    """``(status, answer)`` read through each field's provenance observation,
+    or None unless both came from the configured resolver.
+
+    Reuses the checkpoint path's verifier
+    (``gating.read_authenticated_field_value``). ``answer`` is None for an
+    ``awaiting_operator`` record, which needs none.
+    """
+    from lib.daemon_runtime import gating
+
+    identity = approver_identity()
+    if identity is None:
+        return None
+    sub, jkt = identity
+    entity_id = str(entity.get("entity_id") or "")
+    if not entity_id:
+        return None
+    owner = gating.read_verified_entity_owner(entity_id, entity)
+    if not owner:
+        return None
+
+    def read(field: str) -> str | None:
+        return gating.read_authenticated_field_value(
+            entity_id,
+            entity,
+            field=field,
+            required_approver_sub=sub,
+            required_approver_jkt=jkt,
+            expected_user_id=owner,
+        )
+
+    status = read(STATUS_FIELD)
+    if status is None:
+        return None
+    status = status.strip().lower()
+    if status not in (STATUS_APPROVED, STATUS_REJECTED):
+        return None
+    answer = read(ANSWER_FIELD) if status == STATUS_APPROVED else None
+    if status == STATUS_APPROVED and answer is None:
+        return None
+    return status, answer
 
 
 def raise_request(item: Any) -> dict:
@@ -230,24 +380,38 @@ def raise_request(item: Any) -> dict:
     return back
 
 
-def judge(item: Any, record: dict, parse_reply: Callable[[str | None, list[str]], set[str]]) -> Verdict:
-    """Decide what a stored record permits for ``item``. Pure; no I/O."""
-    status = str(record.get("status") or "").strip().lower()
+def judge(item: Any, entity: dict, parse_reply: Callable[[str | None, list[str]], set[str]]) -> Verdict:
+    """Decide what a stored entity permits for ``item``. No Neotoma writes.
+
+    A resolution (approved or rejected) counts only when authenticated as the
+    configured resolver; anything else holds the payment.
+    """
+    record = _snapshot(entity)
+    status = str(record.get(STATUS_FIELD) or "").strip().lower()
     if status == STATUS_AWAITING or status == "":
         return Verdict("awaiting")
-    if status == STATUS_REJECTED:
-        return Verdict("skipped", "rejected")
-    if status != STATUS_APPROVED:
+    if status not in (STATUS_APPROVED, STATUS_REJECTED):
         return Verdict("blocked", f"unrecognised status {status!r}")
 
+    resolution = authenticated_resolution(entity)
+    if resolution is None:
+        return Verdict(
+            "blocked",
+            "resolution is not authenticated as the configured approver "
+            f"({APPROVER_SUB_ENV}/{APPROVER_JKT_ENV}) — missing, untrusted, "
+            "wrong principal, or approver not configured",
+        )
+    auth_status, answer = resolution
+    if auth_status == STATUS_REJECTED:
+        return Verdict("skipped", "rejected")
+
     want = expected_fields(item)
-    if record.get("payment_key") != str(item.obligation):
+    if record.get(KEY_FIELD) != str(item.obligation):
         return Verdict("blocked", "record is for a different payment")
     for name in BOUND_FIELDS:
         if record.get(name) != want[name]:
             return Verdict("blocked", f"approval does not match the payment ({name})")
 
-    answer = record.get("operator_answer")
     if not isinstance(answer, str) or not answer.strip():
         return Verdict("blocked", "approved with no recorded operator answer")
     if str(item.handler_name) not in parse_reply(answer, [str(item.handler_name)]):
@@ -268,8 +432,10 @@ def collect(
     Returns a ``ConsentEmailResult`` so the existing execute loop in
     ``monedula.main`` is reused unchanged: ``approved`` only for an approved
     record whose bound fields match and whose recorded answer parses. Any
-    Neotoma failure blocks the whole pending set (``channel_ok`` False): no
-    payment, and the pending sessions stay in the journal for the next tick.
+    Neotoma failure is isolated to its own item: that payment is held and the
+    others proceed. Only when EVERY item is unreadable is the channel treated
+    as down (``channel_ok`` False) so the tick is not claimed and the next one
+    retries; the pending sessions stay in the journal.
     """
     import payment_journal
     from consent_email import (
@@ -298,20 +464,32 @@ def collect(
         result.channel_ok = False
         return result
 
+    unavailable = 0
     for item in items:
         key = match_key(item)
         try:
-            record = find_record(str(item.obligation))
-            if record is None:
-                record = raise_request(item)
+            entity = find_entity(str(item.obligation))
+            if entity is None:
+                raise_request(item)
                 log.info(
                     f"payment_approval_raised handler={item.handler_name} "
                     f"session={item.match_id or item.payment_date}"
                 )
+                entity = find_entity(str(item.obligation))
+                if entity is None:
+                    raise ApprovalError("payment_approval did not read back after write")
         except ApprovalError as exc:
-            log.error(f"payment_approval_unavailable — payments held: {exc}")
-            return block_all("payment_approval_unavailable")
-        verdict = judge(item, record, parse_reply)
+            # Fail closed for THIS item only; unrelated payees are unaffected.
+            log.error(
+                f"payment_approval_unavailable handler={item.handler_name} — "
+                f"this payment held: {exc}"
+            )
+            unavailable += 1
+            result.states[key] = "blocked"
+            result.blocked.add(key)
+            result.reason_code = "payment_approval_unavailable"
+            continue
+        verdict = judge(item, entity, parse_reply)
         if verdict.state == "approved":
             result.states[key] = "approved"
             result.approved.add(key)
@@ -325,8 +503,13 @@ def collect(
             )
             result.states[key] = "blocked"
             result.blocked.add(key)
-            result.reason_code = "payment_approval_not_accepted"
+            if result.reason_code != "payment_approval_unavailable":
+                result.reason_code = "payment_approval_not_accepted"
         else:
             result.states[key] = "awaiting_approval"
             result.awaiting.add(key)
+    if items and unavailable == len(items):
+        # Nothing could be read at all (Neotoma down): treat as a channel
+        # failure so the tick is not claimed and the next one retries.
+        return block_all("payment_approval_unavailable")
     return result

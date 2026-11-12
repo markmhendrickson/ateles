@@ -54,6 +54,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from typing import Callable
 
 import httpx
 
@@ -1060,6 +1061,83 @@ def checkpoint_scope_permits_ordinary_effects(scope: str) -> bool:
     return scope in (SCOPE_ORDINARY, SCOPE_LEGACY)
 
 
+def _read_authenticated_field_observation(
+    entity_id: str,
+    record: dict,
+    *,
+    field: str,
+    matches: Callable[[dict], bool],
+    snapshot_value_must_equal_observation: bool,
+    required_approver_sub: str,
+    required_approver_jkt: str,
+    expected_user_id: str,
+) -> dict | None:
+    """Shared provenance verifier behind every authenticated field read.
+
+    The snapshot value of ``field`` is reducer output and therefore says only
+    what value won, not who supplied it.  Authority comes from the immutable
+    observation named by that field's provenance.  ``matches`` is applied to
+    both the snapshot and that observation's own fields.  Missing, unreadable,
+    untrusted, cross-tenant, or wrong-principal attribution returns ``None``.
+    On success returns the principal evidence plus the observation's fields
+    under ``"observation_fields"``.
+    """
+    required_sub = str(required_approver_sub or "").strip()
+    required_jkt = str(required_approver_jkt or "").strip()
+    tenant_id = str(expected_user_id or "").strip()
+    if (
+        not required_sub
+        or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
+        or not tenant_id
+        or not field
+    ):
+        return None
+    snapshot = _snapshot_of(record)
+    if not matches(snapshot):
+        return None
+    provenance = record.get("provenance")
+    if not isinstance(provenance, dict):
+        return None
+    observation_id = provenance.get(field)
+    if not isinstance(observation_id, str) or not observation_id:
+        return None
+    observation = next(
+        (
+            item
+            for item in _fetch_entity_observations(entity_id)
+            if item.get("id") == observation_id
+        ),
+        None,
+    )
+    if not isinstance(observation, dict):
+        return None
+    fields = observation.get("fields")
+    auth = observation.get("provenance")
+    if not isinstance(fields, dict) or not matches(fields):
+        return None
+    if snapshot_value_must_equal_observation and snapshot.get(field) != fields.get(
+        field
+    ):
+        return None
+    if str(observation.get("user_id") or "").strip() != tenant_id:
+        return None
+    if not isinstance(auth, dict):
+        return None
+    if (
+        str(auth.get("agent_sub") or "").strip() != required_sub
+        or str(auth.get("agent_thumbprint") or "").strip() != required_jkt
+        or auth.get("attribution_tier") not in _TRUSTED_AAUTH_TIERS
+    ):
+        return None
+    return {
+        "principal_sub": required_sub,
+        "observation_id": observation_id,
+        "attribution_tier": auth.get("attribution_tier"),
+        "agent_thumbprint": required_jkt,
+        "observation_fields": fields,
+    }
+
+
 def read_authenticated_checkpoint_resolution(
     checkpoint_id: str,
     checkpoint_record: dict,
@@ -1077,56 +1155,62 @@ def read_authenticated_checkpoint_resolution(
     unreadable, untrusted, cross-tenant, or wrong-principal attribution is not
     an approval.
     """
-    required_sub = str(required_approver_sub or "").strip()
-    required_jkt = str(required_approver_jkt or "").strip()
-    tenant_id = str(expected_user_id or "").strip()
     expected = str(expected_resolution or "").strip().lower()
-    if (
-        not required_sub
-        or not re.fullmatch(r"[A-Za-z0-9_-]{43}", required_jkt)
-        or not tenant_id
-        or expected not in {"approved", "rejected"}
-    ):
+    if expected not in {"approved", "rejected"}:
         return None
-    snapshot = _snapshot_of(checkpoint_record)
-    if read_checkpoint_resolution(snapshot) != expected:
-        return None
-    provenance = checkpoint_record.get("provenance")
-    if not isinstance(provenance, dict):
-        return None
-    observation_id = provenance.get("status")
-    if not isinstance(observation_id, str) or not observation_id:
-        return None
-    observation = next(
-        (
-            item
-            for item in _fetch_entity_observations(checkpoint_id)
-            if item.get("id") == observation_id
-        ),
-        None,
+    verified = _read_authenticated_field_observation(
+        checkpoint_id,
+        checkpoint_record,
+        field="status",
+        matches=lambda data: read_checkpoint_resolution(data) == expected,
+        snapshot_value_must_equal_observation=False,
+        required_approver_sub=required_approver_sub,
+        required_approver_jkt=required_approver_jkt,
+        expected_user_id=expected_user_id,
     )
-    if not isinstance(observation, dict):
+    if verified is None:
         return None
-    fields = observation.get("fields")
-    auth = observation.get("provenance")
-    if not isinstance(fields, dict) or read_checkpoint_resolution(fields) != expected:
+    verified.pop("observation_fields", None)
+    return verified
+
+
+def read_authenticated_field_value(
+    entity_id: str,
+    record: dict,
+    *,
+    field: str,
+    required_approver_sub: str,
+    required_approver_jkt: str,
+    expected_user_id: str,
+) -> str | None:
+    """The string value of ``field`` iff its provenance observation is
+    authenticated as the required principal, else ``None``.
+
+    Same verifier as :func:`read_authenticated_checkpoint_resolution`,
+    parameterised by field name for entity types that carry a resolver-written
+    value other than a checkpoint ``status`` (e.g. a Monedula
+    ``payment_approval``).  The snapshot value must equal the value the
+    authenticating observation itself carries, so a later write by another
+    principal can never inherit an earlier approver's authority.
+    """
+
+    def _has_text(data: dict) -> bool:
+        value = data.get(field)
+        return isinstance(value, str) and bool(value.strip())
+
+    verified = _read_authenticated_field_observation(
+        entity_id,
+        record,
+        field=field,
+        matches=_has_text,
+        snapshot_value_must_equal_observation=True,
+        required_approver_sub=required_approver_sub,
+        required_approver_jkt=required_approver_jkt,
+        expected_user_id=expected_user_id,
+    )
+    if verified is None:
         return None
-    if str(observation.get("user_id") or "").strip() != tenant_id:
-        return None
-    if not isinstance(auth, dict):
-        return None
-    if (
-        str(auth.get("agent_sub") or "").strip() != required_sub
-        or str(auth.get("agent_thumbprint") or "").strip() != required_jkt
-        or auth.get("attribution_tier") not in _TRUSTED_AAUTH_TIERS
-    ):
-        return None
-    return {
-        "principal_sub": required_sub,
-        "observation_id": observation_id,
-        "attribution_tier": auth.get("attribution_tier"),
-        "agent_thumbprint": required_jkt,
-    }
+    return verified["observation_fields"][field]
 
 
 def _server_error_detail(exc: Exception) -> str:

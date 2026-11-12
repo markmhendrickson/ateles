@@ -1021,19 +1021,22 @@ def _resolve_consent_channel() -> tuple[str | None, str]:
     """Select the payment consent channel.
 
     Returns ``(channel, source)``. The default, and the only automatic, channel
-    is ``"checkpoint"``: a per-payment ``payment_approval`` record in Neotoma
+    is ``"payment_approval"``: a per-payment ``payment_approval`` record in Neotoma
     that the coordinator session resolves with the operator's literal answer
     (operator ruling 2026-11-12; see ``payment_approval.py``). It needs no
     Telegram or email credentials.
 
     ``MONEDULA_CONSENT_CHANNEL=email|telegram`` still selects the legacy
     break-glass channels, explicitly and only explicitly; they are never
-    chosen automatically any more.
+    chosen automatically any more. ``checkpoint`` is accepted as an alias of
+    ``payment_approval`` (the channel's earlier name).
     """
     override = (os.environ.get("MONEDULA_CONSENT_CHANNEL") or "").strip().lower()
-    if override in ("email", "telegram", "checkpoint"):
+    if override in ("email", "telegram"):
         return override, "env"
-    return "checkpoint", "automatic"
+    if override in ("payment_approval", "checkpoint"):
+        return "payment_approval", "env"
+    return "payment_approval", "automatic"
 
 
 def _consent_failure_notify_body(
@@ -1336,6 +1339,7 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
         event_id_of,
         event_session_date,
         journal_path,
+        legacy_obligation_keys,
         obligation_key,
     )
 
@@ -1366,6 +1370,25 @@ def _apply_session_journal(triggered: list[tuple], *, reconcile: bool) -> list[t
                 key = payment_journal.session_key(handler.name, eid)
                 state = payment_journal.session_state(data, key)
                 if state in payment_journal.SESSION_TERMINAL:
+                    continue
+                if state is None and any(
+                    payment_journal.obligation_state(data, legacy) is not None
+                    for legacy in legacy_obligation_keys(
+                        handler, match, matches, _yesterday().isoformat()
+                    )
+                ):
+                    # Cutover guard: paid (or intent recorded) under the key the
+                    # pre-session-window code used. Never raise it again.
+                    log.warning(
+                        f"session {key} already has a journaled obligation under "
+                        "the legacy key — marking settled, not raising"
+                    )
+                    payment_journal.note_pending(
+                        jpath, key, ended_at=_match_ended_at(match)
+                    )
+                    payment_journal.set_session_state(
+                        jpath, key, payment_journal.SESSION_SETTLED
+                    )
                     continue
                 seen_keys.add(key)
                 if state is None:
@@ -1684,7 +1707,7 @@ def main() -> bool:
             _mark_ran_today()
         _resolve_sessions(triggered, "settled")
 
-    if channel in ("email", "checkpoint"):
+    if channel in ("email", "payment_approval"):
         import payment_journal
         from consent_email import (
             needs_swarm_mailbox_hint,
@@ -1696,15 +1719,20 @@ def main() -> bool:
             request_and_collect,
         )
 
-        if channel == "checkpoint":
+        if channel == "payment_approval":
             import payment_approval
 
             consent = payment_approval.collect(triggered, yesterday_str, _parse_reply)
-            if consent.reason_code == "payment_approval_not_accepted":
+            if consent.channel_ok and consent.reason_code in (
+                "payment_approval_not_accepted",
+                "payment_approval_unavailable",
+            ):
                 _notify(
-                    "monedula: a payment approval was recorded but does not permit "
-                    "payment (answer unparseable, bare yes, or it does not match the "
-                    "payment). Nothing was paid; correct the approval record.",
+                    "monedula: a payment approval does not permit payment (answer "
+                    "unparseable, bare yes, not written by the configured approver, "
+                    "unreadable, or it does not match the payment). That payment "
+                    "was held; the others are unaffected. Correct or re-resolve "
+                    "the approval record.",
                     priority="blocker",
                     dedupe_key="monedula:payment_approval_not_accepted",
                     email_eligible=True,

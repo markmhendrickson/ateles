@@ -263,6 +263,34 @@ def event_session_date(match: Any) -> str:
         return ""
 
 
+def legacy_obligation_keys(
+    handler: Any,
+    match: Any,
+    matches: list,
+    yesterday_str: str,
+) -> set[str]:
+    """Obligation keys the pre-session-window code could have journaled for
+    this match.
+
+    That code keyed on the run's own "yesterday" date and an empty match id
+    (single match) or ``event_id`` / ``id`` / list index (several matches),
+    never on the calendar event id. A session paid just before the new keying
+    went live is recorded only under those keys, so the new key alone cannot
+    see it and the session would be raised and paid a second time. Used as a
+    read-only cutover guard; nothing writes under these keys any more.
+    """
+    dates = {d for d in (event_session_date(match), yesterday_str) if d}
+    ids: set[str] = {""}
+    if len(matches) > 1:
+        top = match if isinstance(match, dict) else {}
+        for candidate in (top.get("event_id"), top.get("id"), event_id_of(match)):
+            if candidate:
+                ids.add(str(candidate))
+        # The old code fell back to the match's own position in the list.
+        ids.update(str(i) for i, m in enumerate(matches) if m is match)
+    return {obligation_key(handler, d, i) for d in dates for i in ids}
+
+
 def build_pending_items(
     triggered: list[tuple[Any, list]],
     yesterday_str: str,
