@@ -2892,7 +2892,6 @@ class _FakeNeotoma:
 @pytest.fixture
 def neotoma(monkeypatch, tmp_path):
     fake = _FakeNeotoma()
-    monkeypatch.setattr(apis, "_held_checkpoint_notices", set())
     monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "synthetic-token")
     monkeypatch.setattr(gating_module, "NEOTOMA_BASE_URL", "https://neotoma.test")
     monkeypatch.setattr(gating_module, "CHECKPOINT_PRODUCER_JKT", PRODUCER_JKT)
@@ -3436,6 +3435,28 @@ class _RecordingNotifier:
         self.sent.append((message, priority))
 
 
+class _JournalNotifier:
+    """The REAL notifier (its own journal-backed dedupe), transport stubbed."""
+
+    def __init__(self, tmp_path):
+        from lib.notify import Notifier
+
+        self.sent: list[tuple[str, object]] = []
+        self._n = Notifier(rubric={"silence_start": "", "silence_end": "",
+                                   "timezone": "Europe/Madrid"})
+        self._n._digest_path = tmp_path / "digest.json"
+        self._n._dedupe_path = tmp_path / "dedupe.json"  # the shared store
+        self._n._apprise = object()
+        self._n._email_primary = False
+        self._n._deliver = lambda m, force=False, email_eligible=True: (
+            self.sent.append((m, apis.Priority.WARN)),
+            True,
+        )[1]
+
+    def send(self, *args, **kwargs):
+        return self._n.send(*args, **kwargs)
+
+
 def _only_notice(notifier):
     assert len(notifier.sent) == 1, notifier.sent
     return notifier.sent[0]
@@ -3455,7 +3476,7 @@ async def test_restricted_decision_notifies_once_with_cause_and_next_step(
         status=status,
         extension=EXTENSION,
     )
-    notifier = _RecordingNotifier()
+    notifier = _JournalNotifier(tmp_path)
     snapshot = neotoma.entities[CP_ID]["snapshot"]
 
     for _ in range(3):  # a poll loop re-delivers the same decision
@@ -3617,3 +3638,57 @@ def test_a_malformed_checkpoint_id_is_never_echoed(neotoma, caplog):
     assert message.startswith("Checkpoint unknown (task unknown)")
     assert "evil" not in message
     assert not any("evil" in r.getMessage() for r in caplog.records)
+
+
+def _notify(notifier, raw_id):
+    apis._notify_held_checkpoint(
+        notifier,
+        raw_id,
+        task_id=None,
+        scope="restricted",
+        reason="authenticated_extension",
+        effect="test",
+    )
+
+
+def test_two_malformed_ids_each_get_their_own_notice(tmp_path):
+    notifier = _JournalNotifier(tmp_path)
+
+    _notify(notifier, "bad id one")
+    _notify(notifier, "bad\nid two")
+    _notify(notifier, "bad id one")  # a repeat of the first stays suppressed
+
+    assert len(notifier.sent) == 2
+    assert all("Checkpoint unknown" in m for m, _ in notifier.sent)
+
+
+def test_a_restart_does_not_rewarn_a_held_checkpoint(tmp_path):
+    first = _JournalNotifier(tmp_path)
+    _notify(first, "ent_cp")
+    assert len(first.sent) == 1
+
+    restarted = _JournalNotifier(tmp_path)  # fresh process state, same journal
+    _notify(restarted, "ent_cp")
+    assert restarted.sent == []
+
+
+def test_a_cleared_key_allows_a_later_recurrence(tmp_path):
+    notifier = _JournalNotifier(tmp_path)
+    _notify(notifier, "ent_cp")
+    notifier._n.clear_dedupe(apis._held_checkpoint_dedupe_key("ent_cp"))
+    _notify(notifier, "ent_cp")
+    assert len(notifier.sent) == 2
+
+
+def test_a_send_that_raises_does_not_mark_the_checkpoint_told(tmp_path):
+    notifier = _JournalNotifier(tmp_path)
+    real = notifier._n.send
+
+    def boom(*a, **k):
+        raise RuntimeError("no transport")
+
+    notifier._n.send = boom
+    _notify(notifier, "ent_cp")  # swallowed, never widens scope
+    notifier._n.send = real
+    _notify(notifier, "ent_cp")
+    assert len(notifier.sent) == 1

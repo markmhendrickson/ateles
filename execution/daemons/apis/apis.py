@@ -4348,8 +4348,14 @@ def _held_checkpoint_explanation(scope: str, reason: str) -> str:
     return f"{cause} (reason: {reason}). {step}."
 
 
-# One notice per checkpoint per process, so a poll loop cannot repeat it.
-_held_checkpoint_notices: set[str] = set()
+def _held_checkpoint_dedupe_key(raw_checkpoint_id: object) -> str:
+    """Notifier dedupe key from the RAW id, so two malformed ids stay distinct.
+
+    The message prints the sanitised id (``unknown`` for any malformed one);
+    the key must not, or one malformed held checkpoint would hide the rest.
+    """
+    digest = hashlib.sha256(str(raw_checkpoint_id).encode("utf-8", "replace"))
+    return f"{DAEMON_NAME}:held_checkpoint:{digest.hexdigest()[:16]}"
 
 
 def _notify_held_checkpoint(
@@ -4363,6 +4369,7 @@ def _notify_held_checkpoint(
     decision: str | None = None,
 ) -> bool:
     """The ONE notice every held outcome sends.  Notice only: no status write."""
+    dedupe_key = _held_checkpoint_dedupe_key(checkpoint_id)
     checkpoint_id = _safe_entity_id(checkpoint_id)
     task_id = _safe_entity_id(task_id)
     decision = decision if decision in ("approved", "rejected") else None
@@ -4374,11 +4381,14 @@ def _notify_held_checkpoint(
         reason if reason in _HELD_CAUSES else "unrecognized",
         effect,
     )
-    if notifier is None or checkpoint_id in _held_checkpoint_notices:
+    if notifier is None:
         return False
-    _held_checkpoint_notices.add(checkpoint_id)
     applied = f"The {decision} decision" if decision else "The requested action"
     try:
+        # The notifier's journal-backed dedupe: one notice per held checkpoint
+        # until its key is cleared, across poll ticks AND restarts.  The key
+        # is marked inside the notifier's send lock, so a send that raises
+        # before routing is not recorded as told.
         notifier.send(
             f"Checkpoint {checkpoint_id} (task {task_id}) is held: "
             f"{applied} was NOT applied and nothing was closed, replaced, retired "
@@ -4386,6 +4396,7 @@ def _notify_held_checkpoint(
             + _held_checkpoint_explanation(scope, reason),
             priority=Priority.WARN,
             handler=DAEMON_NAME,
+            dedupe_key=dedupe_key,
         )
     except Exception:  # noqa: BLE001 - a failed notice never widens scope
         log.exception("[%s] could not send held-checkpoint notice", DAEMON_NAME)
