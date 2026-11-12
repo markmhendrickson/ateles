@@ -426,7 +426,8 @@ def judge(item: Any, entity: dict, parse_reply: Callable[[str | None, list[str]]
     if status == STATUS_AWAITING or status == "":
         return Verdict("awaiting")
     if status not in (STATUS_APPROVED, STATUS_REJECTED):
-        return Verdict("blocked", f"unrecognised status {status!r}")
+        log.error(f"payment_approval unrecognised status {status[:40]!r}")
+        return Verdict("blocked", "the record's status is not recognised")
 
     resolution = authenticated_resolution(entity)
     if resolution is None:
@@ -588,9 +589,9 @@ def collect(
                 item,
                 "unavailable",
                 f"monedula: payment approval could not be raised or read for "
-                f"{describe(item)} ({exc}). That payment is held and the next "
-                "tick retries; no approval request exists yet, so no stale alert "
-                "can fire for it.",
+                f"{describe(item)} (see the daemon log). That payment is held and "
+                "the next tick retries; no approval request exists yet, so no "
+                "stale alert can fire for it.",
                 "blocker",
             )
             result.states[key] = "blocked"
@@ -609,7 +610,7 @@ def collect(
                 "skipped",
                 f"monedula: payment skipped (rejected) for {describe(item)}. "
                 "No payment was made.",
-                "info",
+                "warn",
             )
         elif verdict.state == "blocked":
             log.error(

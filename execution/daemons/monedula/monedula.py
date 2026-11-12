@@ -17,7 +17,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -108,48 +107,48 @@ def _notify(
         )
 
 
-_ACCOUNT_LIKE = re.compile(
-    r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b|\b(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,60}\b"
-)
+# The lowest priority the Notifier actually delivers is WARN: INFO is dropped
+# there unconditionally (lib/notify/notifier.py, _send_locked), so the "payment
+# sent" confirmation is sent as WARN, not INFO.
+_OUTCOME_CATEGORIES = {"sent", "manual_required", "failed"}
 
 
 def _outcome_alert(item: Any, result: Any) -> tuple[str, str]:
     """(priority, body) telling the operator what became of an approved payment.
 
-    Only ``sent`` reads as paid. A ``manual_required``, failed or unreported
-    result is a blocker that says it was NOT paid and that it will not be
-    retried. Carries no IBAN, address or recipient id; free-text errors are
-    scrubbed of account-like strings and truncated.
+    Fixed fields only: handler, session date, amount, currency, the obligation's
+    short id and one fixed outcome category (sent / manual_required / failed /
+    unreported). The result's free-text ``error`` and any payee detail stay in
+    the daemon log; third-party error text is unbounded and cannot be scrubbed
+    reliably, so none of it is copied into an alert. Only ``sent`` reads as paid.
     """
     from consent_email import CURRENCY
 
     status = (
-        str(result.get("status") or "unreported")
+        str(result.get("status") or "").strip().lower()
         if isinstance(result, dict)
-        else "unreported"
+        else ""
     )
-    error = ""
-    if isinstance(result, dict) and result.get("error"):
-        error = _ACCOUNT_LIKE.sub("[redacted]", str(result["error"]))[:200]
+    category = status if status in _OUTCOME_CATEGORIES else "unreported"
     who = (
         f"{item.handler_name} session {item.payment_date} "
         f"{item.amount_eur} {CURRENCY} [{str(item.obligation)[:12]}]"
     )
-    if status == "sent":
-        return "info", f"monedula: payment SENT for {who}."
-    if status == "manual_required":
+    if category == "sent":
+        return "warn", f"monedula: payment SENT for {who}."
+    if category == "manual_required":
         return (
             "blocker",
-            f"monedula: payment NOT made for {who}: manual payment required"
-            f"{f' ({error})' if error else ''}. Nothing was sent; pay it by hand "
-            "using the payee details in the payment profile (not repeated here). "
-            "It will not be retried automatically.",
+            f"monedula: payment NOT made for {who}: manual payment required. "
+            "Nothing was sent; pay it by hand using the payee details in the "
+            "payment profile (not repeated here). It will not be retried "
+            "automatically. Details are in the daemon log.",
         )
     return (
         "blocker",
-        f"monedula: payment did NOT complete for {who} (status {status}"
-        f"{f': {error}' if error else ''}). Check the rail before paying by hand; "
-        "it will not be retried automatically.",
+        f"monedula: payment did NOT complete for {who} (outcome: {category}). "
+        "Check the rail before paying by hand; it will not be retried "
+        "automatically. Details are in the daemon log.",
     )
 
 
@@ -1893,8 +1892,9 @@ def main() -> bool:
                 except Exception as exc:
                     log.error(f"payment_preflight_failed {label}: {exc}")
                     _notify(
-                        f"monedula: payment held for {handler.name} — {exc}. "
-                        "No transfer was attempted; fix the payee and it retries.",
+                        f"monedula: payment held for {handler.name} — preflight "
+                        "failed (see the daemon log). No transfer was attempted; "
+                        "fix the payee and it retries.",
                         priority="blocker",
                         dedupe_key=f"monedula:preflight:{handler.name}",
                         email_eligible=True,
@@ -1938,6 +1938,8 @@ def main() -> bool:
                 return _journal_failure(str(exc))
             all_results.append((handler, result))
             newly_executed.add(key)
+            if not (isinstance(result, dict) and result.get("status") == "sent"):
+                log.error(f"payment_not_completed {label}: {result}")
             _outcome_priority, _outcome_body = _outcome_alert(item, result)
             _notify(
                 _outcome_body,

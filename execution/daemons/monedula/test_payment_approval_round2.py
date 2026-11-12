@@ -39,7 +39,7 @@ def test_a_sent_payment_is_confirmed_as_info(env, alerts):
     w, neo = env
     _paid_with(w, neo, {"status": "sent"})
     sent = _kind(alerts, "payment_outcome") or [a for a in alerts if "payment_outcome" in (a["key"] or "")]
-    assert len(sent) == 1 and sent[0]["priority"] == "info"
+    assert len(sent) == 1 and sent[0]["priority"] == "warn"
     assert "SENT" in sent[0]["message"] and "yoga" in sent[0]["message"]
     assert neo.only["payment_key"][:12] in sent[0]["message"]
 

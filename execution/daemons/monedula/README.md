@@ -70,7 +70,7 @@ ruling 2026-11-12). The default and only automatic channel is `payment_approval`
 - **Operator alerts (all deduped per payment key):** a blocker when a record is raised
   (handler, session date, amount, short key), a blocker when it has been
   `awaiting_operator` longer than `MONEDULA_APPROVAL_STALE_HOURS` (default 24), a
-  blocker per held payment naming the reason, and an info when a rejection skips a
+  blocker per held payment naming the reason, and a warning-level notice when a rejection skips a
   session. A coordinator that is not watching therefore shows up as an alert, not
   silence.
 - **A changed record stays blocked.** If the amount, payee, reference, session
@@ -103,7 +103,7 @@ ruling 2026-11-12). The default and only automatic channel is `payment_approval`
   operator's notification channel (the alert path depends on the notifier having a
   working transport; an undeliverable alert is logged at error level). Record the
   result. Until that is shown, sessions can sit in `awaiting` unnoticed.
-- **After payment:** the operator is told the outcome per payment: info when sent;
+- **After payment:** the operator is told the outcome per payment: a warning-level notice when sent (the Notifier drops INFO, so no INFO alert is promised anywhere);
   a blocker when manual action is needed or the transfer did not complete (it is
   never retried automatically). Payee account details are never put in an alert.
 - **Calendars:** every calendar the account can read is scanned, including shared
@@ -300,7 +300,7 @@ chmod +x install.sh
 | `payment_outcome_unknown` | A transfer was attempted and its outcome never recorded (crash or rail error mid-transfer). Held and never retried automatically; check the rail, then resolve by hand |
 | `payment_approval_not_accepted` | A record exists but does not permit payment: not written by the configured approver, approved with no answer, answer does not name the session (a bare yes does not approve), or it does not match the payment. The alert names the reason and the record's short key; fix the SAME record (correct `operator_answer` as the resolver) |
 | `invalid_wise_recipient_id` | A profile's `wise_recipient_id` is not a positive integer (Neotoma profile or env `<PREFIX>_WISE_RECIPIENT_ID`). Stranded alert; payments for it are held until it is fixed |
-| `payment_outcome` (alert key `monedula:payment_outcome:<obligation>`) | After an approved payment ran: info for `sent`; blocker for `manual_required`, failed or unreported, saying it was NOT paid and will not be retried. Pay by hand from the payment profile, then reconcile |
+| `payment_outcome` (alert key `monedula:payment_outcome:<obligation>`) | After an approved payment ran: a warning-level notice for `sent` (the lowest priority the Notifier delivers); blocker for `manual_required`, failed or unreported, saying it was NOT paid and will not be retried. Pay by hand from the payment profile, then reconcile |
 | `payment_terms_changed` | The payee or amount changed after approval, so the approval no longer applies; nothing paid; a fresh request is raised |
 | `payment_profiles_stranded` | Fix the named payment_profile config; Notifier key `monedula:stranded:<fp>` |
 
@@ -341,10 +341,24 @@ failure one layer down.
 ## Consent gate (ateles#554)
 
 The **only** mechanisms that may authorize a payment are an explicit operator
-consent reply: an email reply as described above, or — when Telegram
-break-glass is selected — a Telegram attendance reply, parsed by `_parse_reply`
-(see `test_parse_reply.py` for the accepted forms — a bare "yes" is
-intentionally rejected).
+consent answer, and which one applies depends on the channel:
+
+- **Default (`payment_approval`):** a `payment_approval` record whose `status` is
+  `approved` and whose `operator_answer` names the attended session
+  (`attended <handler>` / `yes <handler>`), both written by the configured
+  approver (`MONEDULA_PAYMENT_APPROVER_SUB` / `_JKT`) and read through their field
+  provenance, and whose bound fields match the payment about to be made. A bare
+  "yes" does not approve. See "Payment consent: per-payment approval record".
+- **Legacy break-glass, only when explicitly selected** with
+  `MONEDULA_CONSENT_CHANNEL=email|telegram`: an email reply as described above, or
+  a Telegram attendance reply, parsed by `_parse_reply` (see `test_parse_reply.py`
+  for the accepted forms; a bare "yes" is intentionally rejected here too).
+
+### Telegram break-glass only
+
+Everything in the rest of this section describes the legacy Telegram and email
+channels. It does not apply to the default `payment_approval` channel, whose
+failures show up as the alerts in the troubleshooting table.
 
 `telegram_poll_approval` returns one of three outcomes:
 
@@ -366,7 +380,7 @@ A channel failure and a decline are deliberately never allowed to look the
 same in the log or in the exit code again — that indistinguishability is
 what let a 0/480 gate run silently for ten weeks (ateles#554).
 
-**Dead-gate alarm.** `MONEDULA_DEAD_GATE_THRESHOLD` (default 3) consecutive
+**Dead-gate alarm (Telegram break-glass only).** `MONEDULA_DEAD_GATE_THRESHOLD` (default 3) consecutive
 channel failures — with no reply landing in between — additionally fire a
 `monedula_dead_consent_gate` escalation at `severity=critical`. Any reply,
 approved or declined, resets the streak: it proves the channel works.
@@ -385,7 +399,11 @@ persist as a dead field on task entities, and no code path may use it to gate
 
 `~/Library/Logs/ateles/monedula.log`
 
-Log events include: `consent_channel_selected`, `consent_request_suppressed`,
+Log events include, for the default channel: `consent_channel_selected`,
+`payment_approval_raised`, `payment_approval_unavailable`,
+`payment_approval_not_accepted`, `payment_not_completed`,
+`payment_preflight_failed`; and for the legacy email channel:
+`consent_request_suppressed`,
 `consent_request_send_failed`, `consent_reply_read_failed`,
 `consent_reply_sender_rejected`, `consent_reply_unauthenticated`,
 `consent_reply_unrecognized`, `consent_email_needs_swarm_mailbox`.
@@ -398,8 +416,10 @@ calendar leg was claimed. Later launchd invocations the same day skip the
 calendar fetch (one-off profiles are still evaluated every tick) — preventing
 double-payment if launchd retries or the machine wakes mid-day.
 
-Local consent mark: `.monedula_consent_email.json` — fingerprint, request
-generation and `sent_at` only; cleared when a pending set ends.
+Local consent mark (legacy email channel only): `.monedula_consent_email.json` —
+fingerprint, request generation and `sent_at` only; cleared when a pending set
+ends. The default channel keeps no such file; its state is the Neotoma
+`payment_approval` record plus the payment journal below.
 
 Payment journal: `.monedula_payment_journal.json` — durable and never cleared
 by the consent flow. Keyed on a hash of the obligation (handler, session,
@@ -423,7 +443,7 @@ Standing rules enforced for every payment Monedula makes (see project `CLAUDE.md
 - **Yoga / therapy tasks are never marked completed.** Only the `due_date` is
   advanced — these are recurring obligations, not one-off tasks.
 - **Payment paths are idempotent.** Guard against double-send (see Idempotency
-  above) on every execution route. On the email consent path that guard is
-  the durable payment journal (`.monedula_payment_journal.json`, see
+  above) on every execution route. On every consent channel, the default
+  `payment_approval` included, that guard is the durable payment journal (`.monedula_payment_journal.json`, see
   Idempotency above): an obligation with a recorded outcome is never paid
   again, and one with intent but no outcome is held, never retried.

@@ -22,12 +22,16 @@ from test_payment_approval import FakeNeotoma, env  # noqa: E402
 from test_payment_approval_authority import _approve, _kind, alerts  # noqa: E402
 from test_session_payments import _event  # noqa: E402
 
+# The daemon's own _notify, captured at import: the shared world fixture replaces
+# monedula._notify with a no-op, which would hide the real Notifier filter.
+_REAL_NOTIFY = monedula._notify
+
 # Placeholder payee data in every shape a free-text error could carry it.
 SPACED = " ".join(["ES91", "2100", "0418", "4502", "0005", "1332"])
 LOWER = "es9121000418450200051332"
 HOLDER = "Jane Q. Payee"
 LEAK = f"Wise /v1/accounts returned no id: {{'name': '{HOLDER}', 'iban': '{SPACED}', 'alt': '{LOWER}'}}"
-FRAGMENTS = ["jane", "payee", "2100", "0418", "9121", "es91", "wise /v1"]
+FRAGMENTS = ["jane", "q. payee", "2100", "0418", "9121", "es91", "wise /v1"]
 
 
 def _blob(alerts) -> str:
@@ -172,6 +176,7 @@ def _real_notifier(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(notifier_mod.neotoma_sink, "record", lambda **k: None)
     monkeypatch.setattr(monedula, "_notifier", n)
+    monkeypatch.setattr(monedula, "_notify", _REAL_NOTIFY)
     return n, delivered
 
 
@@ -188,3 +193,12 @@ def test_the_real_notifier_drops_info_but_delivers_the_sent_alert(env, monkeypat
     w.tick(minutes=15)
     assert any("payment SENT" in m for m in delivered), delivered
     assert len(w.handler.execute_calls) == 1
+
+
+def test_a_rejection_skip_notice_is_delivered_by_the_real_notifier(env, monkeypatch, tmp_path):
+    n, delivered = _real_notifier(monkeypatch, tmp_path)
+    w, neo = env
+    w.tick()
+    neo.resolve(neo.only["payment_key"], "rejected", "no")
+    w.tick(minutes=15)
+    assert any("payment skipped" in m for m in delivered), delivered

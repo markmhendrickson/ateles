@@ -280,13 +280,13 @@ def test_a_held_payment_alert_names_the_payment_reason_and_is_keyed_per_payment(
     assert held[0]["key"].endswith(neo.only["payment_key"])
 
 
-def test_a_rejection_that_skips_a_session_sends_an_info(env, alerts):
+def test_a_rejection_that_skips_a_session_is_notified_at_a_delivered_priority(env, alerts):
     w, neo = env
     w.tick()
     neo.resolve(neo.only["payment_key"], "rejected", "no")
     w.tick(minutes=15)
     skipped = _kind(alerts, "skipped")
-    assert skipped and skipped[0]["priority"] == "info"
+    assert skipped and skipped[0]["priority"] == "warn"
 
 
 # ── Schema registration contract ─────────────────────────────────────────────
