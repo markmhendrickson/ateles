@@ -1232,7 +1232,8 @@ def test_restricted_pending_checkpoint_dry_run_has_zero_effects(record, monkeypa
     result = apis.reissue_held_task_checkpoint("ent_t1", apply=False)
 
     assert result.outcome == "skipped"
-    assert "restricted original scope" in result.detail
+    assert "authenticated_extension" in result.detail
+    assert "review path" in result.detail
     assert record.writes == 0 and record.events == []
 
 
@@ -1283,21 +1284,26 @@ def _claim_unauthenticated_extension(record, checkpoint_id):
     )
 
 
-def test_unknown_checkpoint_beside_a_current_ordinary_one_is_not_fatal(record):
+def test_unknown_checkpoint_beside_a_current_ordinary_one_is_reported_not_fatal(
+    record,
+):
     record.add_task("ent_t1")
-    record.add_checkpoint("ent_odd", "ent_t1", signed=False)
-    _claim_unauthenticated_extension(record, "ent_odd")
+    record.add_checkpoint("ent_eeeeeeeeeeeeeeeeeeeeeeee", "ent_t1", signed=False)
+    _claim_unauthenticated_extension(record, "ent_eeeeeeeeeeeeeeeeeeeeeeee")
     record.add_checkpoint("ent_ordinary", "ent_t1", signed=True)
 
     result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
 
     assert result.outcome == "skipped"
     assert result.checkpoint_id == "ent_ordinary"
+    assert "ent_eeeeeeeeeeeeeeeeeeeeeeee" in result.detail
+    assert "extension_claim_unauthenticated" in result.detail
+    assert "swarm operator" in result.detail
     assert record.writes == 0 and record.events == []
-    assert record.checkpoints["ent_odd"]["snapshot"]["status"] == "awaiting_operator"
+    assert record.checkpoints["ent_eeeeeeeeeeeeeeeeeeeeeeee"]["snapshot"]["status"] == "awaiting_operator"
 
 
-def test_unknown_checkpoint_alone_fails_and_files_nothing(record):
+def test_unknown_checkpoint_alone_fails_with_cause_owner_and_next_step(record):
     record.add_task("ent_t1")
     record.add_checkpoint("ent_odd", "ent_t1", signed=False)
     _claim_unauthenticated_extension(record, "ent_odd")
@@ -1306,4 +1312,7 @@ def test_unknown_checkpoint_alone_fails_and_files_nothing(record):
 
     assert result.outcome == "failed"
     assert result.remaining == ["ent_odd"]
+    assert "extension_claim_unauthenticated" in result.detail
+    assert "re-read or re-file" in result.detail
+    assert "swarm operator" in result.detail
     assert record.writes == 0 and record.events == []

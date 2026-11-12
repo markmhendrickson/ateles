@@ -17,8 +17,10 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from lib.notify import Notifier, Priority  # noqa: E402
 from lib.notify import neotoma_sink as sink  # noqa: E402
 
+NO_SILENCE = {"silence_start": "", "silence_end": "", "timezone": "Europe/Madrid"}
 FAKE_CRED = ("https://neotoma.invalid", "fake-credential-value")
 
 
@@ -99,6 +101,13 @@ def test_level_maps_to_severity_and_tags(on, level, severity):
     assert set(ent) == {"entity_type", "title", "body", "severity", "source_agent", "status", "tags"}
 
 
+def test_every_notifier_priority_reaches_the_sink_in_shadow(monkeypatch):
+    n = Notifier(rubric=NO_SILENCE)
+    for prio in Priority:
+        n.send(f"smoke {prio.value}", priority=prio, handler="test")
+    assert sorted(r["level"] for r in _read("shadow")) == sorted(p.value for p in Priority)
+
+
 # ── dedup key, title ─────────────────────────────────────────────────────────
 
 
@@ -177,6 +186,35 @@ def test_repeats_are_counted_in_the_next_write(on, monkeypatch):
 
 
 # ── clear_dedupe, generations, expiry ────────────────────────────────────────
+
+
+def test_clear_dedupe_resolves_the_stored_entity(on):
+    n = Notifier(rubric=NO_SILENCE)
+    n.send("channel down", priority=Priority.BLOCKER, handler="monedula", dedupe_key="monedula:chan")
+    sink.flush()
+    n.clear_dedupe("monedula:chan")
+    sink.flush()
+    corrections = on.corrections()
+    assert [(c["field"], c["value"]) for c in corrections] == [
+        ("status", "resolved"),
+        ("resolved_at", corrections[1]["value"]),
+    ]
+    assert all(c["entity_id"] == "ent_fake1" for c in corrections)
+
+
+def test_clear_dedupe_after_a_restart_still_resolves(on):
+    sink.record(message="gate failing", level="blocker", handler="apis", dedupe_key="apis:gate")
+    sink.flush()
+    sink._reset_for_tests()  # a restart: only the state files survive
+    Notifier(rubric=NO_SILENCE).clear_dedupe("apis:gate")
+    sink.flush()
+    assert [c["field"] for c in on.corrections()] == ["status", "resolved_at"]
+
+
+def test_clear_dedupe_for_an_unknown_key_writes_nothing(on):
+    Notifier(rubric=NO_SILENCE).clear_dedupe("never-sent")
+    sink.flush()
+    assert on.calls == []
 
 
 def test_recurrence_after_resolve_in_the_same_window_reaches_a_replaying_server(on):
@@ -320,6 +358,15 @@ def test_record_never_raises_when_everything_is_broken(monkeypatch):
     monkeypatch.setenv(sink.DIR_ENV, "/proc/nonexistent/sink")
     sink.record(message="m", level="warn", handler="apis")
     sink.resolve("k")
+
+
+def test_send_does_not_wait_for_a_slow_write(on, monkeypatch):
+    monkeypatch.setattr(sink, "_http_post", FakeHttp(delay=1.0))
+    n = Notifier(rubric=NO_SILENCE)
+    t0 = time.monotonic()
+    n.send("slow sink", priority=Priority.BLOCKER, handler="apis")
+    assert time.monotonic() - t0 < 0.5
+    sink.flush(5)
 
 
 # ── hostile text, secrets ────────────────────────────────────────────────────

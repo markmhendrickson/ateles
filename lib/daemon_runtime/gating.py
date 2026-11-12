@@ -984,19 +984,32 @@ def _body_extension_in_history(observations: list[dict]) -> bool:
     return False
 
 
-def classify_checkpoint_effect_scope(
+# Why a scope is what it is.  Reason codes name the cause so a held checkpoint
+# can say what happened and who clears it; they never change a decision.
+REASON_AUTHENTICATED_ORDINARY = "authenticated_ordinary"
+REASON_AUTHENTICATED_EXTENSION = "authenticated_extension"
+REASON_NO_RESTRICTION_EVER = "no_restriction_in_history"
+REASON_RECORD_UNAVAILABLE = "record_unavailable"
+REASON_HISTORY_UNREADABLE = "history_unreadable"
+REASON_EXTENSION_EDITED_AWAY = "extension_in_history_envelope_changed"
+REASON_EXTENSION_UNAUTHENTICATED = "extension_claim_unauthenticated"
+REASON_READER_ERROR = "scope_reader_error"
+
+
+def classify_checkpoint_effect_scope_with_reason(
     checkpoint_record: dict | None,
     authority: dict | None,
     observations: list[dict] | None = None,
-) -> str:
-    """Judge the ORIGINAL scope a checkpoint was authenticated with.
+) -> tuple[str, str]:
+    """Judge the ORIGINAL scope a checkpoint was authenticated with, and why.
 
-    Returns ``ordinary`` (authenticated envelope, no extension), ``legacy`` (no
-    envelope was ever written, or no observation of ``body`` ever carried an
-    extension: the supported migration/reissue population), ``restricted``
-    (authenticated envelope with a restrictive extension) or ``unknown`` (the
-    record or its observation history cannot be read, or any observation of
-    ``body`` ever carried an extension that does not authenticate now).
+    Returns ``(scope, reason_code)``.  Scopes: ``ordinary`` (authenticated
+    envelope, no extension), ``legacy`` (no envelope was ever written, or no
+    observation of ``body`` ever carried an extension: the supported
+    migration/reissue population), ``restricted`` (authenticated envelope with
+    a restrictive extension) or ``unknown`` (the record or its observation
+    history cannot be read, or any observation of ``body`` ever carried an
+    extension that does not authenticate now).
 
     When the envelope authenticates, the scope is the immutable creation
     observation's.  When it does not (a later observation edited ``body`` or
@@ -1005,15 +1018,15 @@ def classify_checkpoint_effect_scope(
     read (``observations is None``) is ``unknown``.
     """
     if not isinstance(checkpoint_record, dict):
-        return SCOPE_UNKNOWN
+        return SCOPE_UNKNOWN, REASON_RECORD_UNAVAILABLE
     if isinstance(authority, dict):
         if set(authority) - CHECKPOINT_ORDINARY_ENVELOPE_FIELDS:
-            return SCOPE_RESTRICTED
-        return SCOPE_ORDINARY
+            return SCOPE_RESTRICTED, REASON_AUTHENTICATED_EXTENSION
+        return SCOPE_ORDINARY, REASON_AUTHENTICATED_ORDINARY
     if not isinstance(observations, list):
-        return SCOPE_UNKNOWN
+        return SCOPE_UNKNOWN, REASON_HISTORY_UNREADABLE
     if _body_extension_in_history(observations):
-        return SCOPE_UNKNOWN
+        return SCOPE_UNKNOWN, REASON_EXTENSION_EDITED_AWAY
     encoded = _snapshot_of(checkpoint_record).get("body")
     if isinstance(encoded, str):
         try:
@@ -1024,8 +1037,49 @@ def classify_checkpoint_effect_scope(
             isinstance(payload, dict)
             and set(payload) - CHECKPOINT_ORDINARY_ENVELOPE_FIELDS
         ):
-            return SCOPE_UNKNOWN
-    return SCOPE_LEGACY
+            return SCOPE_UNKNOWN, REASON_EXTENSION_UNAUTHENTICATED
+    return SCOPE_LEGACY, REASON_NO_RESTRICTION_EVER
+
+
+def classify_checkpoint_effect_scope(
+    checkpoint_record: dict | None,
+    authority: dict | None,
+    observations: list[dict] | None = None,
+) -> str:
+    """The scope alone; see ``classify_checkpoint_effect_scope_with_reason``."""
+    return classify_checkpoint_effect_scope_with_reason(
+        checkpoint_record, authority, observations
+    )[0]
+
+
+def checkpoint_effect_scope_with_reason(
+    checkpoint_id: str,
+    checkpoint_record: dict | None = None,
+    *,
+    read_authorization=None,
+    read_observations=None,
+) -> tuple[str, str]:
+    """Read a checkpoint and classify its original effect scope, with the cause."""
+    record = (
+        checkpoint_record
+        if isinstance(checkpoint_record, dict)
+        else fetch_checkpoint_record(checkpoint_id)
+    )
+    if not isinstance(record, dict):
+        return SCOPE_UNKNOWN, REASON_RECORD_UNAVAILABLE
+    reader = read_authorization or read_authenticated_checkpoint_authorization
+    try:
+        authority = reader(checkpoint_id, record)
+        observations = None
+        if not isinstance(authority, dict):
+            observations = (read_observations or fetch_entity_observations_strict)(
+                checkpoint_id
+            )
+    except Exception:  # noqa: BLE001 - an unreadable scope is an unknown one
+        return SCOPE_UNKNOWN, REASON_READER_ERROR
+    return classify_checkpoint_effect_scope_with_reason(
+        record, authority, observations
+    )
 
 
 def checkpoint_effect_scope(
@@ -1036,24 +1090,12 @@ def checkpoint_effect_scope(
     read_observations=None,
 ) -> str:
     """Read a checkpoint and classify its original effect scope."""
-    record = (
-        checkpoint_record
-        if isinstance(checkpoint_record, dict)
-        else fetch_checkpoint_record(checkpoint_id)
-    )
-    if not isinstance(record, dict):
-        return SCOPE_UNKNOWN
-    reader = read_authorization or read_authenticated_checkpoint_authorization
-    try:
-        authority = reader(checkpoint_id, record)
-        observations = None
-        if not isinstance(authority, dict):
-            observations = (read_observations or fetch_entity_observations_strict)(
-                checkpoint_id
-            )
-    except Exception:  # noqa: BLE001 - an unreadable scope is an unknown one
-        return SCOPE_UNKNOWN
-    return classify_checkpoint_effect_scope(record, authority, observations)
+    return checkpoint_effect_scope_with_reason(
+        checkpoint_id,
+        checkpoint_record,
+        read_authorization=read_authorization,
+        read_observations=read_observations,
+    )[0]
 
 
 def checkpoint_scope_permits_ordinary_effects(scope: str) -> bool:
