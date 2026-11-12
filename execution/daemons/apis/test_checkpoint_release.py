@@ -266,6 +266,13 @@ def release_store(monkeypatch, tmp_path):
     monkeypatch.setattr(
         gating_module, "fetch_entity_user_id", REAL_FETCH_ENTITY_USER_ID
     )
+    # The scope gate reads the observation history strictly; serve the same
+    # observations the fixture serves to every other reader.
+    monkeypatch.setattr(
+        apis,
+        "fetch_entity_observations_strict",
+        lambda entity_id: list(gating_module._fetch_entity_observations(entity_id)),
+    )
     policy = ExecutionPolicy(
         entity_id="default",
         low_blast_action_types=frozenset({"local_edit"}),
@@ -2816,3 +2823,598 @@ async def test_replay_of_one_checkpoint_release_writes_routed_once(
     assert [w for w in writes if w[0] == "routed"] == [
         ("routed", f"approved-{brief_id}")
     ]
+
+
+# ── Original authenticated effect scope (restrictive envelope extension) ──────
+#
+# These tests drive the REAL sinks (status transitions, fallback stamp, host
+# denial marker, replacement filing) against a stateful stand-in for Neotoma's
+# HTTP surface, so they assert what actually changed rather than which helper
+# was called.  Only the checkpoint store call is replaced, by a stand-in that
+# persists a fresh ordinary checkpoint into the same store.
+
+PRODUCER_JKT = "P" * 43
+EXTENSION = {"effect_scope": "review_request_only"}
+
+
+class _FakeNeotoma:
+    """Entities, observations and corrections behind gating's httpx calls."""
+
+    def __init__(self):
+        self.entities: dict[str, dict] = {}
+        self.observations: dict[str, list[dict]] = {}
+        self.corrections: list[dict] = []
+        self.fail_fields: set[str] = set()
+        self.stored: list[str] = []
+
+    def _response(self, method, url, payload, status=200):
+        import httpx
+
+        return httpx.Response(
+            status, json=payload, request=httpx.Request(method, url)
+        )
+
+    def get(self, url, headers=None, params=None, timeout=None):
+        path = url.split("/entities/", 1)[1]
+        if path.endswith("/observations"):
+            entity_id = path[: -len("/observations")]
+            rows = self.observations.get(entity_id, [])
+            limit, offset = params["limit"], params["offset"]
+            return self._response(
+                "GET",
+                url,
+                {
+                    "observations": rows[offset : offset + limit],
+                    "total": len(rows),
+                    "limit": limit,
+                    "offset": offset,
+                },
+            )
+        record = self.entities.get(path)
+        if record is None:
+            return self._response("GET", url, {"error": "missing"}, status=404)
+        return self._response("GET", url, record)
+
+    def post(self, url, headers=None, json=None, content=None, timeout=None):
+        body = json
+        field = body["field"]
+        if field in self.fail_fields:
+            return self._response("POST", url, {"error": "down"}, status=500)
+        record = self.entities[body["entity_id"]]
+        record["snapshot"][field] = body["value"]
+        self.corrections.append({"entity_id": body["entity_id"], "field": field})
+        return self._response("POST", url, {"snapshot": dict(record["snapshot"])})
+
+    def status(self, entity_id):
+        return self.entities[entity_id]["snapshot"].get("status")
+
+
+@pytest.fixture
+def neotoma(monkeypatch, tmp_path):
+    fake = _FakeNeotoma()
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "synthetic-token")
+    monkeypatch.setattr(gating_module, "NEOTOMA_BASE_URL", "https://neotoma.test")
+    monkeypatch.setattr(gating_module, "CHECKPOINT_PRODUCER_JKT", PRODUCER_JKT)
+    monkeypatch.setattr(gating_module.httpx, "get", fake.get)
+    monkeypatch.setattr(gating_module.httpx, "post", fake.post)
+    monkeypatch.setenv("APIS_CHECKPOINT_DENIAL_DIR", str(tmp_path / "denials"))
+    policy = ExecutionPolicy(
+        entity_id="default",
+        low_blast_action_types=frozenset({"local_edit"}),
+        high_blast_action_types=frozenset(),
+        loaded=True,
+    )
+    monkeypatch.setattr(apis, "resolve_policy_for_agent", lambda skill: policy)
+
+    async def no_dispatch(*args, **kwargs):
+        pytest.fail("a held or denied checkpoint must never dispatch work")
+
+    monkeypatch.setattr(apis, "dispatch_task", no_dispatch)
+
+    def write_brief(**kwargs):
+        fake.stored.append(kwargs["task_entity_id"])
+        new_id = f"ent_replacement_{len(fake.stored)}"
+        _add_checkpoint(fake, new_id, kwargs["task_entity_id"], policy, status="awaiting_operator")
+        return new_id
+
+    monkeypatch.setattr(apis, "write_checkpoint_brief", write_brief)
+    fake.policy = policy
+    fake.write_brief = write_brief
+    _add_task(fake, "ent_task_1")
+    return fake
+
+
+def _add_task(fake, task_id, **over):
+    fake.entities[task_id] = {
+        "entity_id": task_id,
+        "entity_type": "task",
+        "observation_count": 1,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "snapshot": {
+            "status": "awaiting_approval",
+            "assigned_to": "cicada",
+            "title": "Implement the bounded change",
+            "body": "Engineering work.",
+            "action_type": "local_edit",
+            "confidence": 0.3,
+            **over,
+        },
+    }
+    fake.observations[task_id] = [{"id": f"obs-{task_id}", "user_id": TEST_OWNER}]
+
+
+def _add_checkpoint(
+    fake,
+    checkpoint_id,
+    task_id,
+    policy,
+    *,
+    status="approved",
+    extension=None,
+    authenticated=True,
+    legacy=False,
+):
+    """A checkpoint whose creation observation carries (or lacks) an envelope."""
+    task = fake.entities[task_id]
+    decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+    snapshot = {
+        "status": status,
+        "resolved_dispatched": False,
+        "task_entity_id": task_id,
+        "policy_entity_id": policy.entity_id,
+        "gate_action": decision.action.value,
+        "blast_radius": decision.blast_radius.value,
+        "handler": "apis",
+        "title": "Approve",
+    }
+    record = {
+        "entity_id": checkpoint_id,
+        "entity_type": CHECKPOINT_TYPE,
+        "observation_count": 1,
+        "last_observation_at": "2026-09-21T00:00:00Z",
+        "entity_version": "v1",
+        "snapshot": snapshot,
+    }
+    rows = [{"id": "obs-create", "user_id": TEST_OWNER}]
+    if not legacy:
+        payload = json.loads(
+            build_checkpoint_authorization_envelope(
+                task_record=task,
+                policy=policy,
+                decision=decision,
+                action_type="local_edit",
+                user_id=TEST_OWNER,
+                required_approver_jkt=TEST_RESOLVER_JKT,
+                producer_jkt=PRODUCER_JKT,
+            )
+        )
+        payload.update(extension or {})
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        snapshot["body"] = encoded
+        record["provenance"] = {
+            f: "obs-create"
+            for f in (
+                "body",
+                "task_entity_id",
+                "policy_entity_id",
+                "blast_radius",
+                "gate_action",
+                "handler",
+            )
+        }
+        rows[0].update(
+            {
+                "fields": {"body": encoded},
+                "provenance": {
+                    "agent_sub": "apis@ateles-swarm",
+                    "agent_thumbprint": (
+                        PRODUCER_JKT if authenticated else "Q" * 43
+                    ),
+                    "attribution_tier": "software",
+                },
+            }
+        )
+    fake.entities[checkpoint_id] = record
+    fake.observations[checkpoint_id] = rows
+    return record
+
+
+def _assert_untouched(fake, checkpoint_id, status, tmp_path):
+    assert fake.status(checkpoint_id) == status
+    assert fake.entities[checkpoint_id]["snapshot"]["resolved_dispatched"] is False
+    assert fake.corrections == [], "a held checkpoint must take no consuming write"
+    assert fake.stored == [], "a held checkpoint must file no replacement"
+    assert not (tmp_path / "denials").exists() or not list(
+        (tmp_path / "denials").iterdir()
+    ), "a held checkpoint must leave no host denial marker"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["task_kind_operator_only", "task_changed"])
+async def test_restricted_scope_survives_current_task_drift(
+    neotoma, tmp_path, drift
+):
+    _add_checkpoint(
+        neotoma, "ent_cp", "ent_task_1", neotoma.policy, extension=EXTENSION
+    )
+    if drift == "task_kind_operator_only":
+        neotoma.entities["ent_task_1"]["snapshot"]["action_type"] = "operator_only"
+    else:
+        neotoma.entities["ent_task_1"]["snapshot"]["body"] = "edited after approval"
+
+    snapshot = neotoma.entities["ent_cp"]["snapshot"]
+    consumed = await apis.handle_checkpoint_brief("ent_cp", snapshot, _Notifier())
+
+    assert consumed is False
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_restricted_scope_survives_invalid_rejection(neotoma, tmp_path):
+    _add_checkpoint(
+        neotoma,
+        "ent_cp",
+        "ent_task_1",
+        neotoma.policy,
+        status="rejected",
+        extension=EXTENSION,
+    )
+    snapshot = neotoma.entities["ent_cp"]["snapshot"]
+
+    consumed = await apis.handle_checkpoint_brief("ent_cp", snapshot, _Notifier())
+
+    assert consumed is False
+    _assert_untouched(neotoma, "ent_cp", "rejected", tmp_path)
+    assert neotoma.entities["ent_task_1"]["snapshot"]["status"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value", [("gate_action", "bogus"), ("blast_radius", "never")]
+)
+async def test_restricted_scope_survives_unknown_gate_or_blast(
+    neotoma, tmp_path, field, value
+):
+    _add_checkpoint(
+        neotoma, "ent_cp", "ent_task_1", neotoma.policy, extension=EXTENSION
+    )
+    neotoma.entities["ent_cp"]["snapshot"][field] = value
+    snapshot = neotoma.entities["ent_cp"]["snapshot"]
+
+    consumed = await apis.handle_checkpoint_brief("ent_cp", snapshot, _Notifier())
+
+    assert consumed is False
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_extension_claim_is_held_not_ordinary(
+    neotoma, tmp_path
+):
+    """An envelope that claims a restriction but fails authentication is unknown."""
+    _add_checkpoint(
+        neotoma,
+        "ent_cp",
+        "ent_task_1",
+        neotoma.policy,
+        extension=EXTENSION,
+        authenticated=False,
+    )
+    neotoma.entities["ent_cp"]["snapshot"]["gate_action"] = "bogus"
+    snapshot = neotoma.entities["ent_cp"]["snapshot"]
+
+    consumed = await apis.handle_checkpoint_brief("ent_cp", snapshot, _Notifier())
+
+    assert consumed is False
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+def test_restricted_scope_survives_notifier_failure_and_omitted_context(
+    neotoma, tmp_path
+):
+    _add_checkpoint(
+        neotoma, "ent_cp", "ent_task_1", neotoma.policy, extension=EXTENSION
+    )
+
+    class _BrokenNotifier:
+        def send(self, *args, **kwargs):
+            raise RuntimeError("no transport")
+
+    # Called without the caller context handle_checkpoint_brief would carry
+    # (no authorization, no snapshot): the sink qualifies the scope itself.
+    assert (
+        apis._require_fresh_release_authority(
+            "ent_cp",
+            task_id="ent_task_1",
+            task_snapshot={},
+            notifier=_BrokenNotifier(),
+            reason="task changed",
+        )
+        is None
+    )
+    apis._deny_checkpoint_release("ent_cp", reason="anything")
+    assert apis._persist_checkpoint_denial("ent_cp") is False
+    for sink in (
+        gating_module.close_checkpoint_without_release,
+        gating_module.require_fresh_checkpoint_approval,
+        gating_module.supersede_checkpoint,
+    ):
+        assert sink("ent_cp", handler="apis", reason="x") is False
+    assert apis.migrate_checkpoint_authority("ent_cp", notifier=_Notifier()) is None
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+def test_unreadable_checkpoint_scope_takes_no_consuming_write(neotoma, tmp_path):
+    # No such checkpoint: the scope cannot be qualified.
+    apis._deny_checkpoint_release("ent_missing", reason="x")
+    assert apis._persist_checkpoint_denial("ent_missing") is False
+    assert neotoma.corrections == []
+    assert not (tmp_path / "denials").exists()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_replacement_readback_and_retirement_still_happen(
+    neotoma, tmp_path
+):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy)
+    neotoma.entities["ent_task_1"]["snapshot"]["body"] = "edited after approval"
+    snapshot = neotoma.entities["ent_cp"]["snapshot"]
+    notifier = _Notifier()
+
+    released = await apis.handle_checkpoint_brief("ent_cp", snapshot, notifier)
+
+    assert released is False
+    assert neotoma.stored == ["ent_task_1"]
+    replacement = neotoma.entities["ent_replacement_1"]["snapshot"]
+    assert replacement["status"] == "awaiting_operator"
+    assert neotoma.status("ent_cp") == "approved_requires_fresh_approval"
+    assert any("Fresh approval required" in m for m in notifier.sent)
+
+
+def test_failed_replacement_leaves_ordinary_approval_retriable(
+    neotoma, monkeypatch, tmp_path
+):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy)
+    monkeypatch.setattr(apis, "write_checkpoint_brief", lambda **kw: None)
+    notifier = _Notifier()
+
+    result = apis._require_fresh_release_authority(
+        "ent_cp",
+        task_id="ent_task_1",
+        task_snapshot=neotoma.entities["ent_task_1"]["snapshot"],
+        notifier=notifier,
+        reason="task changed",
+    )
+
+    assert result is None
+    assert neotoma.status("ent_cp") == "approved"
+    assert neotoma.corrections == []
+    assert any("retry" in m.lower() for m in notifier.sent)
+
+
+def test_same_id_replacement_is_not_retired(neotoma, monkeypatch):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy)
+    monkeypatch.setattr(apis, "write_checkpoint_brief", lambda **kw: "ent_cp")
+
+    result = apis._require_fresh_release_authority(
+        "ent_cp",
+        task_id="ent_task_1",
+        task_snapshot=neotoma.entities["ent_task_1"]["snapshot"],
+        notifier=_Notifier(),
+        reason="x",
+    )
+
+    assert result is None
+    assert neotoma.status("ent_cp") == "approved"
+    assert neotoma.corrections == []
+
+
+@pytest.mark.asyncio
+async def test_ordinary_unauthenticated_rejection_still_closes(neotoma):
+    _add_checkpoint(
+        neotoma, "ent_cp", "ent_task_1", neotoma.policy, status="rejected"
+    )
+    snapshot = neotoma.entities["ent_cp"]["snapshot"]
+
+    consumed = await apis.handle_checkpoint_brief("ent_cp", snapshot, _Notifier())
+
+    assert consumed is False  # no authenticated resolver: nothing is declined
+    assert neotoma.status("ent_cp") == "approved_no_release"
+    assert neotoma.entities["ent_task_1"]["snapshot"]["status"] == "awaiting_approval"
+
+
+def test_ordinary_forced_fallback_stamps_then_writes_host_marker(
+    neotoma, tmp_path
+):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy)
+    neotoma.fail_fields = {"status"}  # the purpose-built close cannot land
+
+    apis._deny_checkpoint_release("ent_cp", reason="x")
+
+    assert neotoma.entities["ent_cp"]["snapshot"]["resolved_dispatched"] is True
+    assert neotoma.status("ent_cp") == "approved"
+
+    _add_checkpoint(neotoma, "ent_cp2", "ent_task_1", neotoma.policy)
+    neotoma.fail_fields = {"status", "resolved_dispatched"}  # both writes fail
+
+    apis._deny_checkpoint_release("ent_cp2", reason="x")
+
+    assert apis._checkpoint_denial_persisted("ent_cp2") is True
+    assert list((tmp_path / "denials").iterdir())
+
+
+def test_supported_legacy_migration_still_replaces_and_retires(neotoma):
+    _add_checkpoint(neotoma, "ent_legacy", "ent_task_1", neotoma.policy, legacy=True)
+
+    replacement = apis.migrate_checkpoint_authority(
+        "ent_legacy", notifier=_Notifier()
+    )
+
+    assert replacement == "ent_replacement_1"
+    assert neotoma.status("ent_legacy") == "approved_requires_fresh_approval"
+    assert neotoma.entities[replacement]["snapshot"]["status"] == "awaiting_operator"
+    assert neotoma.entities["ent_legacy"]["snapshot"]["resolved_dispatched"] is False
+
+
+# ── A later edit of a protected field cannot downgrade a restricted scope ────
+
+def _edit_field(fake, checkpoint_id, field, value):
+    """A later observation sets ``field``: provenance moves, creation stays."""
+    record = fake.entities[checkpoint_id]
+    obs_id = f"obs-edit-{field}-{len(fake.observations[checkpoint_id])}"
+    fake.observations[checkpoint_id].append(
+        {"id": obs_id, "user_id": TEST_OWNER, "fields": {field: value}}
+    )
+    record["provenance"][field] = obs_id
+    if value is None:
+        record["snapshot"].pop(field, None)
+    else:
+        record["snapshot"][field] = value
+
+
+def _stripped_body(fake, checkpoint_id):
+    payload = json.loads(fake.entities[checkpoint_id]["snapshot"]["body"])
+    for key in EXTENSION:
+        payload.pop(key)
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+_EDITS = [
+    "ordinary_fields_json",
+    "plain_text",
+    "invalid_json",
+    "removed",
+    "handler",
+    "blast_radius",
+    "gate_action",
+]
+
+
+def _downgrade(fake, checkpoint_id, edit):
+    if edit == "ordinary_fields_json":
+        _edit_field(fake, checkpoint_id, "body", _stripped_body(fake, checkpoint_id))
+    elif edit == "plain_text":
+        _edit_field(fake, checkpoint_id, "body", "reviewed, nothing special")
+    elif edit == "invalid_json":
+        _edit_field(fake, checkpoint_id, "body", '{"version": 2, ')
+    elif edit == "removed":
+        _edit_field(fake, checkpoint_id, "body", None)
+    else:
+        original = fake.entities[checkpoint_id]["snapshot"][edit]
+        _edit_field(fake, checkpoint_id, edit, str(original))
+
+
+@pytest.fixture
+def downgraded(neotoma, monkeypatch):
+    def build(edit, status="approved"):
+        _add_checkpoint(
+            neotoma,
+            "ent_cp",
+            "ent_task_1",
+            neotoma.policy,
+            status=status,
+            extension=EXTENSION,
+        )
+        _downgrade(neotoma, "ent_cp", edit)
+        return neotoma
+
+    return build
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", _EDITS)
+@pytest.mark.parametrize("status", ["approved", "rejected"])
+async def test_edited_restricted_checkpoint_is_not_consumed_by_the_consumer(
+    downgraded, tmp_path, edit, status
+):
+    fake = downgraded(edit, status=status)
+    snapshot = fake.entities["ent_cp"]["snapshot"]
+
+    consumed = await apis.handle_checkpoint_brief("ent_cp", snapshot, _Notifier())
+
+    assert consumed is False
+    _assert_untouched(fake, "ent_cp", status, tmp_path)
+
+
+@pytest.mark.parametrize("edit", _EDITS)
+def test_edited_restricted_checkpoint_is_not_migrated(downgraded, tmp_path, edit):
+    fake = downgraded(edit)
+
+    assert apis.migrate_checkpoint_authority("ent_cp", notifier=_Notifier()) is None
+    _assert_untouched(fake, "ent_cp", "approved", tmp_path)
+
+
+@pytest.mark.parametrize("edit", _EDITS)
+def test_edited_restricted_checkpoint_is_not_replaced_or_retired_by_reissue(
+    downgraded, monkeypatch, tmp_path, edit
+):
+    fake = downgraded(edit, status="awaiting_operator")
+    fake.entities["ent_task_1"]["snapshot"]["status"] = "awaiting_approval"
+    monkeypatch.setattr(
+        apis, "checkpoints_for_task", lambda task_id, strict=False: [fake.entities["ent_cp"]]
+    )
+
+    result = apis.reissue_held_task_checkpoint("ent_task_1", apply=True)
+
+    assert result.outcome == "failed"
+    _assert_untouched(fake, "ent_cp", "awaiting_operator", tmp_path)
+
+
+@pytest.mark.parametrize("edit", _EDITS)
+def test_edited_restricted_checkpoint_takes_no_effect_from_any_sink(
+    downgraded, tmp_path, edit
+):
+    fake = downgraded(edit)
+
+    assert (
+        apis._require_fresh_release_authority(
+            "ent_cp",
+            task_id="ent_task_1",
+            task_snapshot=fake.entities["ent_task_1"]["snapshot"],
+            notifier=_Notifier(),
+            reason="x",
+        )
+        is None
+    )
+    apis._deny_checkpoint_release("ent_cp", reason="x")
+    assert apis._persist_checkpoint_denial("ent_cp") is False
+    for sink in (
+        gating_module.close_checkpoint_without_release,
+        gating_module.require_fresh_checkpoint_approval,
+        gating_module.supersede_checkpoint,
+    ):
+        assert sink("ent_cp", handler="apis", reason="x") is False
+    _assert_untouched(fake, "ent_cp", "approved", tmp_path)
+
+
+def test_unreadable_observation_history_is_unknown_not_legacy(
+    neotoma, monkeypatch, tmp_path
+):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy, legacy=True)
+    monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda cid: None)
+
+    apis._deny_checkpoint_release("ent_cp", reason="x")
+
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+def test_envelope_field_set_covers_everything_the_builder_emits():
+    task = {"entity_id": "ent_t", "snapshot": {"status": "x"}}
+    policy = ExecutionPolicy(entity_id="p", loaded=True)
+    for unscored in (False, True):
+        decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+        if unscored:
+            import dataclasses
+
+            decision = dataclasses.replace(decision, confidence_unscored=True)
+        payload = json.loads(
+            build_checkpoint_authorization_envelope(
+                task_record=task,
+                policy=policy,
+                decision=decision,
+                action_type="local_edit",
+                user_id=TEST_OWNER,
+                required_approver_jkt=TEST_RESOLVER_JKT,
+            )
+        )
+        assert set(payload) <= gating_module.CHECKPOINT_ORDINARY_ENVELOPE_FIELDS

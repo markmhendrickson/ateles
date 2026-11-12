@@ -531,6 +531,25 @@ def test_session_owner_is_left_as_filed_and_status_untouched(_world):
     assert snapshot["status"] == "pending" and "blocked_reason" not in snapshot
 
 
+@pytest.mark.parametrize(
+    "owner",
+    [
+        "constara (Claude local_77de7679)",
+        "Logik client lead \u2014 Claude Code (from 2026-11-12, under ateles inbox "
+        "local_117abff0-4498-445c-858d-2c9da04b86a1); previously Codex 01a186bf",
+    ],
+)
+def test_local_session_id_owner_with_no_assignee_is_left_as_filed(_world, owner):
+    # Reproduces prod: these owners were written BLOCKED
+    # "no route/owner (tags=[], assigned_to=None)" while a session ran them.
+    n = _Notifier()
+    snapshot = {"title": "Draft the launch post", "owner": owner, "tags": [],
+                "status": "pending"}
+    _dispatch_with(snapshot, n)
+    _left_as_filed(_world, n)
+    assert snapshot["status"] == "pending" and "blocked_reason" not in snapshot
+
+
 def test_session_owner_with_guessable_words_is_not_gated_or_routed(_world):
     n = _Notifier()
     _dispatch_with({"title": "Reconcile the payments ledger", "body": "payments wage",
@@ -579,6 +598,9 @@ def test_person_assignee_with_session_owner_is_still_human_owned(_world):
         {"assigned_to": "operator session notes"},
         {"owner": "Claude Martin"},
         {"owner": "Session Bank"},
+        # Positive controls for the `local` marker: a word, not a session id.
+        {"owner": "local clinic"},
+        {"owner": "Claude local office"},
     ],
 )
 def test_other_owners_still_block_and_page(_world, snapshot):

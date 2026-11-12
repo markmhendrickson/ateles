@@ -46,6 +46,10 @@ SESSIONS = [
     "codex_resume_audit",
     "Foundation coordinator 0a1b2c3d-1111",
     "theodore session (Claude Code)",
+    "local_117abff0-4498-445c-858d-2c9da04b86a1",
+    "constara (Claude local_77de7679)",
+    "Logik client lead — Claude Code (from 2026-11-12, under ateles inbox "
+    "local_117abff0-4498-445c-858d-2c9da04b86a1); previously Codex 01a186bf",
 ]
 
 # A session verdict silences the dispatcher's only escalation, so a person, a
@@ -70,6 +74,12 @@ SINGLE_MARKER_WORD_IS_NOT_A_SESSION = [
     "coordinator facade",
     "chat decade",
     "root facade",
+    # `local` is a session marker only with an id.
+    "local",
+    "local facade",
+    "local clinic",
+    "Claude local office",
+    "local 2026",
 ]
 
 NOT_SESSIONS = [
