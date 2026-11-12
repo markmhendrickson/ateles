@@ -933,6 +933,98 @@ def read_authenticated_checkpoint_authorization(
     return payload
 
 
+# Every field the ordinary envelope builder emits.  An authenticated envelope
+# that carries anything else is a restrictive extension: its producer narrowed
+# what the approval may do, so none of the ordinary consuming effects (close,
+# replace, retire, fallback stamp, denial marker) may be taken on it.
+CHECKPOINT_ORDINARY_ENVELOPE_FIELDS = frozenset(
+    {
+        "version",
+        "producer",
+        "producer_jkt",
+        "task_entity_id",
+        "task_revision",
+        "task_observation_count",
+        "task_last_observation_at",
+        "user_id",
+        "required_approver_sub",
+        "required_approver_jkt",
+        "action_type",
+        "policy_entity_id",
+        "policy_revision",
+        "gate_action",
+        "blast_radius",
+        "confidence",
+        "confidence_unscored",
+    }
+)
+
+SCOPE_ORDINARY = "ordinary"
+SCOPE_LEGACY = "legacy"
+SCOPE_RESTRICTED = "restricted"
+SCOPE_UNKNOWN = "unknown"
+
+
+def classify_checkpoint_effect_scope(
+    checkpoint_record: dict | None, authority: dict | None
+) -> str:
+    """Judge the ORIGINAL scope a checkpoint was authenticated with.
+
+    Returns ``ordinary`` (authenticated envelope, no extension), ``legacy`` (no
+    envelope at all, or an unauthenticated one with no extension: the supported
+    migration/reissue population), ``restricted`` (authenticated envelope with a
+    restrictive extension) or ``unknown`` (the record is unavailable, or an
+    envelope carries an extension that could not be authenticated).  The scope
+    is read only from the immutable creation observation, never from the
+    current task, so a later kind change, invalid resolution or omitted caller
+    context cannot widen it.
+    """
+    if not isinstance(checkpoint_record, dict):
+        return SCOPE_UNKNOWN
+    encoded = _snapshot_of(checkpoint_record).get("body")
+    if isinstance(authority, dict):
+        if set(authority) - CHECKPOINT_ORDINARY_ENVELOPE_FIELDS:
+            return SCOPE_RESTRICTED
+        return SCOPE_ORDINARY
+    if not isinstance(encoded, str):
+        return SCOPE_LEGACY
+    try:
+        payload = json.loads(encoded)
+    except (TypeError, ValueError):
+        return SCOPE_LEGACY
+    if isinstance(payload, dict) and set(payload) - CHECKPOINT_ORDINARY_ENVELOPE_FIELDS:
+        # Claims a restriction we could not authenticate: neither ordinary nor
+        # provably legacy, so no consuming effect.
+        return SCOPE_UNKNOWN
+    return SCOPE_LEGACY
+
+
+def checkpoint_effect_scope(
+    checkpoint_id: str,
+    checkpoint_record: dict | None = None,
+    *,
+    read_authorization=None,
+) -> str:
+    """Read a checkpoint and classify its original effect scope."""
+    record = (
+        checkpoint_record
+        if isinstance(checkpoint_record, dict)
+        else fetch_checkpoint_record(checkpoint_id)
+    )
+    if not isinstance(record, dict):
+        return SCOPE_UNKNOWN
+    reader = read_authorization or read_authenticated_checkpoint_authorization
+    try:
+        authority = reader(checkpoint_id, record)
+    except Exception:  # noqa: BLE001 - an unreadable scope is an unknown one
+        return SCOPE_UNKNOWN
+    return classify_checkpoint_effect_scope(record, authority)
+
+
+def checkpoint_scope_permits_ordinary_effects(scope: str) -> bool:
+    return scope in (SCOPE_ORDINARY, SCOPE_LEGACY)
+
+
 def read_authenticated_checkpoint_resolution(
     checkpoint_id: str,
     checkpoint_record: dict,
@@ -1640,6 +1732,15 @@ def _transition_checkpoint_status(
     idempotency_label: str,
 ) -> bool:
     """Write and read back a terminal/non-releasable checkpoint status."""
+    scope = checkpoint_effect_scope(checkpoint_entity_id)
+    if not checkpoint_scope_permits_ordinary_effects(scope):
+        log.warning(
+            "[gating] checkpoint %s original scope is %s - not transitioning to %s",
+            checkpoint_entity_id,
+            scope,
+            status,
+        )
+        return False
     if not NEOTOMA_BEARER_TOKEN:
         log.warning(
             "[gating] no bearer token — cannot transition checkpoint to %s", status

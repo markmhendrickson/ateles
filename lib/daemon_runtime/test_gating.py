@@ -2185,3 +2185,77 @@ def test_missing_action_type_under_never_default_gets_the_unclassified_reason():
         assert d.reason.startswith("unclassified action type (none declared)")
         assert "execution policy does not classify it" in d.reason
         assert "operator-only" not in d.reason
+
+
+# ── Original checkpoint effect scope ──────────────────────────────────────────
+
+
+def _record_with_body(body):
+    return {"entity_id": "ent_cp", "snapshot": {"status": "approved", "body": body}}
+
+
+def _ordinary_authority():
+    return {k: "x" for k in gating_module.CHECKPOINT_ORDINARY_ENVELOPE_FIELDS}
+
+
+@pytest.mark.parametrize(
+    ("record", "authority", "expected"),
+    [
+        (None, None, "unknown"),
+        ({"entity_id": "ent_cp", "snapshot": {"status": "approved"}}, None, "legacy"),
+        (_record_with_body("not json"), None, "legacy"),
+        (_record_with_body('{"version": 2}'), None, "legacy"),
+        (_record_with_body("{}"), _ordinary_authority(), "ordinary"),
+        (
+            _record_with_body("{}"),
+            {**_ordinary_authority(), "effect_scope": "review_request_only"},
+            "restricted",
+        ),
+        # An extension claimed by an envelope that never authenticated.
+        (_record_with_body('{"version": 2, "effect_scope": "x"}'), None, "unknown"),
+    ],
+)
+def test_checkpoint_effect_scope_is_read_from_the_original_envelope(
+    record, authority, expected
+):
+    assert gating_module.classify_checkpoint_effect_scope(record, authority) == expected
+
+
+@pytest.mark.parametrize(
+    "transition",
+    [
+        close_checkpoint_without_release,
+        require_fresh_checkpoint_approval,
+        gating_module.supersede_checkpoint,
+    ],
+)
+def test_status_transitions_never_write_on_a_restricted_original_scope(
+    monkeypatch, transition
+):
+    monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    record = _record_with_body("{}")
+    record["entity_type"] = "checkpoint_" + "brief"
+    monkeypatch.setattr(gating_module, "_fetch_entity", lambda entity_id: record)
+    monkeypatch.setattr(
+        gating_module,
+        "read_authenticated_checkpoint_authorization",
+        lambda *args, **kwargs: {
+            **_ordinary_authority(),
+            "effect_scope": "review_request_only",
+        },
+    )
+
+    posted: list[tuple] = []
+
+    class _Ok:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        gating_module.httpx,
+        "post",
+        lambda *args, **kwargs: posted.append((args, kwargs)) or _Ok(),
+    )
+
+    assert transition("ent_cp", handler="apis", reason="x") is False
+    assert posted == [], "a restricted checkpoint must take no consuming write"
