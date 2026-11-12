@@ -414,6 +414,16 @@ def _do_resolve(base: str, token: str, rec: dict[str, Any]) -> None:
         _stored.pop(rec["key"], None)
 
 
+def _reset_for_tests() -> None:
+    """Forget per-process state (window, stored ids, warnings, pending)."""
+    flush(2.0)
+    with _lock:
+        _last_write.clear()
+        _stored.clear()
+        _warned.clear()
+        _pending_keys.clear()
+
+
 # ── read-only summary CLI ────────────────────────────────────────────────────
 
 
