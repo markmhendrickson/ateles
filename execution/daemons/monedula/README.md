@@ -22,6 +22,40 @@ consent), executes approved payments, and confirms.
 > at all, holds every payment, and raises one deduped blocker,
 > `consent_email_needs_swarm_mailbox`, naming the variable to fix.
 
+## Payment consent: per-payment approval record (default)
+
+Payment consent no longer travels over Telegram or email replies (operator
+ruling 2026-11-12). The default and only automatic channel is `checkpoint`:
+
+1. For each session, Monedula writes one Neotoma `payment_approval` entity
+   (handler, session, amount, currency, payee display name, rail, reference;
+   never an IBAN, BTC address or recipient id; no memo for BTC) and reads it
+   back. It is raised once per payment.
+2. The coordinator session lists `payment_approval` entities with
+   `status == "awaiting_operator"`, puts each to the operator, and corrects
+   two fields: `operator_answer` (the literal answer, written FIRST) and then
+   `status` (`approved` / `rejected`).
+3. Monedula pays only for `approved` with an answer that passes the
+   attendance parser (`attended <handler>` / `yes <handler>`; a bare `yes`
+   does not approve) and whose stored fields match the payment about to be
+   made. Anything else, or Neotoma being unreachable, pays nothing.
+
+`payment_approval` is deliberately not a `checkpoint_brief`: approving a brief
+releases its task to the Apis dispatcher. Apis subscribes only to `task` and
+`checkpoint_brief` and the record carries no task reference, so only Monedula
+consumes the approval. `MONEDULA_CONSENT_CHANNEL=email|telegram` remains as an
+explicit legacy break-glass override and is never chosen automatically.
+
+## Session timing
+
+Every tick reads all calendars (`calendarList list`, then `events list` per
+calendar, Europe/Madrid) and evaluates sessions that ended within
+`MONEDULA_SESSION_WINDOW_HOURS` (default 24). A session is raised once,
+recorded as pending in the payment journal keyed on (handler, event id), and
+stays pending until approved, skipped or paid, even across restarts, midnight
+and a failed profile load. A failed read of any one calendar fails the whole
+fetch (never "no sessions").
+
 ## Swarm mailbox
 
 | Variable | What it is |
