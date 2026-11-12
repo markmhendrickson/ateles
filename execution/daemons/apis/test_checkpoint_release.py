@@ -3418,3 +3418,286 @@ def test_envelope_field_set_covers_everything_the_builder_emits():
             )
         )
         assert set(payload) <= gating_module.CHECKPOINT_ORDINARY_ENVELOPE_FIELDS
+
+
+# -- A held checkpoint says so: one notice, a plain cause, a next step ---------
+
+
+CP_ID = "ent_cccccccccccccccccccccccc"
+TASK_ID = "ent_dddddddddddddddddddddddd"
+
+
+class _RecordingNotifier:
+    def __init__(self):
+        self.sent: list[tuple[str, object]] = []
+        self._told: set[str] = set()
+
+    def send(self, message, priority=None, handler=None, **kwargs):
+        # Honors the notifier's dedupe_key contract; the real journal-backed
+        # behavior is exercised against the real Notifier (_JournalNotifier).
+        key = kwargs.get("dedupe_key")
+        if key is not None:
+            if key in self._told:
+                return False
+            self._told.add(key)
+        self.sent.append((message, priority))
+        return True
+
+
+class _JournalNotifier:
+    """The REAL notifier (its own journal-backed dedupe), transport stubbed."""
+
+    def __init__(self, tmp_path):
+        from lib.notify import Notifier
+
+        self.sent: list[tuple[str, object]] = []
+        self._n = Notifier(rubric={"silence_start": "", "silence_end": "",
+                                   "timezone": "Europe/Madrid"})
+        self._n._digest_path = tmp_path / "digest.json"
+        self._n._dedupe_path = tmp_path / "dedupe.json"  # the shared store
+        self._n._apprise = object()
+        self._n._email_primary = False
+        self._n._deliver = lambda m, force=False, email_eligible=True: (
+            self.sent.append((m, apis.Priority.WARN)),
+            True,
+        )[1]
+
+    def send(self, *args, **kwargs):
+        return self._n.send(*args, **kwargs)
+
+
+def _only_notice(notifier):
+    assert len(notifier.sent) == 1, notifier.sent
+    return notifier.sent[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["approved", "rejected"])
+async def test_restricted_decision_notifies_once_with_cause_and_next_step(
+    neotoma, tmp_path, status
+):
+    _add_task(neotoma, TASK_ID)
+    _add_checkpoint(
+        neotoma,
+        CP_ID,
+        TASK_ID,
+        neotoma.policy,
+        status=status,
+        extension=EXTENSION,
+    )
+    notifier = _JournalNotifier(tmp_path)
+    snapshot = neotoma.entities[CP_ID]["snapshot"]
+
+    for _ in range(3):  # a poll loop re-delivers the same decision
+        assert await apis.handle_checkpoint_brief(CP_ID, snapshot, notifier) is False
+
+    message, priority = _only_notice(notifier)
+    assert priority == apis.Priority.WARN
+    assert CP_ID in message and TASK_ID in message
+    assert f"{status} decision was NOT applied" in message
+    assert "authenticated_extension" in message
+    assert "review path that issued it" in message
+    _assert_untouched(neotoma, CP_ID, status, tmp_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", ["plain_text", "removed", "handler"])
+async def test_unknown_decision_notifies_with_its_own_cause(
+    downgraded, tmp_path, edit
+):
+    fake = downgraded(edit)
+    notifier = _RecordingNotifier()
+
+    await apis.handle_checkpoint_brief(
+        "ent_cp", fake.entities["ent_cp"]["snapshot"], notifier
+    )
+
+    message, _ = _only_notice(notifier)
+    assert "extension_in_history_envelope_changed" in message
+    assert "an earlier version of it carried a restriction" in message
+    assert "re-read or re-file" in message and "swarm operator" in message
+    _assert_untouched(fake, "ent_cp", "approved", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_unreadable_history_notice_names_the_unreadable_history(
+    neotoma, monkeypatch
+):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy, legacy=True)
+    monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda cid: None)
+    notifier = _RecordingNotifier()
+
+    await apis.handle_checkpoint_brief(
+        "ent_cp", neotoma.entities["ent_cp"]["snapshot"], notifier
+    )
+
+    message, _ = _only_notice(notifier)
+    assert "history_unreadable" in message
+    assert "change history could not be read" in message
+
+
+@pytest.mark.parametrize("sink", ["deny", "fresh", "migrate"])
+def test_every_sink_sends_exactly_one_deduplicated_notice(neotoma, tmp_path, sink):
+    _add_task(neotoma, TASK_ID)
+    _add_checkpoint(
+        neotoma, CP_ID, TASK_ID, neotoma.policy, extension=EXTENSION
+    )
+    notifier = _RecordingNotifier()
+    for _ in range(2):
+        if sink == "deny":
+            apis._deny_checkpoint_release(
+                CP_ID, reason="x", notifier=notifier, task_id=TASK_ID
+            )
+        elif sink == "fresh":
+            apis._require_fresh_release_authority(
+                CP_ID,
+                task_id=TASK_ID,
+                task_snapshot={},
+                notifier=notifier,
+                reason="x",
+            )
+        else:
+            apis.migrate_checkpoint_authority(CP_ID, notifier=notifier)
+    message, priority = _only_notice(notifier)
+    assert priority == apis.Priority.WARN
+    assert CP_ID in message and TASK_ID in message
+    assert "authenticated_extension" in message
+    _assert_untouched(neotoma, CP_ID, "approved", tmp_path)
+
+
+def test_a_failed_notice_never_widens_a_held_checkpoint(neotoma, tmp_path):
+    _add_checkpoint(
+        neotoma, "ent_cp", "ent_task_1", neotoma.policy, extension=EXTENSION
+    )
+
+    class _Broken:
+        def send(self, *args, **kwargs):
+            raise RuntimeError("no transport")
+
+    assert (
+        apis._require_fresh_release_authority(
+            "ent_cp",
+            task_id="ent_task_1",
+            task_snapshot={},
+            notifier=_Broken(),
+            reason="x",
+        )
+        is None
+    )
+    apis._deny_checkpoint_release("ent_cp", reason="x", notifier=_Broken())
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_ordinary_checkpoint_sends_no_held_notice(neotoma):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy, status="rejected")
+    notifier = _RecordingNotifier()
+
+    await apis.handle_checkpoint_brief(
+        "ent_cp", neotoma.entities["ent_cp"]["snapshot"], notifier
+    )
+
+    assert not any("is held" in message for message, _ in notifier.sent)
+
+
+@pytest.mark.asyncio
+async def test_untrusted_snapshot_text_never_reaches_the_notice_or_the_log(
+    neotoma, caplog, tmp_path
+):
+    hostile = (
+        "ent_task_1\nCRITICAL forged log line http://evil.example/steal "
+        + "free text " * 200
+    )
+    _add_checkpoint(
+        neotoma, CP_ID, "ent_task_1", neotoma.policy, extension=EXTENSION
+    )
+    neotoma.entities[CP_ID]["snapshot"]["task_entity_id"] = hostile
+    notifier = _RecordingNotifier()
+    caplog.set_level("WARNING")
+
+    consumed = await apis.handle_checkpoint_brief(
+        CP_ID, neotoma.entities[CP_ID]["snapshot"], notifier
+    )
+    apis.migrate_checkpoint_authority(CP_ID, notifier=notifier)
+
+    assert consumed is False
+    message, _ = _only_notice(notifier)
+    assert f"Checkpoint {CP_ID} (task unknown) is held" in message
+    leaked = ("forged", "evil.example", "free text", "\n", "ent_task_1")
+    for text in [message] + [r.getMessage() for r in caplog.records]:
+        assert not any(token in text for token in leaked), text
+    assert any("task unknown" in message for message, _ in notifier.sent)
+    _assert_untouched(neotoma, CP_ID, "approved", tmp_path)
+
+
+def test_a_malformed_checkpoint_id_is_never_echoed(neotoma, caplog):
+    notifier = _RecordingNotifier()
+    caplog.set_level("WARNING")
+
+    apis._notify_held_checkpoint(
+        notifier,
+        "ent_x\nforged http://evil.example",
+        task_id=None,
+        scope="restricted",
+        reason="authenticated_extension",
+        effect="test",
+    )
+
+    message, _ = _only_notice(notifier)
+    assert message.startswith("Checkpoint unknown (task unknown)")
+    assert "evil" not in message
+    assert not any("evil" in r.getMessage() for r in caplog.records)
+
+
+def _notify(notifier, raw_id):
+    apis._notify_held_checkpoint(
+        notifier,
+        raw_id,
+        task_id=None,
+        scope="restricted",
+        reason="authenticated_extension",
+        effect="test",
+    )
+
+
+def test_two_malformed_ids_each_get_their_own_notice(tmp_path):
+    notifier = _JournalNotifier(tmp_path)
+
+    _notify(notifier, "bad id one")
+    _notify(notifier, "bad\nid two")
+    _notify(notifier, "bad id one")  # a repeat of the first stays suppressed
+
+    assert len(notifier.sent) == 2
+    assert all("Checkpoint unknown" in m for m, _ in notifier.sent)
+
+
+def test_a_restart_does_not_rewarn_a_held_checkpoint(tmp_path):
+    first = _JournalNotifier(tmp_path)
+    _notify(first, "ent_cp")
+    assert len(first.sent) == 1
+
+    restarted = _JournalNotifier(tmp_path)  # fresh process state, same journal
+    _notify(restarted, "ent_cp")
+    assert restarted.sent == []
+
+
+def test_a_cleared_key_allows_a_later_recurrence(tmp_path):
+    notifier = _JournalNotifier(tmp_path)
+    _notify(notifier, "ent_cp")
+    notifier._n.clear_dedupe(apis._held_checkpoint_dedupe_key("ent_cp"))
+    _notify(notifier, "ent_cp")
+    assert len(notifier.sent) == 2
+
+
+def test_a_send_that_raises_does_not_mark_the_checkpoint_told(tmp_path):
+    notifier = _JournalNotifier(tmp_path)
+    real = notifier._n.send
+
+    def boom(*a, **k):
+        raise RuntimeError("no transport")
+
+    notifier._n.send = boom
+    _notify(notifier, "ent_cp")  # swallowed, never widens scope
+    notifier._n.send = real
+    _notify(notifier, "ent_cp")
+    assert len(notifier.sent) == 1
