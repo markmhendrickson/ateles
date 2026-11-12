@@ -15,8 +15,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import consent_email  # noqa: E402
-import monedula  # noqa: E402
 import payment_approval  # noqa: E402
 import payment_journal  # noqa: E402
 from test_session_payments import _event, _Handler, _World  # noqa: E402,F401
