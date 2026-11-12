@@ -323,7 +323,12 @@ def _resolve_release_entity_id(version: str) -> str:
     return ids.pop()
 
 
-def set_release_status(version: str, status: str, extra: dict | None = None) -> None:
+def set_release_status(
+    version: str,
+    status: str,
+    extra: dict | None = None,
+    entity_id: str | None = None,
+) -> None:
     """
     Flip a release_result's status (prepared -> approved -> publishing ->
     published / failed) and VERIFY it took effect.
@@ -334,20 +339,30 @@ def set_release_status(version: str, status: str, extra: dict | None = None) -> 
     is silently ignored (v0.28.0 logged "status -> published" while the snapshot
     still read `approved`). correct_field reads the value back; on any failure
     this raises StatusWriteError so a release never proceeds on a status nobody
-    can see. Other fields in `extra` have no prior correction, so they still
-    use a store.
+    can see.
+
+    `entity_id` is the exact entity find_release resolved (one version may have
+    several release_result entities: concurrent RCs, terminal history, and
+    --entity-id picks one). Status and every `extra` field are corrected on
+    that same entity. Only when no id is held does this fall back to a lookup
+    by version, which refuses unless it is unambiguous.
     """
-    entity_id = _resolve_release_entity_id(version)
-    if extra:
-        rec: dict = {"entity_type": "release_result", "version": version, **extra}
-        rec.pop("status", None)
-        key = f"release-{version}-{status}-extra-{date.today().isoformat()}"
-        if neotoma_store([rec], key) is None:
-            log.error(f"Release {version}: storing extra fields for {status} failed")
     import httpx  # local: only the status write needs it
 
+    entity_id = entity_id or _resolve_release_entity_id(version)
+    day = date.today().isoformat()
     headers = {**_neotoma_headers(), "User-Agent": NEOTOMA_USER_AGENT}
     with httpx.Client(headers=headers) as client:
+        for field, value in (extra or {}).items():
+            if field in ("status", "entity_type"):
+                continue
+            # Extras are informational (url, reason, summary): a failed write is
+            # logged but does not stop the release; the status below still is.
+            if not correct_field(
+                client, _neotoma_base(), entity_id, "release_result",
+                field, value, f"release-{version}-{status}-{field}-{day}",
+            ):
+                log.error(f"Release {version}: writing {field} for {status} failed")
         ok = correct_field(
             client,
             _neotoma_base(),
@@ -355,7 +370,7 @@ def set_release_status(version: str, status: str, extra: dict | None = None) -> 
             "release_result",
             "status",
             status,
-            f"release-{version}-{status}-{date.today().isoformat()}",
+            f"release-{version}-{status}-{day}",
         )
     if not ok:
         log.error(f"Release {version}: status -> {status} NOT confirmed by read-back")
@@ -906,6 +921,8 @@ def publish_release(
     email_approval: bool = False,
 ) -> None:
     f = _entity_fields(release)
+    # The exact entity find_release resolved; every status write targets it.
+    entity_id = str(release.get("entity_id") or "") or None
     status = str(f.get("status") or "")
     # Field-name reconciliation: prepare.py's agent stores the RC PR URL under
     # `release_url` and the branch under `branch`, but this reader historically
@@ -930,7 +947,7 @@ def publish_release(
             log.info(f"{version} already approved — proceeding to publish")
         elif status == "pending_approval":
             if not dry_run:
-                set_release_status(version, "approved")
+                set_release_status(version, "approved", entity_id=entity_id)
             status = "approved"
             log.info(f"{version} approved via email reply -> publishing")
         else:
@@ -950,7 +967,7 @@ def publish_release(
 
     log.info(f"Publishing {version} (status={status}, dry_run={dry_run}, force={force})")
     if not dry_run:
-        set_release_status(version, "publishing")
+        set_release_status(version, "publishing", entity_id=entity_id)
 
     resume_idx = STEP_ORDER.index(resume_from) if resume_from else 0
 
@@ -990,6 +1007,7 @@ def publish_release(
         version,
         "published",
         {"release_url": release_url, "published_summary": summary},
+        entity_id=entity_id,
     )
     telegram_send(
         f"✅ Released *{version}*\n"
@@ -1054,7 +1072,10 @@ def main() -> int:
         if args.dry_run:
             return
         try:
-            set_release_status(version, "failed", {"reason": reason[:500]})
+            set_release_status(
+                version, "failed", {"reason": reason[:500]},
+                entity_id=str(release.get("entity_id") or "") or None,
+            )
         except StatusWriteError as werr:
             log.error(f"could not record failed status for {version}: {werr}")
 
