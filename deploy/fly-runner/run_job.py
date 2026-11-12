@@ -104,6 +104,13 @@ EXIT_DELIVERY_FAILED = 94
 # The job's Neotoma signing proxy could not reach an admitted /mcp: the CLI
 # did not run.
 EXIT_NEOTOMA_UNAVAILABLE = 93
+# Neotoma refused the result record with HTTP 401/403: the role's agent grant
+# most likely lacks store_structured on fly_runner_result. Distinct from 95 so
+# the Mac side can name the cause (fly_runner.EXIT_RECORD_REFUSED).
+EXIT_RECORD_REFUSED = 92
+RECORD_REFUSAL_STATUSES = frozenset({401, 403})
+# The last refused record write's HTTP status, for ``main``'s exit code.
+_last_refusal: dict = {"status": None}
 
 # job.json "neotoma_mcp": "" (no proxy) or "proxy" (the CLI's Neotoma MCP
 # server is this process's loopback proxy, which signs with the role's key).
@@ -1122,6 +1129,32 @@ RECORD_ATTEMPT_TIMEOUT_SECONDS = 30.0
 RECORD_DEADLINE_MARGIN_SECONDS = 5.0
 
 
+def _refusal_detail(exc) -> str:
+    """The error code and message of a refused write, never a header or token.
+
+    Reads only the JSON body's ``error_code`` / ``code`` and ``message`` /
+    ``error`` fields (bounded), so the cause (for example a missing grant) is
+    in the log instead of a bare status. Unreadable bodies add nothing."""
+    try:
+        raw = exc.read(2048) if hasattr(exc, "read") else b""
+        body = json.loads(raw.decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 — the status alone is still logged
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    err = body.get("error")
+    if isinstance(err, dict):
+        body = err
+    parts = []
+    for label, keys in (("code", ("error_code", "code")), ("message", ("message", "error"))):
+        for key in keys:
+            val = body.get(key)
+            if isinstance(val, str) and val:
+                parts.append(f"{label}={val[:200]!r}")
+                break
+    return (" (" + ", ".join(parts) + ")") if parts else ""
+
+
 def write_record(base_url: str, auth, record: dict, *, deadline: float | None = None,
                  clock=time.time, sleep=time.sleep, opener=None) -> bool:  # fmt: skip
     """POST the record to Neotoma ``/store`` as the role's own principal.
@@ -1131,6 +1164,7 @@ def write_record(base_url: str, auth, record: dict, *, deadline: float | None = 
     (less a margin). A refused write (any other HTTP status) fails at once.
     Each attempt logs only its status; never the record or a credential."""
     opener = opener or urllib.request.urlopen
+    _last_refusal["status"] = None
     payload = json.dumps(
         {
             "idempotency_key": f"fly-runner-result-{record['run_id']}",
@@ -1174,8 +1208,9 @@ def write_record(base_url: str, auth, record: dict, *, deadline: float | None = 
             return False
         except urllib.error.HTTPError as exc:
             if exc.code < 500:
-                print(f"fly-runner: record write attempt {attempt}: HTTP {exc.code}; refused",
-                      flush=True)
+                _last_refusal["status"] = exc.code
+                print(f"fly-runner: record write attempt {attempt}: HTTP {exc.code}; refused"
+                      f"{_refusal_detail(exc)}", flush=True)
                 return False
             outcome = f"HTTP {exc.code}"
         except (urllib.error.URLError, OSError) as exc:  # timeouts are OSErrors
@@ -1336,7 +1371,11 @@ def _main(job_dir: Path, writer, runner, started: float, deadline: float,
             f"recorded={stored}",
             flush=True,
         )
-        return rc if stored else EXIT_RECORD_FAILED
+        if stored:
+            return rc
+        if _last_refusal["status"] in RECORD_REFUSAL_STATUSES:
+            return EXIT_RECORD_REFUSED
+        return EXIT_RECORD_FAILED
     finally:
         if proxy is not None:
             try:

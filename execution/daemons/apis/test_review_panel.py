@@ -1137,3 +1137,27 @@ def test_falco_prompt_mirrors_map_each_outcome_to_its_verdict(document):
         "`REQUEST_CHANGES` on any CONFIRMED break; otherwise `COMMENT` only if "
         "a concern truly can't be settled" in text
     )
+
+
+def test_fixture_grants_admit_the_fly_result_write_for_every_fly_role():
+    """Fly roles record `fly_runner_result` as themselves; a grant without
+    store_structured on it gets HTTP 403 and the run reads as lost."""
+    import json
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    import check_gate_lens_grants as chk
+
+    fixture = json.loads(chk.FIXTURE_PATH.read_text())
+    caps = {
+        e["agent"]: {c["op"]: sorted(c.get("entity_types") or []) for c in e["capabilities"]}
+        for e in fixture["lenses"]
+    }
+    assert chk.fly_result_problems(caps) == []
+
+    # A Fly role without it is flagged, and so is one with no grant at all.
+    broken = {a: {op: [t for t in ts if t != "fly_runner_result"] for op, ts in c.items()}
+              for a, c in caps.items()}
+    problems = chk.fly_result_problems(broken)
+    assert len(problems) == len(chk.FLY_ROLES)
+    assert all("fly_runner_result" in p and "403" in p for p in problems)
+    assert any("no agent_grant" in p for p in chk.fly_result_problems({}))

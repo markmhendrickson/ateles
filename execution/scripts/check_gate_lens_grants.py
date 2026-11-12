@@ -21,6 +21,9 @@ compares, per gate-owning lens derived from the LENSES registry:
     * the grant is `active` (a suspended/revoked grant denies the write just
       as effectively as a missing one)
     * `issue` is admitted on retrieve AND correct
+    * every role launched on Fly (FLY_ROLES) can `store_structured` a
+      `fly_runner_result`: the job records its own result as the role, and a
+      refusal reads on the Mac as a lost run
 
 Usage:
     check_gate_lens_grants.py           # report drift, exit 1 on mismatch
@@ -51,6 +54,38 @@ FIXTURE_PATH = (
 # fifth (buteo/legal), which is why deriving is the whole point.
 sys.path.insert(0, str(REPO_ROOT / "execution" / "daemons" / "apis"))
 from review_panel import LENSES  # noqa: E402
+
+
+# Roles launched on Fly Machines. Each job writes its `fly_runner_result` as
+# the role's own principal, so its agent_grant must admit store_structured on
+# that type. Without it Neotoma answers 403, the run's review is lost, and the
+# job exits 92/95. Add a role here when it is opted onto Fly.
+FLY_RESULT_ENTITY_TYPE = "fly_runner_result"
+FLY_ROLES: tuple[str, ...] = ("accipiter", "phoenicurus")
+
+
+def fly_result_problems(caps_by_agent: dict[str, dict[str, list[str]]]) -> list[str]:
+    """Problems for Fly roles whose grant cannot store a fly_runner_result.
+
+    *caps_by_agent* maps an agent to its normalized {op: [entity_types]}. A
+    role absent from the map is reported too: no grant at all cannot store."""
+    problems: list[str] = []
+    for agent in FLY_ROLES:
+        caps = caps_by_agent.get(agent)
+        if caps is None:
+            problems.append(
+                f"{agent} runs on Fly but has no agent_grant to check — it cannot "
+                f"store_structured {FLY_RESULT_ENTITY_TYPE}"
+            )
+            continue
+        admitted = caps.get("store_structured", [])
+        if FLY_RESULT_ENTITY_TYPE not in admitted and "*" not in admitted:
+            problems.append(
+                f"{agent} runs on Fly but its grant does not admit store_structured "
+                f"on {FLY_RESULT_ENTITY_TYPE!r} (got {admitted}) — Neotoma will "
+                f"refuse its result record with HTTP 403."
+            )
+    return problems
 
 
 def _load_env() -> tuple[str, str]:
@@ -220,6 +255,13 @@ def check(live: dict[str, dict]) -> tuple[list[str], list[dict]]:
                 "capabilities": row["capabilities"],
             }
         )
+
+    live_caps: dict[str, dict[str, list[str]]] = {}
+    for agent in FLY_ROLES:
+        row = live.get(f"{agent}@ateles-swarm")
+        if row is not None:
+            live_caps[agent] = row["capabilities"]
+    problems.extend(fly_result_problems(live_caps))
 
     return problems, report
 

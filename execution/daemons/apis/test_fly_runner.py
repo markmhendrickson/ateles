@@ -5682,6 +5682,53 @@ def _settle(fly_env, *, sha=_NEW, pulls=None, correction=False, read_error=None,
     return job, rc, out, err, calls
 
 
+def _collect_without_record(fly_env, *, events):
+    fake = FakeFly()
+    executor, _, _ = make_executor(fake)
+
+    async def read_result(run_id):
+        return None
+
+    async def done(handle):
+        return "stopped"
+
+    async def get(machine_id):
+        return {"id": machine_id, "state": "stopped", "instance_id": "i1", "config": {},
+                "events": events}
+
+    executor._read_result = read_result
+    executor._wait_until_done = done
+    executor.client.get = get
+    job = _job()
+    handle = types.SimpleNamespace(job=job, machine_id="m1")
+    return asyncio.run(executor._collect(handle))
+
+
+def _exit(code):
+    return [{"type": "exit", "request": {"exit_event": {"exit_code": code}}},
+            {"type": "start"}]
+
+
+def test_a_refused_result_record_is_named_not_reported_as_lost(fly_env):
+    # Exit 92 is the job's "Neotoma refused the record" status.
+    rc, _, err = _collect_without_record(fly_env, events=_exit(fly_runner.EXIT_RECORD_REFUSED))
+    assert rc == 1
+    assert b"no result recorded" in err
+    assert b"result record refused by Neotoma (HTTP 403)" in err
+    assert b"store_structured fly_runner_result" in err
+
+
+@pytest.mark.parametrize("events", [_exit(95), _exit(0), [], None],
+                         ids=["record-failed-95", "zero", "no-events", "no-field"])
+def test_other_causes_keep_the_plain_missing_result_message(fly_env, events):
+    rc, _, err = _collect_without_record(fly_env, events=events)
+    assert rc == 1 and b"no result recorded" in err and b"refused" not in err
+
+
+def test_the_runner_and_the_image_agree_on_the_refusal_status():
+    assert fly_runner.EXIT_RECORD_REFUSED == 92
+
+
 def test_lost_record_with_a_matching_branch_and_pr_settles_as_opened(fly_env, caplog):
     caplog.set_level("WARNING", logger="apis.fly_runner")
     job, rc, out, _, calls = _settle(fly_env)
