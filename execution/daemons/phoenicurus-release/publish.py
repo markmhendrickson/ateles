@@ -144,7 +144,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
-from lib.daemon_runtime.neotoma_correct import correct_field
+from lib.daemon_runtime.neotoma_correct import correct_field  # noqa: E402
 
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
 # unbounded retry logging filled a 926 GB disk on 2026-08-18.
