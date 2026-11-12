@@ -269,6 +269,8 @@ from lib.daemon_runtime.gating import (  # noqa: E402
     _snapshot_with_tenant,
     ExecutionPolicy,
     checkpoint_already_dispatched,
+    checkpoint_effect_scope,
+    checkpoint_scope_permits_ordinary_effects,
     checkpoints_for_task,
     close_checkpoint_without_release,
     entity_record_digest,
@@ -4273,8 +4275,52 @@ def _checkpoint_denial_persisted(checkpoint_id: str) -> bool:
     return marker is not None and _valid_checkpoint_denial_marker(marker)
 
 
+def _original_checkpoint_scope(
+    checkpoint_id: str, checkpoint_record: dict | None = None
+) -> str:
+    """The ORIGINAL authenticated effect scope of a checkpoint, read again.
+
+    Every consuming sink asks this itself rather than trusting what its caller
+    passed, so an omitted or stale context cannot widen a restrictive scope.
+    """
+    return checkpoint_effect_scope(
+        checkpoint_id,
+        checkpoint_record if isinstance(checkpoint_record, dict) else None,
+        read_authorization=lambda cid, rec: read_authenticated_checkpoint_authorization(
+            cid, rec
+        ),
+        read_observations=lambda cid: fetch_entity_observations_strict(cid),
+    )
+
+
+def _checkpoint_may_take_ordinary_effects(
+    checkpoint_id: str, checkpoint_record: dict | None = None, *, effect: str
+) -> bool:
+    """False, with a diagnostic, unless the original scope is ordinary or legacy."""
+    scope = _original_checkpoint_scope(
+        checkpoint_id,
+        checkpoint_record
+        if isinstance(checkpoint_record, dict)
+        else fetch_checkpoint_record(checkpoint_id),
+    )
+    if checkpoint_scope_permits_ordinary_effects(scope):
+        return True
+    log.warning(
+        "[%s] checkpoint %s original scope is %s - not taking ordinary effect: %s",
+        DAEMON_NAME,
+        checkpoint_id,
+        scope,
+        effect,
+    )
+    return False
+
+
 def _persist_checkpoint_denial(checkpoint_id: str) -> bool:
     """Persist a cross-process replay deny when Neotoma writes both fail."""
+    if not _checkpoint_may_take_ordinary_effects(
+        checkpoint_id, effect="host denial marker"
+    ):
+        return False
     marker = _checkpoint_denial_marker(checkpoint_id)
     if marker is None:
         return False
@@ -4317,6 +4363,12 @@ def _persist_checkpoint_denial(checkpoint_id: str) -> bool:
 
 def _deny_checkpoint_release(checkpoint_id: str, *, reason: str) -> None:
     """Consume a denied approval with durable cross-process fallbacks."""
+    if not _checkpoint_may_take_ordinary_effects(
+        checkpoint_id, effect="close, fallback stamp or denial marker"
+    ):
+        # A restrictive (or unqualifiable) original scope stays held: no close,
+        # no fallback stamp, no host marker.
+        return
     if close_checkpoint_without_release(
         checkpoint_id, handler=DAEMON_NAME, reason=reason
     ):
@@ -4535,6 +4587,20 @@ def _require_fresh_release_authority(
     reason: str,
 ) -> str | None:
     """Create replacement authority before retiring the stale approval."""
+    if not _checkpoint_may_take_ordinary_effects(
+        checkpoint_id, effect="ordinary replacement and retirement"
+    ):
+        try:
+            notifier.send(
+                f"Checkpoint {checkpoint_id} for task {task_id} keeps a restricted "
+                "or unverified original scope; it was not replaced or retired and "
+                "no work was released",
+                priority=Priority.WARN,
+                handler=DAEMON_NAME,
+            )
+        except Exception:  # noqa: BLE001 - a failed notice never widens scope
+            log.exception("[%s] could not send scope-hold notice", DAEMON_NAME)
+        return None
     replacement_id = _file_fresh_checkpoint(
         prior_checkpoint_id=checkpoint_id,
         task_id=task_id,
@@ -4600,6 +4666,10 @@ def migrate_checkpoint_authority(
             DAEMON_NAME,
             checkpoint_id,
         )
+        return None
+    if not _checkpoint_may_take_ordinary_effects(
+        checkpoint_id, checkpoint_record, effect="legacy migration"
+    ):
         return None
     if read_authenticated_checkpoint_authorization(checkpoint_id, checkpoint_record):
         log.error(
@@ -4934,12 +5004,26 @@ def reissue_held_task_checkpoint(
         )
     current_id: str | None = None
     stale_pending: list[str] = []
+    restricted_pending: list[str] = []
+    unknown_pending: list[str] = []
     for item in existing:
         checkpoint_id = str(item.get("entity_id") or "")
         item_snapshot = _record_snapshot(item) or {}
         item_status = str(item_snapshot.get("status") or "").strip().lower()
         if not checkpoint_id:
             continue
+        if item_status == CHECKPOINT_AWAITING_OPERATOR:
+            scope = _original_checkpoint_scope(checkpoint_id, item)
+            if scope == "unknown":
+                # Never replaced, retired or counted as authority; set aside so
+                # a separate ordinary checkpoint is not blocked by it.
+                unknown_pending.append(checkpoint_id)
+                continue
+            if scope == "restricted":
+                # Its original restrictive scope is preserved: never replaced
+                # or retired as "stale", and never counted as ordinary authority.
+                restricted_pending.append(checkpoint_id)
+                continue
         if (
             read_checkpoint_resolution(item_snapshot) == "approved"
             and not checkpoint_already_dispatched(item_snapshot)
@@ -4985,6 +5069,26 @@ def reissue_held_task_checkpoint(
                 "not refiled (name the task with --task to refile it)",
                 checkpoint_id=retired_id,
             )
+
+    if unknown_pending and current_id is None:
+        # An unqualified checkpoint may be a restricted one: filing an ordinary
+        # replacement beside it could widen its scope, so nothing is filed or
+        # retired until it is cleared.
+        return ReissueResult(
+            task_id,
+            "failed",
+            f"checkpoint {unknown_pending[0]} original scope could not be "
+            "qualified; nothing was replaced or retired",
+            remaining=list(unknown_pending),
+        )
+    if restricted_pending and current_id is None:
+        return ReissueResult(
+            task_id,
+            "skipped",
+            f"checkpoint {restricted_pending[0]} keeps a restricted original "
+            "scope; no ordinary replacement was filed",
+            checkpoint_id=restricted_pending[0],
+        )
 
     blocker = _approval_cannot_release(snapshot)
     blocker_outcome = _BLOCKER_OUTCOMES.get(blocker or "")
@@ -5239,6 +5343,19 @@ async def handle_checkpoint_brief(
             log.warning(
                 f"[{DAEMON_NAME}] checkpoint_brief {entity_id} {resolution} but has no "
                 "task_entity_id — cannot act"
+            )
+            return False
+
+        # The checkpoint's ORIGINAL authenticated scope decides whether any
+        # ordinary consuming effect (decline, close, replace, retire, stamp,
+        # marker) may follow.  It is read from the checkpoint itself, never from
+        # the current task, so a changed task kind, an invalid resolution or a
+        # missing caller context cannot widen it.
+        original_scope = _original_checkpoint_scope(entity_id, checkpoint_record)
+        if not checkpoint_scope_permits_ordinary_effects(original_scope):
+            log.warning(
+                f"[{DAEMON_NAME}] checkpoint {entity_id} original scope is "
+                f"{original_scope} - held, no ordinary effect taken"
             )
             return False
 
