@@ -2892,6 +2892,7 @@ class _FakeNeotoma:
 @pytest.fixture
 def neotoma(monkeypatch, tmp_path):
     fake = _FakeNeotoma()
+    monkeypatch.setattr(apis, "_held_checkpoint_notices", set())
     monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "synthetic-token")
     monkeypatch.setattr(gating_module, "NEOTOMA_BASE_URL", "https://neotoma.test")
     monkeypatch.setattr(gating_module, "CHECKPOINT_PRODUCER_JKT", PRODUCER_JKT)
@@ -3418,3 +3419,146 @@ def test_envelope_field_set_covers_everything_the_builder_emits():
             )
         )
         assert set(payload) <= gating_module.CHECKPOINT_ORDINARY_ENVELOPE_FIELDS
+
+
+# -- A held checkpoint says so: one notice, a plain cause, a next step ---------
+
+
+class _RecordingNotifier:
+    def __init__(self):
+        self.sent: list[tuple[str, object]] = []
+
+    def send(self, message, priority=None, handler=None, **kwargs):
+        self.sent.append((message, priority))
+
+
+def _only_notice(notifier):
+    assert len(notifier.sent) == 1, notifier.sent
+    return notifier.sent[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["approved", "rejected"])
+async def test_restricted_decision_notifies_once_with_cause_and_next_step(
+    neotoma, tmp_path, status
+):
+    _add_checkpoint(
+        neotoma,
+        "ent_cp",
+        "ent_task_1",
+        neotoma.policy,
+        status=status,
+        extension=EXTENSION,
+    )
+    notifier = _RecordingNotifier()
+    snapshot = neotoma.entities["ent_cp"]["snapshot"]
+
+    for _ in range(3):  # a poll loop re-delivers the same decision
+        assert await apis.handle_checkpoint_brief("ent_cp", snapshot, notifier) is False
+
+    message, priority = _only_notice(notifier)
+    assert priority == apis.Priority.WARN
+    assert "ent_cp" in message and "ent_task_1" in message
+    assert f"{status} decision was NOT applied" in message
+    assert "authenticated_extension" in message
+    assert "review path that issued it" in message
+    _assert_untouched(neotoma, "ent_cp", status, tmp_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", ["plain_text", "removed", "handler"])
+async def test_unknown_decision_notifies_with_its_own_cause(
+    downgraded, tmp_path, edit
+):
+    fake = downgraded(edit)
+    notifier = _RecordingNotifier()
+
+    await apis.handle_checkpoint_brief(
+        "ent_cp", fake.entities["ent_cp"]["snapshot"], notifier
+    )
+
+    message, _ = _only_notice(notifier)
+    assert "extension_in_history_envelope_changed" in message
+    assert "an earlier version of it carried a restriction" in message
+    assert "re-read or re-file" in message and "swarm operator" in message
+    _assert_untouched(fake, "ent_cp", "approved", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_unreadable_history_notice_names_the_unreadable_history(
+    neotoma, monkeypatch
+):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy, legacy=True)
+    monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda cid: None)
+    notifier = _RecordingNotifier()
+
+    await apis.handle_checkpoint_brief(
+        "ent_cp", neotoma.entities["ent_cp"]["snapshot"], notifier
+    )
+
+    message, _ = _only_notice(notifier)
+    assert "history_unreadable" in message
+    assert "change history could not be read" in message
+
+
+@pytest.mark.parametrize("sink", ["deny", "fresh", "migrate"])
+def test_every_sink_sends_exactly_one_deduplicated_notice(neotoma, tmp_path, sink):
+    _add_checkpoint(
+        neotoma, "ent_cp", "ent_task_1", neotoma.policy, extension=EXTENSION
+    )
+    notifier = _RecordingNotifier()
+    for _ in range(2):
+        if sink == "deny":
+            apis._deny_checkpoint_release(
+                "ent_cp", reason="x", notifier=notifier, task_id="ent_task_1"
+            )
+        elif sink == "fresh":
+            apis._require_fresh_release_authority(
+                "ent_cp",
+                task_id="ent_task_1",
+                task_snapshot={},
+                notifier=notifier,
+                reason="x",
+            )
+        else:
+            apis.migrate_checkpoint_authority("ent_cp", notifier=notifier)
+    message, priority = _only_notice(notifier)
+    assert priority == apis.Priority.WARN
+    assert "ent_cp" in message and "ent_task_1" in message
+    assert "authenticated_extension" in message
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+def test_a_failed_notice_never_widens_a_held_checkpoint(neotoma, tmp_path):
+    _add_checkpoint(
+        neotoma, "ent_cp", "ent_task_1", neotoma.policy, extension=EXTENSION
+    )
+
+    class _Broken:
+        def send(self, *args, **kwargs):
+            raise RuntimeError("no transport")
+
+    assert (
+        apis._require_fresh_release_authority(
+            "ent_cp",
+            task_id="ent_task_1",
+            task_snapshot={},
+            notifier=_Broken(),
+            reason="x",
+        )
+        is None
+    )
+    apis._deny_checkpoint_release("ent_cp", reason="x", notifier=_Broken())
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_ordinary_checkpoint_sends_no_held_notice(neotoma):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy, status="rejected")
+    notifier = _RecordingNotifier()
+
+    await apis.handle_checkpoint_brief(
+        "ent_cp", neotoma.entities["ent_cp"]["snapshot"], notifier
+    )
+
+    assert not any("is held" in message for message, _ in notifier.sent)
