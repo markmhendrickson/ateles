@@ -125,7 +125,7 @@ def test_two_entity_ids_collapse_to_one_key():
 
 def test_title_is_the_readable_first_occurrence_and_stays_stable(on):
     sink.record(message="PR #1723 blocked: CI red\nsecond line", level="blocker", handler="apis")
-    sink.record(message="PR #1724 blocked: CI red", level="blocker", handler="apis")
+    sink.record(message="PR #1724 blocked: CI red\nsecond line", level="blocker", handler="apis")
     sink.flush()
     assert len(on.stores()) == 1  # same shape, collapsed
     assert on.stores()[0]["entities"][0]["title"] == "[apis/blocker] PR #1723 blocked: CI red"
