@@ -55,6 +55,8 @@ CONFIG_NAMES = (
     "HOLD_PREFIXES",
     "HOLD_UNTIL",
     "FRESH_HOURS",
+    "ALERT_GIB",
+    "ALERT_REARM_GIB",
     "GIT_ENV",
     "LOGF",
 )
@@ -101,6 +103,7 @@ def repo(tmp_path, monkeypatch):
     home.mkdir()
     saved = {k: getattr(wp, k) for k in CONFIG_NAMES}
     saved_strip = dict(wp.STRIP)
+    saved_daily = dict(wp.DAILY)
     monkeypatch.setenv("HOME", str(home))
     wp.configure(env={}, cli={})
     wp.GIT_ENV = dict(wp.GIT_ENV, **GIT_IDENTITY)
@@ -169,6 +172,9 @@ def repo(tmp_path, monkeypatch):
         setattr(wp, k, v)
     wp.STRIP.clear()
     wp.STRIP.update(saved_strip)
+    wp.DAILY.clear()
+    wp.DAILY.update(saved_daily)
+    wp.APPROVAL.clear()
 
 
 # ======================================================================================
@@ -1101,7 +1107,7 @@ def test_idle_hours_is_the_node_modules_window_default_24(repo):
     assert "archive" not in wp.build_parser().format_help().lower()
 
 
-def test_the_launchd_template_runs_exactly_the_plain_and_strip_tiers():
+def test_the_launchd_template_runs_exactly_the_one_daily_invocation():
     import plistlib
 
     template = Path(wp.__file__).with_name("com.ateles.worktree-prune.plist.template")
@@ -1111,16 +1117,26 @@ def test_the_launchd_template_runs_exactly_the_plain_and_strip_tiers():
     flags = argv[2:]  # after the interpreter and the script
     wp.reject_removed_options(wp.build_parser(), flags)  # no archive-tier option
     args = wp.build_parser().parse_args(flags)
-    assert args.apply and args.protect_ignored and args.strip_node_modules
-    assert args.max == 200 and not args.strip_only
+    assert args.daily and args.apply and not args.dry_run and not args.strip_only
+    assert (
+        argv[0] == "/c/.venv/bin/python3"
+    )  # the daemon venv convention, not /usr/bin/python3
+    start = plistlib.loads(text.encode("utf-8"))["StartCalendarInterval"]
+    assert (start["Hour"], start["Minute"]) == (
+        8,
+        30,
+    )  # outside the notifier's 22:00-08:00 silence window
+    assert args.max == 200
     assert args.idle_hours is None and wp.idle_windows(args.idle_hours) == 24
     assert args.fresh_hours == 24
     assert sorted(f for f in flags if f.startswith("--")) == [
         "--apply",
+        "--daily",
         "--max",
-        "--protect-ignored",
-        "--strip-node-modules",
     ]
+    # the unreviewed off-repo cleaner must never be referenced, and no archive tier is enabled
+    assert "prune.py" not in text.replace("worktree_prune.py", "")
+    assert ".ateles-work/worktree-prune/prune" not in text
 
 
 @pytest.mark.parametrize("option", list(wp.REMOVED_OPTIONS))
@@ -1449,3 +1465,872 @@ def test_a_symlink_where_a_state_file_belongs_is_refused_not_followed(repo):
     assert open(outside).read() == "precious"
     with pytest.raises(OSError):
         wp.open_private(day_log)
+
+
+# ======================================================================================
+# daily mode: the one safe daily check (keep marks, merged-only removal, caches, approval list, alert)
+# ======================================================================================
+def state_json(repo, name):
+    return json.loads(open(repo.home + "/state/" + name).read())
+
+
+def approval_by_path(repo):
+    doc = state_json(repo, "approval_list.json")
+    return {i["path"]: i for i in doc["items"]}
+
+
+def push_branch(wt, name):
+    """Commit one file in `wt` and push it to a non-default origin branch (pushed, not merged)."""
+    open(wt + "/feature.txt", "w").write("feature\n")
+    sh("git", "add", ".", cwd=wt)
+    sh("git", "commit", "-qm", "feature", cwd=wt)
+    sh("git", "push", "-q", "origin", "HEAD:refs/heads/" + name, cwd=wt)
+    sh("git", "fetch", "-q", "origin", cwd=wt)
+    age(wt)
+
+
+def test_daily_removes_a_merged_clean_worktree_and_nothing_else(repo):
+    w = repo.add_wt("merged")
+    code, summ = run_main(repo, "--daily", "--apply")
+    assert code == 0 and summ["daily"] is True and summ["mode"] == "apply"
+    assert summ["removed"] == 1 and not os.path.exists(w)
+    # the branch survives the worktree
+    assert "b-merged" in sh("git", "branch", "--list", "b-merged", cwd=repo.main)
+
+
+def test_daily_dry_run_flag_deletes_nothing(repo):
+    w = repo.add_wt("dry")
+    code, summ = run_main(repo, "--daily", "--dry-run")
+    assert code == 0 and summ["mode"] == "dry-run" and summ["would_remove"] == 1
+    assert os.path.isdir(w + "/node_modules")
+    # the plain default is still a dry run
+    code, summ = run_main(repo)
+    assert summ["mode"] == "dry-run" and os.path.isdir(w)
+
+
+def test_daily_keeps_and_lists_every_kind_of_unique_or_wanted_work(repo):
+    m = repo.main
+    keep = repo.add_wt("keepmark", node_modules=False)
+    open(keep + "/.ateles-keep", "w").write("")
+    age(keep)
+    dirty = repo.add_wt("dirty", node_modules=False)
+    open(dirty + "/a.txt", "a").write("change\n")
+    age(dirty)
+    untracked = repo.add_wt("untracked", node_modules=False)
+    open(untracked + "/new.txt", "w").write("n\n")
+    age(untracked)
+    local = repo.add_wt("local", node_modules=False)
+    open(local + "/n.txt", "w").write("n\n")
+    sh("git", "add", ".", cwd=local)
+    sh("git", "commit", "-qm", "local", cwd=local)
+    age(local)
+    detached = repo.add_wt("detached", node_modules=False)
+    sh("git", "checkout", "-q", "--detach", cwd=detached)
+    open(detached + "/d.txt", "w").write("d\n")
+    sh("git", "add", ".", cwd=detached)
+    sh("git", "commit", "-qm", "detached", cwd=detached)
+    age(detached)
+    ignored = repo.add_wt("ignored", node_modules=False)
+    os.makedirs(ignored + "/data_backups")
+    open(ignored + "/data_backups/db.bak", "w").write("precious")
+    age(ignored)
+    recent = repo.add_wt("recent", old=2, node_modules=False)
+    locked = repo.add_wt("locked", node_modules=False)
+    sh("git", "worktree", "lock", locked, cwd=m)
+    inuse = repo.add_wt("inuse", node_modules=False)
+    repo.spawn_in(inuse)
+    pushed = repo.add_wt("pushed", node_modules=False)
+    push_branch(pushed, "feat-pushed")
+    code, summ = run_main(repo, "--daily", "--apply")
+    assert code == 0 and summ["removed"] == 0
+    wanted = {
+        keep: "keep-marked",
+        dirty: "dirty",
+        untracked: "dirty",
+        local: "unpushed",
+        detached: "unpushed" if False else "detached-unreachable",
+        ignored: "has-ignored-files",
+        recent: "recent",
+        locked: "locked",
+        inuse: "in-use",
+        pushed: "pushed-not-merged",
+    }
+    items = approval_by_path(repo)
+    for path, reason in wanted.items():
+        assert os.path.isdir(path), path  # nothing was removed
+        assert items[path]["reason"] == reason, (path, items.get(path))
+        assert items[path]["why"] and items[path]["size_kb"] >= 0
+    assert os.path.isfile(ignored + "/data_backups/db.bak")
+    assert os.path.isfile(local + "/n.txt") and os.path.isfile(untracked + "/new.txt")
+
+
+def test_daily_keep_marker_protects_a_worktree_that_is_otherwise_removable(repo):
+    # the marker is committed, so the tree is clean and merged: only the marker keeps it
+    open(repo.main + "/.ateles-keep", "w").write("")
+    sh("git", "add", ".", cwd=repo.main)
+    sh("git", "commit", "-qm", "keep", cwd=repo.main)
+    sh("git", "push", "-q", "origin", "main", cwd=repo.main)
+    sh("git", "fetch", "-q", "origin", cwd=repo.main)
+    w = repo.add_wt("marked")
+    e = wp.analyze(repo.entry(w), False)
+    assert e["status"] == "keep-marked"
+    code, summ = run_main(repo, "--daily", "--apply")
+    assert summ["removed"] == 0 and os.path.isdir(w)
+    assert os.path.isdir(
+        w + "/node_modules/pkg"
+    )  # no tier, caches included, touched it
+    assert approval_by_path(repo)[w]["reason"] == "keep-marked"
+    # a marker added after the list was read is caught by the final re-check
+    os.remove(repo.main + "/.ateles-keep")
+    sh("git", "commit", "-qam", "unkeep", cwd=repo.main)
+    sh("git", "push", "-q", "origin", "main", cwd=repo.main)
+    sh("git", "fetch", "-q", "origin", cwd=repo.main)
+    w2 = repo.add_wt("late", node_modules=False)
+    e2 = wp.analyze(repo.entry(w2), False)
+    assert e2["status"] == "ELIGIBLE"
+    open(w2 + "/.ateles-keep", "w").write("")
+    assert wp.final_check_and_remove(e2, True, True) == "keep-marked"
+    assert os.path.isdir(w2)
+
+
+def test_daily_pushed_but_unmerged_commits_are_kept_not_removed(repo):
+    w = repo.add_wt("unmerged", node_modules=False)
+    push_branch(w, "feat-unmerged")
+    wp.DAILY["merged_only"] = True
+    e = wp.analyze(repo.entry(w), False)
+    assert e["status"] == "pushed-not-merged"
+    wp.DAILY["merged_only"] = (
+        False  # the older plain tier still treats a pushed commit as safe
+    )
+    assert wp.analyze(repo.entry(w), False)["status"] == "ELIGIBLE"
+
+
+def test_daily_a_worktree_with_initialized_submodules_goes_to_the_approval_list(repo):
+    sub = repo.home + "/subsrc"
+    os.makedirs(sub)
+    sh("git", "init", "-q", "-b", "main", sub)
+    open(sub + "/s.txt", "w").write("s\n")
+    sh("git", "add", ".", cwd=sub)
+    sh("git", "commit", "-qm", "sub", cwd=sub)
+    sh(
+        "git",
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        sub,
+        "libsub",
+        cwd=repo.main,
+    )
+    sh("git", "commit", "-qm", "add submodule", cwd=repo.main)
+    sh("git", "push", "-q", "origin", "main", cwd=repo.main)
+    sh("git", "fetch", "-q", "origin", cwd=repo.main)
+    w = repo.add_wt("withsub", node_modules=False)
+    sh(
+        "git",
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "update",
+        "--init",
+        cwd=w,
+    )
+    age(w)
+    code, summ = run_main(repo, "--daily", "--apply")
+    assert code == 0 and summ["removed"] == 0 and os.path.isdir(w + "/libsub")
+    assert approval_by_path(repo)[w]["reason"] == "has-submodules"
+
+
+def test_daily_removes_regenerable_caches_but_keeps_the_worktree_and_non_regenerable_files(
+    repo,
+):
+    with open(repo.main + "/.git/info/exclude", "a") as f:
+        f.write(".venv/\n__pycache__/\n")
+    w = repo.add_wt("caches")
+    for d in (".venv/lib", "dist/js", "build", "src/__pycache__"):
+        os.makedirs(w + "/" + d, exist_ok=True)
+        open(w + "/" + d + "/x.bin", "w").write("z" * 40)
+    os.makedirs(w + "/data_backups")
+    open(w + "/data_backups/db.bak", "w").write("precious")
+    age(w)
+    code, summ = run_main(repo, "--daily", "--apply")
+    assert code == 0 and summ["removed"] == 0 and summ["stripped_worktrees"] == 1
+    for d in ("node_modules", ".venv", "dist", "build", "src/__pycache__"):
+        assert not os.path.exists(w + "/" + d), d
+    assert os.path.isfile(
+        w + "/data_backups/db.bak"
+    )  # non-regenerable ignored file survives
+    assert os.path.isfile(w + "/src/app.js") and os.path.isfile(w + "/a.txt")
+    assert approval_by_path(repo)[w]["reason"] == "has-ignored-files"
+
+
+def test_daily_a_cache_named_directory_that_git_does_not_ignore_is_refused_and_listed(
+    repo,
+):
+    w = repo.add_wt("notignored", node_modules=False)
+    os.makedirs(w + "/out/.cache/emptychild")  # git sees no file, so the tree is clean
+    age(w)
+    wp.STRIP["caches"] = True
+    e = repo.entry(w)
+    res = wp.strip_flow(e, True)
+    assert res == "refused-node-modules"
+    assert "out/.cache:not-git-ignored" in e["strip_refused"]
+    assert os.path.isdir(w + "/out/.cache")
+    wp.note_cache_refusals(e)
+    assert (
+        wp.APPROVAL[0]["kind"] == "cache"
+        and wp.APPROVAL[0]["reason"] == "not-git-ignored"
+    )
+
+
+def test_daily_never_passes_force_to_any_command_and_removes_with_one_plain_call(
+    repo, monkeypatch
+):
+    for n in ("one", "two"):
+        repo.add_wt(n)
+    dirty = repo.add_wt("dirtyone")
+    open(dirty + "/a.txt", "a").write("x\n")
+    age(dirty)
+    seen = []
+    real_run = wp.run
+
+    def spy(args, *a, **k):
+        seen.append(list(args))
+        return real_run(args, *a, **k)
+
+    monkeypatch.setattr(wp, "run", spy)
+    code, summ = run_main(repo, "--daily", "--apply")
+    assert summ["removed"] == 2
+    assert not [c for c in seen if any(x in ("--force", "-f", "-ff") for x in c)]
+    removals = [c for c in seen if "worktree" in c and "remove" in c]
+    assert len(removals) == 2 and os.path.isdir(dirty)
+
+
+def test_daily_never_touches_deployment_checkouts_or_the_in_use_cwd_after_listing(repo):
+    w = repo.add_wt("late-use")
+    e = wp.analyze(repo.entry(w), False)
+    assert e["status"] == "ELIGIBLE"
+    repo.spawn_in(
+        w
+    )  # a process arrives after the analysis: the final re-check must see it
+    wp.DAILY["merged_only"] = True
+    assert wp.final_check_and_remove(e, True, True) == "in-use"
+    assert os.path.isdir(w)
+    assert (
+        "~/ateles-rc-src" in wp.DEFAULT_NEVER_TOUCH
+        and "~/neotoma-rc-src" in wp.DEFAULT_NEVER_TOUCH
+    )
+
+
+def test_daily_writes_an_approval_list_json_and_markdown_with_reasons(repo):
+    dirty = repo.add_wt("lister", node_modules=False)
+    open(dirty + "/a.txt", "a").write("x\n")
+    age(dirty)
+    code, summ = run_main(repo, "--daily", "--apply")
+    assert summ["approval_items"] == 1 and summ["approval_list"].endswith(
+        "approval_list.json"
+    )
+    doc = state_json(repo, "approval_list.json")
+    assert doc["count"] == 1 and doc["items"][0]["reason"] == "dirty"
+    assert doc["items"][0]["path"] == dirty
+    md = open(repo.home + "/state/approval_list.md").read()
+    assert (
+        dirty in md
+        and "not saved to git yet" in md
+        and "Nothing below was changed" in md
+    )
+    assert _mode(repo.home + "/state/approval_list.json") == 0o600
+    # a later run replaces the list rather than appending to it
+    open(dirty + "/a.txt", "w").write("a\n")
+    sh("git", "checkout", "--", "a.txt", cwd=dirty)
+    age(dirty)
+    code, summ = run_main(repo, "--daily", "--apply")
+    assert state_json(repo, "approval_list.json")["count"] == 0
+
+
+def _alert_run(repo, monkeypatch, free, *args):
+    sent = []
+    monkeypatch.setattr(wp, "dfree_gb", lambda: free)
+    monkeypatch.setattr(
+        wp,
+        "send_notification",
+        lambda msg, sev: (
+            sent.append((msg, sev))
+            or {"available": True, "returned": True, "error": ""}
+        ),
+    )
+    code, summ = run_main(repo, "--daily", "--apply", *args)
+    return summ, sent
+
+
+def test_free_space_alert_fires_below_threshold_dedupes_and_rearms(repo, monkeypatch):
+    summ, sent = _alert_run(repo, monkeypatch, 40.0)
+    assert summ["alert_severity"] == 0 and sent == []
+    summ, sent = _alert_run(repo, monkeypatch, 20.0)
+    assert (
+        summ["alert"]["state"] == "fired"
+        and summ["alert_severity"] == 1
+        and len(sent) == 1
+    )
+    rec = [json.loads(x) for x in open(repo.home + "/state/alerts.jsonl")]
+    assert (
+        len(rec) == 1
+        and rec[0]["free_gib"] == 20.0
+        and rec[0]["delivery"]["returned"] is True
+    )
+    # still low the next day: no second alert, but the summary still carries the severity
+    summ, sent = _alert_run(repo, monkeypatch, 19.0)
+    assert (
+        summ["alert"]["state"] == "suppressed"
+        and summ["alert_severity"] == 1
+        and sent == []
+    )
+    assert len(open(repo.home + "/state/alerts.jsonl").read().splitlines()) == 1
+    # recovering to just above the threshold is inside the hysteresis band: still not re-armed
+    summ, sent = _alert_run(repo, monkeypatch, 30.0)
+    assert (
+        summ["alert_severity"] == 0
+        and state_json(repo, "alert_state.json")["armed"] is False
+    )
+    summ, sent = _alert_run(repo, monkeypatch, 18.0)
+    assert summ["alert"]["state"] == "suppressed" and sent == []
+    # above threshold + 10 re-arms; the next drop alerts again
+    summ, sent = _alert_run(repo, monkeypatch, 36.0)
+    assert (
+        summ["alert"]["state"] == "rearmed"
+        and state_json(repo, "alert_state.json")["armed"] is True
+    )
+    summ, sent = _alert_run(repo, monkeypatch, 12.0)
+    assert summ["alert"]["state"] == "fired" and len(sent) == 1
+
+
+def test_free_space_alert_threshold_is_configurable_and_critical_when_very_low(
+    repo, monkeypatch
+):
+    summ, sent = _alert_run(repo, monkeypatch, 40.0, "--alert-gib", "50")
+    assert summ["alert"]["threshold_gib"] == 50.0 and summ["alert"]["state"] == "fired"
+    monkeypatch.setenv("ATELES_WORKTREE_PRUNE_ALERT_GIB", "3")
+    summ, sent = _alert_run(repo, monkeypatch, 4.0)
+    assert summ["alert"]["threshold_gib"] == 3.0
+    assert wp.DEFAULT_ALERT_GIB == 25.0 and wp.DEFAULT_ALERT_REARM_GIB == 10.0
+    wp.configure(env={}, cli={})
+    assert wp.ALERT_GIB == 25.0
+    wp.configure(env={"ATELES_WORKTREE_PRUNE_ALERT_GIB": "junk"}, cli={})
+    assert wp.ALERT_GIB == 25.0  # a bad value falls back to the default, with a warning
+    os.remove(repo.home + "/state/alert_state.json")  # start armed again
+    summ, sent = _alert_run(repo, monkeypatch, 2.0, "--alert-gib", "25")
+    assert summ["alert_severity"] == 2 and sent[0][1] == 2
+
+
+def test_free_space_alert_dry_run_sends_and_writes_nothing(repo, monkeypatch):
+    summ, sent = _alert_run(repo, monkeypatch, 5.0, "--dry-run")
+    assert (
+        summ["alert"]["state"] == "would-fire"
+        and summ["alert_severity"] == 1
+        and sent == []
+    )
+    assert not os.path.exists(repo.home + "/state/alerts.jsonl")
+    assert not os.path.exists(repo.home + "/state/alert_state.json")
+
+
+def test_alert_is_recorded_durably_even_when_no_notifier_transport_exists(
+    repo, monkeypatch
+):
+    monkeypatch.setattr(wp, "dfree_gb", lambda: 10.0)
+    monkeypatch.setattr(
+        wp,
+        "send_notification",
+        lambda msg, sev: {
+            "available": False,
+            "returned": None,
+            "error": "ImportError: no httpx",
+        },
+    )
+    code, summ = run_main(repo, "--daily", "--apply")
+    assert code == 0 and summ["alert_severity"] == 1
+    rec = json.loads(open(repo.home + "/state/alerts.jsonl").read().splitlines()[0])
+    assert (
+        rec["delivery"]["available"] is False and "no httpx" in rec["delivery"]["error"]
+    )
+
+
+def test_send_notification_never_raises_without_the_notifier_dependencies(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def deny(name, *a, **k):
+        if name.startswith("lib.notify"):
+            raise ImportError("no httpx")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", deny)
+    out = wp.send_notification("m", 1)
+    assert out["available"] is False and "ImportError" in out["error"]
+
+
+def test_the_daily_flag_cannot_be_combined_with_strip_only(repo, capsys):
+    with pytest.raises(SystemExit) as ex:
+        wp.main(["--state-dir", repo.home + "/state", "--daily", "--strip-only"])
+    assert ex.value.code == 2
+
+
+# ======================================================================================
+# round 1 fixes: strict ignored files, re-check pins, alert text, list text, delivery honesty
+# ======================================================================================
+def test_daily_alone_is_a_dry_run_and_deletes_nothing(repo):
+    w = repo.add_wt("alone")
+    code, summ = run_main(repo, "--daily")
+    assert code == 0 and summ["mode"] == "dry-run" and summ["daily"] is True
+    assert summ["removed"] == 0 and summ["stripped_worktrees"] == 0
+    assert os.path.isdir(w + "/node_modules/pkg")
+    assert os.path.isfile(
+        repo.home + "/state/approval_list.md"
+    )  # the report is still written
+
+
+def test_daily_ignored_notes_settings_and_nested_repos_keep_the_worktree(repo):
+    notes = repo.add_wt("notes", node_modules=False)
+    os.makedirs(notes + "/tmp")
+    open(notes + "/tmp/notes.txt", "w").write("my notes")
+    age(notes)
+    public = repo.add_wt("public", node_modules=False)
+    os.makedirs(public + "/public")
+    open(public + "/public/page.html", "w").write("<p>x</p>")
+    age(public)
+    envw = repo.add_wt("envfile", node_modules=False)
+    open(envw + "/.env.development", "w").write("LOCAL=1")
+    age(envw)
+    nested = repo.add_wt("nested", node_modules=False)
+    inner = nested + "/build/pkg"
+    os.makedirs(inner)
+    sh("git", "init", "-q", "-b", "main", inner)
+    open(inner + "/work.txt", "w").write("unique")
+    sh("git", "add", ".", cwd=inner)
+    sh("git", "commit", "-qm", "unique local commit", cwd=inner)
+    age(nested)
+    code, summ = run_main(repo, "--daily", "--apply")
+    assert code == 0 and summ["removed"] == 0
+    items = approval_by_path(repo)
+    for w in (notes, public, envw, nested):
+        assert os.path.isdir(w), w
+        assert items[w]["reason"] == "has-ignored-files", (w, items.get(w))
+    assert open(notes + "/tmp/notes.txt").read() == "my notes"
+    assert "unique local commit" in sh("git", "log", "--format=%s", cwd=inner)
+    assert os.path.isdir(
+        nested + "/build/pkg/.git"
+    )  # the cache tier refused the nested repo too
+
+
+def test_strict_ignored_classification_only_lets_real_cache_directories_go(repo):
+    w = repo.add_wt("strict", node_modules=False)
+    for d in ("dist", "tmp", "data"):
+        os.makedirs(w + "/" + d)
+    assert wp.ignored_removable_strict(w, "dist/") == ""
+    assert wp.ignored_removable_strict(w, "tmp/") == "ignored-directory"
+    assert wp.ignored_removable_strict(w, "data/") == "ignored-directory"
+    assert wp.ignored_removable_strict(w, "debug.log") == "ignored-file"
+    assert wp.ignored_removable_strict(w, ".env.development") == "env-copy-differs"
+    assert wp.ignored_removable_strict(w, ".env.production") == "ignored-file"
+    assert (
+        wp.ignored_removable_strict(w, "x.pyc") == ""
+        and wp.ignored_removable_strict(w, ".DS_Store") == ""
+    )
+    os.makedirs(w + "/dist/inner")
+    sh("git", "init", "-q", "-b", "main", w + "/dist/inner")
+    assert wp.ignored_removable_strict(w, "dist/") == "contains-git"
+    shutil.rmtree(w + "/dist")
+    os.symlink(repo.home, w + "/dist")
+    assert wp.ignored_removable_strict(w, "dist/") == "symlink"
+
+
+def _eligible(repo, name):
+    w = repo.add_wt(name, node_modules=False)
+    wp.DAILY["merged_only"] = True
+    e = wp.analyze(repo.entry(w), False)
+    assert e["status"] == "ELIGIBLE", e["status"]
+    return w, e
+
+
+def test_recheck_dirty_change_after_the_list_was_read_keeps_and_lists_the_worktree(
+    repo,
+):
+    w, e = _eligible(repo, "late-dirty")
+    open(w + "/a.txt", "a").write("changed after analysis\n")
+    age(w)  # past the quiet window, so only the cleanliness re-check can stop it
+    res = wp.final_check_and_remove(e, True, True)
+    assert res == "dirty" and os.path.isdir(w)
+    wp.note_approval(e, res)
+    assert wp.APPROVAL[-1]["reason"] == "dirty" and wp.APPROVAL[-1]["path"] == w
+
+
+def test_recheck_untracked_file_after_the_list_was_read_keeps_and_lists_the_worktree(
+    repo,
+):
+    w, e = _eligible(repo, "late-untracked")
+    open(w + "/brand_new.txt", "w").write("n\n")
+    age(w)
+    res = wp.final_check_and_remove(e, True, True)
+    assert res == "dirty" and os.path.isfile(w + "/brand_new.txt")
+    wp.note_approval(e, res)
+    assert wp.APPROVAL[-1]["reason"] == "dirty"
+
+
+def test_recheck_lock_taken_after_the_list_was_read_keeps_and_lists_the_worktree(repo):
+    w, e = _eligible(repo, "late-lock")
+    sh("git", "worktree", "lock", w, cwd=repo.main)
+    res = wp.final_check_and_remove(e, True, True)
+    assert res == "locked" and os.path.isdir(w)
+    wp.note_approval(e, res)
+    assert wp.APPROVAL[-1]["reason"] == "locked"
+
+
+def test_recheck_head_moving_after_the_list_was_read_keeps_and_lists_the_worktree(repo):
+    w, e = _eligible(repo, "late-head")
+    open(w + "/moved.txt", "w").write("m\n")
+    sh("git", "add", ".", cwd=w)
+    sh("git", "commit", "-qm", "moved", cwd=w)
+    age(w)
+    res = wp.final_check_and_remove(e, True, True)
+    assert res == "head-moved" and os.path.isdir(w)
+    wp.note_approval(e, res)
+    assert wp.APPROVAL[-1]["reason"] == "head-moved"
+
+
+# ---- the alert text -------------------------------------------------------------------------
+RUN_DONE = {
+    "caches": 3,
+    "removed": 2,
+    "freed_bytes": int(4.2 * 2**30),
+    "waiting": 12,
+    "waiting_kb": 40 * 1048576,
+}
+
+
+def test_alert_message_is_plain_complete_and_ordered_for_a_phone_reader():
+    msg = wp.build_alert_message(18.4, 1, RUN_DONE)
+    lines = msg.splitlines()
+    assert lines[0] == "Your Mac is low on disk space: 18 GB free."
+    assert (
+        "cleared 3 cache folders and removed 2 merged work folders, freeing about 4.2 GB"
+        in lines[1]
+    )
+    assert "Nothing else was deleted." in lines[2]
+    assert "12 items, about 40.0 GB, are waiting for your decision" in lines[2]
+    assert "Nothing is urgent to delete" in lines[3]
+    assert ".ateles-keep" in lines[3]
+    assert lines[-1].startswith("List: ") and lines[-1].endswith("approval_list.md")
+    for jargon in ("GiB", "home volume", "threshold", "HEAD", "origin", "worktree"):
+        assert jargon not in "\n".join(lines[:-1]), (
+            jargon
+        )  # the path line may contain any word
+
+
+def test_alert_message_says_when_nothing_was_freed_and_nothing_waits():
+    msg = wp.build_alert_message(20.0, 1, {})
+    assert "Today's check freed nothing." in msg
+    assert "Nothing is waiting for your decision." in msg
+    one = wp.build_alert_message(
+        20.0,
+        1,
+        {
+            "caches": 1,
+            "removed": 1,
+            "freed_bytes": 5 * 2**20,
+            "waiting": 1,
+            "waiting_kb": 2048,
+        },
+    )
+    assert (
+        "cleared 1 cache folder and removed 1 merged work folder, freeing about 5 MB"
+        in one
+    )
+    assert "1 item, about 2 MB, is waiting" in one
+
+
+def test_alert_message_wording_differs_when_critical():
+    normal = wp.build_alert_message(3.0, 1, RUN_DONE)
+    critical = wp.build_alert_message(3.0, 2, RUN_DONE)
+    assert critical.startswith(
+        "URGENT: your Mac is almost out of disk space: 3 GB free."
+    )
+    assert "Please free space today" in critical and "Nothing is urgent" not in critical
+    assert "Nothing is urgent" in normal and "URGENT" not in normal
+    assert critical.splitlines()[-1].startswith("List: ")
+
+
+def test_the_sent_alert_carries_the_run_facts(repo, monkeypatch):
+    dirty = repo.add_wt("alertdirty", node_modules=False)
+    open(dirty + "/a.txt", "a").write("x\n")
+    age(dirty)
+    gone = repo.add_wt("alertgone")
+    summ, sent = _alert_run(repo, monkeypatch, 12.0)
+    msg = sent[0][0]
+    assert msg.startswith("Your Mac is low on disk space: 12 GB free.")
+    assert (
+        "removed 1 merged work folder" in msg
+        and "1 item," in msg
+        and "are waiting" not in msg
+    )
+    assert (
+        not os.path.exists(gone)
+        and msg.splitlines()[-1] == "List: " + repo.home + "/state/approval_list.md"
+    )
+
+
+# ---- the approval list text ---------------------------------------------------------------
+def _item(kind, reason, kb, branch="feat-x", path="/h/wt-a"):
+    return {
+        "kind": kind,
+        "path": path,
+        "branch": branch,
+        "reason": reason,
+        "why": wp.REASON_TEXT[reason],
+        "size_kb": kb,
+    }
+
+
+def test_sizes_are_readable_at_every_scale_never_zero_point_zero_zero():
+    assert wp.fmt_size(0) == "under 1 MB" and wp.fmt_size(700) == "under 1 MB"
+    assert wp.fmt_size(5 * 1024) == "5 MB" and wp.fmt_size(900 * 1024) == "900 MB"
+    assert wp.fmt_size(2 * 1048576) == "2.0 GB"
+    md = wp.render_approval_markdown(
+        [
+            _item("worktree", "recent", 700, path="/h/a"),
+            _item("worktree", "dirty", 5 * 1024, path="/h/b"),
+        ],
+        "T",
+        "apply",
+    )
+    assert "0.00" not in md and "(under 1 MB)" in md and "(5 MB)" in md
+
+
+def test_every_reason_text_is_plain_language_without_git_internals():
+    for code, text in wp.REASON_TEXT.items():
+        assert not re.search(r"HEAD|origin|--|\bPR\b|upstream|ref\b", text), (
+            code,
+            text,
+        )
+
+
+def test_work_that_exists_only_here_is_visibly_separate_and_branches_are_shown():
+    items = [
+        _item("worktree", "recent", 10 * 1024, branch="safe-looking", path="/h/safe"),
+        _item(
+            "worktree", "unpushed", 20 * 1024, branch="my-unique-work", path="/h/unique"
+        ),
+        _item("worktree", "keep-marked", 30 * 1024, branch="held", path="/h/held"),
+        _item(
+            "cache",
+            "not-git-ignored",
+            1024,
+            branch="safe-looking",
+            path="/h/safe/out/.cache",
+        ),
+    ]
+    md = wp.render_approval_markdown(items, "T", "apply")
+    only = md.index("Work that may exist only on this Mac")
+    other = md.index("Other items waiting for your decision")
+    kept = md.index("Kept on purpose")
+    assert only < other < kept
+    assert only < md.index("my-unique-work") < other
+    assert other < md.index("/h/safe`") < kept and md.index("/h/held") > kept
+    assert "**my-unique-work** `/h/unique`" in md and "**safe-looking** `/h/safe`" in md
+    assert (
+        "3 items, about 31 MB, are waiting for your decision" in md
+    )  # the kept item is not counted
+
+
+def test_approve_and_keep_commands_are_printed_once_at_the_top():
+    md = wp.render_approval_markdown([_item("worktree", "dirty", 2048)], "T", "apply")
+    assert (
+        md.count("git worktree remove <path>") == 1
+        and md.count("touch <path>/.ateles-keep") == 1
+    )
+    assert md.index("git worktree remove <path>") < md.index("## ")
+
+
+def test_empty_approval_list_says_nothing_needs_a_decision():
+    md = wp.render_approval_markdown([], "T", "apply")
+    assert "Nothing needs your decision." in md and "## " not in md
+    only_kept = wp.render_approval_markdown(
+        [_item("worktree", "locked", 2048)], "T", "apply"
+    )
+    assert (
+        "Nothing needs your decision." in only_kept and "Kept on purpose" in only_kept
+    )
+
+
+# ---- alert delivery honesty ---------------------------------------------------------------
+def test_a_failed_or_unavailable_notifier_does_not_disarm_the_alert_and_is_retried(
+    repo, monkeypatch
+):
+    replies = [
+        {"available": False, "returned": None, "error": "ImportError: no httpx"},
+        {"available": True, "returned": False, "error": ""},
+        {"available": True, "returned": True, "error": ""},
+    ]
+    calls = []
+    monkeypatch.setattr(wp, "dfree_gb", lambda: 10.0)
+    monkeypatch.setattr(
+        wp,
+        "send_notification",
+        lambda m, sv: calls.append(m) or replies[len(calls) - 1],
+    )
+    states = []
+    for _ in range(4):
+        code, summ = run_main(repo, "--daily", "--apply")
+        states.append(summ["alert"]["state"])
+    assert states == ["fired-undelivered", "fired-undelivered", "fired", "suppressed"]
+    assert len(calls) == 3  # retried until delivered, then deduped
+    recs = [json.loads(x) for x in open(repo.home + "/state/alerts.jsonl")]
+    assert [r["delivered"] for r in recs] == [False, False, True]
+    assert state_json(repo, "alert_state.json")["armed"] is False
+
+
+def test_the_notifier_is_called_without_email_routing(monkeypatch):
+    import types
+
+    seen = {}
+
+    class FakeNotifier:
+        def send(self, message, priority, handler="", email_eligible=True, **kw):
+            seen.update(
+                message=message,
+                priority=priority,
+                handler=handler,
+                email_eligible=email_eligible,
+            )
+            return True
+
+    mod = types.ModuleType("lib.notify")
+    mod.Notifier = FakeNotifier
+    mod.Priority = SimpleNamespace(CRITICAL="critical", WARN="warn")
+    monkeypatch.setitem(sys.modules, "lib.notify", mod)
+    out = wp.send_notification("hello", 1)
+    assert out == {"available": True, "returned": True, "error": ""}
+    assert seen["email_eligible"] is False and seen["priority"] == "warn"
+    wp.send_notification("hello", 2)
+    assert seen["priority"] == "critical"
+
+
+# ---- caches in use by a running process -------------------------------------------------------
+def test_a_cache_directory_with_a_file_open_by_a_running_process_is_kept_and_listed(
+    repo,
+):
+    with open(repo.main + "/.git/info/exclude", "a") as f:
+        f.write(".venv/\n")
+    w = repo.add_wt("busycache", node_modules=False)
+    os.makedirs(w + "/.venv/lib")
+    open(w + "/.venv/lib/mod.so", "w").write("binary")
+    os.makedirs(w + "/dist")
+    open(w + "/dist/out.js", "w").write("o")
+    age(w)
+    fh = open(w + "/.venv/lib/mod.so")
+    p = subprocess.Popen(
+        ["sleep", "60"], stdin=fh, cwd="/"
+    )  # cwd is elsewhere: only the open file shows it
+    repo.procs.append(p)
+    fh.close()
+    time.sleep(0.4)
+    wp.STRIP["caches"] = True
+    e = repo.entry(w)
+    res = wp.strip_flow(e, True)
+    assert res == "STRIPPED"
+    assert ".venv:in-use-by-process" in e["strip_refused"]
+    assert os.path.isfile(w + "/.venv/lib/mod.so")  # kept
+    assert not os.path.exists(w + "/dist")  # the idle cache next to it still went
+    wp.note_cache_refusals(e)
+    assert (
+        wp.APPROVAL[-1]["reason"] == "in-use-by-process"
+        and wp.APPROVAL[-1]["branch"] == e["branch"]
+    )
+
+
+def test_a_failed_open_file_scan_keeps_every_cache(repo, monkeypatch):
+    w = repo.add_wt("lsoffail")
+    wp.STRIP["caches"] = True
+    monkeypatch.setattr(wp, "open_file_paths", lambda: (False, set()))
+    e = repo.entry(w)
+    assert wp.strip_flow(e, True) == "recheck-lsof-error"
+    assert os.path.isdir(w + "/node_modules/pkg")
+
+
+def test_a_dry_run_alert_shows_the_message_but_sends_and_writes_nothing(
+    repo, monkeypatch
+):
+    summ, sent = _alert_run(repo, monkeypatch, 9.0, "--dry-run")
+    assert summ["alert"]["state"] == "would-fire" and sent == []
+    assert summ["alert"]["message"].startswith(
+        "Your Mac is low on disk space: 9 GB free."
+    )
+    assert not os.path.exists(repo.home + "/state/alerts.jsonl")
+
+
+# ---- the one disposable ignored file: an identical .env.development copy ----------------------
+def _env_wt(repo, name, content, main_content="SETTING=one\n"):
+    open(repo.main + "/.env.development", "w").write(main_content)
+    w = repo.add_wt(name, node_modules=False)
+    open(w + "/.env.development", "w").write(content)
+    age(w)
+    return w
+
+
+def test_an_env_development_copy_identical_to_the_main_clone_goes_with_the_worktree(
+    repo,
+):
+    w = _env_wt(repo, "envsame", "SETTING=one\n")
+    code, summ = run_main(repo, "--daily", "--apply")
+    assert code == 0 and summ["removed"] == 1 and not os.path.exists(w)
+    assert os.path.isfile(
+        repo.main + "/.env.development"
+    )  # the main clone's own file is untouched
+
+
+def test_an_env_development_copy_that_differs_keeps_the_worktree_and_lists_it(repo):
+    differing = "SETTING=two\n"
+    w = _env_wt(repo, "envdiff", differing)
+    code, summ = run_main(repo, "--daily", "--apply")
+    assert summ["removed"] == 0 and os.path.isdir(w)
+    assert open(w + "/.env.development").read() == differing
+    item = approval_by_path(repo)[w]
+    assert item["reason"] == "has-ignored-files"
+    # no content (or hash of it) leaks into any record the job writes
+    blob = (
+        open(repo.home + "/state/approval_list.json").read()
+        + open(repo.home + "/state/approval_list.md").read()
+    )
+    blob += open(repo.home + "/state/runs.jsonl").read()
+    for log_name in os.listdir(repo.home + "/state/logs"):
+        blob += open(repo.home + "/state/logs/" + log_name).read()
+    assert "SETTING=two" not in blob and "SETTING=one" not in blob
+
+
+def test_env_development_exception_is_narrow(repo):
+    same = "SETTING=one\n"
+    w = _env_wt(repo, "envnarrow", same)
+    assert wp.env_copy_is_disposable(w, repo.main) is True
+    assert wp.env_copy_is_disposable(w, None) is False
+    os.remove(repo.main + "/.env.development")  # missing in the main clone
+    assert wp.env_copy_is_disposable(w, repo.main) is False
+    open(repo.main + "/.env.development", "w").write(same)
+    os.remove(w + "/.env.development")
+    os.symlink(
+        repo.main + "/.env.development", w + "/.env.development"
+    )  # a link is not a copy
+    assert wp.env_copy_is_disposable(w, repo.main) is False
+    os.remove(w + "/.env.development")
+    open(w + "/.env.development.bak", "w").write(
+        same
+    )  # renamed variants are never disposable
+    assert (
+        wp.ignored_removable_strict(w, ".env.development.bak", repo.main)
+        == "ignored-file"
+    )
+    os.makedirs(w + "/sub")
+    open(w + "/sub/.env.development", "w").write(same)  # only at the worktree root
+    assert (
+        wp.ignored_removable_strict(w, "sub/.env.development", repo.main)
+        == "ignored-file"
+    )
