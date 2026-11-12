@@ -7,6 +7,3 @@ httpx-sse==0.4.3
 aiohttp==3.13.5
 cryptography==48.0.0
 PyJWT==2.13.0
-# Notification routing (lib/notify). Same constraint as pyproject.toml. Added so jobs run from this venv
-# (for example worktree_prune.py --daily) can deliver operator alerts; without it the notifier only logs.
-apprise>=1.7

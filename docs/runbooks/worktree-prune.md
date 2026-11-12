@@ -26,7 +26,8 @@ below together and never does anything outside them:
 1. **Whole removal of linked worktrees that are merged and clean**, and nothing else. Merged means HEAD is in
    origin's default branch, or is (an ancestor of) the head of a merged pull request for the branch. A commit
    that is only pushed to some other origin branch is **not** enough (`pushed-not-merged`). Clean means
-   `git status` is empty. `--protect-ignored` is on and, in daily mode, strict: a worktree is removed with
+   `git status` is empty. Immediately before removal, any file under the worktree that a running process holds
+   open or mapped keeps it (`in-use`), and so does a failed open-file scan. `--protect-ignored` is on and, in daily mode, strict: a worktree is removed with
    git-ignored files still inside it only if each of them is a **cache directory** (a name from the list in
    item 2) that passes the cache tier's own directory checks (a real directory inside the worktree, no `.git`
    beneath it, no mount point), or a known cache file (`.DS_Store`, `*.pyc`, `*.tsbuildinfo`,
@@ -98,12 +99,14 @@ or not delivery works), and every run's `runs.jsonl` line carries `alert` and `a
 existing operator notifier, `lib/notify` (`Notifier.send`, Apprise/Telegram-backed, called with
 `email_eligible=False`), imported lazily; this job adds no credentials, transport or scheduler. The notifier
 needs an interpreter with its dependencies and its own transport settings in the job's environment: the
-daemon venv (`~/ateles-rc-src/.venv`, from `execution/scripts/daemon-requirements.txt`) has `httpx` and, as
-of this change, `apprise>=1.7` (the same constraint as `pyproject.toml`), which the notifier needs to send at
-all (without it the notifier only logs). The deployment checkout's venv is refreshed from that file by the
-next autodeploy run (`redeploy_daemons_from_main.sh`), which also restarts the daemons. The transport
-settings must still be in the job's environment, and delivery stays **unproven until it is activated and
-verified on the host**. If it cannot deliver, the record says so (`delivered: false`) and the next run retries.
+daemon venv (`~/ateles-rc-src/.venv`, from `execution/scripts/daemon-requirements.txt`) has `httpx` but
+not `apprise`, which the notifier needs to send at all (without it the notifier only logs). This change does
+**not** touch that requirements file: adding a notifier transport to the shared deployment venv would switch on
+real alert delivery for the other daemons that use the same notifier too, which changes how the swarm
+notifies the operator and is a separate operator decision. Until that is decided, an alert is recorded
+durably in `alerts.jsonl` with `delivered: false` and retried on every run; nothing is lost and nothing is
+silently dropped. Real delivery also needs the transport settings in the job's environment, and stays
+**unproven until it is activated and verified on the host**. If it cannot deliver, the record says so (`delivered: false`) and the next run retries.
 
 The job is scheduled at **08:30**, outside the notifier's 22:00 to 08:00 silence window, so a warn-level alert
 is delivered instead of being held until some other process drains the held queue.
@@ -330,8 +333,9 @@ development clone. Review the flags in the template first: it runs `--daily --ap
 uses the daemon convention for the interpreter, `{{CHECKOUT}}/.venv/bin/python3` (the deployment checkout,
 `~/ateles-rc-src`, as `docs/daemon_rc_autodeploy.md` prescribes), not `/usr/bin/python3`. It runs at 08:30
 local time, and a Mac that is asleep then runs it on wake. For the alert to be delivered, the notifier's
-transport settings must be in `EnvironmentVariables` (the venv has `apprise` once autodeploy has refreshed
-it); otherwise alerts are only recorded and retried.
+transport settings must be in `EnvironmentVariables` and the interpreter's venv must have a notifier
+transport (the deployment venv does not today; that is a separate operator decision); otherwise alerts are
+only recorded in `alerts.jsonl` (`delivered: false`) and retried on each run.
 
 ```
 CHECKOUT=/path/to/a/clean/ateles/checkout

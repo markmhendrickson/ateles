@@ -2334,3 +2334,39 @@ def test_env_development_exception_is_narrow(repo):
         wp.ignored_removable_strict(w, "sub/.env.development", repo.main)
         == "ignored-file"
     )
+
+
+# ---- round 3: open files block whole removal; the byte comparison ignores filecmp's cache ---------
+def test_a_file_open_in_the_worktree_by_a_running_process_blocks_whole_removal(repo):
+    w, e = _eligible(repo, "openfile")
+    fh = open(w + "/a.txt")
+    p = subprocess.Popen(
+        ["sleep", "60"], stdin=fh, cwd="/"
+    )  # cwd is elsewhere: only the open file shows it
+    repo.procs.append(p)
+    fh.close()
+    time.sleep(0.4)
+    res = wp.final_check_and_remove(e, True, True)
+    assert res == "in-use" and os.path.isdir(w)
+    wp.note_approval(e, res)
+    assert wp.APPROVAL[-1]["reason"] == "in-use"
+
+
+def test_a_failed_open_file_scan_keeps_the_worktree_on_whole_removal(repo, monkeypatch):
+    w, e = _eligible(repo, "scanfail")
+    monkeypatch.setattr(wp, "open_file_paths", lambda: (False, set()))
+    assert wp.final_check_and_remove(e, True, True) == "recheck-lsof-error"
+    assert os.path.isdir(w)
+
+
+def test_the_env_copy_comparison_is_not_fooled_by_filecmps_cache(repo):
+    w = _env_wt(repo, "envcache", "SETTING=one\n")
+    assert wp.env_copy_is_disposable(w, repo.main) is True  # populates filecmp's cache
+    mine, theirs = w + "/.env.development", repo.main + "/.env.development"
+    st = os.stat(theirs)
+    open(theirs, "w").write("SETTING=two\n")  # same length
+    os.utime(
+        theirs, ns=(st.st_atime_ns, st.st_mtime_ns)
+    )  # same size and mtime: the cache key is unchanged
+    assert os.stat(mine).st_size == os.stat(theirs).st_size
+    assert wp.env_copy_is_disposable(w, repo.main) is False

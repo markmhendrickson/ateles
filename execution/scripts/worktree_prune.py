@@ -878,6 +878,7 @@ def env_copy_is_disposable(wt, main):
                 return False
         if git_ignored(wt, ENV_COPY_NAME) is not True:
             return False
+        filecmp.clear_cache()  # a cached outcome for an unchanged size and mtime must never decide this
         return filecmp.cmp(mine, theirs, shallow=False)
     except OSError:
         return False
@@ -958,6 +959,14 @@ def final_check_and_remove(e, apply_, protect_ignored):
         e["ignored_nonregen"] = odd[:6]
         if protect_ignored:
             return "has-ignored-files"
+    if DAILY["merged_only"]:
+        # immediately before removal: any file under the worktree that a running process holds open or mapped
+        # keeps it (the cwd scan above cannot see a process working elsewhere); a failed scan keeps it too
+        ok, held_paths = open_file_paths()
+        if not ok:
+            return "recheck-lsof-error"
+        if path_open(wt, held_paths):
+            return "in-use"
     e["kb"] = e.get("kb") or du_kb(wt)
     if not apply_:
         return "WOULD-REMOVE"
@@ -1293,7 +1302,7 @@ REASON_TEXT = {
     "has-ignored-files": "Holds files that git does not track and that cannot be rebuilt "
     "(such as notes, logs, local settings or a nested repository).",
     "recent": "Edited in the last day, so it is probably still in use.",
-    "in-use": "A program is running inside it right now.",
+    "in-use": "A program is running inside it, or has one of its files open, right now.",
     "head-moved": "It changed while the check was running.",
     "git-refused": "Git declined to remove it.",
     "find-error": "A safety check could not finish, so it was left alone.",
