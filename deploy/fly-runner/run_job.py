@@ -1129,30 +1129,31 @@ RECORD_ATTEMPT_TIMEOUT_SECONDS = 30.0
 RECORD_DEADLINE_MARGIN_SECONDS = 5.0
 
 
-def _refusal_detail(exc) -> str:
-    """The error code and message of a refused write, never a header or token.
+def _log_refusal_detail(exc) -> None:
+    """Log the error code and message of a refused write, never a header or token.
 
     Reads only the JSON body's ``error_code`` / ``code`` and ``message`` /
     ``error`` fields (bounded), so the cause (for example a missing grant) is
-    in the log instead of a bare status. Unreadable bodies add nothing."""
+    in the log instead of a bare status. An unreadable body logs nothing more."""
+    body = None
     try:
         raw = exc.read(2048) if hasattr(exc, "read") else b""
         body = json.loads(raw.decode("utf-8", "replace"))
     except Exception:  # noqa: BLE001 — the status alone is still logged
-        return ""
-    if not isinstance(body, dict):
-        return ""
-    err = body.get("error")
-    if isinstance(err, dict):
-        body = err
-    parts = []
-    for label, keys in (("code", ("error_code", "code")), ("message", ("message", "error"))):
-        for key in keys:
-            val = body.get(key)
-            if isinstance(val, str) and val:
-                parts.append(f"{label}={val[:200]!r}")
-                break
-    return (" (" + ", ".join(parts) + ")") if parts else ""
+        body = None  # the status alone is still logged
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            body = err
+        parts = []
+        for label, keys in (("code", ("error_code", "code")), ("message", ("message", "error"))):
+            for key in keys:
+                val = body.get(key)
+                if isinstance(val, str) and val:
+                    parts.append(f"{label}={val[:200]!r}")
+                    break
+        if parts:
+            print("fly-runner: record write refusal detail: " + ", ".join(parts), flush=True)
 
 
 def write_record(base_url: str, auth, record: dict, *, deadline: float | None = None,
@@ -1209,8 +1210,9 @@ def write_record(base_url: str, auth, record: dict, *, deadline: float | None = 
         except urllib.error.HTTPError as exc:
             if exc.code < 500:
                 _last_refusal["status"] = exc.code
-                print(f"fly-runner: record write attempt {attempt}: HTTP {exc.code}; refused"
-                      f"{_refusal_detail(exc)}", flush=True)
+                print(f"fly-runner: record write attempt {attempt}: HTTP {exc.code}; refused",
+                      flush=True)
+                _log_refusal_detail(exc)
                 return False
             outcome = f"HTTP {exc.code}"
         except (urllib.error.URLError, OSError) as exc:  # timeouts are OSErrors
