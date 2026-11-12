@@ -100,15 +100,18 @@ def _key_for(handler, match, yesterday: str) -> str:
 # ── Channel select ───────────────────────────────────────────────────────────
 
 
-def test_no_telegram_plus_email_armed_selects_email_not_channel_error(monkeypatch):
+def test_default_channel_is_the_payment_checkpoint_needing_no_credentials(monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     monkeypatch.delenv("MONEDULA_CONSENT_CHANNEL", raising=False)
     monkeypatch.setenv("ATELES_NOTIFY_EMAIL", "1")
     monkeypatch.setenv("OPERATOR_EMAIL", "operator@example.com")
     channel, source = monedula._resolve_consent_channel()
-    assert channel == "email"
+    assert channel == "checkpoint"
     assert source == "automatic"
+    # Telegram credentials and TELEGRAM_ALLOWED_USER_ID are not required.
+    monkeypatch.delenv("TELEGRAM_ALLOWED_USER_ID", raising=False)
+    assert monedula._resolve_consent_channel() == ("checkpoint", "automatic")
 
 
 def test_env_override_email_source_env(monkeypatch):
@@ -120,7 +123,7 @@ def test_env_override_email_source_env(monkeypatch):
     assert source == "env"
 
 
-def test_missing_channel_config_is_blocker_not_silent_success(
+def test_unreachable_neotoma_is_blocker_not_silent_success(
     monkeypatch, tmp_path, caplog
 ):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
@@ -143,10 +146,17 @@ def test_missing_channel_config_is_blocker_not_silent_success(
     monkeypatch.setattr(monedula, "_post_escalation_entity", lambda *a, **k: True)
     monkeypatch.setattr(monedula, "_emit_consent_escalation", lambda *a, **k: True)
 
+    import payment_approval
+
+    def unreachable(*a, **k):
+        raise payment_approval.ApprovalError("Neotoma unreachable")
+
+    monkeypatch.setattr(payment_approval, "_request", unreachable)
+
     ok = monedula.main()
     assert ok is False
     assert h.execute_calls == []
-    assert any("consent_channel_unconfigured" in c[0] for c in notify_calls)
+    assert any("payment_approval_unavailable" in c[0] for c in notify_calls)
     assert notify_calls[0][2].get("email_eligible") is True
 
 

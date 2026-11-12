@@ -1018,55 +1018,22 @@ def _emit_consent_escalation(
 
 
 def _resolve_consent_channel() -> tuple[str | None, str]:
-    """Select email vs Telegram consent channel from config.
+    """Select the payment consent channel.
 
-    Returns ``(channel, source)`` where channel is ``\"email\"`` | ``\"telegram\"``
-    | ``None`` (misconfigured) and source is ``env`` | ``binding`` | ``automatic``.
+    Returns ``(channel, source)``. The default, and the only automatic, channel
+    is ``"checkpoint"``: a per-payment ``payment_approval`` record in Neotoma
+    that the coordinator session resolves with the operator's literal answer
+    (operator ruling 2026-11-12; see ``payment_approval.py``). It needs no
+    Telegram or email credentials.
 
-    Order: explicit ``MONEDULA_CONSENT_CHANNEL`` → optional vendor_binding
-    (fall-through only; Monedula has no loader on main today) → automatic
-    (email when Telegram creds absent and lib.approval email armed; else
-    Telegram when both creds + operator principal resolve).
+    ``MONEDULA_CONSENT_CHANNEL=email|telegram`` still selects the legacy
+    break-glass channels, explicitly and only explicitly; they are never
+    chosen automatically any more.
     """
     override = (os.environ.get("MONEDULA_CONSENT_CHANNEL") or "").strip().lower()
-    if override in ("email", "telegram"):
+    if override in ("email", "telegram", "checkpoint"):
         return override, "env"
-
-    # Binding fall-through: no inventing defaults. A future loader may set
-    # source=binding when a concrete value is read; absent today → continue.
-    tg_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    tg_chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
-
-    if not tg_token or not tg_chat:
-        try:
-            from lib.approval.email_channel import email_enabled, operator_email
-
-            if email_enabled() and operator_email():
-                return "email", "automatic"
-        except Exception:
-            pass
-        missing = []
-        if not tg_token:
-            missing.append("TELEGRAM_BOT_TOKEN")
-        if not tg_chat:
-            missing.append("TELEGRAM_CHAT_ID")
-        # Also note email arming fields when automatic email could not select.
-        return None, "automatic"
-
-    # Both Telegram creds present.
-    principal, err = _resolve_operator_principal()
-    if principal is not None:
-        return "telegram", "automatic"
-    # Telegram creds present but principal broken — try email fallback before
-    # declaring unconfigured, so email can still be selected when armed.
-    try:
-        from lib.approval.email_channel import email_enabled, operator_email
-
-        if email_enabled() and operator_email():
-            return "email", "automatic"
-    except Exception:
-        pass
-    return None, "automatic"
+    return "checkpoint", "automatic"
 
 
 def _consent_failure_notify_body(
@@ -1717,7 +1684,7 @@ def main() -> bool:
             _mark_ran_today()
         _resolve_sessions(triggered, "settled")
 
-    if channel == "email":
+    if channel in ("email", "checkpoint"):
         import payment_journal
         from consent_email import (
             needs_swarm_mailbox_hint,
@@ -1729,16 +1696,30 @@ def main() -> bool:
             request_and_collect,
         )
 
-        consent = request_and_collect(
-            triggered,
-            yesterday_str,
-            clear_failure_dedupe=lambda: _clear_notify_dedupe(
-                _CONSENT_CHANNEL_DEDUPE_KEY
-            ),
-            on_unauthenticated_reply=lambda msg, key: _notify_unauthenticated_reply(
-                msg, key, handler_names=handler_names, yesterday_str=yesterday_str
-            ),
-        )
+        if channel == "checkpoint":
+            import payment_approval
+
+            consent = payment_approval.collect(triggered, yesterday_str, _parse_reply)
+            if consent.reason_code == "payment_approval_not_accepted":
+                _notify(
+                    "monedula: a payment approval was recorded but does not permit "
+                    "payment (answer unparseable, bare yes, or it does not match the "
+                    "payment). Nothing was paid; correct the approval record.",
+                    priority="blocker",
+                    dedupe_key="monedula:payment_approval_not_accepted",
+                    email_eligible=True,
+                )
+        else:
+            consent = request_and_collect(
+                triggered,
+                yesterday_str,
+                clear_failure_dedupe=lambda: _clear_notify_dedupe(
+                    _CONSENT_CHANNEL_DEDUPE_KEY
+                ),
+                on_unauthenticated_reply=lambda msg, key: _notify_unauthenticated_reply(
+                    msg, key, handler_names=handler_names, yesterday_str=yesterday_str
+                ),
+            )
         if consent.reason_code != REASON_NEEDS_SWARM_MAILBOX:
             _clear_notify_dedupe(_NEEDS_SWARM_MAILBOX_DEDUPE_KEY)
         if not consent.channel_ok:
@@ -1761,6 +1742,11 @@ def main() -> bool:
                 ),
                 "consent_reply_read_failed": (
                     "replies could not be checked; check gws/mailbox; no payment executed"
+                ),
+                "payment_approval_unavailable": (
+                    "Neotoma could not be read or written for the payment approval; "
+                    "no payment executed; the sessions stay pending and the next "
+                    "tick retries"
                 ),
                 "payment_journal_unreadable": (
                     "the payment journal could not be read or written; no payment "
