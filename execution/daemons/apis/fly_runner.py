@@ -70,6 +70,15 @@ FLY_API_BASE_DEFAULT = "https://api.machines.dev/v1"
 GITHUB_API = "https://api.github.com"
 JOB_DIR = "/run/job"
 RESULT_ENTITY_TYPE = "fly_runner_result"
+# The job entrypoint's exit status when Neotoma refused the result record with
+# HTTP 401/403 (deploy/fly-runner/run_job.py EXIT_RECORD_REFUSED); equality is
+# asserted by a test, since the image does not import this module.
+EXIT_RECORD_REFUSED = 92
+RECORD_REFUSED_MESSAGE = (
+    "result record refused by Neotoma (HTTP 401/403): for 401 the signature or key "
+    "was not accepted; for 403 the role's agent grant likely lacks "
+    f"store_structured {RESULT_ENTITY_TYPE}"
+)
 # run_job.py keeps the LAST this-many bytes of stdout (STDOUT_CAP_BYTES there).
 RUNNER_STDOUT_CAP_BYTES = 256 * 1024
 MCP_CONFIG_PLACEHOLDER = "@@ATELES_JOB_MCP_CONFIG@@"
@@ -3574,6 +3583,12 @@ class FlyExecutor:
                 job.outcome_unknown = True
                 if read_error is not None:
                     raise read_error
+                if await self._record_was_refused(handle):
+                    log.error(f"[fly] run={job.run_id}: {RECORD_REFUSED_MESSAGE}")
+                    return 1, b"", (
+                        f"fly runner: no result recorded for run {job.run_id}: "
+                        f"{RECORD_REFUSED_MESSAGE}"
+                    ).encode()
                 return 1, b"", f"fly runner: no result recorded for run {job.run_id}".encode()
             return self._result_from_record(job, record)
         except asyncio.CancelledError:
@@ -3585,6 +3600,26 @@ class FlyExecutor:
                 f"fly runner: the result of run {job.run_id} could not be read "
                 f"({type(exc).__name__}); the run's outcome is unknown"
             ).encode()
+
+    async def _record_was_refused(self, handle: FlyHandle) -> bool:
+        """Whether the machine's last exit status says Neotoma refused the
+        record. Evidence only: any read problem answers False, so the generic
+        message stays for every other cause."""
+        try:
+            machine = await self.client.get(handle.machine_id)
+        except Exception:  # noqa: BLE001 — absent evidence keeps the generic message
+            return False
+        events = machine.get("events") if machine else None
+        if not isinstance(events, list):
+            return False
+        for event in events:  # Fly lists the newest first
+            if not isinstance(event, dict) or event.get("type") != "exit":
+                continue
+            request = event.get("request")
+            exit_event = request.get("exit_event") if isinstance(request, dict) else None
+            code = exit_event.get("exit_code") if isinstance(exit_event, dict) else None
+            return code == EXIT_RECORD_REFUSED
+        return False
 
     async def _settle_from_github(self, job: FlyJob) -> tuple[int, bytes, bytes] | None:
         """A finished delivering run with no readable record, settled from what

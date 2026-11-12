@@ -418,6 +418,28 @@ class TestRunJob:
         assert headers["signature"].startswith("aasig=:")
         assert "signature-key" in headers
 
+    def test_a_403_on_the_record_exits_92_and_another_failure_exits_95(self, tmp_path,
+                                                                        monkeypatch):
+        pytest.importorskip("cryptography")
+        pytest.importorskip("jwt")
+        for name in run_job.DEFAULT_PROBE_ENV_NAMES:
+            monkeypatch.delenv(name, raising=False)
+        jwk = _test_jwk()
+
+        def run(status):
+            job_dir = tmp_path / f"job{status}"
+            _write_job(job_dir, secrets={"NEOTOMA_AAUTH_PRIVATE_JWK": json.dumps(jwk)})
+
+            def writer(base_url, auth, record):
+                run_job._last_refusal["status"] = status
+                return False
+
+            return run_job.main(job_dir, writer=writer,
+                                runner=lambda *a, **k: (0, b"", b"", False))
+
+        assert run(403) == run_job.EXIT_RECORD_REFUSED
+        assert run(None) == run_job.EXIT_RECORD_FAILED
+
     def test_a_key_for_another_role_is_refused(self, tmp_path, monkeypatch):
         pytest.importorskip("cryptography")
         for name in run_job.DEFAULT_PROBE_ENV_NAMES:
@@ -1473,6 +1495,34 @@ def test_record_write_stops_on_a_403_at_once(capsys):
     assert _write(world) is False
     assert world.attempts == 1 and world.sleeps == []
     assert "HTTP 403; refused" in capsys.readouterr().out
+
+
+def test_a_refused_record_write_logs_the_reason_and_exits_92(capsys):
+    import io
+    import urllib.error
+
+    class World(_RecordWorld):
+        def opener(self, req, timeout):
+            self.attempts += 1
+            body = io.BytesIO(b'{"error_code": "FORBIDDEN", "message": "agent grant lacks '
+                              b'store_structured fly_runner_result", "token": "SECRET-TOKEN"}')
+            raise urllib.error.HTTPError(req.full_url, 403, "Forbidden",
+                                         {"Authorization": "Bearer t"}, body)
+
+    world = World([])
+    assert _write(world) is False
+    out = capsys.readouterr().out
+    assert "HTTP 403; refused" in out
+    assert "FORBIDDEN" in out and "lacks store_structured fly_runner_result" in out
+    assert "SECRET-TOKEN" not in out and "Bearer" not in out
+    assert run_job._last_refusal["status"] == 403
+    assert run_job.EXIT_RECORD_REFUSED == 92 and run_job.EXIT_RECORD_REFUSED != run_job.EXIT_RECORD_FAILED
+
+
+def test_exit_record_refused_matches_the_parent_constant():
+    import fly_runner
+
+    assert run_job.EXIT_RECORD_REFUSED == fly_runner.EXIT_RECORD_REFUSED
 
 
 def test_record_write_gives_up_after_about_three_minutes():

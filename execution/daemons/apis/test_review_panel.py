@@ -1137,3 +1137,55 @@ def test_falco_prompt_mirrors_map_each_outcome_to_its_verdict(document):
         "`REQUEST_CHANGES` on any CONFIRMED break; otherwise `COMMENT` only if "
         "a concern truly can't be settled" in text
     )
+
+
+def _fly_grant_fixture_caps():
+    import json
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    import check_gate_lens_grants as chk
+
+    fixture = json.loads(chk.FIXTURE_PATH.read_text())
+    caps = {
+        e["agent"]: {c["op"]: sorted(c.get("entity_types") or []) for c in e["capabilities"]}
+        for e in fixture["lenses"]
+    }
+    return chk, caps
+
+
+def test_fly_preflight_covers_every_fly_lens_role():
+    """The preflight's role set is fly_lens_review.LENS_ROLES, so a role added
+    to Fly cannot drift out of the check, and a role with no grant at all
+    (including one that owns no gate) is reported."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    import fly_lens_review
+
+    chk, _ = _fly_grant_fixture_caps()
+    assert set(chk.FLY_ROLES) == set(fly_lens_review.LENS_ROLES.values())
+    problems = chk.fly_result_problems({})
+    assert len(problems) == len(fly_lens_review.LENS_ROLES)
+    for role in fly_lens_review.LENS_ROLES.values():
+        assert any(p.startswith(role) and "no agent_grant" in p for p in problems)
+
+
+def test_fly_preflight_reports_a_fly_role_whose_grant_lacks_the_result_write():
+    """A Fly role without store_structured on fly_runner_result is flagged
+    (HTTP 403 at run time). The fixture is a snapshot: whichever roles it shows
+    without the grant must be exactly the ones reported."""
+    chk, caps = _fly_grant_fixture_caps()
+    lacking = {
+        a for a in chk.FLY_ROLES
+        if a not in caps
+        or chk.FLY_RESULT_ENTITY_TYPE not in caps[a].get("store_structured", [])
+    }
+    problems = chk.fly_result_problems(caps)
+    assert {a for a in chk.FLY_ROLES if any(p.startswith(a) for p in problems)} == lacking
+
+    granted = {
+        a: {**c, "store_structured": sorted({*c.get("store_structured", []), chk.FLY_RESULT_ENTITY_TYPE})}
+        for a, c in caps.items()
+    }
+    for a in chk.FLY_ROLES:
+        granted.setdefault(a, {"store_structured": [chk.FLY_RESULT_ENTITY_TYPE]})
+    assert chk.fly_result_problems(granted) == []
+    assert all("fly_runner_result" in p and "403" in p for p in problems if "no agent_grant" not in p)
