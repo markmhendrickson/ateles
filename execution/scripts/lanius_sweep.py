@@ -29,6 +29,13 @@ import sys
 from datetime import UTC, datetime, timedelta
 
 import httpx
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from lib.daemon_runtime.neotoma_correct import correct_field  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -112,32 +119,27 @@ def mark_stale(client: httpx.Client, entity_id: str, dry_run: bool) -> bool:
     """
     Mark issue as stale via Neotoma correction.
 
-    Uses POST /corrections (field-level correction pattern).
+    Uses POST /correct (one field per call) and reads the field back.
     Returns True on success.
     """
     if dry_run:
         log.info(f"[lanius] [DRY RUN] Would mark stale: {entity_id}")
         return True
 
-    payload = {
-        "entity_id": entity_id,
-        "field_name": "status",
-        "corrected_value": "stale",
-        "correction_note": "Lanius: no update in over 30 days — marking stale",
-    }
-    try:
-        resp = client.post(f"{NEOTOMA_BASE_URL}/corrections", json=payload, timeout=15)
-        resp.raise_for_status()
+    ok = correct_field(
+        client,
+        NEOTOMA_BASE_URL,
+        entity_id,
+        "issue",
+        "status",
+        "stale",
+        f"lanius-stale-{entity_id}",
+    )
+    if ok:
         log.info(f"[lanius] Marked stale: {entity_id}")
-        return True
-    except httpx.HTTPStatusError as exc:
-        log.error(
-            f"[lanius] Failed to mark {entity_id} stale: HTTP {exc.response.status_code}"
-        )
-        return False
-    except Exception as exc:
-        log.error(f"[lanius] Failed to mark {entity_id} stale: {exc}")
-        return False
+    else:
+        log.error(f"[lanius] Failed to mark {entity_id} stale")
+    return ok
 
 
 def run(dry_run: bool, stale_days: int) -> None:

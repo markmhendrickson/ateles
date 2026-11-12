@@ -173,8 +173,11 @@ _DISPATCHER_ASSIGNEE = "apis"
 _SESSION_MARKERS = frozenset(
     {"session", "subagent", "codex", "claude", "chat", "coordinator"}
 )
-# `root` names a session only together with an id; bare `root` is a word.
-_ID_PREFIXES = _SESSION_MARKERS | {"root"}
+# `root` and `local` name a session only together with an id; bare `root` or
+# `local` is a word. `local_<id>` is how the desktop app spells a local session
+# (`Logik client lead — Claude Code (… inbox local_117abff0-…)`), so an owner
+# written that way names a session even though it carries only one marker word.
+_ID_PREFIXES = _SESSION_MARKERS | {"root", "local"}
 # Words a server-side `contains` filter can search on to narrow task rows to
 # the ones this recognizer might accept. Invariant: every value
 # `names_a_session` accepts contains one of these words, case-insensitively, as
