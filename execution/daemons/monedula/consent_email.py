@@ -230,6 +230,39 @@ def _profile_fields(handler: Any) -> tuple[str, int, bool]:
     return label, amount, is_calendar
 
 
+def event_id_of(match: Any) -> str:
+    """The calendar event id of a match, or ``""`` when it has none."""
+    event = (match or {}).get("event") if isinstance(match, dict) else None
+    if isinstance(event, dict):
+        return str(event.get("id") or "")
+    return ""
+
+
+def event_session_date(match: Any) -> str:
+    """The Madrid-local date a matched event started on, or ``""``."""
+    event = (match or {}).get("event") if isinstance(match, dict) else None
+    if not isinstance(event, dict):
+        return ""
+    start = event.get("start")
+    if not isinstance(start, dict):
+        return ""
+    if start.get("date"):
+        return str(start["date"])[:10]
+    raw = str(start.get("dateTime") or "")
+    if not raw:
+        return ""
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return dt.date().isoformat()
+        return dt.astimezone(ZoneInfo("Europe/Madrid")).date().isoformat()
+    except (ValueError, KeyError):
+        return ""
+
+
 def build_pending_items(
     triggered: list[tuple[Any, list]],
     yesterday_str: str,
@@ -243,15 +276,19 @@ def build_pending_items(
         match_list = matches or [None]
         multi = len(match_list) > 1
         for idx, match in enumerate(match_list):
-            match_id = ""
-            if multi:
+            # A real calendar event id always identifies the session, so the
+            # obligation is the same on every tick however many sessions the
+            # handler matched and whenever the tick runs.
+            match_id = event_id_of(match)
+            if not match_id and multi:
                 match_id = str(
                     (match or {}).get("event_id")
                     or (match or {}).get("id")
                     or idx
                 )
-            session = yesterday_str if not match_id else f"{yesterday_str}:{match_id}"
-            obligation = obligation_key(handler, yesterday_str, match_id)
+            session_date = event_session_date(match) or yesterday_str
+            session = session_date if not match_id else f"{session_date}:{match_id}"
+            obligation = obligation_key(handler, session_date, match_id)
             token = token_for(
                 handler.name,
                 session=f"{session}|{obligation}|g{int(generation)}",
@@ -261,7 +298,7 @@ def build_pending_items(
                     handler_name=handler.name,
                     label=label,
                     amount_eur=amount,
-                    payment_date=yesterday_str,
+                    payment_date=session_date,
                     is_calendar=is_calendar,
                     token=token,
                     match_id=match_id,

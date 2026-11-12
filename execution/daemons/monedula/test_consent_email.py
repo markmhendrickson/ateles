@@ -1310,10 +1310,12 @@ def test_calendar_read_keeps_the_operator_default_gws_config(monkeypatch, tmp_pa
 
     monkeypatch.setattr(monedula.subprocess, "run", fake_run)
     assert monedula.fetch_yesterday_events() == []
-    (argv, env), = seen
-    assert argv[1:4] == ["calendar", "events", "list"]
-    assert (env or {}).get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR") != swarm_dir
-    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in (env or {})
+    assert seen
+    assert seen[0][0][1:4] == ["calendar", "calendarList", "list"]
+    assert any(c[1:4] == ["calendar", "events", "list"] for c, _ in seen)
+    for _argv, run_env in seen:
+        assert (run_env or {}).get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR") != swarm_dir
+        assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in (run_env or {})
 
 
 def test_consent_round_trip_through_the_swarm_mailbox_pays_once(monkeypatch, tmp_path):

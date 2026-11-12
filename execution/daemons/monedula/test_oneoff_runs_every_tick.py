@@ -109,11 +109,12 @@ def test_oneoff_evaluated_when_calendar_already_ran(monkeypatch):
     monedula.main()
 
     assert oneoff.consulted_with, "due one-off must be evaluated on a later tick"
-    assert not fetched, "calendar leg must NOT re-run once the day is claimed"
+    assert fetched, "calendar leg now runs every tick (rolling window, journal dedupe)"
 
 
-def test_calendar_leg_still_runs_once_per_day(monkeypatch):
-    """The guard must keep protecting the calendar leg."""
+def test_calendar_leg_runs_every_tick_not_once_per_day(monkeypatch):
+    """Defect 5: sessions are evaluated each tick; raise-once is the journal's
+    job (per event id), not a once-per-day claim."""
     oneoff = _Handler("invoice", one_off=True)
     _install_handlers(monkeypatch, [oneoff])
 
@@ -122,10 +123,10 @@ def test_calendar_leg_still_runs_once_per_day(monkeypatch):
         monedula, "fetch_yesterday_events", lambda: fetched.append(1) or []
     )
 
-    monedula.main()  # first tick: claims the day
-    monedula.main()  # second tick: must not re-fetch
+    monedula.main()
+    monedula.main()
 
-    assert len(fetched) == 1, f"calendar fetch should run once/day, ran {len(fetched)}x"
+    assert len(fetched) == 2, f"calendar fetch should run each tick, ran {len(fetched)}x"
 
 
 def test_failed_calendar_fetch_leaves_day_unclaimed(monkeypatch):
