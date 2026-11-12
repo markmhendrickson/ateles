@@ -144,6 +144,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging
+from lib.daemon_runtime.neotoma_correct import correct_field
 
 # Rotating + repeat-suppressing (lib/daemon_runtime/logging_setup.py):
 # unbounded retry logging filled a 926 GB disk on 2026-08-18.
@@ -292,26 +293,76 @@ def _entity_fields(entity: dict) -> dict:
     return entity.get("snapshot") or entity.get("fields") or entity
 
 
+class StatusWriteError(Exception):
+    """A release status transition could not be written AND read back.
+
+    Deliberately NOT a StepError: main() turns a StepError into a "failed"
+    status write, which is the very write that just failed. Callers must stop
+    the release, not retry the status through the same broken path.
+    """
+
+
+def _resolve_release_entity_id(version: str) -> str:
+    """Entity id of the release_result for `version`, or raise StatusWriteError.
+
+    Fails closed: zero matches or more than one distinct entity means there is
+    no unambiguous record to correct, so no write is attempted.
+    """
+    want = version.lstrip("v")
+    ids = {
+        str(c.get("entity_id") or "")
+        for c in neotoma_query("release_result", limit=100)
+        if str(_entity_fields(c).get("version") or "").lstrip("v") == want
+    }
+    ids.discard("")
+    if len(ids) != 1:
+        raise StatusWriteError(
+            f"cannot resolve a single release_result entity for {version} "
+            f"(found {len(ids)}); refusing to write status"
+        )
+    return ids.pop()
+
+
 def set_release_status(version: str, status: str, extra: dict | None = None) -> None:
     """
-    Append a release_result observation flipping status (prepared -> approved ->
-    publishing -> published / failed). Idempotency key carries status + date so
-    each transition is a distinct observation.
+    Flip a release_result's status (prepared -> approved -> publishing ->
+    published / failed) and VERIFY it took effect.
 
-    Uses the `release_result` entity type, whose canonical identity is `version`,
-    so every transition coalesces onto the same entity (latest status wins in the
-    snapshot). Declared fields: version, status, branch, release_url, reason, ...
+    Status goes through POST /correct (lib.daemon_runtime.neotoma_correct),
+    never /store: a correction outranks a store observation, and the manual
+    approval path corrects status to `approved`, so a stored status after that
+    is silently ignored (v0.28.0 logged "status -> published" while the snapshot
+    still read `approved`). correct_field reads the value back; on any failure
+    this raises StatusWriteError so a release never proceeds on a status nobody
+    can see. Other fields in `extra` have no prior correction, so they still
+    use a store.
     """
-    rec: dict = {
-        "entity_type": "release_result",
-        "version": version,
-        "status": status,
-    }
+    entity_id = _resolve_release_entity_id(version)
     if extra:
-        rec.update(extra)
-    key = f"release-{version}-{status}-{date.today().isoformat()}"
-    neotoma_store([rec], key)
-    log.info(f"Release {version} status -> {status}")
+        rec: dict = {"entity_type": "release_result", "version": version, **extra}
+        rec.pop("status", None)
+        key = f"release-{version}-{status}-extra-{date.today().isoformat()}"
+        if neotoma_store([rec], key) is None:
+            log.error(f"Release {version}: storing extra fields for {status} failed")
+    import httpx  # local: only the status write needs it
+
+    headers = {**_neotoma_headers(), "User-Agent": NEOTOMA_USER_AGENT}
+    with httpx.Client(headers=headers) as client:
+        ok = correct_field(
+            client,
+            _neotoma_base(),
+            entity_id,
+            "release_result",
+            "status",
+            status,
+            f"release-{version}-{status}-{date.today().isoformat()}",
+        )
+    if not ok:
+        log.error(f"Release {version}: status -> {status} NOT confirmed by read-back")
+        raise StatusWriteError(
+            f"release {version} status -> {status} was not confirmed by read-back"
+        )
+    log.info(f"Release {version} status -> {status} (read back)")
 
 
 # ---------------------------------------------------------------------------
@@ -999,6 +1050,14 @@ def main() -> int:
         log.error("could not determine version from release record")
         return 2
 
+    def _mark_failed(reason: str) -> None:
+        if args.dry_run:
+            return
+        try:
+            set_release_status(version, "failed", {"reason": reason[:500]})
+        except StatusWriteError as werr:
+            log.error(f"could not record failed status for {version}: {werr}")
+
     try:
         publish_release(
             release, version, args.dry_run, args.force,
@@ -1006,16 +1065,23 @@ def main() -> int:
             email_approval=args.from_email_approval,
         )
         return 0
+    except StatusWriteError as exc:
+        # The status write is what failed: do not try to record "failed"
+        # through the same path. Halt and tell the operator the state is unverified.
+        log.error(f"release status write failed: {exc}")
+        telegram_send(
+            f"🔴 Phoenicurus: {version} halted — status write unverified: {exc}. "
+            "Check the release_result snapshot before retrying."
+        )
+        return 1
     except StepError as exc:
         log.error(f"publish failed: {exc}")
-        if not args.dry_run:
-            set_release_status(version, "failed", {"reason": str(exc)[:500]})
+        _mark_failed(str(exc))
         telegram_send(f"🔴 Phoenicurus: {version} publish FAILED — {exc}")
         return 1
     except Exception as exc:  # noqa: BLE001 — last-resort guard for a release tool
         log.exception(f"unexpected fatal error: {exc}")
-        if not args.dry_run:
-            set_release_status(version, "failed", {"reason": str(exc)[:500]})
+        _mark_failed(str(exc))
         telegram_send(f"🔴 Phoenicurus: {version} publish crashed — {exc}")
         return 1
 
