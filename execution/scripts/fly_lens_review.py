@@ -32,14 +32,17 @@ into the program (never print or read that file):
         --repo markmhendrickson/ateles --pr 1724 --lens all \\
         --task-entity-id ent_<task> [--extra-brief round2.md] [--post]
 
-Exit codes: 0 every lens delivered; 3 at least one lens needs the local
-fallback (or its verdict is stale); 2 usage / head unresolvable.
+Exit codes: 0 every lens delivered (and posted, with --post); 3 at least one
+lens needs the local fallback (failed, refused, queue wait, stale); 4 verdicts
+delivered but a --post failed (a POST FAILED line names the lens); 2 usage /
+head unresolvable. 3 wins when both apply.
 Standard library only. See docs/runbooks/fly-lens-review.md.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -71,6 +74,10 @@ VERDICT_RE = re.compile(r"^\*\*(SIGNED_OFF|APPROVE|BLOCKED|REQUEST_CHANGES)\*\*\
 # A deterministic refusal at the router: do not retry, fall back at once.
 REFUSAL_HINTS = ("refus", "not eligible", "not pinnable", "no provider", "headroom")
 QUEUE_HINTS = ("queue", "waited", "wait ")
+# A failure a second Fly job cannot cure: the qa/ux result-write 403 grant gap
+# (shows as "no result recorded", exit 95). Only recognised when the dispatch
+# output says so; otherwise it reads as mechanical (see the runbook).
+DETERMINISTIC_HINTS = ("403", "exit 95", "exit code 95", "exit=95", "rc=95")
 
 
 class FallBack(Exception):
@@ -173,8 +180,12 @@ def dispatch_once(*, python: str, dispatch_script: Path, role: str, lens: str,
         "--json",
     ]
     try:
+        # State the approved queue limit to the Fly runner explicitly; a value
+        # the caller already set wins.
+        child_env = {**os.environ}
+        child_env.setdefault("APIS_FLY_QUEUE_MAX_WAIT_SECONDS", str(QUEUE_MAX_WAIT_SECONDS))
         proc = subprocess.run(
-            cmd, capture_output=True, text=True,
+            cmd, capture_output=True, text=True, env=child_env,
             # the queue wait plus one job, so a stuck child cannot hang us
             timeout=QUEUE_MAX_WAIT_SECONDS + JOB_TIMEOUT_SECONDS + 300,
         )
@@ -205,8 +216,10 @@ def extract_verdict(stdout: str) -> str | None:
 
 
 def classify_failure(env: dict[str, Any]) -> str:
-    """'refusal' (deterministic), 'queue', or 'mechanical' (retry once)."""
+    """'deterministic', 'refusal', 'queue', or 'mechanical' (retry once)."""
     text = " ".join(str(env.get(k, "")) for k in ("reason", "error", "stderr")).lower()
+    if any(h in text for h in DETERMINISTIC_HINTS):
+        return "deterministic"
     if env.get("remote_outcome_unknown") or "no result recorded" in text:
         return "mechanical"
     if any(h in text for h in QUEUE_HINTS) and ("queue" in text):
@@ -263,10 +276,11 @@ def run_lens(*, lens: str, repo: str, pr: int, head: str, task_entity_id: str,
         last_reason = str(env.get("reason") or env.get("error") or "dispatch failed")
         att["problem"] = f"{kind}: {last_reason}"
         log(f"{lens}: attempt {attempt} failed ({kind}): {last_reason}")
-        if kind in ("refusal", "queue"):
-            record.update(status="fallback", reason=f"{kind}: {last_reason}",
+        if kind in ("refusal", "queue", "deterministic"):
+            label = "queue wait" if kind == "queue" else kind
+            record.update(status="fallback", reason=f"{label}: {last_reason}",
                           duration_s=round(clock() - t_lens, 1))
-            raise FallBack(f"{kind}: {last_reason}", record)
+            raise FallBack(f"{label}: {last_reason}", record)
     record.update(status="fallback",
                   reason=f"failed {MAX_ATTEMPTS} times: {last_reason}",
                   duration_s=round(clock() - t_lens, 1))
@@ -297,7 +311,9 @@ def main(argv: list[str] | None = None, *,
     p.add_argument("--lens", required=True, choices=[*LENS_ROLES, "all"])
     p.add_argument("--task-entity-id", required=True,
                    help="Neotoma task id (dispatch_role requires one)")
-    p.add_argument("--out-dir", help="default: ./fly-lens-review-<repo>-<pr>-<head8>")
+    p.add_argument("--out-dir",
+                   help="default: ~/.ateles-work/fly-lens-review/<repo>-<pr>-<head8>-<time>"
+                   " (never the current directory); the path is printed")
     p.add_argument("--extra-brief", help="file passed through to each lens (round notes)")
     p.add_argument("--post", action="store_true",
                    help="post each delivered verdict via post_lens_verdict.py (default: no)")
@@ -324,61 +340,99 @@ def main(argv: list[str] | None = None, *,
         log(str(exc))
         return 2
 
-    out_dir = Path(args.out_dir or
-                   f"fly-lens-review-{args.repo.replace('/', '_')}-{args.pr}-{head[:8]}")
+    out_dir = Path(args.out_dir) if args.out_dir else (
+        Path.home() / ".ateles-work" / "fly-lens-review"
+        / f"{args.repo.replace('/', '_')}-{args.pr}-{head[:8]}-"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
     out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"out-dir: {out_dir}", flush=True)
     lenses = list(LENS_ORDER) if args.lens == "all" else [args.lens]
     summary: dict[str, Any] = {
         "repo": args.repo, "pr": args.pr, "head": head, "started": now_iso(),
-        "task_entity_id": args.task_entity_id, "posted": False, "lenses": [],
+        "task_entity_id": args.task_entity_id, "posted": False, "complete": False,
+        "lenses": [],
     }
+
+    def save() -> None:
+        (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+
     fallbacks = 0
-    for lens in lenses:  # sequential: one job per provider at a time
-        log(f"{lens}: dispatching on Fly for head {head[:12]}")
-        record: dict[str, Any]
-        try:
-            record = run_lens(
-                lens=lens, repo=args.repo, pr=args.pr, head=head,
-                task_entity_id=args.task_entity_id, out_dir=out_dir, extra=extra,
-                python=sys.executable, dispatch_script=Path(args.dispatch_script),
-                dispatch=dispatch)
-        except FallBack as exc:
-            fallbacks += 1
-            record = {"lens": lens, "role": LENS_ROLES[lens], "reviewed_head": head,
-                      "status": "fallback", "reason": str(exc), **exc.record}
-            print(f"FALL BACK TO LOCAL LENS: {lens} ({exc})", flush=True)
+    post_failures = 0
+    try:
+        for n, lens in enumerate(lenses):  # sequential: one job per provider at a time
+            log(f"{lens}: dispatching on Fly for head {head[:12]}")
+            record: dict[str, Any]
+            try:
+                record = run_lens(
+                    lens=lens, repo=args.repo, pr=args.pr, head=head,
+                    task_entity_id=args.task_entity_id, out_dir=out_dir, extra=extra,
+                    python=sys.executable, dispatch_script=Path(args.dispatch_script),
+                    dispatch=dispatch)
+            except FallBack as exc:
+                fallbacks += 1
+                record = {"lens": lens, "role": LENS_ROLES[lens], "reviewed_head": head,
+                          "status": "fallback", "reason": str(exc), **exc.record}
+                print(f"FALL BACK TO LOCAL LENS: {lens} ({exc})", flush=True)
+                summary["lenses"].append(record)
+                save()
+                continue
             summary["lenses"].append(record)
-            continue
-        summary["lenses"].append(record)
-        # the head moved while the lens ran: its verdict is for an older head
-        try:
-            current = head_resolver(args.repo, args.pr)
-        except RuntimeError:
-            current = ""
-        if current != head:
-            record["status"] = "stale"
-            record["reason"] = f"PR head moved to {current or 'unreadable'} during review"
-            fallbacks += 1
-            print(f"FALL BACK TO LOCAL LENS: {lens} (STALE: {record['reason']})",
-                  flush=True)
-            continue
-        print(f"{lens}: {record['verdict']} via {record['provider']} "
-              f"in {record['duration_s']}s -> {record['verdict_file']}", flush=True)
-        if args.post:
-            ok, detail = poster(python=sys.executable,
-                                post_script=Path(args.post_script), repo=args.repo,
-                                pr=args.pr, lens=lens, body_file=record["verdict_file"],
-                                head=head)
-            record["posted"] = ok
-            record["post_detail"] = detail
-            if ok:
-                summary["posted"] = True
-            else:
-                log(f"{lens}: post refused: {detail}")
-    summary["finished"] = now_iso()
-    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+            # the head moved while the lens ran: its verdict is for an older head
+            try:
+                current = head_resolver(args.repo, args.pr)
+            except RuntimeError:
+                current = ""
+            if current != head:
+                stale = Path(record["verdict_file"])
+                stale = stale.rename(stale.with_name(stale.name + ".stale"))
+                record["verdict_file"] = str(stale)
+                record["status"] = "stale"
+                record["reason"] = f"PR head moved to {current or 'unreadable'} during review"
+                fallbacks += 1
+                print(f"FALL BACK TO LOCAL LENS: {lens} (STALE: {record['reason']})",
+                      flush=True)
+                rest = lenses[n + 1:]
+                for other in rest:  # their results would be stale too
+                    fallbacks += 1
+                    summary["lenses"].append({
+                        "lens": other, "role": LENS_ROLES[other], "status": "not_run",
+                        "reason": "stopped: PR head moved"})
+                    print(f"FALL BACK TO LOCAL LENS: {other} (not run: PR head moved)",
+                          flush=True)
+                if rest:
+                    print("stopped dispatching: the PR head moved, so the remaining "
+                          "lenses would review a stale head", flush=True)
+                save()
+                break
+            print(f"{lens}: {record['verdict']} via {record['provider']} "
+                  f"in {record['duration_s']}s -> {record['verdict_file']}", flush=True)
+            if args.post:
+                ok, detail = poster(python=sys.executable,
+                                    post_script=Path(args.post_script), repo=args.repo,
+                                    pr=args.pr, lens=lens,
+                                    body_file=record["verdict_file"], head=head)
+                record["posted"] = ok
+                record["post_detail"] = detail
+                if ok:
+                    summary["posted"] = True
+                else:
+                    post_failures += 1
+                    record["status"] = "post_failed"
+                    short = " ".join(detail.split())[:200] or "no detail"
+                    print(f"POST FAILED: {lens} ({short}); the verdict is NOT on the PR. "
+                          f"Post by hand: python3 execution/scripts/post_lens_verdict.py "
+                          f"--repo {args.repo} --pr {args.pr} --lens {lens} "
+                          f"--body-file {record['verdict_file']} --head {head}",
+                          flush=True)
+            save()
+        summary["complete"] = True
+    finally:  # also on Ctrl-C: keep the partial results
+        summary["finished"] = now_iso()
+        save()
     print(f"summary: {out_dir / 'summary.json'}", flush=True)
-    return 3 if fallbacks else 0
+    if fallbacks:
+        return 3
+    return 4 if post_failures else 0
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ ux=accipiter. `all` runs them one after another.
 
 - Resolves the PR's current head and names it in each lens's brief. If the head
   moves while a lens runs, that verdict is marked STALE and treated as a
-  fallback case.
+  fallback case, and the remaining lenses are not dispatched.
 - Dispatches through `dispatch_role.py --runner fly --github-read
   --action-class lens_review:<lens>`, one Fly job at a time, with the 45 minute
   per-job limit.
@@ -47,16 +47,53 @@ ux=accipiter. `all` runs them one after another.
 - `--extra-brief` appends your file to every lens brief (round notes, prior
   findings to re-check).
 
+## Output location
+
+`--out-dir` defaults to `~/.ateles-work/fly-lens-review/<repo>-<pr>-<head8>-<time>`
+(never the current directory, which may be the deployment checkout). The path is
+printed first. `summary.json` is rewritten after every lens, so an interrupt
+keeps the partial results. A verdict whose head moved is renamed
+`<lens>.verdict.md.stale` so it cannot be mistaken for a delivered one.
+
+## Exit codes
+
+| Exit | Meaning | What to do |
+|---|---|---|
+| 0 | Every requested lens delivered (and, with `--post`, posted) | Nothing |
+| 2 | Usage error, or the PR head could not be read | Fix the arguments |
+| 3 | At least one `FALL BACK TO LOCAL LENS: <lens> (<reason>)` line | Run exactly those lenses locally and post as usual; delivered lenses keep their verdicts |
+| 4 | Verdicts delivered but a `--post` failed (`POST FAILED: <lens> (...)` line) | The verdict is NOT on the PR; post it by hand (below) or re-run if the head moved |
+
+When both 3 and 4 apply, the exit is 3; read every line. Exit 0 with `--post`
+means the verdicts are on the PR.
+
+Reasons in the fallback line: `queue wait` (the 60 minute queue limit, passed to
+the Fly runner as `APIS_FLY_QUEUE_MAX_WAIT_SECONDS`; set that variable first to
+use another value), `refusal` (the router will not run it), `deterministic`
+(a failure a second job cannot cure), `failed 2 times`, `STALE` and
+`not run: PR head moved`.
+
+Manual post of a delivered verdict:
+
+    python3 execution/scripts/post_lens_verdict.py --repo <owner/name> --pr <n> \
+        --lens <lens> --body-file <out-dir>/<lens>.verdict.md --head <reviewed head>
+
+If the head moved, the lens must be re-run; do not post it.
+
 ## Fallback rule
 
-When Fly cannot deliver a lens, the command prints one line per lens and exits 3:
+Run the lens locally as a subagent from its `agent_definition` and post as
+usual whenever the command says so. Do not retry by hand beyond the one
+automatic retry. Fall back locally, without retrying, on these known failures:
 
-    FALL BACK TO LOCAL LENS: <lens> (<reason>)
-
-Run exactly that lens as a local subagent from its `agent_definition` and post
-as usual. Lenses that were delivered keep their verdicts. A stale verdict also
-goes to the fallback. Exit 2 is a usage error or an unreadable PR head. Do not
-retry by hand beyond the one automatic retry.
+- **qa and ux 403 grant gap.** The job cannot write its result; it appears as
+  "no result recorded for run ..." (exit 95). When the dispatch output says 403
+  or exit 95 the command treats it as `deterministic` and does not spend a
+  second job. If the output does not say so, it looks mechanical and is retried
+  once; that retry is wasted, so run qa and ux locally.
+- **Slow hosted Neotoma.** Errors such as "unreachable" or "agent_definition
+  unavailable (timeout)" mean the job could not load its role. Retrying rarely
+  helps while Neotoma is slow; fall back locally.
 
 ## Limits (approved)
 

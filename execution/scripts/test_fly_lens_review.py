@@ -3,6 +3,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fly_lens_review as f  # noqa: E402
@@ -164,3 +166,80 @@ def test_bad_task_id_is_usage_error(tmp_path):
     rc = f.main(["--repo", "o/r", "--pr", "1", "--lens", "pm", "--task-entity-id", "nope",
                  "--out-dir", str(tmp_path)])
     assert rc == 2
+
+
+def test_failed_post_exits_4_with_actionable_line(tmp_path, capsys):
+    rc, _ = run(tmp_path, Script(ok_env()), "--post",
+                poster=lambda **kw: (False, "head moved: comment pinned to older head"))
+    out = capsys.readouterr().out
+    assert rc == 4
+    assert "POST FAILED: pm (head moved" in out and "post_lens_verdict.py" in out
+    assert "--head " + HEAD in out
+    rec = json.loads((tmp_path / "summary.json").read_text())["lenses"][0]
+    assert rec["posted"] is False and rec["status"] == "post_failed"
+
+
+def test_fallback_exit_wins_over_post_failure(tmp_path):
+    rc, _ = run(tmp_path, Script(ok_env(), *[fail_env() for _ in range(8)]), "--post", lens="all",
+                poster=lambda **kw: (False, "x"))
+    assert rc == 3
+
+
+def test_deterministic_403_not_retried(tmp_path, capsys):
+    d = Script(fail_env(stderr="fly runner: no result recorded; result write 403, exit 95"))
+    rc, _ = run(tmp_path, d)
+    assert rc == 3 and len(d.calls) == 1
+    assert "FALL BACK TO LOCAL LENS: pm (deterministic" in capsys.readouterr().out
+
+
+def test_queue_labelled_as_queue_wait(tmp_path, capsys):
+    d = Script({"ok": False, "reason": "launch refused: queue wait exceeded", "returncode": 1,
+                "stderr": ""})
+    run(tmp_path, d)
+    assert "(queue wait:" in capsys.readouterr().out
+
+
+def test_queue_limit_passed_to_runner(monkeypatch, tmp_path):
+    seen = {}
+
+    class P:
+        returncode, stdout, stderr = 0, json.dumps({"ok": True}), ""
+
+    monkeypatch.delenv("APIS_FLY_QUEUE_MAX_WAIT_SECONDS", raising=False)
+    monkeypatch.setattr(f.subprocess, "run", lambda cmd, **kw: seen.update(kw) or P())
+    f.dispatch_once(python="py", dispatch_script=Path("d.py"), role="pavo", lens="pm",
+                    repo="o/r", task_entity_id="ent_x", task_file=tmp_path / "b.md")
+    assert seen["env"]["APIS_FLY_QUEUE_MAX_WAIT_SECONDS"] == "3600"
+
+
+def test_head_move_stops_remaining_and_marks_stale(tmp_path, capsys):
+    d = Script(ok_env(), ok_env())
+    rc, posts = run(tmp_path, d, "--post", lens="all", heads=(HEAD, "b" * 40))
+    out = capsys.readouterr().out
+    assert rc == 3 and len(d.calls) == 1 and posts == []
+    assert "stopped dispatching" in out
+    assert out.count("FALL BACK TO LOCAL LENS") == 5
+    assert (tmp_path / "pm.verdict.md.stale").exists()
+    assert not (tmp_path / "pm.verdict.md").exists()
+
+
+def test_summary_written_after_each_lens_and_on_interrupt(tmp_path):
+    def boom(**kw):
+        if kw["lens"] == "arch":
+            raise KeyboardInterrupt
+        return ok_env()
+
+    with pytest.raises(KeyboardInterrupt):
+        run(tmp_path, boom, lens="all")
+    summ = json.loads((tmp_path / "summary.json").read_text())
+    assert [x["lens"] for x in summ["lenses"]] == ["pm"] and summ["complete"] is False
+
+
+def test_default_out_dir_is_not_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    rc = f.main(["--repo", "o/r", "--pr", "7", "--lens", "pm", "--task-entity-id", "ent_x"],
+                dispatch=Script(ok_env()), head_resolver=lambda r, p: HEAD)
+    assert rc == 0
+    assert not list(tmp_path.glob("fly-lens-review-*"))
+    assert list((tmp_path / "home" / ".ateles-work" / "fly-lens-review").glob("*/summary.json"))
