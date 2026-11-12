@@ -3430,9 +3430,18 @@ TASK_ID = "ent_dddddddddddddddddddddddd"
 class _RecordingNotifier:
     def __init__(self):
         self.sent: list[tuple[str, object]] = []
+        self._told: set[str] = set()
 
     def send(self, message, priority=None, handler=None, **kwargs):
+        # Honors the notifier's dedupe_key contract; the real journal-backed
+        # behavior is exercised against the real Notifier (_JournalNotifier).
+        key = kwargs.get("dedupe_key")
+        if key is not None:
+            if key in self._told:
+                return False
+            self._told.add(key)
         self.sent.append((message, priority))
+        return True
 
 
 class _JournalNotifier:
