@@ -72,6 +72,10 @@ class FakeNeotoma:
         self.queries: list[dict] = []
         self.drop_fields: set[str] = set()  # simulate undeclared fields
         self.fail_query_for: set[str] = set()
+        self.fail_store_for: set[str] = set()  # store refused outright
+        self.timeout_after_store_for: set[str] = set()  # write lands, caller sees a timeout
+        self.hide_queries = 0  # next N lookups do not see stored rows yet
+        self.idempotency: dict[str, str] = {}
         self._n = 0
 
     def _observe(self, key, fields, sub, jkt, tier="software"):
@@ -100,6 +104,14 @@ class FakeNeotoma:
             self.writes += 1
             for ent in body["entities"]:
                 key = ent["payment_key"]
+                if key in self.fail_store_for:
+                    raise payment_approval.ApprovalError("HTTP 400: store refused")
+                # Like the real server: a reused idempotency key with a
+                # different payload is a conflict, not a no-op.
+                digest = repr(sorted(ent.items()))
+                prior = self.idempotency.setdefault(body["idempotency_key"], digest)
+                if prior != digest:
+                    raise payment_approval.ApprovalError("HTTP 409: idempotency key reused with a different payload")
                 if key not in self.rows:
                     fields = {
                         k: v
@@ -109,12 +121,17 @@ class FakeNeotoma:
                     self.rows[key] = fields
                     self.ids[key] = f"ent_{len(self.ids)}"
                     self._observe(key, fields, "monedula@ateles-swarm", "M" * 43)
+                if key in self.timeout_after_store_for:
+                    raise payment_approval.ApprovalError("Neotoma request failed: TimeoutError")
             return {"ok": True}
         if path == "/entities/query":
             self.queries.append(body)
             want = _validated_payment_key_filter(body)
             if want in self.fail_query_for:
                 raise payment_approval.ApprovalError("query failed")
+            if self.hide_queries > 0:
+                self.hide_queries -= 1
+                return {"entities": []}
             return {
                 "entities": [
                     {"entity_id": self.ids[k], "snapshot": dict(r)}
