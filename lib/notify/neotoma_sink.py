@@ -228,7 +228,7 @@ def build_title(daemon: str, level: str, text: str, gen: int = 1, shape: str = "
 
 
 def title_shape(skey: str) -> str:
-    return _shape(skey)[:8]
+    return _shape(skey)[:12]
 
 
 def _shape(skey: str) -> str:

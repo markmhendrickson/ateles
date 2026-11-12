@@ -728,12 +728,6 @@ async def _fetch_comments(snap: dict) -> list:
 
 async def _handle_escalation(event: NeotomaEvent) -> None:
     """Surface escalation entities to Ateles via Notifier."""
-    # Daemon alerts the notifier's Neotoma sink stored (tag "notify") are
-    # already alerts: re-sending them would feed them back through the
-    # notifier, which stores the re-send again (lib/notify/neotoma_sink.py).
-    tags = event.snapshot.get("tags")
-    if isinstance(tags, (list, tuple)) and "notify" in tags:
-        return
     status = (event.snapshot.get("status") or "").lower()
     dedupe_key = f"escalation:{event.entity_id}"
     if status in ("resolved", "closed"):
