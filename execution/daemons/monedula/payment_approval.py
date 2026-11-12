@@ -385,15 +385,26 @@ def raise_request(item: Any) -> dict:
         **fields,
     }
     assert not (FORBIDDEN_FIELD_NAMES & set(entity)), "payment_approval leaks a payee detail"
-    _request(
-        "POST",
-        "/store",
-        {
-            "entities": [entity],
-            "idempotency_key": f"monedula-payment-approval-{item.obligation}",
-        },
-    )
-    back = find_record(str(item.obligation))
+    try:
+        _request(
+            "POST",
+            "/store",
+            {
+                "entities": [entity],
+                "idempotency_key": f"monedula-payment-approval-{item.obligation}",
+            },
+        )
+    except ApprovalError as store_error:
+        # A write that landed but timed out looks like a failure, and a retry
+        # carries a new raised_at under the same idempotency key, which the
+        # server refuses as a conflict. Read back what is there: if the record
+        # exists it is the one to verify; if not, the store really failed.
+        existing = find_record(str(item.obligation))
+        if existing is None:
+            raise store_error
+        back = existing
+    else:
+        back = find_record(str(item.obligation))
     if back is None:
         raise ApprovalError("payment_approval did not read back after write")
     for name, want in fields.items():
@@ -452,17 +463,23 @@ def _currency() -> str:
     return CURRENCY
 
 
-def _is_stale(entity: dict) -> bool:
+def _stale_interval(entity: dict) -> int:
+    """How many full stale intervals the record has been awaiting (0 = not stale).
+
+    The count is part of the stale alert's dedupe key, so an unanswered record
+    alerts again after each further interval instead of once forever.
+    """
     raised = _snapshot(entity).get(RAISED_AT_FIELD)
     if not isinstance(raised, str) or not raised:
-        return False
+        return 0
     try:
         when = datetime.fromisoformat(raised)
     except ValueError:
-        return False
+        return 0
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
-    return (_now() - when).total_seconds() > stale_hours() * 3600
+    age_hours = (_now() - when).total_seconds() / 3600
+    return int(age_hours // stale_hours()) if age_hours > stale_hours() else 0
 
 
 def collect(
@@ -514,14 +531,14 @@ def collect(
         result.channel_ok = False
         return result
 
-    def say(item: Any, kind: str, message: str, priority: str) -> None:
+    def say(item: Any, kind: str, message: str, priority: str, suffix: str = "") -> None:
         if notify is None:
             return
         try:
             notify(
                 message,
                 priority=priority,
-                dedupe_key=f"monedula:payment_approval_{kind}:{item.obligation}",
+                dedupe_key=f"monedula:payment_approval_{kind}:{item.obligation}{suffix}",
                 email_eligible=True,
             )
         except Exception as exc:  # noqa: BLE001 - alerting must not break the tick
@@ -555,7 +572,9 @@ def collect(
                     "raised",
                     f"monedula: payment approval needed for {describe(item)}. "
                     "It awaits your answer via the coordinator session; nothing "
-                    "is paid until you answer.",
+                    f"is paid until you answer. To approve, answer 'attended "
+                    f"{item.handler_name}' (or 'yes {item.handler_name}'); to skip "
+                    "it, answer 'no'.",
                     "blocker",
                 )
         except ApprovalError as exc:
@@ -565,6 +584,15 @@ def collect(
                 f"this payment held: {exc}"
             )
             unavailable += 1
+            say(
+                item,
+                "unavailable",
+                f"monedula: payment approval could not be raised or read for "
+                f"{describe(item)} ({exc}). That payment is held and the next "
+                "tick retries; no approval request exists yet, so no stale alert "
+                "can fire for it.",
+                "blocker",
+            )
             result.states[key] = "blocked"
             result.blocked.add(key)
             result.reason_code = "payment_approval_unavailable"
@@ -604,14 +632,18 @@ def collect(
         else:
             result.states[key] = "awaiting_approval"
             result.awaiting.add(key)
-            if _is_stale(entity):
+            interval = _stale_interval(entity)
+            if interval:
                 say(
                     item,
                     "stale",
                     f"monedula: payment approval for {describe(item)} has been "
-                    f"awaiting your answer for over {stale_hours():g}h. Is the "
-                    "coordinator session watching payment_approval records?",
+                    f"awaiting your answer for over {interval * stale_hours():g}h. "
+                    "Is the coordinator session watching payment_approval records? "
+                    f"To approve, answer 'attended {item.handler_name}' (or 'yes "
+                    f"{item.handler_name}'); to skip it, answer 'no'.",
                     "blocker",
+                    suffix=f":{interval}",
                 )
     if items and unavailable == len(items):
         # Nothing could be read at all (Neotoma down): treat as a channel

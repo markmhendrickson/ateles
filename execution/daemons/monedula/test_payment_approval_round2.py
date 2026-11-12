@@ -136,7 +136,7 @@ def test_an_undeliverable_alert_is_logged_at_error(monkeypatch, caplog):
 
 def test_a_timed_out_first_write_that_landed_is_not_a_held_payment(env, alerts):
     w, neo = env
-    key = consent_email.obligation_key(w.handler, "2026-11-11", "")
+    key = consent_email.obligation_key(w.handler, "2026-11-11", "evt-1")
     neo.timeout_after_store_for = {key}
     w.tick()
     # The record landed; the read-back finds it, so this is a raised request,
@@ -151,13 +151,17 @@ def test_a_retry_after_an_invisible_landed_write_reads_back_not_conflicts(env, a
     the retry reuses the idempotency key with a new raised_at, which the server
     refuses. The retry must read back the record that is there, not hold."""
     w, neo = env
-    key = consent_email.obligation_key(w.handler, "2026-11-11", "")
+    key = consent_email.obligation_key(w.handler, "2026-11-11", "evt-1")
     neo.timeout_after_store_for = {key}
-    neo.hide_queries = 2  # the first tick's lookup and read-back both miss it
+    neo.hide_queries = 3  # tick 1: lookup + read-back miss; tick 2: lookup misses
     w.tick()
+    first_tick_unavailable = len(_kind(alerts, "unavailable"))
     neo.timeout_after_store_for = set()
-    w.tick(minutes=15)
+    w.tick(minutes=15)  # re-raises with a new raised_at; the server answers 409
     assert key in neo.rows
+    assert len(_kind(alerts, "unavailable")) == first_tick_unavailable, (
+        "the idempotency conflict was treated as a held payment"
+    )
     _approve(neo)
     w.tick(minutes=15)
     assert len(w.handler.execute_calls) == 1

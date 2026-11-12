@@ -253,7 +253,7 @@ def test_a_record_awaiting_past_the_threshold_alerts_as_stale(env, alerts, monke
     w.tick(minutes=15)
     stale = _kind(alerts, "stale")
     assert stale and stale[0]["priority"] == "blocker"
-    assert stale[0]["key"].endswith(neo.only["payment_key"])
+    assert neo.only["payment_key"] in stale[0]["key"]
 
 
 def test_stale_threshold_is_configurable(env, alerts, monkeypatch):

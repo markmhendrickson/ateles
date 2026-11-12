@@ -7,10 +7,15 @@ Checks Google Calendar for yesterday's sessions that trigger payment obligations
 asks for **payment consent** (operator authorization UX — not GDPR Art. 7
 consent), executes approved payments, and confirms.
 
-**Email consent** is the default when Telegram credentials are absent.
-**Telegram break-glass** is an explicit override only.
+**The per-payment approval record** (`payment_approval`, below) is the default
+and only automatic consent channel: one Neotoma record per payment, resolved by
+the coordinator session with the operator's literal answer. It needs no Telegram
+or email credentials. **Email** and **Telegram** are legacy break-glass channels,
+selected only by an explicit `MONEDULA_CONSENT_CHANNEL=email|telegram`; the
+sections about the swarm mailbox, reply examples and Telegram below apply only
+to those. To enable the default channel, follow "Enabling checklist".
 
-> **Email consent runs through the swarm's own mailbox.** It works once
+> **Legacy (email break-glass only): consent runs through the swarm's own mailbox.** It works once
 > `ATELES_SWARM_EMAIL` and `ATELES_SWARM_GWS_CONFIG_DIR` are set (see
 > "Swarm mailbox" below). The request goes **from** the swarm mailbox **to**
 > `OPERATOR_EMAIL`; the operator's reply arrives in the swarm mailbox as
@@ -93,9 +98,14 @@ ruling 2026-11-12). The default and only automatic channel is `payment_approval`
   raise fails its read-back and all payments are held.
 - **Surfacing check (before enabling):** with the coordinator session open, let
   Monedula raise one record (or create a synthetic `awaiting_operator` record) and
-  confirm the coordinator lists it and puts it to the operator in the session the
-  operator is using; record the result. Until that is shown, sessions sit in
-  `awaiting` with nothing alerting anyone.
+  confirm both that the coordinator lists it and puts it to the operator in the
+  session the operator uses, AND that the "raised" blocker actually arrived on the
+  operator's notification channel (the alert path depends on the notifier having a
+  working transport; an undeliverable alert is logged at error level). Record the
+  result. Until that is shown, sessions can sit in `awaiting` unnoticed.
+- **After payment:** the operator is told the outcome per payment: info when sent;
+  a blocker when manual action is needed or the transfer did not complete (it is
+  never retried automatically). Payee account details are never put in an alert.
 - **Calendars:** every calendar the account can read is scanned, including shared
   calendars others can write to. Events on them can raise approval requests;
   nothing is paid without the operator's per-payment answer.
@@ -108,6 +118,29 @@ releases its task to the Apis dispatcher. Apis subscribes only to `task` and
 consumes the approval. `MONEDULA_CONSENT_CHANNEL=email|telegram` remains as an
 explicit legacy break-glass override and is never chosen automatically.
 
+### Enabling checklist (in order)
+
+1. **Register the schema.** `python3 execution/scripts/register_payment_approval_schema.py`
+   (dry run), then `... --apply`. Verify: the script prints
+   `registered and verified: payment_approval`.
+2. **Set the approver identity on the Monedula daemon** (its launchd environment or
+   the private env it loads): `MONEDULA_PAYMENT_APPROVER_SUB` and
+   `MONEDULA_PAYMENT_APPROVER_JKT`, to the values in "Approver identity" above.
+   Verify: restart the daemon and read the variables back from the running process
+   (never print the key file).
+3. **Confirm the grants** (Mark's): the `payment-approver` key's Neotoma grant, and
+   the Wise token for therapy. Verify: the resolver's `neotoma request --aauth`
+   correction of a test record succeeds.
+4. **Run the surfacing check** above. Verify: you received the raised blocker.
+5. **Enable** by leaving `MONEDULA_CONSENT_CHANNEL` unset.
+
+**Answering without a coordinator session.** If no coordinator is watching, the
+operator can resolve the record by hand as the resolver principal: correct
+`operator_answer` to `attended <handler>` (or `yes <handler>`), then correct
+`status` to `approved` (or `rejected` to skip), in that order, using
+`neotoma request --aauth` with the resolver key. Verify: the next tick sends the
+"payment SENT" or outcome alert.
+
 ## Session timing
 
 Every tick reads all calendars (`calendarList list`, then `events list` per
@@ -118,7 +151,7 @@ stays pending until approved, skipped or paid, even across restarts, midnight
 and a failed profile load. A failed read of any one calendar fails the whole
 fetch (never "no sessions").
 
-## Swarm mailbox
+## Swarm mailbox (legacy email break-glass)
 
 | Variable | What it is |
 |----------|------------|
@@ -152,10 +185,10 @@ Never a silent no-op when payments are pending.
 
 | State | Meaning |
 |-------|---------|
-| `awaiting_approval` | Request sent or held; no reply yet (silence ≠ decline) |
-| `approved` | Explicit operator approve / ATTENDED |
-| `skipped` | Explicit `SKIP` only |
-| `blocked` | Channel/config/send/read failure — no payment moved |
+| `awaiting_approval` | Record raised (or request sent) and held; no answer yet (silence ≠ decline) |
+| `approved` | Record `approved` with an authenticated answer naming the session (`attended <handler>` / `yes <handler>`); legacy email: explicit ATTENDED |
+| `skipped` | Record `rejected` by the approver; legacy email: explicit `SKIP` |
+| `blocked` | Unauthenticated, mismatched, unreadable or unraisable record, or a channel/config/send/read failure — no payment moved |
 
 Missing config, transport failure, unread inbox, and no reply never become
 `skipped`.
@@ -164,6 +197,19 @@ Missing config, transport failure, unread inbox, and no reply never become
 
 Loaded automatically from `~/.config/neotoma/.env` at startup.
 
+Default channel (`payment_approval`):
+
+| Variable | Purpose |
+|----------|---------|
+| `MONEDULA_PAYMENT_APPROVER_SUB` / `MONEDULA_PAYMENT_APPROVER_JKT` | **Required.** The resolver principal and its 43-character key thumbprint; unset means nothing can be approved |
+| `MONEDULA_APPROVAL_STALE_HOURS` | Hours an unanswered record waits before a stale blocker, repeated every further interval (default `24`) |
+| `MONEDULA_SESSION_WINDOW_HOURS` | Rolling session window (default `24`) |
+| `MONEDULA_CONSENT_CHANNEL` | Optional: `payment_approval` (alias `checkpoint`) \| `email` \| `telegram`; unset means `payment_approval` |
+| `WISE_API_TOKEN` | Wise API bearer token (therapy; yoga pays by BTC) |
+| `DATA_DIR` | Path to data directory (for contacts.parquet) |
+
+Legacy break-glass channels (email, Telegram) only:
+
 | Variable | Purpose |
 |----------|---------|
 | `ATELES_NOTIFY_EMAIL` | `"1"` arms `lib.approval` email send/read for Monedula consent |
@@ -171,16 +217,13 @@ Loaded automatically from `~/.config/neotoma/.env` at startup.
 | `ATELES_SWARM_EMAIL` | **Required for email consent.** The swarm mailbox's address; must differ from `OPERATOR_EMAIL`. See "Swarm mailbox" |
 | `ATELES_SWARM_GWS_CONFIG_DIR` | **Required for email consent.** gws config directory signed in as the swarm mailbox; must exist. See "Swarm mailbox" |
 | `ATELES_MAIL_AUTHSERV_ID` | Optional trusted receiving-server id (default `mx.google.com`). See "Swarm mailbox" |
-| `MONEDULA_CONSENT_CHANNEL` | Optional override: `email` \| `telegram` |
 | `TELEGRAM_BOT_TOKEN` | Telegram break-glass only |
 | `TELEGRAM_CHAT_ID` | Telegram break-glass only |
 | `TELEGRAM_ALLOWED_USER_ID` | Operator's Telegram user ID. **Required when Telegram is selected.** Unset or non-numeric ⇒ the gate refuses every reply (`channel_error`) and escalates — it is never a wildcard. See "Who may approve (Telegram)" below. |
 | `TELEGRAM_TOPIC_PAYMENTS` | Thread ID for payments topic |
 | `MONEDULA_DEAD_GATE_THRESHOLD` | Consecutive channel failures before dead-gate alarm (default `3`) |
-| `WISE_API_TOKEN` | Wise API bearer token |
-| `DATA_DIR` | Path to data directory (for contacts.parquet) |
 
-## Email consent — request / reply examples (synthetic)
+## Email consent (legacy break-glass) — request / reply examples (synthetic)
 
 **Single-item request** (calendar): subject carries the marker; body allows bare
 `ATTENDED` / `SKIP`.
@@ -255,12 +298,16 @@ chmod +x install.sh
 | `consent_reply_unrecognized` | Authenticated but unparseable line; hold item; correction mail explains form |
 | `payment_journal_unreadable` | The payment journal could not be read or written; every payment held; inspect `.monedula_payment_journal.json` before anything is paid |
 | `payment_outcome_unknown` | A transfer was attempted and its outcome never recorded (crash or rail error mid-transfer). Held and never retried automatically; check the rail, then resolve by hand |
+| `payment_approval_not_accepted` | A record exists but does not permit payment: not written by the configured approver, approved with no answer, answer does not name the session (a bare yes does not approve), or it does not match the payment. The alert names the reason and the record's short key; fix the SAME record (correct `operator_answer` as the resolver) |
+| `invalid_wise_recipient_id` | A profile's `wise_recipient_id` is not a positive integer (Neotoma profile or env `<PREFIX>_WISE_RECIPIENT_ID`). Stranded alert; payments for it are held until it is fixed |
+| `payment_outcome` (alert key `monedula:payment_outcome:<obligation>`) | After an approved payment ran: info for `sent`; blocker for `manual_required`, failed or unreported, saying it was NOT paid and will not be retried. Pay by hand from the payment profile, then reconcile |
+| `payment_terms_changed` | The payee or amount changed after approval, so the approval no longer applies; nothing paid; a fresh request is raised |
 | `payment_profiles_stranded` | Fix the named payment_profile config; Notifier key `monedula:stranded:<fp>` |
 
 Consent-channel-failure alert key: `monedula:consent_channel_failed`
 (`email_eligible=True`, actionable body).
 
-## Telegram break-glass notes
+## Telegram break-glass notes (legacy)
 
 **Telegram getUpdates is single-consumer per bot token.** If another process
 polls `getUpdates` on the same `TELEGRAM_BOT_TOKEN`, Monedula's poll loses

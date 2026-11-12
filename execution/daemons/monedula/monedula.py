@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -84,6 +85,10 @@ def _notify(
     separately.
     """
     if _notifier is None:
+        log.error(
+            "operator alert could not be delivered (no notifier available): "
+            f"{message[:160]}"
+        )
         return
     try:
         from lib.notify import Priority
@@ -96,8 +101,56 @@ def _notify(
             dedupe_key=dedupe_key,
             email_eligible=email_eligible,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.error(
+            f"operator alert could not be delivered ({type(exc).__name__}): "
+            f"{message[:160]}"
+        )
+
+
+_ACCOUNT_LIKE = re.compile(
+    r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b|\b(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,60}\b"
+)
+
+
+def _outcome_alert(item: Any, result: Any) -> tuple[str, str]:
+    """(priority, body) telling the operator what became of an approved payment.
+
+    Only ``sent`` reads as paid. A ``manual_required``, failed or unreported
+    result is a blocker that says it was NOT paid and that it will not be
+    retried. Carries no IBAN, address or recipient id; free-text errors are
+    scrubbed of account-like strings and truncated.
+    """
+    from consent_email import CURRENCY
+
+    status = (
+        str(result.get("status") or "unreported")
+        if isinstance(result, dict)
+        else "unreported"
+    )
+    error = ""
+    if isinstance(result, dict) and result.get("error"):
+        error = _ACCOUNT_LIKE.sub("[redacted]", str(result["error"]))[:200]
+    who = (
+        f"{item.handler_name} session {item.payment_date} "
+        f"{item.amount_eur} {CURRENCY} [{str(item.obligation)[:12]}]"
+    )
+    if status == "sent":
+        return "info", f"monedula: payment SENT for {who}."
+    if status == "manual_required":
+        return (
+            "blocker",
+            f"monedula: payment NOT made for {who}: manual payment required"
+            f"{f' ({error})' if error else ''}. Nothing was sent; pay it by hand "
+            "using the payee details in the payment profile (not repeated here). "
+            "It will not be retried automatically.",
+        )
+    return (
+        "blocker",
+        f"monedula: payment did NOT complete for {who} (status {status}"
+        f"{f': {error}' if error else ''}). Check the rail before paying by hand; "
+        "it will not be retried automatically.",
+    )
 
 
 def _clear_notify_dedupe(dedupe_key: str) -> None:
@@ -1820,6 +1873,15 @@ def main() -> bool:
                     "current payee/amount; holding and re-requesting."
                 )
                 terms_changed.add(key)
+                _notify(
+                    f"monedula: approval no longer covers {item.handler_name} "
+                    f"session {item.payment_date} [{str(item.obligation)[:12]}]: "
+                    "the payee or amount changed after you approved it. Nothing "
+                    "was paid; a fresh request is raised on the current terms.",
+                    priority="blocker",
+                    dedupe_key=f"monedula:payment_terms_changed:{item.obligation}",
+                    email_eligible=True,
+                )
                 continue
             # Preflight BEFORE intent: a payee that cannot be paid safely
             # (inactive/unknown recipient, unresolved payee) fails closed
@@ -1876,6 +1938,13 @@ def main() -> bool:
                 return _journal_failure(str(exc))
             all_results.append((handler, result))
             newly_executed.add(key)
+            _outcome_priority, _outcome_body = _outcome_alert(item, result)
+            _notify(
+                _outcome_body,
+                priority=_outcome_priority,
+                dedupe_key=f"monedula:payment_outcome:{item.obligation}",
+                email_eligible=True,
+            )
             log.info(f"{label} result: {result}")
             if _job:
                 _job.finished(f"{handler.name} payment executed")

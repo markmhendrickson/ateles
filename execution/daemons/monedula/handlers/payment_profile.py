@@ -454,10 +454,10 @@ def load_profiles_with_neotoma_fallback(
         return profiles
 
     log.info("No Neotoma payment profiles found — falling back to env vars")
-    return load_profiles()
+    return load_profiles(strandings)
 
 
-def load_profiles() -> list[PaymentProfile]:
+def load_profiles(strandings: list | None = None) -> list[PaymentProfile]:
     """
     Load all PaymentProfiles from env vars.
     Driven by MONEDULA_PROFILES (comma-separated prefix list).
@@ -475,7 +475,7 @@ def load_profiles() -> list[PaymentProfile]:
     profiles: list[PaymentProfile] = []
 
     for prefix in prefixes:
-        profile = _load_profile(prefix)
+        profile = _load_profile(prefix, strandings)
         if profile:
             profiles.append(profile)
 
@@ -483,8 +483,14 @@ def load_profiles() -> list[PaymentProfile]:
     return profiles
 
 
-def _load_profile(prefix: str) -> PaymentProfile | None:
-    """Load a single PaymentProfile from env vars for the given prefix."""
+def _load_profile(
+    prefix: str, strandings: list | None = None
+) -> PaymentProfile | None:
+    """Load a single PaymentProfile from env vars for the given prefix.
+
+    A bad ``WISE_RECIPIENT_ID`` is recorded in ``strandings`` (when supplied),
+    exactly as the Neotoma loader does, so it alerts instead of only logging.
+    """
 
     def env(key: str, default: str = "") -> str:
         return os.environ.get(f"{prefix}_{key}", default).strip()
@@ -528,6 +534,17 @@ def _load_profile(prefix: str) -> PaymentProfile | None:
         recipient_id = parse_wise_recipient_id(env("WISE_RECIPIENT_ID"))
     except ValueError as exc:
         log.error(f"[{prefix}] {exc} — profile skipped")
+        if strandings is not None:
+            from strandings import REASON_BAD_RECIPIENT_ID, Stranding
+
+            strandings.append(
+                Stranding(
+                    entity_id="",
+                    label=label,
+                    reason=REASON_BAD_RECIPIENT_ID,
+                    detail=f"{exc}. Payments for this profile are held until it is fixed.",
+                )
+            )
         return None
 
     return PaymentProfile(
