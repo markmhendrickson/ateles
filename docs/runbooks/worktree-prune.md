@@ -6,7 +6,8 @@ Linked git worktrees pile up under a clone directory (one per session, agent run
 carries its own `node_modules`. `execution/scripts/worktree_prune.py` is the nightly job that gives that
 disk space back without ever discarding work that exists only on this machine. This runbook describes what
 it removes, what it refuses to touch, how to configure it, how to run its tests, and how to install the
-launchd job. Dry run is the default; nothing is deleted without `--apply`.
+launchd job. Dry run is the default; nothing is deleted without `--apply`. The scheduled job is ONE daily
+check, `--daily` (next section), which replaces any older nightly cleaner on the host.
 
 ## Scope
 
@@ -15,6 +16,100 @@ launchd template (`execution/scripts/com.ateles.worktree-prune.plist.template`).
 clones, deployment checkouts (see `docs/daemon_rc_autodeploy.md`), branch cleanup on the remote, or disk
 cleanup outside git worktrees. Installing the launchd job is a per-host action; merging this code installs
 nothing.
+
+## Daily mode (`--daily`): the one scheduled check
+
+`--daily` is the single documented invocation for the scheduled job: `--daily --apply` deletes, and
+`--daily` alone (or with `--dry-run`) only reports, like every mode of this script. It turns on the settings
+below together and never does anything outside them:
+
+1. **Whole removal of linked worktrees that are merged and clean**, and nothing else. Merged means HEAD is in
+   origin's default branch, or is (an ancestor of) the head of a merged pull request for the branch. A commit
+   that is only pushed to some other origin branch is **not** enough (`pushed-not-merged`). Clean means
+   `git status` is empty. Immediately before removal, any file under the worktree that a running process holds
+   open or mapped keeps it (`in-use`), and so does a failed open-file scan. `--protect-ignored` is on and, in daily mode, strict: a worktree is removed with
+   git-ignored files still inside it only if each of them is a **cache directory** (a name from the list in
+   item 2) that passes the cache tier's own directory checks (a real directory inside the worktree, no `.git`
+   beneath it, no mount point), or a known cache file (`.DS_Store`, `*.pyc`, `*.tsbuildinfo`,
+   `*.eslintcache`). The one other exception is the dev env copy that project hooks place in every
+   worktree: a file named exactly `.env.development` at the worktree root counts as disposable only if it is a
+   regular file (not a link), git ignores it, and it is byte-identical to the same-named file in the main clone
+   (compared byte for byte; its contents and any hash of them are never printed, logged or stored). A renamed
+   variant, a differing copy, a missing main-clone file or a link keeps the worktree. Any other ignored entry
+   (`tmp/`, `public/`, `data/`, logs, a nested repository under a `build/`) keeps the worktree and lists it
+   (`has-ignored-files`).
+2. **Deleting regenerable cache directories** inside worktrees that pass the strip gate (below): directories
+   named like the existing regenerable classification (`node_modules`, `.venv`, `venv`, `dist`, `build`,
+   `.next`, `.nuxt`, `.turbo`, `.cache`, `coverage`, `__pycache__`, `.pytest_cache`, `.mypy_cache`,
+   `.ruff_cache`, `target`, `.parcel-cache`, `.vite`, `.vitest`, `.dev-serve`, `.mcp-venv`) that git **ignores**
+   and holds no tracked file. The worktree stays. A same-named directory git does not ignore is refused
+   (`not-git-ignored`) and listed. A cache directory with any file open or mapped by a running process (a
+   virtualenv in use, for example, even when that process works elsewhere) is kept (`in-use-by-process`), and
+   if the open-file scan itself fails every cache is kept. It does not touch user-level or system caches.
+3. **A free-space alert** (see below).
+4. **An approval list** of everything it did not act on (see below).
+
+It never removes uncommitted, untracked or local-only work, never passes `--force` to anything, and leaves
+worktrees with initialized submodules (which git refuses to remove without force) for approval. Detached
+HEADs unreachable from origin are kept. Every condition is re-checked immediately before acting; the 24 hour
+quiet period, the in-use (cwd) check, the lock, the never-touch list and the deployment checkouts
+(`~/ateles-rc-src`, `~/neotoma-rc-src`) all apply. `--daily` cannot be combined with `--strip-only`.
+
+The pieces are also available separately for ad-hoc use: `--require-merged`, `--strip-caches`,
+`--approval-list`, `--alert`.
+
+### Keep marks
+
+Two things keep a worktree out of every tier (removal, cache deletion):
+
+- `git worktree lock <path>` (already honored);
+- a file or directory named **`.ateles-keep`** at the worktree root (`touch <worktree>/.ateles-keep`). It need
+  not be committed. A kept worktree is listed as kept on purpose (reason `keep-marked`), not as waiting for a
+  decision.
+
+### Approval list
+
+Every run writes `<state dir>/approval_list.json` (everything) and `<state dir>/approval_list.md` (short, for
+a person), replacing the previous ones. The Markdown prints the two commands once at the top (`git worktree
+remove <path>` to approve, `touch <path>/.ateles-keep` to keep), says "Nothing needs your decision." when the
+list is empty, shows sizes in MB or GB, and groups items: first "Work that may exist only on this Mac"
+(uncommitted or untracked files, commits never uploaded, unmerged branches, untracked files that cannot be
+rebuilt), then other items waiting for a decision, then items kept on purpose (not counted as waiting). Each
+line shows the branch, path, size and a plain-language reason. The JSON carries the same with the reason
+code, `group`, `decision_count` and `decision_kb`. The run takes **no action** on a listed item.
+
+### Free-space alert
+
+When free space on the home volume falls below `ATELES_WORKTREE_PRUNE_ALERT_GIB` (`--alert-gib`, default
+**25** GiB; `0` disables) the run alerts. Once an alert is **delivered** it stays quiet while space remains
+low, and re-arms only after free space recovers to the threshold plus `ATELES_WORKTREE_PRUNE_ALERT_REARM_GIB`
+(`--alert-rearm-gib`, default **10**); recovery inside that band does not re-arm. A send that failed, could not
+be attempted (notifier unavailable) or was not reported as sent does **not** disarm: it is recorded and tried
+again on the next run (so, if the notifier holds the message for later and also reports not-sent, a later run
+may send it again). Free space below 5 GiB is critical severity. State is `<state dir>/alert_state.json`.
+
+The text is written for someone reading it on a phone: a plain first sentence with free space in GB; what this
+run already cleared or removed and about how much it freed (or "freed nothing"); that nothing else was
+deleted, with the count and size of items waiting for a decision; the next step (optional and safe, urgent
+wording when critical); how to keep a folder; and the list's path last.
+
+Each attempt is written to `<state dir>/alerts.jsonl` (the durable record, with `delivered`, written whether
+or not delivery works), and every run's `runs.jsonl` line carries `alert` and `alert_severity` (0 = fine,
+1 = below threshold, 2 = critical), also while the alert is suppressed. Delivery goes through the repo's
+existing operator notifier, `lib/notify` (`Notifier.send`, Apprise/Telegram-backed, called with
+`email_eligible=False`), imported lazily; this job adds no credentials, transport or scheduler. The notifier
+needs an interpreter with its dependencies and its own transport settings in the job's environment: the
+daemon venv (`~/ateles-rc-src/.venv`, from `execution/scripts/daemon-requirements.txt`) has `httpx` but
+not `apprise`, which the notifier needs to send at all (without it the notifier only logs). This change does
+**not** touch that requirements file: adding a notifier transport to the shared deployment venv would switch on
+real alert delivery for the other daemons that use the same notifier too, which changes how the swarm
+notifies the operator and is a separate operator decision. Until that is decided, an alert is recorded
+durably in `alerts.jsonl` with `delivered: false` and retried on every run; nothing is lost and nothing is
+silently dropped. Real delivery also needs the transport settings in the job's environment, and stays
+**unproven until it is activated and verified on the host**. If it cannot deliver, the record says so (`delivered: false`) and the next run retries.
+
+The job is scheduled at **08:30**, outside the notifier's 22:00 to 08:00 silence window, so a warn-level alert
+is delivered instead of being held until some other process drains the held queue.
 
 ## The tiers
 
@@ -90,6 +185,9 @@ worktree and in total in the runs log (`strip_detail`, `strip_bytes_freed`; a dr
 
 `--idle-hours` is the idle window of the node_modules tier only (default 24).
 
+With `--daily`, the node_modules tier becomes the cache tier described above (same gate, more directory
+names, each also required to be git-ignored). Locked and keep-marked worktrees are skipped by it too.
+
 ### What is deliberately not here
 
 An archive-then-remove tier (write a recovery archive of dirty or unpushed work, then force-remove the
@@ -162,6 +260,8 @@ python3 execution/scripts/worktree_prune.py                        # dry run, pr
 python3 execution/scripts/worktree_prune.py --list                 # also lists each would-remove worktree
 python3 execution/scripts/worktree_prune.py --strip-only           # dry run of the node_modules tier alone
 python3 execution/scripts/worktree_prune.py --strip-only --apply   # delete node_modules where eligible
+python3 execution/scripts/worktree_prune.py --daily                 # the daily check, report only (dry run)
+python3 execution/scripts/worktree_prune.py --daily --apply         # the daily check, applying (what launchd runs)
 ```
 
 ## Self-test
@@ -180,6 +280,8 @@ CI runs them in the `ateles package tests` workflow (`Run execution/scripts test
 - `<state dir>/runs.jsonl`: one JSON summary per run (status, counts, GB, kept-by-reason, free disk, and
   for the node_modules tier `stripped_worktrees`, `strip_bytes_freed`, `would_strip_bytes`, `strip_kept`
   and a per-worktree `strip_detail`).
+- `<state dir>/approval_list.json` and `approval_list.md`: the latest approval list (daily mode).
+- `<state dir>/alerts.jsonl` and `alert_state.json`: alert records and the armed/disarmed state (daily mode).
 - `<state dir>/logs/YYYY-MM-DD.log`: per-worktree decisions (`REMOVED`, `WOULD-REMOVE`, `STRIPPED`,
   `WOULD-STRIP`, `KEEP <reason>`); files older than 30 days are deleted.
 - `<state dir>/logs/launchd.{out,err}.log`: stdout and stderr from launchd, truncated when over 1 MB.
@@ -210,6 +312,10 @@ alone. The node_modules tier has its own map, `strip_kept`.
 | `dirty`, `unpushed`, `detached-unreachable` | uncommitted changes, a commit that exists only locally, or a detached HEAD unreachable from origin |
 | `head-moved` | HEAD changed between the check and the action |
 | `has-ignored-files` | `--protect-ignored` and non-regenerable ignored files are present |
+| `keep-marked` | the worktree root holds a `.ateles-keep` marker |
+| `in-use-by-process` | cache tier: a running process has a file open inside that cache directory |
+| `pushed-not-merged` | `--require-merged` / `--daily`: pushed to a non-default origin ref but not merged |
+| `has-submodules` | an initialized submodule is present; git would refuse removal and this job never forces |
 | `find-error`, `status-error`, `recheck-list-error`, `recheck-lsof-error` | a check could not be completed, so the worktree was kept |
 | `git-refused` | `git worktree remove` refused (logged with git's message) |
 | `over-cap-deferred` | the `--max` cap was reached; next run |
@@ -221,10 +327,15 @@ alone. The node_modules tier has its own map, `strip_kept`.
 The template `execution/scripts/com.ateles.worktree-prune.plist.template` uses two placeholders: `{{HOME}}`
 (the home directory) and `{{CHECKOUT}}` (the absolute path of the Ateles checkout that holds the script).
 The job runs whatever is in that working tree, so use a checkout that is kept clean and current, not a
-development clone. Review the flags in the template first: it applies deletions with `--apply`, runs the
-plain tier with `--protect-ignored` and the node_modules tier with `--strip-node-modules` (24 hours idle,
-since no `--idle-hours` is passed), and caps a run at `--max 200`. It does not enable any archive tier. It
-runs at 03:30 local time, and a Mac that is asleep then runs it on wake.
+development clone. Review the flags in the template first: it runs `--daily --apply` (merged-only whole removal with strict
+`--protect-ignored`, 24 hours idle for the cache tier, the alert and the approval list) and caps a run at
+`--max 200`. It does not enable any archive tier and does not reference any script outside the repo. It
+uses the daemon convention for the interpreter, `{{CHECKOUT}}/.venv/bin/python3` (the deployment checkout,
+`~/ateles-rc-src`, as `docs/daemon_rc_autodeploy.md` prescribes), not `/usr/bin/python3`. It runs at 08:30
+local time, and a Mac that is asleep then runs it on wake. For the alert to be delivered, the notifier's
+transport settings must be in `EnvironmentVariables` and the interpreter's venv must have a notifier
+transport (the deployment venv does not today; that is a separate operator decision); otherwise alerts are
+only recorded in `alerts.jsonl` (`delivered: false`) and retried on each run.
 
 ```
 CHECKOUT=/path/to/a/clean/ateles/checkout
@@ -243,9 +354,43 @@ Verify it took effect:
 
 ```
 launchctl print "gui/$(id -u)/com.ateles.worktree-prune" | head
-# a dry run of the tiers the nightly job runs, against the real clones
-python3 "$CHECKOUT/execution/scripts/worktree_prune.py" --protect-ignored --strip-node-modules --list
+# a dry run of the daily check against the real clones (deletes nothing); then read the approval list it wrote
+"$CHECKOUT/.venv/bin/python3" "$CHECKOUT/execution/scripts/worktree_prune.py" --daily --list
+less "$HOME/.ateles-work/worktree-prune/approval_list.md"
 ```
 
 To run once now (this applies): `launchctl kickstart "gui/$(id -u)/com.ateles.worktree-prune"`.
 To disable: `launchctl bootout "gui/$(id -u)/com.ateles.worktree-prune"` and delete the plist.
+
+## Retiring the older nightly cleaners (host step, after this merges)
+
+The host previously ran two nightly jobs: `com.ateles.worktree-prune` (03:30) running an unreviewed
+off-repo script with an archive-then-force-remove tier, and `com.ateles.worktree-prune-strip` (04:30)
+running this script without `--strip-only`, which also removed whole worktrees. The daily check above
+replaces both. Retiring them is an operator step on the host, done only after this change has merged and
+the checkout the job runs from has been updated; merging changes nothing on any host.
+
+```
+launchctl bootout "gui/$(id -u)/com.ateles.worktree-prune" 2>/dev/null
+launchctl bootout "gui/$(id -u)/com.ateles.worktree-prune-strip" 2>/dev/null
+rm -f "$HOME/Library/LaunchAgents/com.ateles.worktree-prune-strip.plist"
+# then install the daily job from the template (previous section) under the label com.ateles.worktree-prune
+```
+
+Verify: `launchctl list | grep worktree-prune` shows exactly one job, its `ProgramArguments` contain `--daily`
+and no path outside the checkout, and a `--daily` dry run writes `approval_list.md`. Verify the alert with
+dry runs and one test message, never with an applying run:
+
+```
+# 1. the wording and the firing logic: a dry run with a high threshold reports "would-fire" and shows the
+#    message in runs.jsonl / the printed summary; it sends and writes nothing and deletes nothing
+ATELES_WORKTREE_PRUNE_ALERT_GIB=100000 "$CHECKOUT/.venv/bin/python3" \
+  "$CHECKOUT/execution/scripts/worktree_prune.py" --daily
+# 2. delivery: send one plain test message through the same notifier, with the same interpreter and the
+#    environment the job uses; True means the notifier reports it sent, and a phone must show it arrive
+"$CHECKOUT/.venv/bin/python3" -c "import sys; sys.path.insert(0, '$CHECKOUT/execution/scripts'); \
+import worktree_prune as w; print(w.send_notification('Worktree prune: delivery test, please ignore.', 1))"
+```
+
+Keep the old off-repo script and its archives until the operator has reviewed them; deleting them is a
+separate decision.

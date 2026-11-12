@@ -40,6 +40,17 @@ re-checks every condition immediately before it acts.
 
 A tier that archives work before removing it is deliberately not part of this module.
 
+Daily mode (`--daily`) bundles the safe automatic subset for one scheduled job, and nothing else:
+  - whole removal of linked worktrees that are MERGED (HEAD in origin's default branch or a merged PR head)
+    and clean, with --protect-ignored on, no --force, and submodule worktrees left for approval;
+  - deleting regenerable cache directories (the REGEN_ANY_DEPTH directory names: node_modules, .venv,
+    dist, build, ...) that git ignores and does not track, inside worktrees that pass the strip gate;
+  - a free-space alert when the home volume drops below ATELES_WORKTREE_PRUNE_ALERT_GIB (default 25);
+  - an approval list (approval_list.json and approval_list.md in the state dir) of every worktree or cache
+    candidate it did NOT act on, with size and the exact reason. It takes no action on those.
+A worktree holding a keep marker (a `.ateles-keep` file at its root) or locked by `git worktree lock` is
+never touched by any tier; it appears on the approval list as kept.
+
 Operator-specific values are configuration, never code. Each can be set by environment
 variable or CLI flag (flag wins); the defaults are relative to the user's home directory:
   ATELES_WORKTREE_PRUNE_STATE_DIR      lock, runs.jsonl, logs   (--state-dir)
@@ -48,10 +59,13 @@ variable or CLI flag (flag wins); the defaults are relative to the user's home d
   ATELES_WORKTREE_PRUNE_HOLD_PREFIXES  comma-separated worktree directory-name prefixes to hold (--hold-prefix)
   ATELES_WORKTREE_PRUNE_HOLD_UNTIL     YYYY-MM-DD the hold lapses on  (--hold-until)
   ATELES_WORKTREE_PRUNE_YIELD_TO_FILE  --apply yields while this file changed in the last 30 minutes (--yield-to-file)
+  ATELES_WORKTREE_PRUNE_ALERT_GIB      free-space alert threshold in GiB, default 25; 0 disables  (--alert-gib)
+  ATELES_WORKTREE_PRUNE_ALERT_REARM_GIB  GiB above the threshold the alert re-arms at, default 10  (--alert-rearm-gib)
 """
 
 import argparse
 import datetime
+import filecmp
 import fcntl
 import json
 import os
@@ -67,6 +81,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 ENV_PREFIX = "ATELES_WORKTREE_PRUNE_"
 DEFAULT_FRESH_HOURS = 24
 DEFAULT_STRIP_IDLE_HOURS = 24
+DEFAULT_ALERT_GIB = 25.0
+DEFAULT_ALERT_REARM_GIB = 10.0
+CRITICAL_FREE_GIB = 5.0
+# A file or directory with this name at a worktree's root marks it as kept: no tier ever touches it.
+KEEP_MARKER = ".ateles-keep"
 ERR_ABORT_RATIO = 0.20
 ERR_MIN_CALLS = 20
 # Deployment checkouts the swarm's daemons run from (documented in the repo's CLAUDE.md). Never touched,
@@ -86,8 +105,18 @@ HOLD_PREFIXES = ()
 HOLD_UNTIL = None  # (y, m, d) or None. None with prefixes set means "hold indefinitely" (fails closed).
 FRESH_HOURS = DEFAULT_FRESH_HOURS
 # Settings of the optional node_modules-only tier. Off unless --strip-node-modules / --strip-only is passed.
-STRIP = {"enabled": False, "only": False, "idle_hours": DEFAULT_STRIP_IDLE_HOURS}
+STRIP = {
+    "enabled": False,
+    "only": False,
+    "caches": False,
+    "idle_hours": DEFAULT_STRIP_IDLE_HOURS,
+}
 STRIP_DIR_NAME = "node_modules"
+# Daily-mode switches (set from the CLI in _main; all off by default so existing invocations are unchanged).
+DAILY = {"merged_only": False, "approval": False, "alert": False}
+ALERT_GIB = DEFAULT_ALERT_GIB
+ALERT_REARM_GIB = DEFAULT_ALERT_REARM_GIB
+APPROVAL = []  # approval-list items collected during a run
 
 # Regenerable = never worth protecting (used by --protect-ignored).
 REGEN_ANY_DEPTH = {
@@ -120,6 +149,9 @@ REGEN_NAMES = (
     ".env.development",
 )  # husky-copied by scripts/copy-env-to-worktree.js; name only, never read
 DATA_REGEN_CHILDREN = ("logs", "sources", "tmp")
+# Directory names the cache tier may delete (daily mode): the directory entries of REGEN_ANY_DEPTH. A name is
+# necessary, never sufficient: the directory must also be git-ignored and hold no tracked file.
+CACHE_DIR_NAMES = frozenset(REGEN_ANY_DEPTH - {".DS_Store"})
 
 # launchd starts jobs with a minimal PATH; add the usual Homebrew / system locations for git, gh and lsof.
 TOOL_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -232,7 +264,9 @@ def configure(env=None, cli=None):
         MANUAL_PROGRESS, \
         NEVER, \
         HOLD_PREFIXES, \
-        HOLD_UNTIL
+        HOLD_UNTIL, \
+        ALERT_GIB, \
+        ALERT_REARM_GIB
     env = os.environ if env is None else env
     cli = cli or {}
     warnings = []
@@ -291,6 +325,27 @@ def configure(env=None, cli=None):
     MANUAL_PROGRESS = (
         os.path.abspath(os.path.expanduser(yield_file)) if yield_file else None
     )
+    for name, flag, default in (
+        ("ALERT_GIB", "alert_gib", DEFAULT_ALERT_GIB),
+        ("ALERT_REARM_GIB", "alert_rearm_gib", DEFAULT_ALERT_REARM_GIB),
+    ):
+        raw = pick(name, flag)
+        value = default
+        if raw not in (None, ""):
+            try:
+                value = float(raw)
+                if value < 0 or value != value:
+                    raise ValueError(raw)
+            except ValueError:
+                warnings.append(
+                    "%s%s %r is not a non-negative number: using %s"
+                    % (ENV_PREFIX, name, raw, default)
+                )
+                value = default
+        if name == "ALERT_GIB":
+            ALERT_GIB = value
+        else:
+            ALERT_REARM_GIB = value
     return warnings
 
 
@@ -426,6 +481,19 @@ def cwdset():
     return rc, set(line[1:] for line in o.splitlines() if line.startswith("n"))
 
 
+def open_file_paths():
+    """(ok, set of absolute paths any process has open, mapped or as its cwd). One system-wide lsof scan.
+    ok is False if the scan failed: callers must then keep everything."""
+    rc, o, _ = run(["lsof", "-n", "-w", "-Fn"], timeout=300, count=False)
+    paths = set(line[1:] for line in o.splitlines() if line.startswith("n"))
+    return (rc == 0 or bool(paths)), paths
+
+
+def path_open(path, open_paths):
+    rp = os.path.realpath(path)
+    return any(p == q or p.startswith(q + "/") for p in open_paths for q in (path, rp))
+
+
 def in_use(wt, cwds):
     rw = os.path.realpath(wt)
     return any(c == w or c.startswith(w + "/") for c in cwds for w in (wt, rw))
@@ -507,6 +575,12 @@ def held(wt):
     return HOLD_UNTIL is None or time.localtime()[:3] < HOLD_UNTIL
 
 
+def is_kept(wt):
+    """True if the worktree root holds the keep marker (any entry named KEEP_MARKER, a dangling link included).
+    A kept worktree is never touched by any tier."""
+    return os.path.lexists(os.path.join(wt, KEEP_MARKER))
+
+
 def never_touch(wt):
     rw = os.path.realpath(wt)
     if held(wt):
@@ -584,9 +658,17 @@ def pushed_via(e, head):
     )
     if rc == 0 and o.strip():
         return "origin"
+    return merged_pr_via(
+        e, head
+    )  # None for a detached HEAD: unreachable, never eligible
+
+
+def merged_pr_via(e, head):
+    """'merged-PR-head' / 'ancestor-of-merged-PR-head' if HEAD is (an ancestor of) a merged PR head for the branch."""
+    wt = e["wt"]
     br = e.get("branch")
     if not br:
-        return None  # detached and not on any origin ref: unreachable, never eligible
+        return None
     oids = merged_heads(e["main"], br)
     if head in oids:
         return "merged-PR-head"
@@ -598,6 +680,63 @@ def pushed_via(e, head):
         if rc2 == 0:
             return "ancestor-of-merged-PR-head"
     return None
+
+
+def merged_into_default(e, head):
+    """True if HEAD is an ancestor of origin's default branch (origin/HEAD, else origin/main or origin/master)."""
+    wt = e["wt"]
+    refs = []
+    rc, o, _ = run(
+        git_cmd(wt, "symbolic-ref", "-q", "refs/remotes/origin/HEAD"),
+        count=False,
+        ok_rcs=(0, 1),
+    )
+    if rc == 0 and o.strip():
+        refs.append(o.strip())
+    refs += [
+        r
+        for r in ("refs/remotes/origin/main", "refs/remotes/origin/master")
+        if r not in refs
+    ]
+    for ref in refs:
+        rc2, _, _ = run(
+            git_cmd(wt, "merge-base", "--is-ancestor", head, ref),
+            count=False,
+            ok_rcs=(0, 1),
+        )
+        if rc2 == 0:
+            return True
+    return False
+
+
+def removal_basis(e, head):
+    """(via, why): why is '' when whole-worktree removal is justified, else the keep reason.
+
+    Base rule: HEAD is on an origin ref or is (an ancestor of) a merged PR head. In merged-only mode (daily)
+    a commit that is merely pushed to some non-default origin ref is NOT enough: it must be merged.
+    """
+    pv = pushed_via(e, head)
+    if not pv:
+        return None, ("unpushed" if e.get("branch") else "detached-unreachable")
+    if DAILY["merged_only"] and pv == "origin":
+        mv = merged_pr_via(e, head)
+        if mv:
+            return mv, ""
+        if merged_into_default(e, head):
+            return "origin-default", ""
+        return None, "pushed-not-merged"
+    return pv, ""
+
+
+def has_submodules(wt):
+    """True if the worktree has an initialized submodule (git refuses to remove it without force) or git
+    could not say. Kept for approval: this module never forces."""
+    if not os.path.lexists(os.path.join(wt, ".gitmodules")):
+        return False
+    rc, o, _ = run(git_cmd(wt, "submodule", "status"))
+    if rc != 0:
+        return True
+    return any(line and line[0] != "-" for line in o.splitlines())
 
 
 def recent_file(wt, hours=None):
@@ -684,6 +823,9 @@ def analyze(e, want_size):
     if not is_linked_worktree(e):
         e["status"] = "not-linked-worktree"
         return e
+    if is_kept(wt):
+        e["status"] = "keep-marked"
+        return e
     if "locked" in e["flags"]:
         e["status"] = "locked"
         return e
@@ -704,9 +846,9 @@ def analyze(e, want_size):
     if not c:
         e["status"] = "dirty"
         return e
-    pv = pushed_via(e, e["head"])
-    if not pv:
-        e["status"] = "unpushed" if e.get("branch") else "detached-unreachable"
+    pv, why = removal_basis(e, e["head"])
+    if why:
+        e["status"] = why
         return e
     e["pushed_via"] = pv
     e["status"] = "ELIGIBLE"
@@ -715,11 +857,71 @@ def analyze(e, want_size):
     return e
 
 
+CACHE_FILE_SUFFIXES = (".pyc", ".tsbuildinfo", ".eslintcache")
+CACHE_FILE_NAMES = (".DS_Store",)
+# The one disposable ignored file: the dev env copy project hooks place at every worktree root.
+ENV_COPY_NAME = ".env.development"
+
+
+def env_copy_is_disposable(wt, main):
+    """True only if `<wt>/.env.development` is a regular file (not a link), git-ignored, and byte-identical to
+    the same-named regular file in the main clone. Compared with filecmp (no shallow mode); the contents and
+    any hash of them are never read into a log, a message or a record."""
+    if not main:
+        return False
+    mine = os.path.join(wt, ENV_COPY_NAME)
+    theirs = os.path.join(main, ENV_COPY_NAME)
+    try:
+        for f in (mine, theirs):
+            st = os.lstat(f)
+            if not stat.S_ISREG(st.st_mode):
+                return False
+        if git_ignored(wt, ENV_COPY_NAME) is not True:
+            return False
+        filecmp.clear_cache()  # a cached outcome for an unchanged size and mtime must never decide this
+        return filecmp.cmp(mine, theirs, shallow=False)
+    except OSError:
+        return False
+
+
+def ignored_removable_strict(wt, entry, main=None):
+    """Daily mode: may this git-ignored entry be deleted together with its worktree? '' if yes, else why not.
+
+    Name-based regenerability is NOT enough here (tmp/, public/, *.log, .env.development* can hold notes and
+    local settings). Only a cache directory name that passes the cache tier's own per-directory checks
+    (a real directory inside the worktree, no .git beneath it, no mount crossing), or a known cache file
+    (.DS_Store, *.pyc, ...), goes with the worktree. Everything else keeps it for approval.
+    """
+    rel = entry.rstrip("/")
+    base = os.path.basename(rel)
+    path = os.path.join(wt, rel)
+    if not entry.endswith("/"):
+        if base in CACHE_FILE_NAMES or base.endswith(CACHE_FILE_SUFFIXES):
+            return ""
+        if rel == ENV_COPY_NAME:  # only at the worktree root, never a renamed variant
+            return "" if env_copy_is_disposable(wt, main) else "env-copy-differs"
+        return "ignored-file"
+    if base not in CACHE_DIR_NAMES:
+        return "ignored-directory"
+    if os.path.islink(path) or not os.path.isdir(path):
+        return "symlink"
+    rw = os.path.realpath(wt)
+    if not os.path.realpath(path).startswith(rw + os.sep):
+        return "not-contained"
+    if contains_git(path):
+        return "contains-git"
+    if crosses_mount(wt, path):
+        return "mount-point"
+    return ""
+
+
 def final_check_and_remove(e, apply_, protect_ignored):
     """Fresh re-check of EVERY condition, then (if apply_) remove. Returns a status string."""
     wt = e["wt"]
     if never_touch(wt) or not os.path.isdir(wt) or not is_linked_worktree(e):
         return "recheck-never-touch"
+    if is_kept(wt):
+        return "keep-marked"
     rc, cw = cwdset()
     if rc != 0 and not cw:
         return "recheck-lsof-error"  # cannot prove nobody is inside: keep
@@ -740,17 +942,31 @@ def final_check_and_remove(e, apply_, protect_ignored):
     c = status_clean(wt)
     if not c:
         return "dirty" if c is False else "status-error"
-    pv = pushed_via(e, h)
-    if not pv:
-        return "unpushed"
+    pv, why = removal_basis(e, h)
+    if why:
+        return "unpushed" if why in ("unpushed", "detached-unreachable") else why
+    if has_submodules(wt):
+        return "has-submodules"
     ig = ignored_entries(wt)
     if ig is None and protect_ignored:
         return "status-error"
-    odd = [x for x in (ig or []) if not ignored_is_regen(wt, x)]
+    if DAILY["merged_only"]:
+        odd = [x for x in (ig or []) if ignored_removable_strict(wt, x, e["main"])]
+        protect_ignored = True
+    else:
+        odd = [x for x in (ig or []) if not ignored_is_regen(wt, x)]
     if odd:
         e["ignored_nonregen"] = odd[:6]
         if protect_ignored:
             return "has-ignored-files"
+    if DAILY["merged_only"]:
+        # immediately before removal: any file under the worktree that a running process holds open or mapped
+        # keeps it (the cwd scan above cannot see a process working elsewhere); a failed scan keeps it too
+        ok, held_paths = open_file_paths()
+        if not ok:
+            return "recheck-lsof-error"
+        if path_open(wt, held_paths):
+            return "in-use"
     e["kb"] = e.get("kb") or du_kb(wt)
     if not apply_:
         return "WOULD-REMOVE"
@@ -768,21 +984,41 @@ def final_check_and_remove(e, apply_, protect_ignored):
 # `node_modules` inside a clean, pushed, idle, unused, unlocked linked worktree. The worktree stays.
 # It deletes nothing else: never a symlink, never anything whose real path leaves the worktree.
 # ----------------------------------------------------------------------------------------------
+def strip_names():
+    """Directory names the strip tier may delete: node_modules, or every regenerable cache name in daily mode."""
+    return CACHE_DIR_NAMES if STRIP.get("caches") else frozenset((STRIP_DIR_NAME,))
+
+
+def git_ignored(wt, rel):
+    """True/False if git ignores `rel`; None if git could not say."""
+    rc, _, _ = run(
+        git_cmd(wt, "check-ignore", "-q", "--", rel),
+        count=False,
+        ok_rcs=(0, 1),
+    )
+    if rc == 0:
+        return True
+    return False if rc == 1 else None
+
+
 def node_modules_contained(wt, path):
     """True only if `path` is a real (non-symlink) directory literally named node_modules whose real path
     lies inside the worktree's real path. Checked per directory immediately before it is deleted."""
+    names = strip_names()
     if (
-        os.path.basename(path) != STRIP_DIR_NAME
+        os.path.basename(path) not in names
         or os.path.islink(path)
         or not os.path.isdir(path)
     ):
         return False
     rw = os.path.realpath(wt)
     rp = os.path.realpath(path)
-    if os.path.basename(rp) != STRIP_DIR_NAME or not rp.startswith(rw + os.sep):
+    if os.path.basename(rp) not in names or not rp.startswith(rw + os.sep):
         return False
     # an ancestor that is a symlink would make the real path differ from the walked path
-    return rp == os.path.join(os.path.realpath(os.path.dirname(path)), STRIP_DIR_NAME)
+    return rp == os.path.join(
+        os.path.realpath(os.path.dirname(path)), os.path.basename(path)
+    )
 
 
 def _device(path):
@@ -832,7 +1068,7 @@ def find_node_modules(wt):
             rel = os.path.relpath(full, wt)
             if d == ".git":
                 continue
-            if d == STRIP_DIR_NAME:
+            if d in strip_names():
                 if os.path.islink(full):
                     refused.append("%s:symlink" % rel)
                 else:
@@ -900,6 +1136,8 @@ def strip_gate(e, hours, full):
         return "missing"
     if not is_linked_worktree(e):
         return "not-linked-worktree"
+    if is_kept(wt):
+        return "keep-marked"
     if "prunable" in e["flags"]:
         return "prunable"
     if "locked" in e["flags"]:
@@ -947,6 +1185,8 @@ def strip_flow(e, apply_):
             refused.append("%s:tracked-check-error" % rel)
         elif t:
             refused.append("%s:tracked-files" % rel)
+        elif os.path.basename(d) != STRIP_DIR_NAME and git_ignored(wt, rel) is not True:
+            refused.append("%s:not-git-ignored" % rel)
         elif contains_git(d):
             refused.append("%s:contains-git" % rel)
         elif crosses_mount(wt, d):
@@ -964,6 +1204,21 @@ def strip_flow(e, apply_):
     if why:
         e["strip_dirs"], e["strip_bytes"] = [], 0
         return why
+    if STRIP.get("caches"):
+        # a cache such as .venv can be the runtime of a process whose cwd is elsewhere: keep any directory
+        # with a file open (or mapped) inside it, and keep everything if the scan itself failed
+        ok, held_paths = open_file_paths()
+        if not ok:
+            e["strip_dirs"], e["strip_bytes"] = [], 0
+            return "recheck-lsof-error"
+        busy = [d for d, _ in plan if path_open(d, held_paths)]
+        for d in busy:
+            refused.append("%s:in-use-by-process" % os.path.relpath(d, wt))
+        plan = [(d, n) for d, n in plan if d not in busy]
+        e["strip_dirs"] = [os.path.relpath(d, wt) for d, _ in plan]
+        e["strip_bytes"] = sum(n for _, n in plan)
+        if not plan:
+            return "refused-node-modules"
     if not apply_:
         return "WOULD-STRIP"
     freed, done, failed = 0, [], False
@@ -1030,6 +1285,425 @@ def write_summary(d):
         f.write(json.dumps(d, sort_keys=True) + "\n")
 
 
+# ----------------------------------------------------------------------------------------------
+# Approval list: every worktree or cache candidate the run did NOT act on, for the operator to approve.
+# The run takes no action on anything listed. Written to the state dir on every daily run.
+# ----------------------------------------------------------------------------------------------
+# Plain-language reasons: no git flags, no HEAD/origin wording. The key is the reason code used everywhere else.
+REASON_TEXT = {
+    "keep-marked": "You marked this folder to keep (a %s file is inside it)."
+    % KEEP_MARKER,
+    "locked": "You locked this work folder, so it is kept.",
+    "dirty": "Has changes that are not saved to git yet (edited or new files).",
+    "unpushed": "Has saved work that exists only on this Mac (it was never uploaded).",
+    "detached-unreachable": "Has saved work that is not on any branch and exists only on this Mac.",
+    "pushed-not-merged": "Its work is uploaded but has not been merged yet.",
+    "has-submodules": "Contains a linked sub-repository, which this tool does not remove automatically.",
+    "has-ignored-files": "Holds files that git does not track and that cannot be rebuilt "
+    "(such as notes, logs, local settings or a nested repository).",
+    "recent": "Edited in the last day, so it is probably still in use.",
+    "in-use": "A program is running inside it, or has one of its files open, right now.",
+    "head-moved": "It changed while the check was running.",
+    "git-refused": "Git declined to remove it.",
+    "find-error": "A safety check could not finish, so it was left alone.",
+    "status-error": "A safety check could not finish, so it was left alone.",
+    "recheck-list-error": "A safety check could not finish, so it was left alone.",
+    "recheck-lsof-error": "A safety check could not finish, so it was left alone.",
+    "aborted-error-ratio": "The check stopped early because too many commands failed.",
+    "tracked-files": "This cache folder contains files that are saved in git.",
+    "not-git-ignored": "This cache-like folder is not one that git ignores, so it may hold real work.",
+    "contains-git": "This cache folder contains another git repository.",
+    "nested-repo": "This cache folder is inside another git repository.",
+    "symlink": "This cache folder is a shortcut (symbolic link).",
+    "mount-point": "This cache folder is, or contains, another mounted disk.",
+    "not-contained": "This cache folder points outside its work folder.",
+    "tracked-check-error": "A safety check could not finish, so it was left alone.",
+    "in-use-by-process": "A running program has files open inside this cache folder.",
+}
+# Reasons that mean the work exists only on this Mac (or may): shown first, with a warning.
+ONLY_HERE_REASONS = (
+    "dirty",
+    "unpushed",
+    "detached-unreachable",
+    "pushed-not-merged",
+    "has-ignored-files",
+)
+# The operator already decided these: listed for completeness, not counted as waiting for a decision.
+KEPT_ON_PURPOSE = ("keep-marked", "locked")
+# Statuses that are not approval candidates: not a usable linked worktree, off-limits by configuration, or
+# simply deferred to the next run by the per-run cap.
+APPROVAL_EXCLUDE = (
+    "never-touch",
+    "recheck-never-touch",
+    "prunable",
+    "missing",
+    "not-linked-worktree",
+    "no-head",
+    "over-cap-deferred",
+)
+
+
+def fmt_size(kb):
+    """Readable size for a person: MB under 1 GiB, GB above; never '0.00'."""
+    if kb < 1024:
+        return "under 1 MB"
+    if kb < 1048576:
+        return "%d MB" % round(kb / 1024)
+    return "%.1f GB" % (kb / 1048576)
+
+
+def note_approval(e, reason):
+    """Record a whole-worktree candidate that was not acted on."""
+    if reason in APPROVAL_EXCLUDE or reason in REMOVAL_RESULTS:
+        return
+    item = {
+        "kind": "worktree",
+        "path": e["wt"],
+        "branch": e.get("branch"),
+        "reason": reason,
+        "why": REASON_TEXT.get(reason, reason),
+    }
+    if e.get("ignored_nonregen"):
+        item["non_regenerable_ignored"] = list(e["ignored_nonregen"])
+    if e.get("detail"):
+        item["detail"] = e["detail"]
+    if e.get("kb"):
+        item["size_kb"] = e["kb"]
+    APPROVAL.append(item)
+
+
+def note_cache_refusals(e):
+    """Record each cache directory the strip tier refused ('rel:reason') as an approval candidate."""
+    for r in e.get("strip_refused", []):
+        rel, _, reason = r.rpartition(":")
+        APPROVAL.append(
+            {
+                "kind": "cache",
+                "path": os.path.join(e["wt"], rel),
+                "worktree": e["wt"],
+                "branch": e.get("branch"),
+                "reason": reason,
+                "why": REASON_TEXT.get(reason, reason),
+            }
+        )
+
+
+def _size_item(item):
+    if "size_kb" not in item:
+        item["size_kb"] = du_kb(item["path"])
+    return item
+
+
+def item_group(item):
+    if item["reason"] in KEPT_ON_PURPOSE:
+        return "kept-on-purpose"
+    if item["reason"] in ONLY_HERE_REASONS:
+        return "only-on-this-mac"
+    return "needs-decision"
+
+
+def decision_summary(items):
+    """(count, kb) of the items waiting for a decision (kept-on-purpose items excluded)."""
+    waiting = [i for i in items if item_group(i) != "kept-on-purpose"]
+    return len(waiting), sum(i.get("size_kb", 0) for i in waiting)
+
+
+def write_private_replace(path, text):
+    """Atomically replace `path` with `text`, mode 0600, never following a symlink at the temp name."""
+    tmp = path + ".tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, PRIVATE_FILE_MODE)
+    try:
+        os.fchmod(fd, PRIVATE_FILE_MODE)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    os.replace(tmp, path)
+
+
+def render_approval_markdown(items, ts, mode):
+    """The short, plain-language list the operator reads. Pure: no I/O."""
+    count, total_kb = decision_summary(items)
+    lines = [
+        "# Worktree prune: your decisions",
+        "",
+        "Checked %s%s. Nothing below was changed by the check."
+        % (ts, " (report-only run)" if mode == "dry-run" else ""),
+        "",
+        "To remove an item you have checked, run this from your main project folder:",
+        "",
+        "    git worktree remove <path>",
+        "",
+        "(For a cache folder, just delete that one folder.) To keep an item for good, run:",
+        "",
+        "    touch <path>/%s" % KEEP_MARKER,
+        "",
+    ]
+    if count == 0:
+        lines += ["Nothing needs your decision.", ""]
+    else:
+        lines += [
+            "%d items, about %s, are waiting for your decision."
+            % (count, fmt_size(total_kb)),
+            "",
+        ]
+    sections = (
+        (
+            "only-on-this-mac",
+            "Work that may exist only on this Mac",
+            "Do not remove these unless you are sure you no longer need the work.",
+        ),
+        ("needs-decision", "Other items waiting for your decision", ""),
+        ("kept-on-purpose", "Kept on purpose (no action needed)", ""),
+    )
+    shown = 0
+    for group, title, note in sections:
+        part = [i for i in items if item_group(i) == group]
+        if not part:
+            continue
+        lines += ["## %s" % title, ""]
+        if note:
+            lines += [note, ""]
+        for i in part:
+            if shown >= 300:
+                break
+            shown += 1
+            label = (
+                "cache folder"
+                if i["kind"] == "cache"
+                else (i.get("branch") or "no branch")
+            )
+            lines.append(
+                "- **%s** `%s` (%s): %s"
+                % (
+                    escape_text(label),
+                    escape_text(i["path"]),
+                    fmt_size(i.get("size_kb", 0)),
+                    escape_text(i["why"]),
+                )
+            )
+        lines.append("")
+    if len(items) > shown:
+        lines += ["... and %d more in approval_list.json." % (len(items) - shown), ""]
+    return "\n".join(lines)
+
+
+def write_approval_list(items, ts, mode, workers):
+    """Write approval_list.json (everything) and approval_list.md (short). Returns the JSON path."""
+    with ThreadPoolExecutor(max(1, workers)) as pool:
+        list(pool.map(_size_item, items))
+    items.sort(key=lambda i: (-i.get("size_kb", 0), i["path"]))
+    for i in items:
+        i["group"] = item_group(i)
+    count, total_kb = decision_summary(items)
+    doc = {
+        "generated": ts,
+        "mode": mode,
+        "note": "Nothing on this list was changed. Approve an item by acting on it yourself, or add a "
+        "%s file to its worktree root to keep it." % KEEP_MARKER,
+        "count": len(items),
+        "total_kb": sum(i.get("size_kb", 0) for i in items),
+        "decision_count": count,
+        "decision_kb": total_kb,
+        "items": items,
+    }
+    jpath = os.path.join(BASE, "approval_list.json")
+    write_private_replace(jpath, json.dumps(doc, indent=1, sort_keys=True) + "\n")
+    write_private_replace(
+        os.path.join(BASE, "approval_list.md"),
+        render_approval_markdown(items, ts, mode) + "\n",
+    )
+    return jpath
+
+
+# ----------------------------------------------------------------------------------------------
+# Free-space alert with hysteresis. State: <state dir>/alert_state.json. Every firing is also written to
+# <state dir>/alerts.jsonl (the durable record, written whether or not delivery works).
+# ----------------------------------------------------------------------------------------------
+def _alert_path(name):
+    return os.path.join(BASE, name)
+
+
+def load_alert_state():
+    try:
+        with open(_alert_path("alert_state.json")) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _plural(n, word):
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+
+
+def build_alert_message(free_gb, severity, run=None):
+    """The alert text, written to be read on a phone by someone who does not know the tool.
+
+    `run` describes what this run did: {"caches": n, "removed": n, "freed_bytes": n, "waiting": n,
+    "waiting_kb": n}. Order: the problem, what was already done, what is waiting, the next step, the path.
+    """
+    run = run or {}
+    critical = severity >= 2
+    if critical:
+        head = "URGENT: your Mac is almost out of disk space: %.0f GB free." % free_gb
+    else:
+        head = "Your Mac is low on disk space: %.0f GB free." % free_gb
+    done = []
+    if run.get("caches"):
+        done.append("cleared %s" % _plural(run["caches"], "cache folder"))
+    if run.get("removed"):
+        done.append("removed %s" % _plural(run["removed"], "merged work folder"))
+    if done:
+        did = "Today's check already %s, freeing about %s." % (
+            " and ".join(done),
+            fmt_size(run.get("freed_bytes", 0) / 1024),
+        )
+    else:
+        did = "Today's check freed nothing."
+    waiting = run.get("waiting", 0)
+    if waiting:
+        left = "%s, about %s, %s waiting for your decision." % (
+            _plural(waiting, "item"),
+            fmt_size(run.get("waiting_kb", 0)),
+            "is" if waiting == 1 else "are",
+        )
+    else:
+        left = "Nothing is waiting for your decision."
+    if critical:
+        step = (
+            "Please free space today, or the Mac may start failing: open the list and remove what "
+            "you no longer need."
+        )
+    else:
+        step = (
+            "Nothing is urgent to delete. If you want more space, open the list and remove what "
+            "you no longer need."
+        )
+    keep = (
+        "To keep a work folder from ever being cleaned, add a file named %s inside it."
+        % KEEP_MARKER
+    )
+    return "\n".join(
+        [
+            head,
+            did,
+            "Nothing else was deleted. " + left,
+            step + " " + keep,
+            "List: " + _alert_path("approval_list.md"),
+        ]
+    )
+
+
+def send_notification(message, severity):
+    """Deliver through the repo's existing operator notifier (lib/notify, Apprise/Telegram-backed).
+
+    Returns {"available": bool, "returned": bool|None, "error": str}. `returned` is the notifier's own
+    result: True = sent now, False = held for later delivery, dropped or undelivered. No credentials are
+    handled here: the notifier reads its own transport settings from its environment. Sent with
+    email_eligible=False: the message points at a file, so it must never become an inbox item.
+    """
+    try:
+        root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from lib.notify import Notifier, Priority  # noqa: PLC0415
+
+        prio = Priority.CRITICAL if severity >= 2 else Priority.WARN
+        sent = Notifier().send(
+            message, prio, handler="worktree-prune", email_eligible=False
+        )
+        return {"available": True, "returned": bool(sent), "error": ""}
+    except Exception as ex:  # missing deps (httpx, apprise), no transport, anything: never crash the run
+        return {
+            "available": False,
+            "returned": None,
+            "error": ("%s: %s" % (type(ex).__name__, ex))[:200],
+        }
+
+
+def evaluate_alert(free_gb, apply_, run=None):
+    """Check free space against the threshold. Returns the alert summary dict (severity 0 = nothing wrong).
+
+    Fires when free space falls below ALERT_GIB; once DELIVERED it stays quiet (suppressed) while space stays
+    low and re-arms only after free space recovers to ALERT_GIB + ALERT_REARM_GIB. A send that failed, was
+    unavailable or was not reported as sent does NOT disarm: it is recorded and retried on the next run.
+    A dry run reports what it would do and writes and sends nothing.
+    """
+    rearm_at = ALERT_GIB + ALERT_REARM_GIB
+    res = {
+        "threshold_gib": ALERT_GIB,
+        "rearm_gib": rearm_at,
+        "free_gib": round(free_gb, 1),
+        "severity": 0,
+        "state": "ok",
+    }
+    if ALERT_GIB <= 0:
+        res["state"] = "disabled"
+        return res
+    if free_gb < 0:
+        res["state"] = "free-space-unknown"
+        return res
+    st = load_alert_state()
+    armed = st.get("armed", True)
+    if free_gb >= rearm_at:
+        if not armed:
+            res["state"] = "rearmed"
+            if apply_:
+                st["armed"] = True
+                write_private_replace(
+                    _alert_path("alert_state.json"), json.dumps(st, sort_keys=True)
+                )
+        return res
+    if free_gb >= ALERT_GIB:
+        return res  # inside the hysteresis band: no new alert, no re-arm
+    res["severity"] = 2 if free_gb < CRITICAL_FREE_GIB else 1
+    if not armed:
+        res["state"] = "suppressed"
+        return res
+    res["state"] = "fired" if apply_ else "would-fire"
+    msg = build_alert_message(free_gb, res["severity"], run)
+    if not apply_:
+        res["message"] = (
+            msg  # shown so a dry run can check the wording; nothing is sent or written
+        )
+        return res
+    ts = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    delivery = send_notification(msg, res["severity"])
+    delivered = bool(delivery.get("available") and delivery.get("returned"))
+    res["delivery"] = delivery
+    res["delivered"] = delivered
+    if not delivered:
+        res["state"] = "fired-undelivered"
+    record = {
+        "ts": ts,
+        "kind": "low-free-space",
+        "severity": res["severity"],
+        "free_gib": res["free_gib"],
+        "threshold_gib": ALERT_GIB,
+        "message": msg,
+        "delivery": delivery,
+        "delivered": delivered,
+    }
+    with open_private(_alert_path("alerts.jsonl"), "a") as f:
+        f.write(json.dumps(record, sort_keys=True) + "\n")
+    if delivered:
+        state = {"armed": False, "last_alert": ts, "last_free_gib": res["free_gib"]}
+    else:  # stays armed: the next run retries
+        state = {"armed": True, "last_failed": ts, "last_free_gib": res["free_gib"]}
+    write_private_replace(
+        _alert_path("alert_state.json"), json.dumps(state, sort_keys=True)
+    )
+    return res
+
+
 REMOVAL_RESULTS = ("REMOVED", "WOULD-REMOVE")
 # Statuses that put a worktree out of reach of every tier: do not even attempt the node_modules tier on them.
 STRIP_SKIP_STATUS = (
@@ -1039,6 +1713,7 @@ STRIP_SKIP_STATUS = (
     "not-linked-worktree",
     "no-head",
     "locked",
+    "keep-marked",
 )
 
 
@@ -1050,6 +1725,49 @@ def build_parser():
         "--apply",
         action="store_true",
         help="actually remove / delete (default: dry run)",
+    )
+    ap.add_argument(
+        "--daily",
+        action="store_true",
+        help="the one daily invocation: --protect-ignored, merged-only whole-worktree removal, "
+        "regenerable-cache deletion, the free-space alert and the approval list. Like every mode it is a dry "
+        "run unless --apply is also given.",
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="never delete, whatever else is given (overrides --apply and --daily's apply)",
+    )
+    ap.add_argument(
+        "--strip-caches",
+        action="store_true",
+        help="cache tier: also delete other regenerable cache directories (.venv, dist, build, ...) that git "
+        "ignores and does not track, not only node_modules (implies --strip-node-modules)",
+    )
+    ap.add_argument(
+        "--require-merged",
+        action="store_true",
+        help="whole-worktree removal needs HEAD merged (origin's default branch or a merged PR head), not merely pushed",
+    )
+    ap.add_argument(
+        "--approval-list",
+        action="store_true",
+        help="write approval_list.json and approval_list.md (every candidate not acted on) to the state dir",
+    )
+    ap.add_argument(
+        "--alert",
+        action="store_true",
+        help="alert when free space on the home volume is below the threshold (see --alert-gib)",
+    )
+    ap.add_argument(
+        "--alert-gib",
+        help="free-space alert threshold in GiB (env %sALERT_GIB; default %g; 0 disables)"
+        % (ENV_PREFIX, DEFAULT_ALERT_GIB),
+    )
+    ap.add_argument(
+        "--alert-rearm-gib",
+        help="GiB above the threshold at which the alert re-arms (env %sALERT_REARM_GIB; default %g)"
+        % (ENV_PREFIX, DEFAULT_ALERT_REARM_GIB),
     )
     ap.add_argument(
         "--fresh-hours",
@@ -1179,6 +1897,12 @@ def _main(argv):
     parser = build_parser()
     reject_removed_options(parser, sys.argv[1:] if argv is None else list(argv))
     a = parser.parse_args(argv)
+    if a.daily and a.strip_only:
+        parser.error("--daily cannot be combined with --strip-only")
+    if a.dry_run:
+        a.apply = False
+    if a.daily:
+        a.protect_ignored = True
     try:
         warnings = configure(
             os.environ,
@@ -1189,13 +1913,20 @@ def _main(argv):
                 "hold_prefix": a.hold_prefix,
                 "hold_until": a.hold_until,
                 "yield_to_file": a.yield_to_file,
+                "alert_gib": a.alert_gib,
+                "alert_rearm_gib": a.alert_rearm_gib,
             },
         )
     except ConfigError as ex:
         parser.error(str(ex))  # exit 2 before anything is read, written or deleted
     FRESH_HOURS = max(1, a.fresh_hours)
     STRIP["only"] = bool(a.strip_only)
-    STRIP["enabled"] = bool(a.strip_node_modules or a.strip_only)
+    STRIP["caches"] = bool(a.daily or a.strip_caches)
+    STRIP["enabled"] = bool(a.strip_node_modules or a.strip_only or STRIP["caches"])
+    DAILY["merged_only"] = bool(a.daily or a.require_merged)
+    DAILY["approval"] = bool(a.daily or a.approval_list)
+    DAILY["alert"] = bool(a.daily or a.alert)
+    APPROVAL.clear()
     STRIP["idle_hours"] = idle_windows(a.idle_hours)
 
     ensure_private_dir(BASE)
@@ -1238,6 +1969,7 @@ def _main(argv):
             if STRIP["only"]
             else (" +strip-node-modules" if STRIP["enabled"] else ""),
         )
+        + (" daily" if a.daily else "")
     )
     if not shutil.which("gh", path=GIT_ENV["PATH"]):
         log(
@@ -1307,6 +2039,8 @@ def _main(argv):
                             "KEEP %-18s %s %s"
                             % (st, e["wt"], e.get("branch") or "(detached)")
                         )
+            if DAILY["approval"] and not STRIP["only"]:
+                note_approval(e, res)
             if (
                 not STRIP["enabled"]
                 or res in REMOVAL_RESULTS
@@ -1318,6 +2052,8 @@ def _main(argv):
                 log("DEFER strip over-cap %s" % e["wt"])
                 continue
             sres = strip_flow(e, a.apply)
+            if DAILY["approval"]:
+                note_cache_refusals(e)
             if sres in ("STRIPPED", "WOULD-STRIP"):
                 log(
                     "%s %s (%s) %.2fMB dirs=%s refused=%s"
@@ -1383,6 +2119,31 @@ def _main(argv):
 
     free1 = dfree_gb()
     strip_done = stripped if a.apply else would_strip
+    approval_path = None
+    if DAILY["approval"] and not STRIP["only"] and status == "ok":
+        try:
+            approval_path = write_approval_list(APPROVAL, ts, mode, a.workers)
+        except OSError as ex:
+            log("WARN approval list not written: %s" % ex)
+    alert = {"severity": 0, "state": "off"}
+    if DAILY["alert"]:
+        try:
+            waiting, waiting_kb = decision_summary(APPROVAL if approval_path else [])
+            alert = evaluate_alert(
+                free1,
+                a.apply,
+                {
+                    "caches": sum(len(x.get("strip_dirs", [])) for x in stripped),
+                    "removed": removed,
+                    "freed_bytes": kb_total * 1024
+                    + sum(x.get("strip_bytes", 0) for x in stripped),
+                    "waiting": waiting,
+                    "waiting_kb": waiting_kb,
+                },
+            )
+        except Exception as ex:  # an alert problem must not hide the run's own result
+            alert = {"severity": 0, "state": "error", "error": str(ex)[:200]}
+            log("WARN alert check failed: %s" % ex)
     summ = {
         "ts": ts,
         "mode": mode,
@@ -1399,6 +2160,11 @@ def _main(argv):
         "free_gb_before": round(free0, 1),
         "free_gb_after": round(free1, 1),
         "low_disk": 0 <= free1 < 5,
+        "daily": bool(a.daily),
+        "alert": alert,
+        "alert_severity": alert.get("severity", 0),
+        "approval_items": len(APPROVAL) if approval_path else 0,
+        "approval_list": approval_path,
         "secs": round(time.time() - t0),
         "strip_tier": STRIP["enabled"],
         "strip_only": STRIP["only"],
