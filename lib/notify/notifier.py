@@ -65,7 +65,7 @@ except ImportError:
 
 import httpx
 
-from . import held_view
+from . import held_view, neotoma_sink
 
 log = logging.getLogger(__name__)
 
@@ -301,6 +301,19 @@ class Notifier:
         prio = Priority(priority) if isinstance(priority, str) else priority
         tag = f"[{handler}] " if handler else ""
         full_message = f"{tag}{message}"
+
+        # Also store the alert in Neotoma for the operator's harness session
+        # (lib/notify/neotoma_sink.py). Additive and fail-open: it never
+        # changes routing or the return value and never raises or blocks.
+        try:
+            neotoma_sink.record(
+                message=message,
+                level=prio.value,
+                handler=handler,
+                dedupe_key=dedupe_key,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
         if dedupe_key and self._is_duplicate(dedupe_key):
             log.info(
@@ -730,6 +743,10 @@ class Notifier:
         genuine recurrence — the condition clearing and then coming back — is
         reported again rather than staying suppressed forever. Never raises.
         """
+        try:
+            neotoma_sink.resolve(key)  # mark this process's stored alert resolved
+        except Exception:  # noqa: BLE001
+            pass
         with self._notification_lock:
             try:
                 journal = self._dedupe_journal
