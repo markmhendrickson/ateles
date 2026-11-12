@@ -33,6 +33,8 @@ class FakeNeotoma:
         self.snaps = {e: {"version": "v0.28.0", "status": status} for e in ids}
         self.pinned = {e: set(pinned) for e in ids}
         self.stores = 0
+        self.dedup = False
+        self.seen_keys = set()
 
     @property
     def snap(self):
@@ -51,6 +53,13 @@ class FakeNeotoma:
             eid = body["entity_id"]
             if eid not in self.snaps:
                 return httpx.Response(404)
+            if self.dedup:
+                # Neotoma: the observation id derives from (entity, field,
+                # value, key); a duplicate insert succeeds and writes nothing.
+                ident = (eid, body["field"], str(body["value"]), body["idempotency_key"])
+                if ident in self.seen_keys:
+                    return httpx.Response(200, json={"success": True})
+                self.seen_keys.add(ident)
             self.snaps[eid][body["field"]] = body["value"]
             self.pinned[eid].add(body["field"])
             return httpx.Response(200, json={"success": True})
@@ -219,3 +228,50 @@ def test_failed_status_targets_the_held_entity(fake, monkeypatch):
     assert fake.snaps[ENT]["status"] == "failed"
     assert "reason" in fake.snaps[ENT]
     assert fake.snaps["ent_other"]["status"] == "pending_approval"
+
+
+def test_same_day_failed_then_forced_retry_is_not_deduped(fake, monkeypatch):
+    """A repeated status write in a later invocation must not replay an old key."""
+    fake.dedup = True
+    publish.set_release_status("v0.28.0", "publishing", entity_id=ENT)
+    publish.set_release_status("v0.28.0", "failed", {"reason": "boom"}, entity_id=ENT)
+    assert fake.snap["status"] == "failed"
+    # A new publish invocation (--force retry) is a new process: new nonce.
+    monkeypatch.setattr(publish, "_RUN_NONCE", "second-run")
+    publish.set_release_status("v0.28.0", "publishing", entity_id=ENT)
+    assert fake.snap["status"] == "publishing"
+    publish.set_release_status("v0.28.0", "published", entity_id=ENT)
+    assert fake.snap["status"] == "published"
+
+
+def test_key_names_entity_and_status_and_field():
+    a = publish._status_key("ent_a", "v1", "published", "status")
+    assert "ent_a" in a and "published" in a and a.endswith(publish._RUN_NONCE)
+    assert a != publish._status_key("ent_b", "v1", "published", "status")
+    assert a != publish._status_key("ent_a", "v1", "published", "release_url")
+
+
+@pytest.mark.parametrize(
+    "fetched, version",
+    [
+        ({"entity_type": "task", "snapshot": {"version": "v0.28.0"}}, "v0.28.0"),
+        ({"entity_type": "release_result", "snapshot": {"version": "v0.27.0"}}, "v0.28.0"),
+        ({"entity_type": "release_result", "snapshot": {}}, "v0.28.0"),
+    ],
+)
+def test_entity_id_must_be_a_release_result_with_the_requested_version(
+    monkeypatch, fetched, version
+):
+    monkeypatch.setattr(publish, "neotoma_fetch_entity", lambda i: dict(fetched))
+    assert publish.find_release(version, ENT) is None
+
+
+def test_entity_id_matching_version_is_accepted_and_carries_its_id(monkeypatch):
+    monkeypatch.setattr(
+        publish, "neotoma_fetch_entity",
+        lambda i: {"entity_type": "release_result", "snapshot": {"version": "0.28.0"}},
+    )
+    got = publish.find_release("v0.28.0", ENT)
+    assert got["entity_id"] == ENT
+    # no --version: nothing to cross-check
+    assert publish.find_release(None, ENT) is not None

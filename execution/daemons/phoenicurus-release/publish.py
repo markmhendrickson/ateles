@@ -47,7 +47,8 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from datetime import date
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Cloudflare fronts the hosted Neotoma instance and blocks urllib's default
@@ -293,6 +294,17 @@ def _entity_fields(entity: dict) -> dict:
     return entity.get("snapshot") or entity.get("fields") or entity
 
 
+# One value per publish invocation. /correct treats a repeated idempotency key
+# as a no-op, so a retry later the same day (failed -> publishing --force) would
+# otherwise replay the earlier observation and change nothing. Constant within a
+# run, so a retried correct_field call inside this run still dedups.
+_RUN_NONCE = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:8]}"
+
+
+def _status_key(entity_id: str, version: str, status: str, field: str) -> str:
+    return f"release-{entity_id}-{version}-{status}-{field}-{_RUN_NONCE}"
+
+
 class StatusWriteError(Exception):
     """A release status transition could not be written AND read back.
 
@@ -350,7 +362,6 @@ def set_release_status(
     import httpx  # local: only the status write needs it
 
     entity_id = entity_id or _resolve_release_entity_id(version)
-    day = date.today().isoformat()
     headers = {**_neotoma_headers(), "User-Agent": NEOTOMA_USER_AGENT}
     with httpx.Client(headers=headers) as client:
         for field, value in (extra or {}).items():
@@ -360,7 +371,7 @@ def set_release_status(
             # logged but does not stop the release; the status below still is.
             if not correct_field(
                 client, _neotoma_base(), entity_id, "release_result",
-                field, value, f"release-{version}-{status}-{field}-{day}",
+                field, value, _status_key(entity_id, version, status, field),
             ):
                 log.error(f"Release {version}: writing {field} for {status} failed")
         ok = correct_field(
@@ -370,7 +381,7 @@ def set_release_status(
             "release_result",
             "status",
             status,
-            f"release-{version}-{status}-{day}",
+            _status_key(entity_id, version, status, "status"),
         )
     if not ok:
         log.error(f"Release {version}: status -> {status} NOT confirmed by read-back")
@@ -407,6 +418,22 @@ def find_release(version: str | None, entity_id: str | None) -> dict | None:
     """
     if entity_id:
         ent = neotoma_fetch_entity(entity_id)
+        if not ent:
+            return None
+        etype = str(ent.get("entity_type") or _entity_fields(ent).get("entity_type") or "")
+        if etype and etype != "release_result":
+            log.error(f"--entity-id {entity_id} is a {etype!r}, not a release_result")
+            return None
+        if version:
+            have = str(_entity_fields(ent).get("version") or "").lstrip("v")
+            if have != version.lstrip("v"):
+                log.error(
+                    f"--entity-id {entity_id} has version {have!r}, "
+                    f"not the requested {version!r}; refusing"
+                )
+                return None
+        # Status writes target exactly this entity.
+        ent.setdefault("entity_id", entity_id)
         return ent
     if not version:
         return None
