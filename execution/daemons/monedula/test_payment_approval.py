@@ -74,6 +74,7 @@ class FakeNeotoma:
         self.fail_query_for: set[str] = set()
         self.fail_store_for: set[str] = set()  # store refused outright
         self.timeout_after_store_for: set[str] = set()  # write lands, caller sees a timeout
+        self.store_error_message = "HTTP 400: store refused"
         self.hide_queries = 0  # next N lookups do not see stored rows yet
         self.idempotency: dict[str, str] = {}
         self._n = 0
@@ -105,7 +106,7 @@ class FakeNeotoma:
             for ent in body["entities"]:
                 key = ent["payment_key"]
                 if key in self.fail_store_for:
-                    raise payment_approval.ApprovalError("HTTP 400: store refused")
+                    raise payment_approval.ApprovalError(self.store_error_message)
                 # Like the real server: a reused idempotency key with a
                 # different payload is a conflict, not a no-op.
                 digest = repr(sorted(ent.items()))
