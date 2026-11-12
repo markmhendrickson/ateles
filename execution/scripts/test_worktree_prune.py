@@ -2215,6 +2215,28 @@ def test_the_notifier_is_called_without_email_routing(monkeypatch):
     assert seen["priority"] == "critical"
 
 
+def test_the_low_disk_alert_reaches_the_neotoma_sink(monkeypatch):
+    # Unmocked path: the real Notifier routes the alert, and the sink records it.
+    import json
+    from pathlib import Path
+
+    from lib.notify import neotoma_sink
+
+    monkeypatch.setenv(neotoma_sink.MODE_ENV, "shadow")
+    out = wp.send_notification("Your Mac is low on disk space: 9 GB free.", 2)
+    assert out["available"] is True
+    rows = [
+        json.loads(line)
+        for p in Path(neotoma_sink.sink_dir()).glob("shadow-*.jsonl")
+        for line in p.read_text().splitlines()
+    ]
+    assert len(rows) == 1
+    ent = rows[0]["entity"]
+    assert ent["body"] == "Your Mac is low on disk space: 9 GB free."
+    assert ent["severity"] == "critical"
+    assert {"notify", "level:critical", "daemon:worktree-prune"} <= set(ent["tags"])
+
+
 # ---- caches in use by a running process -------------------------------------------------------
 def test_a_cache_directory_with_a_file_open_by_a_running_process_is_kept_and_listed(
     repo,

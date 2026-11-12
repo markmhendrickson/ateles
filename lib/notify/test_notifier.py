@@ -947,3 +947,41 @@ def test_a_planted_symlink_at_the_queue_path_is_replaced_not_followed(tmp_path):
     assert victim.read_text() == "keep"
     assert not (tmp_path / "digest.json").is_symlink()
     assert len(_file(tmp_path, "digest.json")) == 1
+
+
+# ── Neotoma alert sink is additive (lib/notify/neotoma_sink.py) ──────────────
+
+
+def test_sink_never_changes_send_results_or_the_held_queue(monkeypatch, tmp_path):
+    from lib.notify import neotoma_sink
+
+    def run(mode):
+        monkeypatch.setenv(neotoma_sink.MODE_ENV, mode)
+        neotoma_sink._reset_for_tests()
+        n = Notifier(rubric=ALWAYS_SILENT)
+        n._digest_path = tmp_path / f"held-{mode}.json"
+        results = [
+            n.send("a", priority=Priority.CRITICAL, handler="h"),
+            n.send("b", priority=Priority.BLOCKER, handler="h"),
+            n.send("c", priority=Priority.OPERATOR_DECISION, handler="h"),
+            n.send("d", priority=Priority.WARN, handler="h"),
+            n.send("e", priority=Priority.INFO, handler="h"),
+        ]
+        return results, list(n._digest_queue)
+
+    assert run("off") == run("shadow")
+
+
+def test_a_failing_sink_cannot_break_send_or_clear_dedupe(monkeypatch):
+    from lib.notify import neotoma_sink
+
+    def boom(**kw):
+        raise RuntimeError("sink exploded")
+
+    monkeypatch.setattr(neotoma_sink, "record", boom)
+    monkeypatch.setattr(neotoma_sink, "resolve", boom)
+    n = Notifier(rubric=ALWAYS_SILENT)
+    assert n.send("x", priority=Priority.WARN, handler="h", dedupe_key="k") is False
+    assert any("x" in m for m in n._digest_queue)
+    n.clear_dedupe("k")
+    assert n._is_duplicate("k") is False
