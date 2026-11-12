@@ -56,6 +56,9 @@ def joined(normal, admitted_reader, monkeypatch, tmp_path):
                  before_reader=None, reply=None, unreadable_status=None, pr=admitted_reader)
 
     def fetch_record(entity_id):
+        if entity_id == checkpoint_id:
+            # The close sink reads the checkpoint's original scope first.
+            return copy.deepcopy(checkpoint)
         assert entity_id == task_id
         if state['unreadable_status'] is not None and record['snapshot']['status'] == state['unreadable_status']:
             return None

@@ -56,6 +56,9 @@ class _Record:
         monkeypatch.setattr(apis, "_checkpoint_authority_state", self.authority_state)
         monkeypatch.setattr(apis, "write_checkpoint_brief", self.write_brief)
         monkeypatch.setattr(apis, "supersede_checkpoint", self.supersede)
+        # The scope gate reads the observation history strictly; these records
+        # carry no body edits, so an empty history is a readable one.
+        monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda _id: [])
 
     def add_task(self, task_id, status="awaiting_approval", **fields):
         self.tasks[task_id] = {
@@ -461,6 +464,13 @@ def test_fresh_release_authority_never_retires_the_replacement_itself(monkeypatc
 
 def test_a_distinct_replacement_still_retires_the_prior_brief(monkeypatch):
     retired: list[str] = []
+    # The prior brief is a readable ordinary one: its original scope qualifies.
+    monkeypatch.setattr(
+        apis,
+        "fetch_checkpoint_record",
+        lambda checkpoint_id: {"entity_id": checkpoint_id, "snapshot": {}},
+    )
+    monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda _id: [])
     monkeypatch.setattr(apis, "_file_fresh_checkpoint", lambda **_kw: "ent_new")
     monkeypatch.setattr(
         apis,
@@ -1173,3 +1183,127 @@ def test_named_task_run_still_refiles_with_an_unrecognized_status(
     assert _run_cli(monkeypatch, "--task", "ent_t1", "--apply") == 0
     assert _records(capsys.readouterr().out)[0]["outcome"] == "reissued"
     assert record.writes == 1
+
+
+# ── Original restrictive scope survives reissue ───────────────────────────────
+
+def _restrict(record, monkeypatch, checkpoint_id, extension=None):
+    """Give a pending checkpoint an authenticated restrictive envelope."""
+    import json as _json
+
+    authority = {
+        **{k: "x" for k in gating.CHECKPOINT_ORDINARY_ENVELOPE_FIELDS},
+        **(extension or {"effect_scope": "review_request_only"}),
+    }
+    record.checkpoints[checkpoint_id]["snapshot"]["body"] = _json.dumps(authority)
+    original = apis.read_authenticated_checkpoint_authorization
+    monkeypatch.setattr(
+        apis,
+        "read_authenticated_checkpoint_authorization",
+        lambda cid, rec: dict(authority) if cid == checkpoint_id else original(cid, rec),
+    )
+
+
+def test_restricted_pending_checkpoint_is_never_replaced_or_retired(
+    record, monkeypatch
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_restricted", "ent_t1", signed=True)
+    _restrict(record, monkeypatch, "ent_restricted")
+    # The task changed since: ordinary reasoning would call this brief stale.
+    record.tasks["ent_t1"]["observation_count"] = 9
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "skipped"
+    assert result.checkpoint_id == "ent_restricted"
+    assert record.writes == 0
+    assert record.events == []
+    assert record.checkpoints["ent_restricted"]["snapshot"]["status"] == (
+        "awaiting_operator"
+    )
+
+
+def test_restricted_pending_checkpoint_dry_run_has_zero_effects(record, monkeypatch):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_restricted", "ent_t1", signed=True)
+    _restrict(record, monkeypatch, "ent_restricted")
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=False)
+
+    assert result.outcome == "skipped"
+    assert "restricted original scope" in result.detail
+    assert record.writes == 0 and record.events == []
+
+
+def test_unqualifiable_scope_fails_without_replacing_or_retiring(record, monkeypatch):
+    import json as _json
+
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_odd", "ent_t1", signed=False)
+    # An envelope claiming an extension that never authenticated.
+    record.checkpoints["ent_odd"]["snapshot"]["body"] = _json.dumps(
+        {"version": 2, "effect_scope": "review_request_only"}
+    )
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "failed"
+    assert record.writes == 0 and record.events == []
+    assert record.checkpoints["ent_odd"]["snapshot"]["status"] == "awaiting_operator"
+
+
+def test_later_ordinary_checkpoint_stays_and_stale_legacy_is_retired_beside_restricted(
+    record, monkeypatch
+):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_restricted", "ent_t1", signed=True)
+    _restrict(record, monkeypatch, "ent_restricted")
+    record.add_checkpoint("ent_legacy", "ent_t1", signed=False)
+    record.add_checkpoint("ent_ordinary", "ent_t1", signed=True)
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "retired_stale"
+    assert result.checkpoint_id == "ent_ordinary"
+    assert result.superseded == ["ent_legacy"]
+    assert record.checkpoints["ent_restricted"]["snapshot"]["status"] == (
+        "awaiting_operator"
+    )
+    assert record.checkpoints["ent_ordinary"]["snapshot"]["status"] == (
+        "awaiting_operator"
+    )
+
+
+def _claim_unauthenticated_extension(record, checkpoint_id):
+    import json as _json
+
+    record.checkpoints[checkpoint_id]["snapshot"]["body"] = _json.dumps(
+        {"version": 2, "effect_scope": "review_request_only"}
+    )
+
+
+def test_unknown_checkpoint_beside_a_current_ordinary_one_is_not_fatal(record):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_odd", "ent_t1", signed=False)
+    _claim_unauthenticated_extension(record, "ent_odd")
+    record.add_checkpoint("ent_ordinary", "ent_t1", signed=True)
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "skipped"
+    assert result.checkpoint_id == "ent_ordinary"
+    assert record.writes == 0 and record.events == []
+    assert record.checkpoints["ent_odd"]["snapshot"]["status"] == "awaiting_operator"
+
+
+def test_unknown_checkpoint_alone_fails_and_files_nothing(record):
+    record.add_task("ent_t1")
+    record.add_checkpoint("ent_odd", "ent_t1", signed=False)
+    _claim_unauthenticated_extension(record, "ent_odd")
+
+    result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
+
+    assert result.outcome == "failed"
+    assert result.remaining == ["ent_odd"]
+    assert record.writes == 0 and record.events == []
