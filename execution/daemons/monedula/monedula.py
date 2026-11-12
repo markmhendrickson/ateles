@@ -1017,7 +1017,7 @@ def _emit_consent_escalation(
     return _post_escalation_entity(entity, idempotency_key)
 
 
-def _resolve_consent_channel() -> tuple[str | None, str]:
+def _resolve_consent_channel() -> tuple[str, str]:
     """Select the payment consent channel.
 
     Returns ``(channel, source)``. The default, and the only automatic, channel
@@ -1666,38 +1666,6 @@ def main() -> bool:
 
     handler_names = list(dict.fromkeys([h.name for h, _ in triggered]))
     summaries = _pending_summaries(triggered)
-
-    if channel is None:
-        streak = _record_gate_failure("consent_channel_unconfigured")
-        log.error(
-            "consent_channel_unconfigured — naming missing fields only; "
-            f"missing_fields={missing} — blocking payments, not silent no-op."
-        )
-        failure = types.SimpleNamespace(
-            kind="channel_error",
-            error_code=None,
-            error_detail="consent_channel_unconfigured",
-        )
-        _emit_consent_escalation(
-            failure,
-            pending_handler_names=handler_names,
-            yesterday_str=yesterday_str,
-            gate_failure_streak=streak,
-        )
-        _notify(
-            _consent_failure_notify_body(
-                reason_code="consent_channel_unconfigured",
-                pending_summaries=summaries,
-                recovery_hint=(
-                    "set MONEDULA_CONSENT_CHANNEL=email and arm ATELES_NOTIFY_EMAIL=1 "
-                    "plus OPERATOR_EMAIL, or set Telegram break-glass vars"
-                ),
-            ),
-            priority="blocker",
-            dedupe_key=_CONSENT_CHANNEL_DEDUPE_KEY,
-            email_eligible=True,
-        )
-        return False
 
     if channel == "telegram" and calendar_fetch_ok:
         # Break-glass polls in the same tick — the request is raised exactly

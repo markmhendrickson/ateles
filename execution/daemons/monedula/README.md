@@ -84,6 +84,9 @@ ruling 2026-11-12). The default and only automatic channel is `payment_approval`
   `neotoma request --aauth`, with `NEOTOMA_AAUTH_PRIVATE_JWK_PATH`,
   `NEOTOMA_AAUTH_SUB` and `NEOTOMA_AAUTH_ISS` set for that key. These values are
   configuration only; nothing in the code carries them.
+- **Grants outside the code:** the `payment-approver` key needs its Neotoma grant
+  (Mark's), and the Wise token must be present for the therapy profile (yoga pays by
+  BTC and needs none). Without either, nothing is approved or paid.
 - **Schema first:** run
   `python3 execution/scripts/register_payment_approval_schema.py` (dry run) then
   `--apply` before Monedula first runs with this channel; without the schema every
@@ -134,12 +137,14 @@ This change does **not** enable global Notifier email for unrelated daemons
 
 | Condition | Channel | Source |
 |-----------|---------|--------|
-| `MONEDULA_CONSENT_CHANNEL=email` | Email consent | `env` |
-| `MONEDULA_CONSENT_CHANNEL=telegram` | Telegram break-glass | `env` |
-| Telegram creds absent + `ATELES_NOTIFY_EMAIL=1` + `OPERATOR_EMAIL` set | Email consent | `automatic` |
+| `MONEDULA_CONSENT_CHANNEL` unset | Per-payment approval record (`payment_approval`) | `automatic` |
+| `MONEDULA_CONSENT_CHANNEL=payment_approval` (or the alias `checkpoint`) | Per-payment approval record | `env` |
+| `MONEDULA_CONSENT_CHANNEL=email` | Email consent (legacy break-glass) | `env` |
+| `MONEDULA_CONSENT_CHANNEL=telegram` | Telegram break-glass (legacy) | `env` |
 | Email selected but swarm mailbox not configured | Blocker (`consent_email_needs_swarm_mailbox`) — no request sent, no mail call made | — |
-| Both Telegram creds + operator principal resolve | Telegram break-glass | `automatic` |
-| Nothing configured | Blocker (`consent_channel_unconfigured`) | — |
+
+Email and Telegram are never chosen automatically. The approval record needs no
+Telegram or email credentials, only the approver identity below.
 
 Never a silent no-op when payments are pending.
 
@@ -241,7 +246,7 @@ chmod +x install.sh
 
 | Reason code | Check / remediation |
 |-------------|---------------------|
-| `consent_channel_unconfigured` | Set `MONEDULA_CONSENT_CHANNEL`, or arm `ATELES_NOTIFY_EMAIL=1` + `OPERATOR_EMAIL`, or Telegram break-glass vars |
+| `payment_approval_unavailable` | Neotoma could not be read or written for a payment approval (or the `payment_approval` schema is not registered); that payment is held and the next tick retries |
 | `consent_request_send_failed` | Request not delivered; payments blocked; next tick retries; check `gws gmail +send` |
 | `consent_reply_read_failed` | Replies could not be checked; no payment executed; check `gws`/mailbox |
 | `consent_email_needs_swarm_mailbox` | Email consent selected but the swarm mailbox is not configured. No request sent, no mail call made; every payment held. The alert names the variable to fix: `ATELES_SWARM_EMAIL` (distinct from `OPERATOR_EMAIL`) and/or `ATELES_SWARM_GWS_CONFIG_DIR` (an existing gws config dir signed in as the swarm account). See "Swarm mailbox". Notifier key `monedula:consent_email_needs_swarm_mailbox` |

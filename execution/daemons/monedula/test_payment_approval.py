@@ -27,6 +27,38 @@ APPROVER_JKT = "A" * 43
 OTHER_SUB = "intruder@ateles-swarm"
 
 
+def _validated_payment_key_filter(body: dict):
+    """Validate the /entities/query request the way the Neotoma API does.
+
+    Contract (openapi ``snapshot_filters``): a map of field to
+    ``{"op": <operator>, "value": ...}``. A bare value is a 400 on the real
+    server, so it must fail here too; the fake once accepted it silently and
+    every real lookup would have been held.
+    """
+    assert body.get("entity_type") == payment_approval.ENTITY_TYPE
+    assert isinstance(body.get("limit"), int) and not isinstance(body["limit"], bool)
+    filters = body.get("snapshot_filters")
+    if filters is None:
+        return None
+    if not isinstance(filters, dict):
+        raise payment_approval.ApprovalError("HTTP 400: snapshot_filters must be an object")
+    for name, spec in filters.items():
+        if (
+            not isinstance(spec, dict)
+            or spec.get("op") not in {"eq", "in", "gt", "gte", "lt", "lte", "ne", "contains"}
+            or "value" not in spec
+            or set(spec) - {"op", "value"}
+        ):
+            raise payment_approval.ApprovalError(
+                f"HTTP 400: snapshot_filters.{name} must be {{op, value}}"
+            )
+    spec = filters.get("payment_key")
+    if spec is None:
+        return None
+    assert spec["op"] == "eq", "payment_key lookup must be an exact match"
+    return spec["value"]
+
+
 class FakeNeotoma:
     """In-memory Neotoma: entities, per-field provenance and observations."""
 
@@ -80,7 +112,7 @@ class FakeNeotoma:
             return {"ok": True}
         if path == "/entities/query":
             self.queries.append(body)
-            want = (body.get("snapshot_filters") or {}).get("payment_key")
+            want = _validated_payment_key_filter(body)
             if want in self.fail_query_for:
                 raise payment_approval.ApprovalError("query failed")
             return {

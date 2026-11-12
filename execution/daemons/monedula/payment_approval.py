@@ -271,7 +271,8 @@ def find_entity(payment_key: str) -> dict | None:
         "/entities/query",
         {
             "entity_type": ENTITY_TYPE,
-            "snapshot_filters": {KEY_FIELD: payment_key},
+            # The API takes {"op", "value"} per field; a bare value is a 400.
+            "snapshot_filters": {KEY_FIELD: {"op": "eq", "value": payment_key}},
             "limit": LOOKUP_LIMIT,
             "include_snapshots": True,
         },

@@ -155,7 +155,9 @@ def test_lookup_is_filtered_server_side_on_payment_key(env):
     w.tick(minutes=15)
     assert neo.queries
     for q in neo.queries:
-        assert q["snapshot_filters"] == {"payment_key": neo.only["payment_key"]}
+        assert q["snapshot_filters"] == {
+            "payment_key": {"op": "eq", "value": neo.only["payment_key"]}
+        }
         assert q["limit"] <= 10
 
 
