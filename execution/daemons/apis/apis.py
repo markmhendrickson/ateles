@@ -4299,6 +4299,18 @@ def _original_checkpoint_scope(
     return _original_checkpoint_scope_with_reason(checkpoint_id, checkpoint_record)[0]
 
 
+# A held checkpoint's own record is exactly the untrusted one, so nothing read
+# from it reaches an operator message or a log line unless it is an entity id.
+_SAFE_ENTITY_ID = re.compile(r"ent_[0-9a-f]{24}")
+
+
+def _safe_entity_id(value: object) -> str:
+    """The id when it is a well-formed entity id, else ``unknown``."""
+    if isinstance(value, str) and _SAFE_ENTITY_ID.fullmatch(value):
+        return value
+    return "unknown"
+
+
 _HELD_CAUSES = {
     "authenticated_extension": (
         "it was issued with a restricted scope, so this approve/reject path "
@@ -4322,6 +4334,7 @@ _HELD_CAUSES = {
 def _held_checkpoint_explanation(scope: str, reason: str) -> str:
     """Plain cause and next step for a held checkpoint (never changes a decision)."""
     cause = _HELD_CAUSES.get(reason, "its original scope could not be confirmed")
+    reason = reason if reason in _HELD_CAUSES else "unrecognized"
     if scope == "restricted":
         step = (
             "Next step: resolve it through the review path that issued it; do "
@@ -4350,12 +4363,15 @@ def _notify_held_checkpoint(
     decision: str | None = None,
 ) -> bool:
     """The ONE notice every held outcome sends.  Notice only: no status write."""
+    checkpoint_id = _safe_entity_id(checkpoint_id)
+    task_id = _safe_entity_id(task_id)
+    decision = decision if decision in ("approved", "rejected") else None
     log.warning(
         "[%s] checkpoint %s held (scope=%s, reason=%s): %s not taken",
         DAEMON_NAME,
         checkpoint_id,
         scope,
-        reason,
+        reason if reason in _HELD_CAUSES else "unrecognized",
         effect,
     )
     if notifier is None or checkpoint_id in _held_checkpoint_notices:
@@ -4364,7 +4380,7 @@ def _notify_held_checkpoint(
     applied = f"The {decision} decision" if decision else "The requested action"
     try:
         notifier.send(
-            f"Checkpoint {checkpoint_id} (task {task_id or 'unknown'}) is held: "
+            f"Checkpoint {checkpoint_id} (task {task_id}) is held: "
             f"{applied} was NOT applied and nothing was closed, replaced, retired "
             f"or released ({effect}). "
             + _held_checkpoint_explanation(scope, reason),
@@ -5167,7 +5183,7 @@ def reissue_held_task_checkpoint(
             )
 
     held_notes = [
-        f"checkpoint {held_id} is held ({scope_name}): "
+        f"checkpoint {_safe_entity_id(held_id)} is held ({scope_name}): "
         + _held_checkpoint_explanation(scope_name, held_reason)
         for scope_name, group in (
             ("restricted", restricted_pending),

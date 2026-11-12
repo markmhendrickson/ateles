@@ -1288,19 +1288,19 @@ def test_unknown_checkpoint_beside_a_current_ordinary_one_is_reported_not_fatal(
     record,
 ):
     record.add_task("ent_t1")
-    record.add_checkpoint("ent_odd", "ent_t1", signed=False)
-    _claim_unauthenticated_extension(record, "ent_odd")
+    record.add_checkpoint("ent_eeeeeeeeeeeeeeeeeeeeeeee", "ent_t1", signed=False)
+    _claim_unauthenticated_extension(record, "ent_eeeeeeeeeeeeeeeeeeeeeeee")
     record.add_checkpoint("ent_ordinary", "ent_t1", signed=True)
 
     result = apis.reissue_held_task_checkpoint("ent_t1", apply=True)
 
     assert result.outcome == "skipped"
     assert result.checkpoint_id == "ent_ordinary"
-    assert "ent_odd" in result.detail
+    assert "ent_eeeeeeeeeeeeeeeeeeeeeeee" in result.detail
     assert "extension_claim_unauthenticated" in result.detail
     assert "swarm operator" in result.detail
     assert record.writes == 0 and record.events == []
-    assert record.checkpoints["ent_odd"]["snapshot"]["status"] == "awaiting_operator"
+    assert record.checkpoints["ent_eeeeeeeeeeeeeeeeeeeeeeee"]["snapshot"]["status"] == "awaiting_operator"
 
 
 def test_unknown_checkpoint_alone_fails_with_cause_owner_and_next_step(record):
