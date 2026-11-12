@@ -535,6 +535,16 @@ def test_pruning_a_stale_state_file_resolves_open_alerts_and_keeps_generations(o
     assert on.stores()[-1]["entities"][0]["title"] == T("quiet", "blocker", "quiet daemon alert", "q", 2)
 
 
+def test_a_lock_file_is_never_aged_out_while_its_state_is_in_use(on):
+    sink.record(message="m", level="warn", handler="busy", dedupe_key="k")
+    sink.flush()
+    lock_file = sink.sink_dir() / "state-on-busy.json.lock"
+    os.utime(lock_file, (1, 1))  # old lock, fresh state: a writer may hold it
+    inode = lock_file.stat().st_ino
+    sink._prune(force=True)
+    assert lock_file.exists() and lock_file.stat().st_ino == inode
+
+
 def test_an_empty_state_file_is_eventually_removed_with_its_lock(on):
     sink.record(message="m", level="warn", handler="gone", dedupe_key="k")
     sink.flush()
