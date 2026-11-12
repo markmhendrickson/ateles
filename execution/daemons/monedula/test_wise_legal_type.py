@@ -42,6 +42,9 @@ class _Capture:
 def capture(monkeypatch) -> _Capture:
     cap = _Capture()
     monkeypatch.setattr("handlers.wise_transfer._wise_post", cap)
+    # The recipient lookup must SUCCEED with no match for a create to be
+    # allowed; these tests used to reach the live API and fall through on a 401.
+    monkeypatch.setattr("handlers.wise_transfer._wise_get", lambda *a, **k: [])
     return cap
 
 
