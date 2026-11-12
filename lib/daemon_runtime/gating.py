@@ -965,37 +965,66 @@ SCOPE_RESTRICTED = "restricted"
 SCOPE_UNKNOWN = "unknown"
 
 
+def _body_extension_in_history(observations: list[dict]) -> bool:
+    """True when ANY observation of ``body`` ever carried a non-ordinary field."""
+    for item in observations:
+        fields = item.get("fields") if isinstance(item, dict) else None
+        body = fields.get("body") if isinstance(fields, dict) else None
+        if not isinstance(body, str):
+            continue
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(payload, dict)
+            and set(payload) - CHECKPOINT_ORDINARY_ENVELOPE_FIELDS
+        ):
+            return True
+    return False
+
+
 def classify_checkpoint_effect_scope(
-    checkpoint_record: dict | None, authority: dict | None
+    checkpoint_record: dict | None,
+    authority: dict | None,
+    observations: list[dict] | None = None,
 ) -> str:
     """Judge the ORIGINAL scope a checkpoint was authenticated with.
 
     Returns ``ordinary`` (authenticated envelope, no extension), ``legacy`` (no
-    envelope at all, or an unauthenticated one with no extension: the supported
-    migration/reissue population), ``restricted`` (authenticated envelope with a
-    restrictive extension) or ``unknown`` (the record is unavailable, or an
-    envelope carries an extension that could not be authenticated).  The scope
-    is read only from the immutable creation observation, never from the
-    current task, so a later kind change, invalid resolution or omitted caller
-    context cannot widen it.
+    envelope was ever written, or no observation of ``body`` ever carried an
+    extension: the supported migration/reissue population), ``restricted``
+    (authenticated envelope with a restrictive extension) or ``unknown`` (the
+    record or its observation history cannot be read, or any observation of
+    ``body`` ever carried an extension that does not authenticate now).
+
+    When the envelope authenticates, the scope is the immutable creation
+    observation's.  When it does not (a later observation edited ``body`` or
+    another protected field), the mutable current snapshot is never trusted to
+    say "no restriction": the whole observation history is, and an uncertain
+    read (``observations is None``) is ``unknown``.
     """
     if not isinstance(checkpoint_record, dict):
         return SCOPE_UNKNOWN
-    encoded = _snapshot_of(checkpoint_record).get("body")
     if isinstance(authority, dict):
         if set(authority) - CHECKPOINT_ORDINARY_ENVELOPE_FIELDS:
             return SCOPE_RESTRICTED
         return SCOPE_ORDINARY
-    if not isinstance(encoded, str):
-        return SCOPE_LEGACY
-    try:
-        payload = json.loads(encoded)
-    except (TypeError, ValueError):
-        return SCOPE_LEGACY
-    if isinstance(payload, dict) and set(payload) - CHECKPOINT_ORDINARY_ENVELOPE_FIELDS:
-        # Claims a restriction we could not authenticate: neither ordinary nor
-        # provably legacy, so no consuming effect.
+    if not isinstance(observations, list):
         return SCOPE_UNKNOWN
+    if _body_extension_in_history(observations):
+        return SCOPE_UNKNOWN
+    encoded = _snapshot_of(checkpoint_record).get("body")
+    if isinstance(encoded, str):
+        try:
+            payload = json.loads(encoded)
+        except (TypeError, ValueError):
+            payload = None
+        if (
+            isinstance(payload, dict)
+            and set(payload) - CHECKPOINT_ORDINARY_ENVELOPE_FIELDS
+        ):
+            return SCOPE_UNKNOWN
     return SCOPE_LEGACY
 
 
@@ -1004,6 +1033,7 @@ def checkpoint_effect_scope(
     checkpoint_record: dict | None = None,
     *,
     read_authorization=None,
+    read_observations=None,
 ) -> str:
     """Read a checkpoint and classify its original effect scope."""
     record = (
@@ -1016,9 +1046,14 @@ def checkpoint_effect_scope(
     reader = read_authorization or read_authenticated_checkpoint_authorization
     try:
         authority = reader(checkpoint_id, record)
+        observations = None
+        if not isinstance(authority, dict):
+            observations = (read_observations or fetch_entity_observations_strict)(
+                checkpoint_id
+            )
     except Exception:  # noqa: BLE001 - an unreadable scope is an unknown one
         return SCOPE_UNKNOWN
-    return classify_checkpoint_effect_scope(record, authority)
+    return classify_checkpoint_effect_scope(record, authority, observations)
 
 
 def checkpoint_scope_permits_ordinary_effects(scope: str) -> bool:

@@ -1061,6 +1061,9 @@ def test_non_releasable_checkpoint_close_requires_exact_readback(
     monkeypatch, readback_status, expected
 ):
     monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(
+        gating_module, "fetch_entity_observations_strict", lambda _id: []
+    )
 
     class _Response:
         def raise_for_status(self):
@@ -1093,6 +1096,9 @@ def test_fresh_approval_transition_requires_exact_readback(
     monkeypatch, readback_status, expected
 ):
     monkeypatch.setattr(gating_module, "NEOTOMA_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(
+        gating_module, "fetch_entity_observations_strict", lambda _id: []
+    )
 
     class _Response:
         def raise_for_status(self):
@@ -2199,26 +2205,49 @@ def _ordinary_authority():
 
 
 @pytest.mark.parametrize(
-    ("record", "authority", "expected"),
+    ("record", "authority", "history", "expected"),
     [
-        (None, None, "unknown"),
-        ({"entity_id": "ent_cp", "snapshot": {"status": "approved"}}, None, "legacy"),
-        (_record_with_body("not json"), None, "legacy"),
-        (_record_with_body('{"version": 2}'), None, "legacy"),
-        (_record_with_body("{}"), _ordinary_authority(), "ordinary"),
+        (None, None, [], "unknown"),
+        ({"entity_id": "ent_cp", "snapshot": {"status": "approved"}}, None, [], "legacy"),
+        (_record_with_body("not json"), None, [], "legacy"),
+        (_record_with_body('{"version": 2}'), None, [], "legacy"),
+        (_record_with_body("{}"), _ordinary_authority(), None, "ordinary"),
         (
             _record_with_body("{}"),
             {**_ordinary_authority(), "effect_scope": "review_request_only"},
+            None,
             "restricted",
         ),
         # An extension claimed by an envelope that never authenticated.
-        (_record_with_body('{"version": 2, "effect_scope": "x"}'), None, "unknown"),
+        (_record_with_body('{"version": 2, "effect_scope": "x"}'), None, [], "unknown"),
+        # An uncertain history read is never "no restriction".
+        (_record_with_body('{"version": 2}'), None, None, "unknown"),
+        # A later edit stripped the extension from the current body, but the
+        # creation observation carried it: never legacy.
+        (
+            _record_with_body('{"version": 2}'),
+            None,
+            [
+                {"id": "o1", "fields": {"body": '{"version": 2, "effect_scope": "x"}'}},
+                {"id": "o2", "fields": {"body": '{"version": 2}'}},
+            ],
+            "unknown",
+        ),
+        (
+            {"entity_id": "ent_cp", "snapshot": {"status": "approved"}},
+            None,
+            [{"id": "o1", "fields": {"body": '{"effect_scope": "x"}'}}],
+            "unknown",
+        ),
     ],
 )
 def test_checkpoint_effect_scope_is_read_from_the_original_envelope(
-    record, authority, expected
+    record, authority, history, expected
 ):
-    assert gating_module.classify_checkpoint_effect_scope(record, authority) == expected
+    assert (
+        gating_module.classify_checkpoint_effect_scope(record, authority, history)
+        == expected
+    )
 
 
 @pytest.mark.parametrize(

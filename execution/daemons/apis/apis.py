@@ -4289,6 +4289,7 @@ def _original_checkpoint_scope(
         read_authorization=lambda cid, rec: read_authenticated_checkpoint_authorization(
             cid, rec
         ),
+        read_observations=lambda cid: fetch_entity_observations_strict(cid),
     )
 
 

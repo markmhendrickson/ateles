@@ -56,6 +56,9 @@ class _Record:
         monkeypatch.setattr(apis, "_checkpoint_authority_state", self.authority_state)
         monkeypatch.setattr(apis, "write_checkpoint_brief", self.write_brief)
         monkeypatch.setattr(apis, "supersede_checkpoint", self.supersede)
+        # The scope gate reads the observation history strictly; these records
+        # carry no body edits, so an empty history is a readable one.
+        monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda _id: [])
 
     def add_task(self, task_id, status="awaiting_approval", **fields):
         self.tasks[task_id] = {
@@ -467,6 +470,7 @@ def test_a_distinct_replacement_still_retires_the_prior_brief(monkeypatch):
         "fetch_checkpoint_record",
         lambda checkpoint_id: {"entity_id": checkpoint_id, "snapshot": {}},
     )
+    monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda _id: [])
     monkeypatch.setattr(apis, "_file_fresh_checkpoint", lambda **_kw: "ent_new")
     monkeypatch.setattr(
         apis,

@@ -266,6 +266,13 @@ def release_store(monkeypatch, tmp_path):
     monkeypatch.setattr(
         gating_module, "fetch_entity_user_id", REAL_FETCH_ENTITY_USER_ID
     )
+    # The scope gate reads the observation history strictly; serve the same
+    # observations the fixture serves to every other reader.
+    monkeypatch.setattr(
+        apis,
+        "fetch_entity_observations_strict",
+        lambda entity_id: list(gating_module._fetch_entity_observations(entity_id)),
+    )
     policy = ExecutionPolicy(
         entity_id="default",
         low_blast_action_types=frozenset({"local_edit"}),
@@ -3247,3 +3254,167 @@ def test_supported_legacy_migration_still_replaces_and_retires(neotoma):
     assert neotoma.status("ent_legacy") == "approved_requires_fresh_approval"
     assert neotoma.entities[replacement]["snapshot"]["status"] == "awaiting_operator"
     assert neotoma.entities["ent_legacy"]["snapshot"]["resolved_dispatched"] is False
+
+
+# ── A later edit of a protected field cannot downgrade a restricted scope ────
+
+def _edit_field(fake, checkpoint_id, field, value):
+    """A later observation sets ``field``: provenance moves, creation stays."""
+    record = fake.entities[checkpoint_id]
+    obs_id = f"obs-edit-{field}-{len(fake.observations[checkpoint_id])}"
+    fake.observations[checkpoint_id].append(
+        {"id": obs_id, "user_id": TEST_OWNER, "fields": {field: value}}
+    )
+    record["provenance"][field] = obs_id
+    if value is None:
+        record["snapshot"].pop(field, None)
+    else:
+        record["snapshot"][field] = value
+
+
+def _stripped_body(fake, checkpoint_id):
+    payload = json.loads(fake.entities[checkpoint_id]["snapshot"]["body"])
+    for key in EXTENSION:
+        payload.pop(key)
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+_EDITS = [
+    "ordinary_fields_json",
+    "plain_text",
+    "invalid_json",
+    "removed",
+    "handler",
+    "blast_radius",
+    "gate_action",
+]
+
+
+def _downgrade(fake, checkpoint_id, edit):
+    if edit == "ordinary_fields_json":
+        _edit_field(fake, checkpoint_id, "body", _stripped_body(fake, checkpoint_id))
+    elif edit == "plain_text":
+        _edit_field(fake, checkpoint_id, "body", "reviewed, nothing special")
+    elif edit == "invalid_json":
+        _edit_field(fake, checkpoint_id, "body", '{"version": 2, ')
+    elif edit == "removed":
+        _edit_field(fake, checkpoint_id, "body", None)
+    else:
+        original = fake.entities[checkpoint_id]["snapshot"][edit]
+        _edit_field(fake, checkpoint_id, edit, str(original))
+
+
+@pytest.fixture
+def downgraded(neotoma, monkeypatch):
+    def build(edit, status="approved"):
+        _add_checkpoint(
+            neotoma,
+            "ent_cp",
+            "ent_task_1",
+            neotoma.policy,
+            status=status,
+            extension=EXTENSION,
+        )
+        _downgrade(neotoma, "ent_cp", edit)
+        return neotoma
+
+    return build
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", _EDITS)
+@pytest.mark.parametrize("status", ["approved", "rejected"])
+async def test_edited_restricted_checkpoint_is_not_consumed_by_the_consumer(
+    downgraded, tmp_path, edit, status
+):
+    fake = downgraded(edit, status=status)
+    snapshot = fake.entities["ent_cp"]["snapshot"]
+
+    consumed = await apis.handle_checkpoint_brief("ent_cp", snapshot, _Notifier())
+
+    assert consumed is False
+    _assert_untouched(fake, "ent_cp", status, tmp_path)
+
+
+@pytest.mark.parametrize("edit", _EDITS)
+def test_edited_restricted_checkpoint_is_not_migrated(downgraded, tmp_path, edit):
+    fake = downgraded(edit)
+
+    assert apis.migrate_checkpoint_authority("ent_cp", notifier=_Notifier()) is None
+    _assert_untouched(fake, "ent_cp", "approved", tmp_path)
+
+
+@pytest.mark.parametrize("edit", _EDITS)
+def test_edited_restricted_checkpoint_is_not_replaced_or_retired_by_reissue(
+    downgraded, monkeypatch, tmp_path, edit
+):
+    fake = downgraded(edit, status="awaiting_operator")
+    fake.entities["ent_task_1"]["snapshot"]["status"] = "awaiting_approval"
+    monkeypatch.setattr(
+        apis, "checkpoints_for_task", lambda task_id, strict=False: [fake.entities["ent_cp"]]
+    )
+
+    result = apis.reissue_held_task_checkpoint("ent_task_1", apply=True)
+
+    assert result.outcome == "failed"
+    _assert_untouched(fake, "ent_cp", "awaiting_operator", tmp_path)
+
+
+@pytest.mark.parametrize("edit", _EDITS)
+def test_edited_restricted_checkpoint_takes_no_effect_from_any_sink(
+    downgraded, tmp_path, edit
+):
+    fake = downgraded(edit)
+
+    assert (
+        apis._require_fresh_release_authority(
+            "ent_cp",
+            task_id="ent_task_1",
+            task_snapshot=fake.entities["ent_task_1"]["snapshot"],
+            notifier=_Notifier(),
+            reason="x",
+        )
+        is None
+    )
+    apis._deny_checkpoint_release("ent_cp", reason="x")
+    assert apis._persist_checkpoint_denial("ent_cp") is False
+    for sink in (
+        gating_module.close_checkpoint_without_release,
+        gating_module.require_fresh_checkpoint_approval,
+        gating_module.supersede_checkpoint,
+    ):
+        assert sink("ent_cp", handler="apis", reason="x") is False
+    _assert_untouched(fake, "ent_cp", "approved", tmp_path)
+
+
+def test_unreadable_observation_history_is_unknown_not_legacy(
+    neotoma, monkeypatch, tmp_path
+):
+    _add_checkpoint(neotoma, "ent_cp", "ent_task_1", neotoma.policy, legacy=True)
+    monkeypatch.setattr(apis, "fetch_entity_observations_strict", lambda cid: None)
+
+    apis._deny_checkpoint_release("ent_cp", reason="x")
+
+    _assert_untouched(neotoma, "ent_cp", "approved", tmp_path)
+
+
+def test_envelope_field_set_covers_everything_the_builder_emits():
+    task = {"entity_id": "ent_t", "snapshot": {"status": "x"}}
+    policy = ExecutionPolicy(entity_id="p", loaded=True)
+    for unscored in (False, True):
+        decision = evaluate_gate(confidence=0.3, action_type="local_edit", policy=policy)
+        if unscored:
+            import dataclasses
+
+            decision = dataclasses.replace(decision, confidence_unscored=True)
+        payload = json.loads(
+            build_checkpoint_authorization_envelope(
+                task_record=task,
+                policy=policy,
+                decision=decision,
+                action_type="local_edit",
+                user_id=TEST_OWNER,
+                required_approver_jkt=TEST_RESOLVER_JKT,
+            )
+        )
+        assert set(payload) <= gating_module.CHECKPOINT_ORDINARY_ENVELOPE_FIELDS
