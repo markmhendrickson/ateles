@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.request
@@ -297,7 +298,12 @@ def scan_transcript(transcript_path: str | None) -> dict:
     """Walk the JSONL transcript and summarize integrity-relevant signals.
 
     Returns: {turns: int, wrote_domain: bool, bound_plan: bool, bound_task: bool,
-    captured_learning: bool, captured_conversation: bool, write_types: set}
+    captured_learning: bool, captured_conversation: bool, write_types: set,
+    last_event_uuid: str}
+    `last_event_uuid` is the `uuid` of the last transcript row that carries
+    one (sanitized; "" when none does). It identifies WHICH stop this is, so
+    the harness_event idempotency key is stable for a retry of the same stop
+    and distinct for the next one — see `harness_event_idempotency_key`.
     `turns` counts transcript user/assistant events (a liveness signal only).
     `captured_conversation` is the per-state-change capture signal: True when
     any Neotoma write stored a conversation / conversation_message /
@@ -312,6 +318,7 @@ def scan_transcript(transcript_path: str | None) -> dict:
         "turns": 0, "wrote_domain": False, "bound_plan": False,
         "bound_task": False, "captured_learning": False,
         "captured_conversation": False, "write_types": set(),
+        "last_event_uuid": "",
     }
     if not transcript_path or not os.path.exists(transcript_path):
         return summary
@@ -325,6 +332,11 @@ def scan_transcript(transcript_path: str | None) -> dict:
                     ev = json.loads(line)
                 except Exception:  # noqa: BLE001
                     continue
+                if not isinstance(ev, dict):
+                    continue
+                row_uuid = _safe_discriminator(ev.get("uuid"))
+                if row_uuid:
+                    summary["last_event_uuid"] = row_uuid
                 _inspect_event(ev, summary)
     except Exception as exc:  # noqa: BLE001
         log(f"transcript scan failed (fail-open): {exc}")
@@ -466,25 +478,255 @@ urllib.request.install_opener(urllib.request.build_opener(_NoRedirectHandler))
 
 
 # ---------------------------------------------------------------------------
-# harness_event audit emission (best-effort, fail-open)
+# harness_event audit emission (best-effort, fail-open, non-blocking)
 # ---------------------------------------------------------------------------
+#
+# WHY A DETACHED SENDER. The POST used to run inline in the hook process with
+# an 8 s timeout. When the Neotoma instance is slow to accept writes (its
+# write lock can be held for most of a minute), that stalled every Stop by up
+# to 8 s, then timed out anyway — and because the idempotency key carried a
+# wall-clock timestamp, any later retry wrote a DUPLICATE row instead of
+# being deduplicated. Two changes close both halves:
+#
+#   1. The key is stable per logical event (`harness_event_idempotency_key`):
+#      a retry of the same stop reproduces it, the next stop does not.
+#   2. The POST runs in a DETACHED child process (`_launch_sender`). A hook is
+#      a short-lived process, so an in-process thread would die with it; the
+#      child is started in its own session (`start_new_session=True`), holds
+#      none of the hook's stdio (so the harness, which reads the hook's
+#      stdout/stderr to EOF, is never kept waiting on it), and does the POST
+#      with a 60 s timeout plus one same-key retry.
+#
+# The hook's own enforcement decision never depends on the POST: it is made
+# synchronously from the transcript before and regardless of emission.
+#
+# Credentials reach the child ONLY on its stdin, never on its argv (readable
+# by every local user through the process table) and never in its
+# environment (readable by the same user through process inspection); the
+# bearer and base URL are also stripped from the environment the child
+# inherits.
+
+HARNESS_EVENT_POST_TIMEOUT_S = 60
+HARNESS_EVENT_POST_ATTEMPTS = 2  # first try + one retry with the SAME key
+HARNESS_EVENT_RETRY_BACKOFF_S = 2
+_SENDER_PATH = Path(__file__).resolve().parent / "_harness_event_sender.py"
+_SENDER_LOG_NAME = "harness_event_sender.log"
+_SENDER_LOG_MAX_BYTES = 512 * 1024
+_DISCRIMINATOR_MAX_LEN = 80
+
+
+def _safe_discriminator(value) -> str:
+    """Reduce an untrusted transcript value to a key-safe token, or ""."""
+    if not isinstance(value, str):
+        return ""
+    cleaned = "".join(c for c in value if c.isalnum() or c in "-_")
+    return cleaned[:_DISCRIMINATOR_MAX_LEN]
+
+
+def transcript_event_discriminator(transcript_path: str | None) -> str:
+    """The `uuid` of the last transcript row that carries one, sanitized.
+
+    This is the per-stop discriminator for the harness_event idempotency key.
+    At Stop time the transcript ends at the turn being stopped, so re-running
+    the same stop reads the same last row (same key), while the next stop —
+    including a stop after a blocked one, which appends the model's
+    follow-up — ends at a newer row (new key). Never raises; "" when the
+    transcript is absent, unreadable, or carries no uuid (e.g. a harness that
+    does not write uuids), in which case the caller falls back to the
+    timestamp key shape.
+    """
+    if not transcript_path:
+        return ""
+    last = ""
+    try:
+        with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                if isinstance(row, dict):
+                    row_uuid = _safe_discriminator(row.get("uuid"))
+                    if row_uuid:
+                        last = row_uuid
+    except Exception:  # noqa: BLE001 — fail open to the fallback key shape
+        return ""
+    return last
+
+
+def harness_event_idempotency_key(idempotency_slug: str, discriminator: str = "") -> str:
+    """`harness-event-{slug}-{discriminator}` when a stable discriminator is
+    known — the same logical event always yields the same key, so a retried
+    POST is deduplicated server-side rather than written twice. With no
+    discriminator, the previous `harness-event-{slug}-{unix_seconds}` shape
+    is kept unchanged."""
+    disc = _safe_discriminator(discriminator)
+    if disc:
+        return f"harness-event-{idempotency_slug}-{disc}"
+    return f"harness-event-{idempotency_slug}-{int(time.time())}"
+
+
+def _sender_log_path() -> str:
+    try:
+        return str(state_dir() / _SENDER_LOG_NAME)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _launch_sender(payload: dict):
+    """Start the detached sender and hand it `payload` on stdin. Returns the
+    `Popen` (production callers ignore it; tests wait on it). Never blocks on
+    the network; a failure to start raises to the caller, which swallows it.
+    """
+    child_env = {
+        k: v for k, v in os.environ.items()
+        if k not in (BEARER_ENV, "NEOTOMA_BASE_URL")
+    }
+    proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell, no secrets
+        [sys.executable or "python3", "-I", str(_SENDER_PATH)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=True,
+        env=child_env,
+        cwd=str(_SENDER_PATH.parent),
+    )
+    try:
+        if proc.stdin is not None:
+            proc.stdin.write(json.dumps(payload).encode())
+    finally:
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return proc
+
+
+def _append_sender_log(log_path: str, line: str) -> None:
+    """Best-effort diagnostic for the detached sender, whose stderr is
+    /dev/null. Capped so a persistently failing endpoint cannot grow it
+    without bound. Never carries a credential value."""
+    if not log_path:
+        return
+    try:
+        p = Path(log_path)
+        if p.exists() and p.stat().st_size > _SENDER_LOG_MAX_BYTES:
+            p.write_text("")
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(f"{stamp} {line}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _post_once(base_url: str, token: str, body: dict, timeout: float) -> None:
+    req = urllib.request.Request(
+        f"{base_url}/store",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    # The module-level opener installed above refuses redirects rather than
+    # following them with the Authorization header attached — see
+    # _NoRedirectHandler. The sender imports this module, so the refusal
+    # holds in the detached child too.
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        resp.read()
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        if "refusing to follow redirect" in str(exc):
+            return False
+        return exc.code >= 500 or exc.code in (408, 429)
+    # Timeouts, connection resets/refusals and other transport failures.
+    return True
+
+
+def deliver_harness_event(payload: dict) -> None:
+    """Run in the detached sender: POST `payload["body"]` with a long timeout
+    and at most one retry carrying the SAME idempotency key. Never raises.
+
+    The same body (and so the same key) is resent on retry, so a first
+    attempt that timed out client-side but landed server-side is
+    deduplicated rather than duplicated.
+    """
+    log_tag = str(payload.get("log_tag") or "harness-event")
+    log_path = str(payload.get("log_path") or "")
+    try:
+        base_url = str(payload.get("base_url") or "")
+        token = str(payload.get("token") or "")
+        body = payload.get("body")
+        timeout = float(payload.get("timeout") or HARNESS_EVENT_POST_TIMEOUT_S)
+        attempts = max(1, int(payload.get("attempts") or HARNESS_EVENT_POST_ATTEMPTS))
+        backoff = float(payload.get("backoff", HARNESS_EVENT_RETRY_BACKOFF_S))
+        if not base_url or not token or not isinstance(body, dict):
+            _append_sender_log(log_path, f"[{log_tag}] sender got an incomplete payload; skipped")
+            return
+        for attempt in range(1, attempts + 1):
+            try:
+                _post_once(base_url, token, body, timeout)
+                return
+            except urllib.error.HTTPError as exc:
+                # _NoRedirectHandler.redirect_request is the ONLY raise site
+                # that uses this exact message — matching on it (rather than
+                # treating every 3xx as a refused redirect) avoids mislabeling
+                # a genuine 3xx response urllib never routes through
+                # redirect_request at all (e.g. 300, 304, 305, 306).
+                if "refusing to follow redirect" in str(exc):
+                    _append_sender_log(
+                        log_path,
+                        f"[{log_tag}] harness_event emission failed (non-fatal): refused "
+                        f"a redirect ({exc.code}) rather than forwarding credentials "
+                        "cross-origin",
+                    )
+                    return
+                last_exc: BaseException = exc
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+            if attempt >= attempts or not _is_retryable(last_exc):
+                _append_sender_log(
+                    log_path,
+                    f"[{log_tag}] harness_event emission failed (non-fatal) after "
+                    f"{attempt} attempt(s): {last_exc}",
+                )
+                return
+            time.sleep(backoff)
+    except Exception as exc:  # noqa: BLE001 — the sender must never raise
+        _append_sender_log(log_path, f"[{log_tag}] sender error (non-fatal): {exc}")
+
+
 def emit_harness_event_raw(
     idempotency_slug: str, entity_fields: dict, log_tag: str = "harness-event",
     session_id: str = "", suppress_stderr_warning: bool = False,
+    discriminator: str = "",
 ) -> None:
-    """POST one `harness_event` entity to Neotoma. Shared by every Stop hook
-    in this checkout that emits an audit row — `emit_harness_event` below
+    """Hand one `harness_event` entity to a detached sender that POSTs it to
+    Neotoma, and return immediately. Shared by every Stop hook in this
+    checkout that emits an audit row — `emit_harness_event` below
     (session-integrity) and `decision_shape_gate.py`'s decision-shape check.
 
-    `idempotency_slug` becomes `harness-event-{idempotency_slug}-{timestamp}`.
+    The idempotency key is `harness_event_idempotency_key(idempotency_slug,
+    discriminator)`: `harness-event-{slug}-{discriminator}` when the caller
+    passes a stable per-event discriminator (both current callers pass the
+    transcript's last row uuid), else the previous
+    `harness-event-{slug}-{unix_seconds}` shape.
     `entity_fields` is merged onto the required `entity_type`/`harness` keys
     as-is, so each caller owns its own event vocabulary (e.g. `event_type`,
     `integrity_status`) rather than this function imposing one shape on all
     callers — the two current callers intentionally use different schemas for
     what "the outcome" means (a tri-state enum vs. a bool + finding list).
-    `log_tag` names the caller in stderr diagnostics, so a missing-token or
+    `log_tag` names the caller in diagnostics, so a missing-token or
     network-failure line points at the hook that actually failed rather than
     always reading "[session-integrity]" regardless of which hook called in.
+    Network diagnostics now come from the detached sender and land in
+    `.claude/.session_state/harness_event_sender.log`, since the sender has
+    no stderr the harness reads.
     `session_id`, when given, scopes the once-per-session missing-credentials
     warning (see `_warn_missing_credentials_once`) — omitted, the warning is
     still printed but not deduplicated across calls. `suppress_stderr_warning`
@@ -501,10 +743,12 @@ def emit_harness_event_raw(
     `sync_skills.py` / `session_language.py` already use. It never combines
     an endpoint and bearer from different sources without an explicit verified
     binding. When neither source is complete, this emits one VISIBLE warning
-    per session (not a silent skip) and returns without making a request.
+    per session (not a silent skip) and returns without starting a sender.
+    The pair reaches the sender only on its stdin (see the section comment).
 
-    Schema 689230f4-cd83-49b6-baa7-a752cf70629d. Best-effort otherwise: a
-    network error is logged and swallowed — never blocks the hook.
+    Schema 689230f4-cd83-49b6-baa7-a752cf70629d. Best-effort and non-blocking:
+    a failure to start the sender is logged and swallowed, and the POST
+    itself can never delay or fail the hook.
     """
     base_url, token = neotoma_credentials()
     if not base_url or not token:
@@ -512,7 +756,7 @@ def emit_harness_event_raw(
             _warn_missing_credentials_once(session_id, log_tag)
         return
     body = {
-        "idempotency_key": f"harness-event-{idempotency_slug}-{int(time.time())}",
+        "idempotency_key": harness_event_idempotency_key(idempotency_slug, discriminator),
         "observation_source": "workflow_state",
         "entities": [{
             "entity_type": "harness_event",
@@ -521,33 +765,20 @@ def emit_harness_event_raw(
         }],
     }
     try:
-        req = urllib.request.Request(
-            f"{base_url}/store",
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
-            method="POST",
-        )
-        # The module-level opener installed above refuses redirects rather
-        # than following them with the Authorization header attached — see
-        # _NoRedirectHandler.
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            resp.read()
-    except urllib.error.HTTPError as exc:
-        # _NoRedirectHandler.redirect_request is the ONLY raise site that
-        # uses this exact message — matching on it (rather than treating
-        # every 3xx as a refused redirect) avoids mislabeling a genuine 3xx
-        # response urllib never routes through redirect_request at all
-        # (e.g. 300, 304, 305, 306 go straight to HTTPErrorProcessor).
-        if "refusing to follow redirect" in str(exc):
-            sys.stderr.write(
-                f"[{log_tag}] harness_event emission failed (non-fatal): refused "
-                f"a redirect ({exc.code}) rather than forwarding credentials "
-                "cross-origin\n"
-            )
-        else:
-            sys.stderr.write(f"[{log_tag}] harness_event emission failed (non-fatal): {exc}\n")
+        _launch_sender({
+            "base_url": base_url,
+            "token": token,
+            "body": body,
+            "log_tag": log_tag,
+            "log_path": _sender_log_path(),
+            "timeout": HARNESS_EVENT_POST_TIMEOUT_S,
+            "attempts": HARNESS_EVENT_POST_ATTEMPTS,
+        })
     except Exception as exc:  # noqa: BLE001
-        sys.stderr.write(f"[{log_tag}] harness_event emission failed (non-fatal): {exc}\n")
+        sys.stderr.write(
+            f"[{log_tag}] harness_event emission failed (non-fatal): could not "
+            f"start the detached sender: {type(exc).__name__}\n"
+        )
 
 
 def emit_harness_event(
@@ -561,6 +792,8 @@ def emit_harness_event(
     by emit_harness_event_raw). `suppress_stderr_warning` forwards to
     `emit_harness_event_raw` — see its docstring; used by `stop_finalizer.py`,
     which presents the missing-credentials notice itself via `systemMessage`.
+    The idempotency discriminator is `summary["last_event_uuid"]` (set by
+    `scan_transcript`), so a retry of the same stop reuses the same key.
     """
     emit_harness_event_raw(f"session-integrity-{session_id}", {
         "event_type": "session_integrity_check",
@@ -573,4 +806,5 @@ def emit_harness_event(
         "captured_learning": summary.get("captured_learning", False),
         "write_types": sorted(summary.get("write_types", []) or []),
     }, log_tag="session-integrity", session_id=session_id,
-        suppress_stderr_warning=suppress_stderr_warning)
+        suppress_stderr_warning=suppress_stderr_warning,
+        discriminator=str(summary.get("last_event_uuid") or ""))
