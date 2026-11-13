@@ -25,6 +25,14 @@ def setup_function(_fn=None):
     watch._telegram_alert_state.clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_identity(monkeypatch):
+    """These tests are about polling and deferral, not identity: never resolve
+    (or even look for) piculet's real key. Identity behaviour is covered, with a
+    synthetic key, in test_piculet_identity.py."""
+    monkeypatch.setattr(watch, "pinned_import_env", lambda: dict(os.environ))
+
+
 # ── _alert_is_due — the shared gate ─────────────────────────────────────────
 
 

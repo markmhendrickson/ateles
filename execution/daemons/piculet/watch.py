@@ -23,6 +23,9 @@ Operator commands, run once and exit (no args starts the watcher):
                                                distinctive substring).
     python3 watch.py --discard '<filename>'   Drop a held memo without
                                                processing it.
+    python3 watch.py --list-pending           Read-only: how many unseen memos
+                                               the next polls would import, and
+                                               their oldest/newest dates.
 
 The exact release command for each held memo is also printed in its hold
 notification over the existing Telegram path.
@@ -240,6 +243,12 @@ if str(_REPO_ROOT) not in sys.path:
 
 from lib.daemon_runtime.logging_setup import configure_daemon_logging  # noqa: E402
 from lib.transcript_clarity import assess_transcript  # noqa: E402
+from lib.daemon_runtime.neotoma_store_guard import EXIT_STORE_DEFERRED  # noqa: E402
+from lib.daemon_runtime.pinned_cli_identity import (  # noqa: E402
+    PinnedIdentityError,
+    build_pinned_env,
+    verify_cli_runtime,
+)
 
 # Built by _start_daemon_services(), after the environment is bootstrapped:
 # lib.notify reads the bearer token into module globals when it is imported,
@@ -711,6 +720,23 @@ DEFER_BASE_SECONDS = 60
 DEFER_MAX_SECONDS = 3600
 DEFERRED_REASON = "already-imported lookup unavailable"
 
+# The importer chain exits with this when a Neotoma store did not land and
+# could not be confirmed after a read-back and one retry (a restarting server).
+# Same treatment as 75: the memo stays unseen and unheld and is retried.
+IMPORT_EXIT_STORE_DEFERRED = EXIT_STORE_DEFERRED
+STORE_DEFERRED_REASON = "neotoma store unavailable"
+_DEFER_REASONS = {
+    IMPORT_EXIT_LOOKUP_UNAVAILABLE: DEFERRED_REASON,
+    IMPORT_EXIT_STORE_DEFERRED: STORE_DEFERRED_REASON,
+}
+
+# At most this many new memos are imported per poll, newest first; the rest wait
+# for later polls, unseen and unheld. Bounds the load a long backlog puts on the
+# shared Neotoma instance and the transcriber after an outage.
+DEFAULT_MAX_IMPORTS_PER_POLL = 5
+DAEMON_IDENTITY = "piculet"
+IDENTITY_ALERT_KEY = "piculet:identity-refused"
+
 
 def build_import_command(new_files: list[Path]) -> list[str]:
     """The importer invocation for exactly the given memos.
@@ -725,7 +751,19 @@ def build_import_command(new_files: list[Path]) -> list[str]:
     return cmd
 
 
-def run_import(new_files: list[Path]) -> int | None:
+def pinned_import_env() -> dict[str, str]:
+    """The importer chain's environment, pinned to piculet's own Neotoma identity.
+
+    Raises PinnedIdentityError (key missing, a conflicting NEOTOMA_AAUTH_SUB, or
+    a deployed CLI that cannot honor a per-agent key). Never falls back to the
+    shared bearer: the bearer-style variables are removed from this mapping.
+    """
+    pinned = build_pinned_env(DAEMON_IDENTITY, os.environ)
+    verify_cli_runtime(pinned)
+    return pinned
+
+
+def run_import(new_files: list[Path], env: dict[str, str] | None = None) -> int | None:
     """Import exactly ``new_files``; the importer handles dedup, transcription
     and Neotoma storage. Returns the importer's exit code, or None when it
     could not be run to completion.
@@ -741,7 +779,7 @@ def run_import(new_files: list[Path]) -> int | None:
         result = subprocess.run(
             build_import_command(new_files),
             timeout=7200,  # 2 hours max
-            env=os.environ,
+            env=env if env is not None else pinned_import_env(),
             capture_output=True,
             text=True,
         )
@@ -756,15 +794,17 @@ def run_import(new_files: list[Path]) -> int | None:
                 log.warning(f"[import] {line}")
         if result.returncode == 0:
             log.info("Import pipeline completed successfully.")
-        elif result.returncode == IMPORT_EXIT_LOOKUP_UNAVAILABLE:
+        elif result.returncode in _DEFER_REASONS:
             # The operator warning is raised once per poll by
             # process_voice_memos, deduplicated under a stable key.
-            log.info("Import deferred: already-imported lookup unavailable.")
+            log.info(f"Import deferred: {_DEFER_REASONS[result.returncode]}.")
         else:
             log_warning(f"Import pipeline exited with code {result.returncode}.")
         return result.returncode
     except subprocess.TimeoutExpired:
         log_error("Import pipeline timed out after 2 hours.")
+    except PinnedIdentityError:
+        raise  # never swallowed into "ran badly": the caller defers the memos
     except Exception as e:
         log_error(f"Import pipeline error: {e}")
     return None
@@ -786,9 +826,9 @@ def _display_path(path: Path) -> str:
 def deferred_warning_text(waiting: int) -> str:
     return (
         f"Import deferred for {waiting} memo{'s' if waiting != 1 else ''}: the "
-        "already-imported lookup is unavailable. They stay unseen and unheld "
+        "already-imported lookup or the Neotoma store is unavailable. They stay unseen and unheld "
         "and are retried with backoff (up to hourly). The importer's output, "
-        f"which names how the lookup failed, is in {_display_path(LOG_FILE)} "
+        f"which names how it failed, is in {_display_path(LOG_FILE)} "
         "(lines tagged [import])."
     )
 
@@ -847,7 +887,9 @@ def memo_import_due(deferred: dict, name: str, now: float) -> bool:
         return True
 
 
-def record_deferral(deferred: dict, name: str, now: float) -> None:
+def record_deferral(
+    deferred: dict, name: str, now: float, reason: str = DEFERRED_REASON
+) -> None:
     entry = deferred.get(name)
     if not isinstance(entry, dict):
         entry = {}
@@ -856,13 +898,87 @@ def record_deferral(deferred: dict, name: str, now: float) -> None:
     except (TypeError, ValueError):
         attempts = 1
     deferred[name] = {
-        "reason": DEFERRED_REASON,
+        "reason": reason,
         "attempts": attempts,
         "first_deferred_at": entry.get("first_deferred_at", now),
         "last_attempt_at": now,
         "next_attempt_at": now + defer_backoff_seconds(attempts),
         "notified": True,
     }
+
+
+def max_imports_per_poll() -> int:
+    """PICULET_MAX_IMPORTS_PER_POLL, default 5; anything below 1 or unparsable
+    reads as the default (a cap of zero would silently stop the daemon)."""
+    try:
+        value = int(os.environ.get("PICULET_MAX_IMPORTS_PER_POLL", "").strip())
+    except ValueError:
+        return DEFAULT_MAX_IMPORTS_PER_POLL
+    return value if value >= 1 else DEFAULT_MAX_IMPORTS_PER_POLL
+
+
+def _memo_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def identity_refused_text(waiting: int, reason: str) -> str:
+    return (
+        f"Import not run for {waiting} memo{'s' if waiting != 1 else ''}: piculet "
+        f"cannot present its own Neotoma identity ({reason}). Nothing was staged, "
+        "transcribed or stored, and the memos stay unseen and unheld. It will "
+        "not fall back to another identity."
+    )
+
+
+def _warn_identity_refused(waiting: int, reason: str) -> None:
+    """One log line per poll; one alert per condition (hourly reminder)."""
+    message = identity_refused_text(waiting, reason)
+    log.warning(message)
+    if _telegram_send_due(IDENTITY_ALERT_KEY, f"🟡 [piculet] WARNING: {message}"):
+        _notify_lib(f"piculet warning: {message}", priority="info")
+
+
+def pending_summary(new_files: list[Path], deferred: dict, now: float) -> dict:
+    """What the next polls would import, from local state only (no Neotoma)."""
+    from datetime import datetime
+
+    due = [f for f in new_files if memo_import_due(deferred, f.name, now)]
+    times = [_memo_mtime(f) for f in new_files]
+
+    def stamp(t: float) -> str:
+        return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
+
+    cap = max_imports_per_poll()
+    return {
+        "unseen": len(new_files),
+        "due_now": len(due),
+        "in_backoff": len(new_files) - len(due),
+        "per_poll_cap": cap,
+        "polls_to_clear": -(-len(due) // cap) if due else 0,
+        "oldest": stamp(min(times)) if times else None,
+        "newest": stamp(max(times)) if times else None,
+    }
+
+
+def list_pending() -> int:
+    """Read-only: size the backlog. Touches no Neotoma, no state, no daemon."""
+    summary = pending_summary(find_new_files(load_seen()), load_deferred(), time.time())
+    if not summary["unseen"]:
+        print("No unseen Voice Memos: nothing would be imported.")
+        return 0
+    print(
+        f"{summary['unseen']} unseen memo(s); {summary['due_now']} due now "
+        f"({summary['in_backoff']} in retry backoff).\n"
+        f"Oldest: {summary['oldest']}   Newest: {summary['newest']}\n"
+        f"At {summary['per_poll_cap']} per poll, newest first: "
+        f"{summary['polls_to_clear']} poll(s) to clear.\n"
+        "Note: memos already stored in Neotoma but missing from the seen-set "
+        "are counted here; the importer's lookup skips them when it runs."
+    )
+    return 0
 
 
 def process_voice_memos(
@@ -888,6 +1004,30 @@ def process_voice_memos(
         save_deferred(deferred)
         return
 
+    # Fail closed on identity BEFORE anything is staged, transcribed or stored:
+    # without piculet's own key the importer must not run under any other.
+    try:
+        import_env = pinned_import_env()
+    except PinnedIdentityError as exc:
+        _warn_identity_refused(len(due), str(exc))
+        save_deferred(deferred)
+        return
+    _telegram_clear(IDENTITY_ALERT_KEY)
+
+    # Newest first, at most N per poll. The rest are not touched: not seen, not
+    # held, not deferred; they are simply found again by the next poll.
+    cap = max_imports_per_poll()
+    due.sort(key=_memo_mtime, reverse=True)
+    backlog = len(new_files)
+    waiting_backoff = backlog - len(due)
+    waiting_cap = max(len(due) - cap, 0)
+    due = due[:cap]
+    log.info(
+        f"Poll backlog: {backlog} unseen memo(s); importing {len(due)} newest "
+        f"(cap {cap}), {waiting_cap} wait for later polls, "
+        f"{waiting_backoff} in retry backoff."
+    )
+
     fresh = [f for f in due if not deferred.get(f.name, {}).get("notified")]
     retries = len(due) - len(fresh)
     log.info(
@@ -907,12 +1047,12 @@ def process_voice_memos(
     deferred_now: list[Path] = []
     try:
         for memo in due:
-            rc = run_import([memo])
-            if rc == IMPORT_EXIT_LOOKUP_UNAVAILABLE:
-                # Nothing was staged or transcribed for this memo. Leave it
-                # unseen and unheld; with nothing copied, a retry is only a
-                # lookup.
-                record_deferral(deferred, memo.name, now)
+            rc = run_import([memo], import_env)
+            if rc in _DEFER_REASONS:
+                # Lookup unknown (75): nothing was staged. Store unconfirmed
+                # (76): the staged copy is reused on retry and the store is
+                # idempotent. Either way: unseen, unheld, retried with backoff.
+                record_deferral(deferred, memo.name, now, _DEFER_REASONS[rc])
                 deferred_now.append(memo)
             else:
                 deferred.pop(memo.name, None)
@@ -921,7 +1061,7 @@ def process_voice_memos(
         for memo in deferred_now:
             wait = int(deferred[memo.name]["next_attempt_at"] - now)
             log.info(
-                f"Deferred {memo.name}: {DEFERRED_REASON}; "
+                f"Deferred {memo.name}: {deferred[memo.name]['reason']}; "
                 f"attempt {deferred[memo.name]['attempts']}, next in {wait}s."
             )
         if deferred_now:
@@ -1545,6 +1685,8 @@ def list_held() -> int:
 def cli(argv: list[str]) -> int:
     """Entry point. Operator subcommands run once and return an exit code;
     no args starts the watcher (which does not return)."""
+    if len(argv) > 1 and argv[1] == "--list-pending":
+        return list_pending()  # local state only: no services, no secrets
     if len(argv) > 1 and argv[1] in ("--release", "--discard", "--list-held"):
         _start_daemon_services()
         cmd = argv[1]
