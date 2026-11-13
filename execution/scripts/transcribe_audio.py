@@ -53,9 +53,18 @@ sys.path.insert(
     0, str(PROJECT_ROOT / "execution" / "scripts")
 )  # Add scripts directory to path
 
+from lib.daemon_runtime import neotoma_store_guard  # noqa: E402
+from lib.daemon_runtime.neotoma_store_guard import StoreDeferred  # noqa: E402
+from lib.daemon_runtime.pinned_cli_identity import (  # noqa: E402
+    PIN_ENV as _PIN_ENV,
+    cli_isolation_prefix,
+    load_dotenv_unless_pinned_bearer,
+    pinned_child_problem,
+)
+
 stderr_capture = io.StringIO()
 with contextlib.redirect_stderr(stderr_capture):
-    result = load_dotenv(PROJECT_ROOT / ".env")
+    result = load_dotenv_unless_pinned_bearer(load_dotenv, PROJECT_ROOT / ".env")
 
 stderr_output = stderr_capture.getvalue()
 if "could not parse statement" in stderr_output.lower():
@@ -2092,6 +2101,14 @@ def _neotoma_auth_preflight() -> tuple[bool, str]:
     bearer token is configured we want a loud failure so the SKILL's prod-mirror
     contract holds. (See ``.cursor/skills/record_meeting/SKILL.md``.)
     """
+    if os.environ.get(_PIN_ENV, "").strip():
+        # Pinned to the daemon's own identity: the signature is the only
+        # credential. A bearer beside it, or a mismatched key, is a refusal,
+        # never a fallback to the shared token.
+        problem = pinned_child_problem()
+        if problem:
+            return False, f"pinned Neotoma identity refused: {problem}."
+        return True, "ok"
     token = os.environ.get("NEOTOMA_BEARER_TOKEN", "").strip()
     if not token:
         return (
@@ -2103,18 +2120,24 @@ def _neotoma_auth_preflight() -> tuple[bool, str]:
     return True, "ok"
 
 
-def _neotoma_cli_prefix() -> list[str]:
-    """Use a daemon's deployed runtime when configured, otherwise the CLI on PATH."""
+def _neotoma_cli_core() -> list[str]:
+    """The runtime itself: a daemon's deployed CLI when configured, else `neotoma`."""
     script = os.environ.get("NEOTOMA_CLI_SCRIPT", "").strip()
     if script:
         return [os.environ.get("NODE_BIN", "node"), script]
     return ["neotoma"]
 
 
+def _neotoma_cli_prefix() -> list[str]:
+    """argv that runs the CLI; in a pinned run ONLY the CLI gets the private
+    HOME and project root (so it cannot reach a stored token or a project .env)."""
+    return [*cli_isolation_prefix(), *_neotoma_cli_core()]
+
+
 def _neotoma_cli_available() -> bool:
-    prefix = _neotoma_cli_prefix()
-    return bool(shutil.which(prefix[0])) and (
-        len(prefix) == 1 or Path(prefix[1]).is_file()
+    core = _neotoma_cli_core()
+    return bool(shutil.which(core[0])) and (
+        len(core) == 1 or Path(core[1]).is_file()
     )
 
 
@@ -2368,13 +2391,78 @@ def _neotoma_cli_relationship_create(
             relationship_type,
         ]
     )
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
+    if not neotoma_store_guard.active():
+        proc = neotoma_store_guard.paced(
+            lambda: subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120, check=False
+            )
+        )
+        raw = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        if proc.returncode != 0:
+            return False, err or raw or f"exit {proc.returncode}"
+        return True, raw or "ok"
+    return _pinned_relationship_create(
+        cmd, source_entity_id, target_entity_id, relationship_type
     )
+
+
+def _relationship_attempt(cmd: list[str]) -> "subprocess.CompletedProcess":
+    """One paced relationship write; a timeout becomes a failed result."""
+    try:
+        return neotoma_store_guard.paced(
+            lambda: subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120, check=False
+            )
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, "", "relationship write timed out")
+
+
+def _relationship_exists(source_entity_id: str, target_entity_id: str, relationship_type: str) -> bool:
+    """Read-back by the relationship's own identity (source, target, type)."""
+    data = _neotoma_cli_json(
+        [
+            "relationships", "list",
+            "--source-entity-id", source_entity_id,
+            "--target-entity-id", target_entity_id,
+            "--relationship-type", relationship_type,
+            "--limit", "1",
+        ]
+    ) or {}
+    rows = data.get("relationships") or data.get("results") or []
+    return bool(rows)
+
+
+def _pinned_relationship_create(
+    cmd: list[str], source_entity_id: str, target_entity_id: str, relationship_type: str
+) -> tuple[bool, str]:
+    """The store's recovery policy for a relationship write.
+
+    A relationship is identified by (source, target, type), which is its
+    idempotency key: re-sending the identical command cannot duplicate it. On a
+    502/503/timeout: read back first; if absent, wait and retry once with the
+    same command; if that fails the same way, read back again, then defer
+    (StoreDeferred -> exit 76). A permanent failure keeps the normal path.
+    """
+
+    def transient(proc) -> bool:
+        return proc.returncode != 0 and neotoma_store_guard.is_transient_failure(
+            f"{proc.stderr or ''} {proc.stdout or ''}"
+        )
+
+    proc = _relationship_attempt(cmd)
+    if transient(proc):
+        if _relationship_exists(source_entity_id, target_entity_id, relationship_type):
+            return True, "ok (confirmed by read-back)"
+        _store_sleep(neotoma_store_guard.retry_delay())
+        proc = _relationship_attempt(cmd)
+        if transient(proc):
+            if _relationship_exists(source_entity_id, target_entity_id, relationship_type):
+                return True, "ok (confirmed by read-back)"
+            raise StoreDeferred(
+                "relationship write failed twice with a transient error; deferring"
+            )
     raw = (proc.stdout or "").strip()
     err = (proc.stderr or "").strip()
     if proc.returncode != 0:
@@ -3007,6 +3095,63 @@ def _neotoma_target_is_localhost() -> bool:
     return host in {"localhost", "127.0.0.1", "::1"}
 
 
+_store_sleep = time.sleep  # patched by tests
+
+
+def _store_attempt(cmd: list[str]) -> "subprocess.CompletedProcess":
+    """One paced store attempt; a timeout becomes a failed result, not a raise."""
+    try:
+        return neotoma_store_guard.paced(
+            lambda: subprocess.run(
+                cmd, capture_output=True, text=True, timeout=900, check=False
+            )
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, "", "store timed out")
+
+
+def _store_failed_transiently(proc: "subprocess.CompletedProcess") -> bool:
+    if proc.returncode == 0 and (proc.stdout or "").strip():
+        return False
+    return neotoma_store_guard.is_transient_failure(
+        f"{proc.stderr or ''} {proc.stdout or ''}"
+    )
+
+
+def _run_store_with_recovery(
+    cmd: list[str], content_hash: str | None, resolved_audio: Path
+) -> "tuple[subprocess.CompletedProcess, str | None]":
+    """Run the store; in a pinned run, survive a restarting server safely.
+
+    A 502/503/timeout may mean the write landed. So: read back by the same
+    identifiers first; only if it is absent, wait and retry ONCE with the very
+    same command (same idempotency keys); if that fails the same way, read back
+    again and otherwise raise StoreDeferred. Returns (result, landed_entity_id);
+    landed_entity_id is set when a read-back found the write.
+    """
+    proc = _store_attempt(cmd)
+    if not neotoma_store_guard.active() or not _store_failed_transiently(proc):
+        return proc, None
+    landed = _find_existing_transcription(content_hash, resolved_audio)
+    if landed:
+        return proc, landed
+    delay = neotoma_store_guard.retry_delay()
+    print(
+        f"Neotoma store failed transiently; read-back found nothing. "
+        f"Retrying once in {int(delay)}s with the same idempotency key.",
+        file=sys.stderr,
+        flush=True,
+    )
+    _store_sleep(delay)
+    proc = _store_attempt(cmd)
+    if not _store_failed_transiently(proc):
+        return proc, None
+    landed = _find_existing_transcription(content_hash, resolved_audio)
+    if landed:
+        return proc, landed
+    raise StoreDeferred("Neotoma store failed twice with a transient error; deferring")
+
+
 def save_transcription(
     audio_path: Path,
     transcription_result: dict,
@@ -3256,12 +3401,8 @@ def save_transcription(
                     observation_source,
                 ]
             )
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=900,
-            check=False,
+        proc, landed_id = _run_store_with_recovery(
+            cmd, entity["audio_content_sha256"], resolved_audio
         )
     finally:
         try:
@@ -3271,7 +3412,21 @@ def save_transcription(
 
     raw = (proc.stdout or "").strip()
     source_id = None
-    if proc.returncode != 0 or not raw:
+    if landed_id:
+        # A 502/503/timeout answered, but a read-back found the write.
+        entity_id = landed_id
+        if attach_wav:
+            source_id = _find_audio_source(resolved_audio.name, entity["audio_content_sha256"])
+            if not source_id:
+                raise StoreDeferred(
+                    "store may have landed but the audio attachment could not be confirmed"
+                )
+        if not require_exact_result:
+            _verify_transcription_storage(
+                entity_id, entity, source_id if attach_wav else None,
+                declared_fields=_declared_transcription_fields(),
+            )
+    elif proc.returncode != 0 or not raw:
         err = (proc.stderr or "").strip() or raw or f"exit {proc.returncode}"
         if "ERR_IDEMPOTENCY_MISMATCH" not in err:
             raise RuntimeError(f"Neotoma store failed: {err}")
@@ -3555,17 +3710,21 @@ def main():
             return
 
         _write_pending_store(audio_path, mic_path, context, transcription_result, identity=identity)
-        transcription_record = save_transcription(
-            audio_path,
-            transcription_result,
-            relate_contact_entity_ids=relate_c,
-            relate_feedback_analysis_entity_id=relate_fba,
-            relate_verbose=bool(args.relate_verbose),
-            original_source_file=args.original_source_file or None,
-            extra_entity_fields=extra_fields,
-            require_audio_attachment=args.require_audio_attachment,
-            require_exact_result=bool(args.receipt_file),
-        )
+        try:
+            transcription_record = save_transcription(
+                audio_path,
+                transcription_result,
+                relate_contact_entity_ids=relate_c,
+                relate_feedback_analysis_entity_id=relate_fba,
+                relate_verbose=bool(args.relate_verbose),
+                original_source_file=args.original_source_file or None,
+                extra_entity_fields=extra_fields,
+                require_audio_attachment=args.require_audio_attachment,
+                require_exact_result=bool(args.receipt_file),
+            )
+        except StoreDeferred as exc:
+            print(f"STORE_DEFERRED: {exc}", file=sys.stderr, flush=True)
+            sys.exit(neotoma_store_guard.EXIT_STORE_DEFERRED)
 
         if args.receipt_file:
             if _pending_store_identity(audio_path, mic_path) != identity:

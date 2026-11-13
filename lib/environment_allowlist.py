@@ -299,6 +299,7 @@ DAEMON_CONFIG_NAMES: frozenset[str] = frozenset(
         "MONEDULA_PROFILES",
         "MONEDULA_SESSION_WINDOW_HOURS",
         "NEOTOMA_AAUTH_ISS",
+        "NEOTOMA_AAUTH_PRIVATE_JWK_PATH",  # path of the signing key a per-agent CLI child uses (a path, not key material)
         "NEOTOMA_AAUTH_SUB",
         "NEOTOMA_AAUTH_VIA_CLI",
         "NEOTOMA_AGENT_CLAUDE_BIN",
@@ -324,6 +325,9 @@ DAEMON_CONFIG_NAMES: frozenset[str] = frozenset(
         "NEOTOMA_REPO_ROOT",
         "NEOTOMA_SANDBOX_URL",
         "NEOTOMA_SSE_SUBSCRIPTION_ID",
+        "NEOTOMA_STORE_MIN_INTERVAL_SECONDS",  # minimum gap between a pinned daemon's Neotoma stores (default 12)
+        "NEOTOMA_STORE_PACE_FILE",  # where the store-pacing clock is kept (default under ~/.ateles-work)
+        "NEOTOMA_STORE_RETRY_DELAY_SECONDS",  # wait before the one retry of a store that failed transiently (default 120)
         "NODE_BIN",
         "OPERATOR_EMAIL",
         "OPERATOR_NAME",
@@ -339,6 +343,7 @@ DAEMON_CONFIG_NAMES: frozenset[str] = frozenset(
         "PHOENICURUS_RELEASE_REPO",
         "PHOENICURUS_STALE_RELEASE_BLOCK_DAYS",
         "PHOENICURUS_STALE_RELEASE_REESCALATE_HOURS",
+        "PICULET_MAX_IMPORTS_PER_POLL",  # most new voice memos piculet imports in one poll, newest first (default 5)
         "PRIORITY_RUBRIC_ENTITY_ID",
         "PYTHONPATH",
         "RECORD_MEETING_DIARIZE",
