@@ -48,6 +48,9 @@ PR_NUMBER = os.environ.get("LOXIA_PR_NUMBER", "")
 REPO = os.environ.get("LOXIA_REPO", "")
 DRY_RUN = os.environ.get("LOXIA_DRY_RUN", "false").lower() == "true"
 HEAD_SHA = os.environ.get("LOXIA_HEAD_SHA", "")
+# Ref holding the PR head as fetched data. The working tree is the trusted base
+# checkout; the PR's changes are only ever read through git, never executed.
+HEAD_REF = os.environ.get("LOXIA_HEAD_REF", "HEAD")
 
 NEOTOMA_BEARER_TOKEN = os.environ.get("NEOTOMA_BEARER_TOKEN", "")
 NEOTOMA_BASE_URL = os.environ.get(
@@ -90,18 +93,21 @@ resolve_reviewers = _load_resolve_reviewers()
 # ── Git diff ──────────────────────────────────────────────────────────────────
 
 
+_GIT_DATA_FLAGS = ["--no-ext-diff", "--no-textconv"]
+
+
 def get_pr_diff() -> str:
     """
-    Get the diff for the current PR by comparing HEAD to merge-base with main.
-    Falls back to `git diff HEAD~1` if merge-base fails.
+    Get the diff for the current PR by comparing the PR head ref to its
+    merge-base with main. Falls back to `git diff <head>~1` if merge-base fails.
     """
     try:
         base = subprocess.check_output(
-            ["git", "merge-base", "origin/main", "HEAD"],
+            ["git", "merge-base", "origin/main", HEAD_REF],
             text=True,
         ).strip()
         diff = subprocess.check_output(
-            ["git", "diff", base, "HEAD"],
+            ["git", "diff", *_GIT_DATA_FLAGS, base, HEAD_REF],
             text=True,
         )
         return diff[:MAX_DIFF_CHARS]
@@ -109,7 +115,9 @@ def get_pr_diff() -> str:
         pass
 
     try:
-        diff = subprocess.check_output(["git", "diff", "HEAD~1"], text=True)
+        diff = subprocess.check_output(
+            ["git", "diff", *_GIT_DATA_FLAGS, f"{HEAD_REF}~1", HEAD_REF], text=True
+        )
         return diff[:MAX_DIFF_CHARS]
     except subprocess.CalledProcessError:
         return "(could not retrieve diff)"
@@ -119,11 +127,11 @@ def get_changed_files() -> list[str]:
     """Return list of files changed in this PR."""
     try:
         base = subprocess.check_output(
-            ["git", "merge-base", "origin/main", "HEAD"],
+            ["git", "merge-base", "origin/main", HEAD_REF],
             text=True,
         ).strip()
         out = subprocess.check_output(
-            ["git", "diff", "--name-only", base, "HEAD"],
+            ["git", "diff", *_GIT_DATA_FLAGS, "--name-only", base, HEAD_REF],
             text=True,
         )
         return [f.strip() for f in out.splitlines() if f.strip()]
