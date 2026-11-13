@@ -407,6 +407,45 @@ class TestWarnVsBlockBranch:
         assert code == 0
         assert calls == []
 
+    def test_emitted_discriminator_is_the_last_uuid_and_advances(
+        self, tmp_path, monkeypatch
+    ):
+        """The decision-shape row's idempotency key must be stable for a
+        re-run of the same stop and new for the next stop: `main()` passes
+        the transcript's last row uuid as `discriminator`."""
+        def _finding_row(uuid):
+            return {
+                "type": "assistant",
+                "uuid": uuid,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Shall I dispatch the fix now?"}],
+                },
+            }
+
+        p = tmp_path / "uuid_transcript.jsonl"
+        rows = [
+            {"type": "user", "uuid": "u-1", "message": {"role": "user", "content": "go"}},
+            _finding_row("a-1"),
+        ]
+        p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        calls = _no_emit(monkeypatch)
+        monkeypatch.setattr(dsg, "ENFORCE", False)
+        ev = {"transcript_path": str(p), "session_id": "s5"}
+
+        for _ in range(2):  # the same stop, run twice
+            monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(ev)))
+            dsg.main()
+        rows += [
+            {"type": "user", "uuid": "u-2", "message": {"role": "user", "content": "again"}},
+            _finding_row("a-2"),
+        ]
+        p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(ev)))
+        dsg.main()
+
+        assert [c[1].get("discriminator") for c in calls] == ["a-1", "a-1", "a-2"]
+
 
 class TestQuotedProseDoesNotFire:
     """ateles#1105 — the gate must judge how the turn ENDS, not what it quotes.

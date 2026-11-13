@@ -28,10 +28,12 @@ environment without a venv.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -334,7 +336,7 @@ def scan_transcript(transcript_path: str | None) -> dict:
                     continue
                 if not isinstance(ev, dict):
                     continue
-                row_uuid = _safe_discriminator(ev.get("uuid"))
+                row_uuid = _row_event_uuid(ev)
                 if row_uuid:
                     summary["last_event_uuid"] = row_uuid
                 _inspect_event(ev, summary)
@@ -464,9 +466,14 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802 - stdlib API
-        raise urllib.error.HTTPError(
+        raise _RedirectRefused(
             newurl, code, f"refusing to follow redirect ({msg})", headers, fp,
         )
+
+
+class _RedirectRefused(urllib.error.HTTPError):
+    """Raised ONLY by `_NoRedirectHandler`, so a refused redirect is told
+    apart from a genuine 3xx by type rather than by message text."""
 
 
 # Installed as the module-level default opener so the existing
@@ -495,24 +502,50 @@ urllib.request.install_opener(urllib.request.build_opener(_NoRedirectHandler))
 #      child is started in its own session (`start_new_session=True`), holds
 #      none of the hook's stdio (so the harness, which reads the hook's
 #      stdout/stderr to EOF, is never kept waiting on it), and does the POST
-#      with a 60 s timeout plus one same-key retry.
+#      with a 60 s per-attempt wall-clock deadline plus one same-key retry on
+#      transient errors only. The child's whole lifetime is capped as well
+#      (`sender_lifetime_s`), so a slow-drip response or a hung DNS lookup
+#      cannot keep it alive.
 #
 # The hook's own enforcement decision never depends on the POST: it is made
 # synchronously from the transcript before and regardless of emission.
 #
 # Credentials reach the child ONLY on its stdin, never on its argv (readable
 # by every local user through the process table) and never in its
-# environment (readable by the same user through process inspection); the
-# bearer and base URL are also stripped from the environment the child
-# inherits.
+# environment (readable by the same user through process inspection). The
+# child's environment is an allowlist (`_SENDER_ENV_ALLOWLIST`), so no other
+# secret the hook happens to hold rides along into a process that can
+# outlive it. A bearer containing a control character is refused before any
+# child starts: http.client would echo it inside an exception message.
+#
+# Diagnostics go to a 0600 per-checkout log and carry the idempotency key, an
+# exception TYPE and an HTTP status code — never an exception message, which
+# can quote request headers.
 
-HARNESS_EVENT_POST_TIMEOUT_S = 60
+HARNESS_EVENT_POST_TIMEOUT_S = 60  # per attempt, enforced as a wall-clock deadline
 HARNESS_EVENT_POST_ATTEMPTS = 2  # first try + one retry with the SAME key
 HARNESS_EVENT_RETRY_BACKOFF_S = 2
+_SENDER_LIFETIME_SLACK_S = 10
+HARNESS_EVENT_SENDER_MAX_LIFETIME_S = (
+    HARNESS_EVENT_POST_ATTEMPTS * HARNESS_EVENT_POST_TIMEOUT_S
+    + (HARNESS_EVENT_POST_ATTEMPTS - 1) * HARNESS_EVENT_RETRY_BACKOFF_S
+    + _SENDER_LIFETIME_SLACK_S
+)
 _SENDER_PATH = Path(__file__).resolve().parent / "_harness_event_sender.py"
 _SENDER_LOG_NAME = "harness_event_sender.log"
 _SENDER_LOG_MAX_BYTES = 512 * 1024
 _DISCRIMINATOR_MAX_LEN = 80
+_TRANSCRIPT_TAIL_BYTES = 256 * 1024
+# What the sender process needs: an interpreter search path, a home and
+# temp dir, locale, CA-bundle overrides, and the proxy variables urllib
+# already honoured when the POST ran inside the hook.
+_SENDER_ENV_ALLOWLIST = (
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+    "NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy",
+    "SYSTEMROOT",
+)
 
 
 def _safe_discriminator(value) -> str:
@@ -523,38 +556,70 @@ def _safe_discriminator(value) -> str:
     return cleaned[:_DISCRIMINATOR_MAX_LEN]
 
 
+def _row_event_uuid(row) -> str:
+    """The sanitized `uuid` of one parsed transcript row, or "" when the row
+    carries none. The single definition of "which rows identify a stop":
+    `scan_transcript` (forward, last non-empty wins) and
+    `transcript_event_discriminator` (backward, first non-empty wins) both
+    call it, so the two can never disagree about a row."""
+    if not isinstance(row, dict):
+        return ""
+    return _safe_discriminator(row.get("uuid"))
+
+
+def _parse_row(line: str):
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        return json.loads(line)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def transcript_event_discriminator(transcript_path: str | None) -> str:
-    """The `uuid` of the last transcript row that carries one, sanitized.
+    """The `uuid` of the last transcript row that carries one, sanitized —
+    the same answer `scan_transcript(...)["last_event_uuid"]` gives.
 
     This is the per-stop discriminator for the harness_event idempotency key.
     At Stop time the transcript ends at the turn being stopped, so re-running
     the same stop reads the same last row (same key), while the next stop —
     including a stop after a blocked one, which appends the model's
-    follow-up — ends at a newer row (new key). Never raises; "" when the
-    transcript is absent, unreadable, or carries no uuid (e.g. a harness that
-    does not write uuids), in which case the caller falls back to the
-    timestamp key shape.
+    follow-up — ends at a newer row (new key).
+
+    Reads only the last `_TRANSCRIPT_TAIL_BYTES` and walks it backwards, so a
+    caller that does not already scan the transcript (`decision_shape_gate.py`)
+    pays for one small read, not another full parse. Only when that tail holds
+    no complete uuid row does it fall back to one forward pass. Never raises;
+    "" when the transcript is absent, unreadable, or carries no uuid, in which
+    case the caller falls back to the timestamp key shape.
     """
     if not transcript_path:
         return ""
-    last = ""
     try:
+        with open(transcript_path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            start = max(0, size - _TRANSCRIPT_TAIL_BYTES)
+            fh.seek(start)
+            lines = fh.read().decode("utf-8", errors="replace").splitlines()
+        if start > 0 and lines:
+            lines = lines[1:]  # the first line of a mid-file read may be partial
+        for line in reversed(lines):
+            found = _row_event_uuid(_parse_row(line))
+            if found:
+                return found
+        if start == 0:
+            return ""
+        last = ""
         with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
-                if isinstance(row, dict):
-                    row_uuid = _safe_discriminator(row.get("uuid"))
-                    if row_uuid:
-                        last = row_uuid
+                found = _row_event_uuid(_parse_row(line))
+                if found:
+                    last = found
+        return last
     except Exception:  # noqa: BLE001 — fail open to the fallback key shape
         return ""
-    return last
 
 
 def harness_event_idempotency_key(idempotency_slug: str, discriminator: str = "") -> str:
@@ -569,6 +634,25 @@ def harness_event_idempotency_key(idempotency_slug: str, discriminator: str = ""
     return f"harness-event-{idempotency_slug}-{int(time.time())}"
 
 
+def _has_control_char(value: str) -> bool:
+    return any(ord(c) < 0x20 or ord(c) == 0x7F for c in value)
+
+
+def sender_lifetime_s(payload: dict) -> int:
+    """Hard cap on the detached sender's whole lifetime, in seconds: every
+    attempt's deadline plus the backoffs plus slack, never more than
+    `HARNESS_EVENT_SENDER_MAX_LIFETIME_S`. Used by the sender as an alarm,
+    a backstop to the per-attempt deadline in `_post_with_deadline`."""
+    try:
+        timeout = float(payload.get("timeout") or HARNESS_EVENT_POST_TIMEOUT_S)
+        attempts = max(1, int(payload.get("attempts") or HARNESS_EVENT_POST_ATTEMPTS))
+        backoff = float(payload.get("backoff", HARNESS_EVENT_RETRY_BACKOFF_S))
+        total = attempts * timeout + (attempts - 1) * backoff + _SENDER_LIFETIME_SLACK_S
+    except Exception:  # noqa: BLE001
+        return HARNESS_EVENT_SENDER_MAX_LIFETIME_S
+    return max(1, min(int(total) + 1, HARNESS_EVENT_SENDER_MAX_LIFETIME_S))
+
+
 def _sender_log_path() -> str:
     try:
         return str(state_dir() / _SENDER_LOG_NAME)
@@ -576,15 +660,15 @@ def _sender_log_path() -> str:
         return ""
 
 
+def _sender_env() -> dict[str, str]:
+    return {k: os.environ[k] for k in _SENDER_ENV_ALLOWLIST if k in os.environ}
+
+
 def _launch_sender(payload: dict):
     """Start the detached sender and hand it `payload` on stdin. Returns the
     `Popen` (production callers ignore it; tests wait on it). Never blocks on
     the network; a failure to start raises to the caller, which swallows it.
     """
-    child_env = {
-        k: v for k, v in os.environ.items()
-        if k not in (BEARER_ENV, "NEOTOMA_BASE_URL")
-    }
     proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell, no secrets
         [sys.executable or "python3", "-I", str(_SENDER_PATH)],
         stdin=subprocess.PIPE,
@@ -592,7 +676,7 @@ def _launch_sender(payload: dict):
         stderr=subprocess.DEVNULL,
         close_fds=True,
         start_new_session=True,
-        env=child_env,
+        env=_sender_env(),
         cwd=str(_SENDER_PATH.parent),
     )
     try:
@@ -609,19 +693,50 @@ def _launch_sender(payload: dict):
 
 def _append_sender_log(log_path: str, line: str) -> None:
     """Best-effort diagnostic for the detached sender, whose stderr is
-    /dev/null. Capped so a persistently failing endpoint cannot grow it
-    without bound. Never carries a credential value."""
+    /dev/null. The file is created 0600 (and an existing file is tightened to
+    0600) because it lives beside session state other users must not read.
+    Past `_SENDER_LOG_MAX_BYTES` it is rotated to ONE `.1` file, so history
+    survives exactly when failures are frequent. Callers pass fixed text,
+    the idempotency key, exception type names and status codes only — never
+    an exception message or a credential."""
     if not log_path:
         return
     try:
         p = Path(log_path)
-        if p.exists() and p.stat().st_size > _SENDER_LOG_MAX_BYTES:
-            p.write_text("")
-        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with p.open("a", encoding="utf-8") as fh:
-            fh.write(f"{stamp} {line}\n")
+        try:
+            if p.stat().st_size > _SENDER_LOG_MAX_BYTES:
+                rotated = p.with_name(p.name + ".1")
+                os.replace(p, rotated)
+                os.chmod(rotated, 0o600)
+        except FileNotFoundError:
+            pass
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(p), flags, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            os.write(fd, f"{stamp} {line}\n".encode("utf-8", errors="replace"))
+        finally:
+            os.close(fd)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _describe_exc(exc: BaseException) -> str:
+    """Exception type, plus the HTTP status or the wrapped reason's type.
+    Deliberately never `str(exc)`: http.client quotes a rejected header value
+    — `Bearer <token>` — inside its exception message."""
+    name = type(exc).__name__
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"{name} {exc.code}"
+    reason = getattr(exc, "reason", None)
+    if isinstance(exc, urllib.error.URLError) and isinstance(reason, BaseException):
+        return f"{name}({type(reason).__name__})"
+    return name
+
+
+class HarnessEventDeadlineExceeded(TimeoutError):
+    """One POST attempt outlived its wall-clock deadline."""
 
 
 def _post_once(base_url: str, token: str, body: dict, timeout: float) -> None:
@@ -639,66 +754,99 @@ def _post_once(base_url: str, token: str, body: dict, timeout: float) -> None:
         resp.read()
 
 
+def _post_with_deadline(base_url: str, token: str, body: dict, timeout: float) -> None:
+    """One attempt, bounded by WALL-CLOCK time. urlopen's `timeout` is per
+    socket operation, so a response trickled a byte at a time, or a DNS
+    lookup (which it does not cover at all), can hold an attempt open far
+    longer. The attempt runs in a daemon thread joined with `timeout`; if it
+    is still running, the attempt is abandoned as a deadline failure. The
+    abandoned thread cannot keep the process alive (daemon), and a retry
+    reuses the same key, so a late success of the abandoned attempt is
+    deduplicated server-side."""
+    outcome: dict = {}
+
+    def _run() -> None:
+        try:
+            _post_once(base_url, token, body, timeout)
+            outcome["ok"] = True
+        except BaseException as exc:  # noqa: BLE001 — re-raised in the caller
+            outcome["exc"] = exc
+
+    worker = threading.Thread(target=_run, name="harness-event-post", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise HarnessEventDeadlineExceeded()
+    if "exc" in outcome:
+        raise outcome["exc"]
+
+
 def _is_retryable(exc: BaseException) -> bool:
+    """Transient errors only: a 5xx, 408 or 429, a timeout (including the
+    wall-clock deadline), or a transport failure. A 4xx, a malformed request
+    (ValueError and friends) or anything unexpected is not retried. A
+    refused redirect never reaches here — `deliver_harness_event` stops on
+    it first."""
     if isinstance(exc, urllib.error.HTTPError):
-        if "refusing to follow redirect" in str(exc):
-            return False
         return exc.code >= 500 or exc.code in (408, 429)
-    # Timeouts, connection resets/refusals and other transport failures.
-    return True
+    return isinstance(exc, (OSError, http.client.HTTPException))
 
 
 def deliver_harness_event(payload: dict) -> None:
-    """Run in the detached sender: POST `payload["body"]` with a long timeout
-    and at most one retry carrying the SAME idempotency key. Never raises.
+    """Run in the detached sender: POST `payload["body"]` with a per-attempt
+    wall-clock deadline and at most one retry, on transient errors only,
+    carrying the SAME idempotency key. Never raises.
 
     The same body (and so the same key) is resent on retry, so a first
     attempt that timed out client-side but landed server-side is
-    deduplicated rather than duplicated.
+    deduplicated rather than duplicated. A row that fails every attempt is
+    dropped; the sender log line (with its key) is the only trace.
     """
     log_tag = str(payload.get("log_tag") or "harness-event")
     log_path = str(payload.get("log_path") or "")
+    key = "?"
     try:
+        body = payload.get("body")
+        if isinstance(body, dict):
+            key = str(body.get("idempotency_key") or "?")[:200]
         base_url = str(payload.get("base_url") or "")
         token = str(payload.get("token") or "")
-        body = payload.get("body")
         timeout = float(payload.get("timeout") or HARNESS_EVENT_POST_TIMEOUT_S)
         attempts = max(1, int(payload.get("attempts") or HARNESS_EVENT_POST_ATTEMPTS))
         backoff = float(payload.get("backoff", HARNESS_EVENT_RETRY_BACKOFF_S))
         if not base_url or not token or not isinstance(body, dict):
-            _append_sender_log(log_path, f"[{log_tag}] sender got an incomplete payload; skipped")
+            _append_sender_log(
+                log_path, f"[{log_tag}] sender got an incomplete payload; skipped; key={key}",
+            )
             return
+        last_exc: BaseException | None = None
         for attempt in range(1, attempts + 1):
             try:
-                _post_once(base_url, token, body, timeout)
+                _post_with_deadline(base_url, token, body, timeout)
                 return
-            except urllib.error.HTTPError as exc:
-                # _NoRedirectHandler.redirect_request is the ONLY raise site
-                # that uses this exact message — matching on it (rather than
-                # treating every 3xx as a refused redirect) avoids mislabeling
-                # a genuine 3xx response urllib never routes through
-                # redirect_request at all (e.g. 300, 304, 305, 306).
-                if "refusing to follow redirect" in str(exc):
-                    _append_sender_log(
-                        log_path,
-                        f"[{log_tag}] harness_event emission failed (non-fatal): refused "
-                        f"a redirect ({exc.code}) rather than forwarding credentials "
-                        "cross-origin",
-                    )
-                    return
-                last_exc: BaseException = exc
+            except _RedirectRefused as exc:
+                _append_sender_log(
+                    log_path,
+                    f"[{log_tag}] harness_event emission failed (non-fatal): refused "
+                    f"a redirect ({exc.code}) rather than forwarding credentials "
+                    f"cross-origin; key={key}",
+                )
+                return
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
             if attempt >= attempts or not _is_retryable(last_exc):
                 _append_sender_log(
                     log_path,
                     f"[{log_tag}] harness_event emission failed (non-fatal) after "
-                    f"{attempt} attempt(s): {last_exc}",
+                    f"{attempt} attempt(s): {_describe_exc(last_exc)}; key={key}",
                 )
                 return
             time.sleep(backoff)
     except Exception as exc:  # noqa: BLE001 — the sender must never raise
-        _append_sender_log(log_path, f"[{log_tag}] sender error (non-fatal): {exc}")
+        _append_sender_log(
+            log_path,
+            f"[{log_tag}] sender error (non-fatal): {_describe_exc(exc)}; key={key}",
+        )
 
 
 def emit_harness_event_raw(
@@ -724,7 +872,7 @@ def emit_harness_event_raw(
     `log_tag` names the caller in diagnostics, so a missing-token or
     network-failure line points at the hook that actually failed rather than
     always reading "[session-integrity]" regardless of which hook called in.
-    Network diagnostics now come from the detached sender and land in
+    Network diagnostics come from the detached sender and land in
     `.claude/.session_state/harness_event_sender.log`, since the sender has
     no stderr the harness reads.
     `session_id`, when given, scopes the once-per-session missing-credentials
@@ -744,7 +892,9 @@ def emit_harness_event_raw(
     an endpoint and bearer from different sources without an explicit verified
     binding. When neither source is complete, this emits one VISIBLE warning
     per session (not a silent skip) and returns without starting a sender.
-    The pair reaches the sender only on its stdin (see the section comment).
+    A pair containing a control character is refused here, before any child
+    starts, with one log line naming only the key. The pair reaches the
+    sender only on its stdin (see the section comment).
 
     Schema 689230f4-cd83-49b6-baa7-a752cf70629d. Best-effort and non-blocking:
     a failure to start the sender is logged and swallowed, and the POST
@@ -755,8 +905,16 @@ def emit_harness_event_raw(
         if not suppress_stderr_warning:
             _warn_missing_credentials_once(session_id, log_tag)
         return
+    key = harness_event_idempotency_key(idempotency_slug, discriminator)
+    if _has_control_char(token) or _has_control_char(base_url):
+        _append_sender_log(
+            _sender_log_path(),
+            f"[{log_tag}] harness_event emission skipped (non-fatal): the Neotoma "
+            f"credential pair contains a control character; key={key}",
+        )
+        return
     body = {
-        "idempotency_key": harness_event_idempotency_key(idempotency_slug, discriminator),
+        "idempotency_key": key,
         "observation_source": "workflow_state",
         "entities": [{
             "entity_type": "harness_event",
@@ -773,11 +931,12 @@ def emit_harness_event_raw(
             "log_path": _sender_log_path(),
             "timeout": HARNESS_EVENT_POST_TIMEOUT_S,
             "attempts": HARNESS_EVENT_POST_ATTEMPTS,
+            "backoff": HARNESS_EVENT_RETRY_BACKOFF_S,
         })
     except Exception as exc:  # noqa: BLE001
         sys.stderr.write(
             f"[{log_tag}] harness_event emission failed (non-fatal): could not "
-            f"start the detached sender: {type(exc).__name__}\n"
+            f"start the detached sender: {type(exc).__name__}; key={key}\n"
         )
 
 
