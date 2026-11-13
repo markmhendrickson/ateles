@@ -1,8 +1,8 @@
 # Ateles documentation
 
 Documentation for the Ateles agent swarm — a single-operator AI fleet that runs a founder's company and
-personal life, built on [Neotoma](https://github.com/markmhendrickson/neotoma) as the canonical memory and
-state layer. Start with the [README](../README.md) for the one-screen picture.
+personal life, built on [Neotoma](https://github.com/markmhendrickson/neotoma) as the system of record for
+AI agents. Start with the [README](../README.md) for the one-screen picture.
 
 This index is organized by the path a new adopter actually takes: **decide → understand → stand up →
 operate → extend → maintain.** For the full reasoning behind this structure — and an audit of which docs
