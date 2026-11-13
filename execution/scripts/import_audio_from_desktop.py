@@ -42,8 +42,15 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "execution" / "scripts"))
 
-# Load environment variables
-load_dotenv(PROJECT_ROOT / ".env")
+from lib.daemon_runtime.pinned_cli_identity import (  # noqa: E402
+    cli_isolation_prefix,
+    load_dotenv_unless_pinned_bearer,
+    pinned_child_problem,
+)
+from lib.daemon_runtime.neotoma_store_guard import EXIT_STORE_DEFERRED  # noqa: E402
+
+# Load environment variables (a pinned run takes no bearer from the file)
+load_dotenv_unless_pinned_bearer(load_dotenv, PROJECT_ROOT / ".env")
 
 # Configuration
 from ateles.runtime_paths import get_data_dir, is_cloud_evicted  # noqa: E402
@@ -214,6 +221,37 @@ def _neotoma_prod_base_url() -> str:
     return os.environ.get("NEOTOMA_PROD_BASE_URL", "")
 
 
+def _neotoma_cli_core() -> list[str]:
+    script = os.environ.get("NEOTOMA_CLI_SCRIPT", "").strip()
+    if script:
+        return [os.environ.get("NODE_BIN", "node"), script]
+    return ["neotoma"]
+
+
+def _neotoma_cli_prefix() -> list[str]:
+    """The deployed CLI a daemon pinned (NEOTOMA_CLI_SCRIPT), else `neotoma`.
+
+    The lookup used to run the bare `neotoma` on PATH regardless, so a pinned
+    run's lookups went out under whatever identity that binary defaulted to.
+    In a pinned run only the CLI gets the private HOME and project root.
+    """
+    return [*cli_isolation_prefix(), *_neotoma_cli_core()]
+
+
+def _neotoma_cli_available() -> bool:
+    core = _neotoma_cli_core()
+    return bool(shutil.which(core[0])) and (
+        len(core) == 1 or Path(core[1]).is_file()
+    )
+
+
+def _lookup_timeout_seconds() -> float:
+    try:
+        return float(os.environ.get("IMPORT_LOOKUP_TIMEOUT_SECONDS", "").strip() or 15)
+    except ValueError:
+        return 15.0
+
+
 # Outcomes of the already-imported lookup. UNKNOWN is a failed lookup — the CLI
 # missing, a non-zero exit, empty or unparseable output, a timeout. It is NOT
 # "not imported": treating it so re-copied the whole library during every
@@ -248,7 +286,7 @@ def _lookup_argv(field: str, value: str) -> list[str]:
     with ``--`` is read as the identifier, never as a CLI option.
     """
     return [
-        "neotoma",
+        *_neotoma_cli_prefix(),
         "--json",
         "--api-only",
         "--base-url",
@@ -279,8 +317,12 @@ def import_status(original_filename: str) -> LookupResult:
     failure class as the reason, and the caller skips the file this run
     instead of treating it as new.
     """
-    if not shutil.which("neotoma"):
+    if not _neotoma_cli_available():
         return LookupResult(LOOKUP_UNKNOWN, "cli_missing")
+    if pinned_child_problem():
+        # A pinned run with a stray bearer or a wrong key must not look up (or
+        # later store) under another identity: unknown, so the memo is skipped.
+        return LookupResult(LOOKUP_UNKNOWN, "identity_refused")
 
     def _search(field: str, value: str) -> tuple[bool | None, str | None]:
         """(True, None) on a match, (False, None) on a clean miss, or
@@ -290,7 +332,7 @@ def import_status(original_filename: str) -> LookupResult:
                 _lookup_argv(field, value),
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=_lookup_timeout_seconds(),
                 env=os.environ,
             )
         except subprocess.TimeoutExpired:
@@ -366,6 +408,11 @@ def transcribe_file(
         if result.returncode == 0:
             print("    ✓ Transcription complete")
             return {"success": True, "output": result.stdout}
+        elif result.returncode == EXIT_STORE_DEFERRED:
+            # The Neotoma store did not land and could not be confirmed (a
+            # restarting server). Not a transcription failure: retry later.
+            print("    ? Neotoma store deferred; will be retried")
+            return {"success": False, "deferred": True, "error": result.stderr}
         else:
             print(f"    ✗ Transcription failed: {result.stderr}")
             return {"success": False, "error": result.stderr}
@@ -736,6 +783,13 @@ def _import_pairs(source_file_pairs: list[tuple[Path, Path]], args) -> None:
     for line in summary_lines:
         print(line)
     if exit_code != 0:
+        results = [i["transcription_result"] for i in transcription_results]
+        if results and all(
+            r.get("success") or r.get("deferred") for r in results
+        ) and any(r.get("deferred") for r in results):
+            # Every non-success was a deferred store: say so, so the caller
+            # defers instead of treating the memo as imported.
+            sys.exit(EXIT_STORE_DEFERRED)
         sys.exit(exit_code)
 
 
