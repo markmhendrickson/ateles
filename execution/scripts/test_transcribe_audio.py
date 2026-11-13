@@ -1017,3 +1017,96 @@ def test_cli_pending_cache_binds_resolved_vocabulary(tmp_path, monkeypatch, sour
             ta.main()
         asr.assert_not_called()
         store.assert_not_called()
+
+
+# --------------------------------------------------------------------------
+# Unreadable audio: report the errno, and name cloud eviction distinctly.
+# Neither message may carry the recording's path or name.
+# --------------------------------------------------------------------------
+
+
+def test_unreadable_audio_hash_logs_errno_without_path(tmp_path, capsys):
+    audio = _write_audio(tmp_path / "private-memo-name.m4a")
+    audio.chmod(0)
+    try:
+        if os.access(audio, os.R_OK):
+            pytest.skip("running with privileges that bypass file modes")
+        assert ta._audio_content_hash(audio) is None
+    finally:
+        audio.chmod(0o600)
+    err = capsys.readouterr().err
+    assert "errno=13 (EACCES)" in err
+    assert "private-memo-name" not in err
+    assert str(tmp_path) not in err
+
+
+def test_pending_store_identity_names_the_errno(tmp_path):
+    audio = _write_audio(tmp_path / "private-memo-name.m4a")
+    audio.chmod(0)
+    try:
+        if os.access(audio, os.R_OK):
+            pytest.skip("running with privileges that bypass file modes")
+        with pytest.raises(RuntimeError) as info:
+            ta._pending_store_identity(audio, None)
+    finally:
+        audio.chmod(0o600)
+    message = str(info.value)
+    assert "errno=13 (EACCES)" in message
+    assert "private-memo-name" not in message
+
+
+def test_pending_store_identity_reports_cloud_eviction_distinctly(tmp_path, monkeypatch):
+    audio = _write_audio(tmp_path / "private-memo-name.m4a")
+    real_open = open
+
+    def evicted_open(path, *args, **kwargs):
+        if Path(path) == audio:
+            raise OSError(11, "Resource deadlock avoided")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", evicted_open)
+    monkeypatch.setattr(ta, "is_cloud_evicted", lambda _p: True)
+
+    with pytest.raises(RuntimeError) as info:
+        ta._pending_store_identity(audio, None)
+    message = str(info.value)
+    assert f"audio unreadable ({ta.AUDIO_EVICTED_BY_CLOUD_STORAGE})." in message
+    assert "errno=" not in message
+    assert "Download it from iCloud" in message and "then re-run the import." in message
+    assert "\n" not in message  # the importer summary shows one line
+    assert "private-memo-name" not in message
+
+
+@pytest.mark.parametrize(
+    "extras, expected",
+    [
+        # Flag set but blocks still allocated: only the SF_DATALESS check
+        # can return True here, so this case cannot pass via the fallback.
+        ({"st_blocks": 8, "st_flags": 0x40000000}, True),
+        ({"st_blocks": 0, "st_flags": 0}, True),            # no blocks, non-empty
+        ({"st_blocks": 8, "st_flags": 0}, False),           # resident
+    ],
+    ids=["dataless-flag", "zero-blocks", "resident"],
+)
+def test_is_cloud_evicted_detects_placeholders(extras, expected):
+    from ateles.runtime_paths import is_cloud_evicted
+
+    # A plain stand-in, not os.stat_result: st_flags is a macOS/BSD-only
+    # field that os.stat_result() rejects on Linux.
+    st = types.SimpleNamespace(st_size=500, **extras)
+    assert is_cloud_evicted(st) is expected
+
+
+def test_is_cloud_evicted_without_st_flags_uses_the_block_fallback():
+    """Linux stat results have no st_flags at all."""
+    from ateles.runtime_paths import is_cloud_evicted
+
+    assert is_cloud_evicted(types.SimpleNamespace(st_size=500, st_blocks=0)) is True
+    assert is_cloud_evicted(types.SimpleNamespace(st_size=500, st_blocks=8)) is False
+
+
+def test_is_cloud_evicted_false_for_real_file(tmp_path):
+    from ateles.runtime_paths import is_cloud_evicted
+
+    assert is_cloud_evicted(_write_audio(tmp_path / "rec.m4a")) is False
+    assert is_cloud_evicted(tmp_path / "missing.m4a") is False
