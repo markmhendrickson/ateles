@@ -205,10 +205,15 @@ def test_pr_harness_event_also_upserts_canonical_pull_request(monkeypatch):
     )
     asyncio.run(SwarmDispatcher(_StubNotifier(), _config())._log_harness_event(trigger))
 
-    entities, _ = stored[0]
-    pull_request = next(
-        entity for entity in entities if entity["entity_type"] == "pull_request"
-    )
+    # The canonical row is its own store, apart from the audit row, so that
+    # the audit row can be paced in the background while this one is not.
+    (entities,) = [
+        entities
+        for entities, _key in stored
+        if any(entity["entity_type"] == "pull_request" for entity in entities)
+    ]
+    assert [entity["entity_type"] for entity in entities] == ["pull_request"]
+    pull_request = entities[0]
     assert pull_request["repository"] == "owner/repo"
     assert pull_request["number"] == 87
     assert pull_request["head_sha"] == "a" * 40

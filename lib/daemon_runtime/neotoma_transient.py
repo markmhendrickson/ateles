@@ -20,7 +20,12 @@ same idempotency key) on every attempt.
 plus two opt-ins that the gating paths above do not take: ``retry_status``
 also retries HTTP 429 and 5xx (never any other 4xx), and ``total_seconds``
 caps the whole call -- each attempt's time limit is shortened to fit what is
-left, and no pause starts that would end past the cap.
+left, and no pause starts that would end past the cap.  ``max_retries``
+caps the number of retries below the default two (the Apis ``harness_event``
+audit store takes one): a timed-out write has an unknown outcome, Neotoma has
+no read-by-idempotency-key route to check it, and the retry carries the same
+key, so a write that had landed is answered as a replay rather than stored
+twice.
 """
 
 from __future__ import annotations
@@ -98,6 +103,7 @@ async def acall_with_transient_retry(
     attempt_timeout: float,
     total_seconds: float,
     retry_status: bool = False,
+    max_retries: int | None = None,
 ) -> T:
     """Await ``fn(time_limit)`` with the bounded retry described above.
 
@@ -105,10 +111,14 @@ async def acall_with_transient_retry(
     ``attempt_timeout`` and never past ``total_seconds`` from the first call,
     and is cancelled if it runs past that limit (a retryable timeout).
     When the attempts or the total bound are spent, the last exception is
-    re-raised unchanged.
+    re-raised unchanged. ``max_retries`` (default: every pause in
+    ``RETRY_PAUSES_SECONDS``) caps how many retries follow the first attempt.
     """
     deadline = _monotonic() + total_seconds
-    attempts = len(RETRY_PAUSES_SECONDS) + 1
+    retries = len(RETRY_PAUSES_SECONDS)
+    if max_retries is not None:
+        retries = max(0, min(retries, max_retries))
+    attempts = retries + 1
     for attempt in range(attempts):
         limit = min(attempt_timeout, deadline - _monotonic())
         try:

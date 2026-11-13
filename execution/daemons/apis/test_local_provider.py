@@ -1044,3 +1044,70 @@ def _verified_empty_policy_admission(monkeypatch):
     """
     import skill_runner
     monkeypatch.setattr(skill_runner, "_load_active_policy_prompt", lambda *a, **kw: "")
+
+
+# ── paced audit queue (Apis daemon posture) ─────────────────────────────────
+
+
+def test_provider_failover_rows_are_queued_with_their_own_fields(tmp_path, fallback_bound):
+    """With pacing on, a failover row is queued, not written on the dispatch's
+    time, and two failovers in a row each keep their own reason and detail."""
+    import audit_queue
+
+    _write_config(tmp_path, {**CONFIG, "context_ceiling_tokens": 8000})
+    spawns, events = _Spawns(local_reply=(1, THRASH_STDOUT, b"")), []
+    loader = MagicMock()
+    loader.return_value.load.return_value = _agent_def()
+    failovers_before_join: list[dict] = []
+
+    async def two_local_failures():
+        queue = audit_queue.enable(audit_queue.PacedAuditQueue(min_gap_seconds=0))
+        release = asyncio.Event()
+
+        async def hold():  # keeps every later row waiting until released
+            await release.wait()
+
+        queue.submit(hold, label="hold")
+        try:
+            # 1: refused before launch (prompt over the ceiling).
+            first = await skill_runner.run_skill(
+                "cicada", "x" * 60_000, role="cicada",
+                task_entity_id="ent_task_ceiling", work_class="rebase",
+            )
+            # 2: launched, and the local run thrashed.
+            second = await skill_runner.run_skill(
+                "cicada", "rebase onto main", role="cicada",
+                task_entity_id="ent_task_thrash", work_class="rebase",
+            )
+            failovers_before_join.extend(
+                e for e in events if e["event_type"] == "provider_failover"
+            )
+            release.set()
+            await queue.join()
+        finally:
+            audit_queue.disable()
+        return first, second
+
+    with (
+        patch("skill_runner.AgentLoader", loader),
+        patch("skill_runner.CLAUDE_BIN", "/bin/claude"),
+        patch("skill_runner.ATELES_REPO", _REPO_ROOT),
+        patch("skill_runner.CODEX_BIN", None),
+        patch("skill_runner.CURSOR_BIN", None),
+        patch("skill_runner._write_harness_event", side_effect=lambda **kw: events.append(kw)),
+        patch("asyncio.create_subprocess_exec", side_effect=spawns.spawn),
+    ):
+        first, second = asyncio.run(two_local_failures())
+
+    assert first.ok and second.ok and first.provider == second.provider == "claude"
+    assert failovers_before_join == [], "a failover row was written before the queue ran"
+    ceiling, thrash = [e for e in events if e["event_type"] == "provider_failover"]
+    assert ceiling["task_entity_id"] == "ent_task_ceiling"
+    assert "failover_reason=context_ceiling" in ceiling["output_summary"]
+    assert thrash["task_entity_id"] == "ent_task_thrash"
+    assert "failover_reason=local_run_failed:autocompact_thrash" in thrash["output_summary"]
+    assert ceiling["output_summary"] != thrash["output_summary"]
+    # Resolved at the failover and carried through the queue.
+    assert ceiling["agent_sub"] == thrash["agent_sub"] == "cicada@ateles-swarm"
+    assert ceiling["usage"].as_event_fields()["model"] == "qwen3-coder-ollama"
+    assert ceiling["event_at"] and thrash["event_at"] and ceiling["event_at"] <= thrash["event_at"]
