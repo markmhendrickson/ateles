@@ -602,6 +602,7 @@ from routing import (  # noqa: E402
 )
 
 import github_gateway  # noqa: E402
+import audit_queue  # noqa: E402
 
 import build_delivery  # noqa: E402
 import model_tiering  # noqa: E402
@@ -6192,6 +6193,16 @@ async def main() -> None:
         f"grace={_reconcile_cfg.GRACE_SECONDS}s "
         f"page={_reconcile_cfg.QUERY_LIMIT} rows x "
         f"{_reconcile_cfg.PAGES_PER_SWEEP} pages/sweep)"
+    )
+
+    # harness_event audit stores go out one at a time, in the background, so a
+    # Neotoma instance slow to accept writes neither delays the dispatch or
+    # webhook being audited nor receives the rows as a burst.
+    audit_queue.enable()
+    log.info(
+        f"[{DAEMON_NAME}] audit stores paced: one at a time, "
+        f"{audit_queue.MIN_GAP_SECONDS:.0f}s apart, at most "
+        f"{audit_queue.MAX_PENDING} waiting"
     )
 
     # 1. Load agent_definition from Neotoma

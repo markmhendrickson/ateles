@@ -71,6 +71,7 @@ from lib.daemon_runtime import (  # noqa: E402
     AgentLoader, admit_agent_definition,
 )
 from dispatch_usage import DispatchUsage, parse_dispatch_usage  # noqa: E402
+import audit_queue  # noqa: E402
 from foundation import (  # noqa: E402
     SWARM_FOUNDATION_CONTRACT,  # noqa: F401 — re-exported beside the sibling contracts
     foundation_contract,
@@ -1553,6 +1554,25 @@ def _write_harness_event(
                 )
     except Exception as exc:
         log.debug(f"[apis] harness_event write failed (non-fatal): {exc}")
+
+
+async def _emit_harness_event(**fields) -> None:
+    """Write a harness_event through Apis's one paced audit queue.
+
+    In the Apis daemon (``audit_queue.enable()``) this returns at once and
+    ``_write_harness_event`` runs later on a worker thread, one audit store
+    at a time, so the dispatch it records never waits on Neotoma. Anywhere
+    else it runs inline on a worker thread, as the direct
+    ``asyncio.to_thread`` call it replaces did. ``fields`` are captured now,
+    so a queued row records the values at the moment of the event.
+    """
+    await audit_queue.emit(
+        lambda: asyncio.to_thread(_write_harness_event, **fields),
+        label=(
+            f"harness_event {fields.get('event_type', '')} "
+            f"task={fields.get('task_entity_id', '')}"
+        ),
+    )
 
 
 # ── Dispatch-failure diagnostics (ateles#257) ──────────────────────────────────
@@ -3253,8 +3273,7 @@ async def _run_skill_once(
             msg = str(exc)
             log.error(f"[apis] {skill} dispatch refused — {msg}")
             try:
-                await asyncio.to_thread(
-                    _write_harness_event,
+                await _emit_harness_event(
                     task_entity_id=task_entity_id,
                     agent_session_id=agent_session_id,
                     role=_role,
@@ -3459,8 +3478,7 @@ async def _run_skill_once(
 
         # Stage 5: degraded harness_event
         try:
-            await asyncio.to_thread(
-                _write_harness_event,
+            await _emit_harness_event(
                 task_entity_id=task_entity_id,
                 agent_session_id=agent_session_id,
                 role=_role,
@@ -3817,8 +3835,7 @@ async def _run_skill_once(
 
     # ── Stage 2: harness_event at dispatch start ───────────────────────────────
     try:
-        await asyncio.to_thread(
-            _write_harness_event,
+        await _emit_harness_event(
             task_entity_id=task_entity_id,
             agent_session_id=agent_session_id,
             role=_role,
@@ -4252,8 +4269,7 @@ async def _run_skill_once(
                     )
                     log.error(f"[apis] {skill} dispatch outcome unknown — {msg}")
                     try:
-                        await asyncio.to_thread(
-                            _write_harness_event,
+                        await _emit_harness_event(
                             task_entity_id=task_entity_id,
                             agent_session_id=agent_session_id,
                             role=_role,
@@ -4333,8 +4349,7 @@ async def _run_skill_once(
 
             # Stage 2: harness_event on timeout (failure)
             try:
-                await asyncio.to_thread(
-                    _write_harness_event,
+                await _emit_harness_event(
                     task_entity_id=task_entity_id,
                     agent_session_id=agent_session_id,
                     role=_role,
@@ -4552,8 +4567,7 @@ async def _run_skill_once(
                 f"({len(result.stdout)}B stdout) [{_usage.summary()}]"
             )
             try:
-                await asyncio.to_thread(
-                    _write_harness_event,
+                await _emit_harness_event(
                     task_entity_id=task_entity_id,
                     agent_session_id=agent_session_id,
                     role=_role,
@@ -4596,8 +4610,7 @@ async def _run_skill_once(
                 f"stderr head: {result.stderr[:500]}"
             )
             try:
-                await asyncio.to_thread(
-                    _write_harness_event,
+                await _emit_harness_event(
                     task_entity_id=task_entity_id,
                     agent_session_id=agent_session_id,
                     role=_role,
@@ -5515,8 +5528,7 @@ async def _run_provider_attempts(
                     else "no cheapest-tier model bound for a frontier provider — refusing"
                 )
             )
-            await asyncio.to_thread(
-                _record_local_failover,
+            failover_fields = dict(
                 skill=skill,
                 role=(role or skill).lower(),
                 task_entity_id=task_entity_id,
@@ -5526,6 +5538,13 @@ async def _run_provider_attempts(
                     ("" if next_provider else "frontier_fallback=refused ")
                     + (result.error or result.stderr[:200])
                 ),
+            )
+            await audit_queue.emit(
+                # Bound now: this loop rebinds failover_fields on its next pass.
+                lambda fields=failover_fields: asyncio.to_thread(
+                    _record_local_failover, **fields
+                ),
+                label=f"harness_event provider_failover task={task_entity_id}",
             )
             if not allowed:
                 return _refuse_local_fallback(
@@ -5738,8 +5757,7 @@ async def run_review_prompt(
                     provider=provider,
                 )
             try:
-                await asyncio.to_thread(
-                    _write_harness_event,
+                await _emit_harness_event(
                     task_entity_id="",
                     role=role,
                     agent_sub="",

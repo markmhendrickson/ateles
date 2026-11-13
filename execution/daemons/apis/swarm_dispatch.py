@@ -110,6 +110,7 @@ import review_carry
 import review_delta
 import review_scope
 import skill_runner
+import audit_queue
 from skill_runner import (
     ATELES_REPO,
     GATE_OWNER_TOOL_DENY_UNAVAILABLE,
@@ -150,8 +151,24 @@ DAEMON_NAME = "apis"
 # docs/foundation/work_model.md#parent-and-child-tasks).
 CORRECTION_ADMISSION_CLASS = "workflow_entering"
 
+# Time limit for one Neotoma ``/store`` attempt, for every store that does not
+# name its own. A store the server is slow to accept (writes of several
+# seconds, and pauses of most of a minute while it rebuilds) must not be cut
+# off at 30s and reported lost when it would have landed.
+NEOTOMA_STORE_ATTEMPT_TIMEOUT_SECONDS = 60.0
+# A ``harness_event`` audit store gets one retry, with the same body and
+# idempotency key, after a timeout or connection error: a timeout is an
+# unknown outcome, Neotoma has no read-by-idempotency-key route to settle it,
+# and a write that had landed is answered as a replay, not stored twice. The
+# whole store is bounded by two attempts plus the one pause.
+AUDIT_STORE_MAX_RETRIES = 1
+AUDIT_STORE_TOTAL_SECONDS = (
+    2 * NEOTOMA_STORE_ATTEMPT_TIMEOUT_SECONDS
+    + _neotoma_transient.RETRY_PAUSES_SECONDS[0]
+)
+
 # The exact-head ``pr_review`` store carries the full text of every panel
-# review, so one attempt can outlast the 30s every other store gets. Each
+# review, so one attempt can outlast the limit every other store gets. Each
 # attempt may take this long; the whole store, retries and pauses included,
 # never takes longer than the total (a panel must not wait without bound).
 PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS = 90.0
@@ -16255,15 +16272,20 @@ class SwarmDispatcher:
         relationships: list[dict] | None = None,
         *,
         retry_transient: bool = False,
+        retry_once: bool = False,
     ) -> dict | None:
         """POST ``entities`` to Neotoma ``/store``; None on any failure.
 
-        Default: one attempt with a 30s time limit, as every caller has always
-        had. ``retry_transient=True`` (the large ``pr_review`` store) uses the
+        Default: one attempt limited to ``NEOTOMA_STORE_ATTEMPT_TIMEOUT_SECONDS``.
+        ``retry_transient=True`` (the large ``pr_review`` store) uses the
         shared bounded Neotoma retry instead: timeouts, connection errors, 429
         and 5xx are retried with the same body and idempotency key, each
         attempt may take up to ``PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS``,
         and the whole store is capped at ``PR_REVIEW_STORE_TOTAL_SECONDS``.
+        ``retry_once=True`` (the ``harness_event`` audit stores) uses the same
+        shared retry with at most ``AUDIT_STORE_MAX_RETRIES`` retry, after a
+        timeout or connection error only, with the same body and key; a reply
+        marked ``replayed`` shows the earlier attempt had landed.
         Any other 4xx fails at once. A 2xx reporting undeclared fields is
         returned as before, for the caller to refuse.
         """
@@ -16271,9 +16293,28 @@ class SwarmDispatcher:
             log.warning(f"[{DAEMON_NAME}] NEOTOMA_BEARER_TOKEN unset — store skipped")
             return None
         try:
+            if retry_once and not retry_transient:
+                result = await _neotoma_transient.acall_with_transient_retry(
+                    lambda time_limit: self._store_entities_once(
+                        entities, idempotency_key, time_limit, relationships
+                    ),
+                    label=f"store {idempotency_key}",
+                    attempt_timeout=NEOTOMA_STORE_ATTEMPT_TIMEOUT_SECONDS,
+                    total_seconds=AUDIT_STORE_TOTAL_SECONDS,
+                    max_retries=AUDIT_STORE_MAX_RETRIES,
+                )
+                if isinstance(result, dict) and result.get("replayed"):
+                    log.info(
+                        f"[{DAEMON_NAME}] Neotoma store {idempotency_key}: "
+                        "answered as an idempotency replay (already stored)"
+                    )
+                return result
             if not retry_transient:
                 return await self._store_entities_once(
-                    entities, idempotency_key, 30, relationships
+                    entities,
+                    idempotency_key,
+                    NEOTOMA_STORE_ATTEMPT_TIMEOUT_SECONDS,
+                    relationships,
                 )
             return await _neotoma_transient.acall_with_transient_retry(
                 lambda time_limit: self._store_entities_once(
@@ -16316,8 +16357,23 @@ class SwarmDispatcher:
             resp.raise_for_status()
             return resp.json() if resp.content else {}
 
+    async def _store_audit(self, entities: list[dict], idempotency_key: str) -> None:
+        """Store ``harness_event`` audit rows without delaying the caller.
+
+        Every ``harness_event`` store Apis makes goes through here and so
+        through the one paced queue (``audit_queue``): in the daemon this
+        returns at once and the row is written in the background, one store
+        at a time, with one same-key retry after a timeout.
+        """
+        await audit_queue.emit(
+            lambda: self._store_entities(
+                entities, idempotency_key=idempotency_key, retry_once=True
+            ),
+            label=idempotency_key,
+        )
+
     async def _log_harness_event(self, t: SwarmTrigger) -> None:
-        entities = [
+        event = [
             {
                 "entity_type": "harness_event",
                 "event_type": f"github.{t.kind}",
@@ -16328,6 +16384,17 @@ class SwarmDispatcher:
                 "occurred_at": datetime.now(timezone.utc).isoformat(),
             }
         ]
+        # The audit row is queued. The canonical pull_request row below is
+        # state, not audit, so it is still written inline, as before: a queued
+        # backlog must not land an older head's row after the panel's own
+        # exact-head pull_request write.
+        await self._store_audit(
+            event,
+            idempotency_key=(
+                f"harness-event-{t.kind}-{t.repository}-{t.number}-"
+                f"{t.delivery_id}-{content_digest(event)}"
+            ),
+        )
         if t.is_pr:
             parent_number = self._parent_issue_number(t.body, t.repository)
             pull_request: dict = {
@@ -16349,14 +16416,13 @@ class SwarmDispatcher:
             if parent_number:
                 pull_request["closes_issue_number"] = parent_number
                 pull_request["parent_issue_number"] = parent_number
-            entities.append(pull_request)
-        await self._store_entities(
-            entities,
-            idempotency_key=(
-                f"harness-event-{t.kind}-{t.repository}-{t.number}-"
-                f"{t.delivery_id}-{content_digest(entities)}"
-            ),
-        )
+            await self._store_entities(
+                [pull_request],
+                idempotency_key=(
+                    f"pull-request-event-{t.kind}-{t.repository}-{t.number}-"
+                    f"{t.delivery_id}-{content_digest([pull_request])}"
+                ),
+            )
 
     async def _persist_panel_reviews(
         self,
@@ -16507,7 +16573,7 @@ class SwarmDispatcher:
             }
             for lens, text in reviews
         ]
-        await self._store_entities(
+        await self._store_audit(
             audit,
             idempotency_key=(
                 f"panel-reviews-{t.repository}-{t.number}-"
