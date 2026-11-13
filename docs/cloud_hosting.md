@@ -213,12 +213,19 @@ ATELES_SKIP_DOTENV=1 .venv/bin/python execution/daemons/apis/fly_machine_status.
 Run it from the dispatcher's dedicated checkout with that process's existing
 `APIS_FLY_APP`, `APIS_FLY_API_TOKEN` and `APIS_FLY_<PROVIDER>_MACHINE_ID`
 bindings. It loads no env or key file. `--provider` takes `all`, `claude`,
-`codex` or `cursor`; `--help` is static. There are no other options.
+`codex` or `cursor`, and defaults to `all` when omitted; `--help` is static.
+There are no other options.
 
-It makes one `GET` per requested login machine through the existing Machines
-client, under one 10-second deadline. It takes no lease, starts, stops, updates
-or destroys nothing, and touches no ledger, executor or Neotoma record. It only
-calls the official Machines API base, so a configured override is refused.
+It checks every requested binding before any request: if one is missing,
+malformed or shared with another provider, it reads no machine at all and
+reports the faulty bindings. Otherwise it makes one `GET` per requested login
+machine through the existing Machines client. The whole run, including
+cancelling unfinished reads and closing the client, ends within one 10-second
+deadline; a read still unfinished then reports `timed_out`. It takes no lease,
+starts, stops, updates or destroys nothing, and touches no ledger, executor or
+Neotoma record. It only calls the official Machines API base, so a configured
+override is refused. The HTTP client's own loggers, including their child
+loggers, are silenced while it runs.
 
 The output is always one JSON object of at most 4 KiB:
 
@@ -228,8 +235,11 @@ The output is always one JSON object of at most 4 KiB:
 - `errors`: per provider (or `null` for the whole command), a fixed `code` and,
   for an HTTP failure, its numeric status. The codes are `missing_configuration`,
   `invalid_configuration`, `missing_binding`, `invalid_binding`,
-  `duplicate_binding`, `request_failed`, `malformed_response`, `timed_out`,
-  `invalid_arguments`, `interrupted` and `unexpected_error`.
+  `duplicate_binding`, `request_failed`, `malformed_response`,
+  `unrecognized_state`, `timed_out`, `invalid_arguments`, `interrupted` and
+  `unexpected_error`. A well-formed machine whose state the command does not
+  recognize reads `unknown` with `unrecognized_state`, not
+  `malformed_response`: the response was fine, the state is new to the command.
 - `complete`: every requested machine was read. Exit 0 only when complete;
   otherwise exit 2.
 

@@ -12,10 +12,13 @@ Prints exactly one closed JSON envelope (at most 4 KiB) and nothing else:
 
 It reads ``APIS_FLY_APP``, ``APIS_FLY_API_TOKEN`` and the per-provider
 ``APIS_FLY_<PROVIDER>_MACHINE_ID`` bindings from the process environment
-through ``FlyConfig.from_env`` and loads no env or key file. It makes at most
-one ``GET /machines/<id>`` per requested provider through the existing
-``FlyMachinesClient``, inside one 10-second deadline: no retries, no lease, no
-start/stop/update/destroy, no executor, ledger or Neotoma.
+through ``FlyConfig.from_env`` and loads no env or key file. Every requested
+binding is checked before any request: if one is missing, malformed or shared
+with another provider, no machine is read. Otherwise it makes at most one
+``GET /machines/<id>`` per requested provider through the existing
+``FlyMachinesClient``. The whole run, including cancelling unfinished reads and
+closing the client, finishes inside one 10-second deadline: no retries, no
+lease, no start/stop/update/destroy, no executor, ledger or Neotoma.
 
 Nothing read from the API, the environment or the command line is echoed:
 not job files, env, metadata, names, machine or run ids, versions, error
@@ -33,6 +36,7 @@ import json
 import logging
 import re
 import sys
+import time
 from typing import Any
 
 import fly_runner
@@ -40,6 +44,9 @@ import httpx
 
 SCHEMA_VERSION = 1
 DEADLINE_SECONDS = 10.0
+# Held back from the reads, inside the deadline, for cancelling unfinished
+# reads and letting their clients close (capped at a quarter of the deadline).
+CLEANUP_SECONDS = 0.5
 MAX_OUTPUT_BYTES = 4096
 PROVIDERS: tuple[str, ...] = ("claude", "codex", "cursor")
 EXIT_COMPLETE = 0
@@ -53,14 +60,15 @@ INVALID_BINDING = "invalid_binding"
 DUPLICATE_BINDING = "duplicate_binding"
 REQUEST_FAILED = "request_failed"
 MALFORMED_RESPONSE = "malformed_response"
+UNRECOGNIZED_STATE = "unrecognized_state"
 TIMED_OUT = "timed_out"
 INVALID_ARGUMENTS = "invalid_arguments"
 INTERRUPTED = "interrupted"
 UNEXPECTED_ERROR = "unexpected_error"
 ERROR_CODES: frozenset[str] = frozenset({
     MISSING_CONFIGURATION, INVALID_CONFIGURATION, MISSING_BINDING, INVALID_BINDING,
-    DUPLICATE_BINDING, REQUEST_FAILED, MALFORMED_RESPONSE, TIMED_OUT, INVALID_ARGUMENTS,
-    INTERRUPTED, UNEXPECTED_ERROR,
+    DUPLICATE_BINDING, REQUEST_FAILED, MALFORMED_RESPONSE, UNRECOGNIZED_STATE, TIMED_OUT,
+    INVALID_ARGUMENTS, INTERRUPTED, UNEXPECTED_ERROR,
 })  # fmt: skip
 
 USAGE = "usage: fly_machine_status.py [--provider {all,claude,codex,cursor}]\n"
@@ -68,6 +76,9 @@ HELP = USAGE + (
     "\nBounded read-only status of the configured Fly login machines.\n"
     "Prints one fixed JSON envelope: per provider the machine state and whether\n"
     "a run marker or job config is present; no ids, names, files or values.\n"
+    "With no option, --provider defaults to all.\n"
+    "Reads APIS_FLY_APP, APIS_FLY_API_TOKEN and APIS_FLY_<PROVIDER>_MACHINE_ID\n"
+    "from the environment; see docs/cloud_hosting.md.\n"
     "Exit 0 only when every requested machine was read; otherwise 2.\n"
     "A complete status does not mean a machine is free or may be released.\n"
 )
@@ -78,8 +89,15 @@ INVALID_ARGUMENTS_TEXT = "fly_machine_status: invalid arguments\n" + USAGE
 _APP_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}", re.ASCII)
 _MACHINE_ID_RE = re.compile(r"[A-Za-z0-9]{1,64}", re.ASCII)
 _TOKEN_RE = re.compile(r"[\x21-\x7e]+", re.ASCII)
-# Loggers that could carry a request URL, header or response text.
-_QUIET_LOGGERS = ("httpx", "httpcore", "asyncio", "apis.fly_runner")
+# Loggers that could carry a request URL, header or response text. Each is
+# silenced together with every child logger (httpcore traces through
+# ``httpcore.http11``, ``httpcore.connection`` and so on, and a parent's
+# ``disabled`` flag does not stop a child's records from propagating).
+_QUIET_LOGGERS = ("httpx", "httpcore", "h2", "hpack", "asyncio", "apis.fly_runner")
+_KNOWN_CHILD_LOGGERS = (
+    "httpcore.connection", "httpcore.http11", "httpcore.http2", "httpcore.proxy",
+    "httpcore.socks",
+)  # fmt: skip
 
 
 class _Rejected(Exception):
@@ -245,64 +263,160 @@ async def _read(client: fly_runner.FlyMachinesClient, provider: str,
     return fly_runner.project_machine_status(provider, machine)
 
 
+def _remaining(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
+
+def _cleanup_seconds() -> float:
+    return min(CLEANUP_SECONDS, DEADLINE_SECONDS / 4)
+
+
 async def collect(providers: tuple[str, ...], *,
-                  transport: httpx.AsyncBaseTransport | None = None) -> dict:  # fmt: skip
-    """The status envelope for *providers*. At most one GET per provider,
-    all inside one aggregate deadline."""
+                  transport: httpx.AsyncBaseTransport | None = None,
+                  deadline: float | None = None) -> dict:  # fmt: skip
+    """The status envelope for *providers*. Every requested binding is checked
+    before any request; then at most one GET per provider, all inside the
+    aggregate *deadline* (a ``time.monotonic()`` value)."""
+    if deadline is None:
+        deadline = time.monotonic() + DEADLINE_SECONDS
     try:
         config = _load_config()
     except _Rejected as rejected:
         return _envelope([], [_error(None, rejected.code)])
+    # One bad binding stops the whole command before any client call, so a
+    # partial read never stands in for a full one.
+    binding_errors = [
+        _error(provider, problem)
+        for provider in providers
+        if (problem := _binding_problem(config, provider))
+    ]
+    if binding_errors:
+        return _envelope([_unknown(p) for p in providers], binding_errors)
     rows: dict[str, dict] = {}
     errors: list[dict] = []
-    reads: dict[str, asyncio.Task] = {}
     client = fly_runner.FlyMachinesClient(config, transport=transport)
-    for provider in providers:
-        problem = _binding_problem(config, provider)
-        if problem:
-            rows[provider] = _unknown(provider)
-            errors.append(_error(provider, problem))
-            continue
-        reads[provider] = asyncio.ensure_future(
+    reads: dict[str, asyncio.Task] = {
+        provider: asyncio.ensure_future(
             _read(client, provider, config.login_machines[provider])
         )
-    if reads:
-        _done, pending = await asyncio.wait(reads.values(), timeout=DEADLINE_SECONDS)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.wait(pending)
-        for provider, task in reads.items():
-            if task in pending:
-                rows[provider] = _unknown(provider)
-                errors.append(_error(provider, TIMED_OUT))
-                continue
-            exc = task.exception() if not task.cancelled() else TimeoutError()
-            if exc is None:
-                rows[provider] = task.result()
-                if rows[provider]["machine_state"] == "unknown":
-                    errors.append(_error(provider, MALFORMED_RESPONSE))
-                continue
+        for provider in providers
+    }
+    read_budget = max(0.0, deadline - _cleanup_seconds() - time.monotonic())
+    _done, pending = await asyncio.wait(reads.values(), timeout=read_budget)
+    for task in pending:
+        task.cancel()
+    if pending:
+        # Bounded: a read that ignores cancellation or hangs while closing its
+        # client is abandoned at the deadline, not waited on.
+        await asyncio.wait(pending, timeout=_remaining(deadline))
+    for provider, task in reads.items():
+        if task in pending:
+            if task.done() and not task.cancelled():
+                task.exception()  # retrieved so it is never logged; not printed
             rows[provider] = _unknown(provider)
-            code, status = _failure_code(exc)
-            errors.append(_error(provider, code, status))
+            errors.append(_error(provider, TIMED_OUT))
+            continue
+        exc = task.exception() if not task.cancelled() else TimeoutError()
+        if exc is None:
+            rows[provider] = task.result()
+            if rows[provider]["machine_state"] == "unknown":
+                # ``client.get`` already validated the machine, so the only
+                # way the projector answers unknown here is a state outside
+                # its vocabulary.
+                errors.append(_error(provider, UNRECOGNIZED_STATE))
+            continue
+        rows[provider] = _unknown(provider)
+        code, status = _failure_code(exc)
+        errors.append(_error(provider, code, status))
     machines = [rows[p] for p in providers]
     return _envelope(machines, errors)
 
 
+def _drop_loop_error(_loop: asyncio.AbstractEventLoop, _context: dict) -> None:
+    """The event loop's exception handler: an abandoned or failed task is
+    reported only through the fixed envelope, never as log or stderr text."""
+
+
+def _close_loop(loop: asyncio.AbstractEventLoop, deadline: float) -> None:
+    """Cancel what is left, wait for it only until *deadline*, then close the
+    loop. Anything still running is abandoned: its coroutine is closed here,
+    with finalizer reports suppressed, so nothing surfaces later."""
+    try:
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.wait(pending, timeout=_remaining(deadline)))
+        shutdown = loop.create_task(loop.shutdown_asyncgens())
+        loop.run_until_complete(asyncio.wait({shutdown}, timeout=_remaining(deadline)))
+        stuck = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        saved_hook = sys.unraisablehook
+        sys.unraisablehook = lambda _unraisable: None
+        try:
+            for task in stuck:
+                with contextlib.suppress(BaseException):
+                    task.get_coro().close()
+        finally:
+            sys.unraisablehook = saved_hook
+    finally:
+        loop.close()
+
+
+def run_bounded(providers: tuple[str, ...], *,
+                transport: httpx.AsyncBaseTransport | None = None) -> dict:  # fmt: skip
+    """``collect`` on a private event loop; the whole run, including its
+    teardown, ends by one ``DEADLINE_SECONDS`` deadline. ``asyncio.run`` is
+    not used because its teardown waits without limit for cancelled tasks."""
+    deadline = time.monotonic() + DEADLINE_SECONDS
+    loop = asyncio.new_event_loop()
+    loop.set_exception_handler(_drop_loop_error)
+    try:
+        task = loop.create_task(
+            collect(providers, transport=transport, deadline=deadline)
+        )
+        loop.run_until_complete(asyncio.wait({task}, timeout=_remaining(deadline)))
+        if task.done():
+            return task.result()
+        task.cancel()
+        return _envelope([_unknown(p) for p in providers],
+                         [_error(p, TIMED_OUT) for p in providers])  # fmt: skip
+    finally:
+        _close_loop(loop, deadline)
+
+
 @contextlib.contextmanager
 def _quiet_logging():
-    """Silence every logger that could carry a URL, header or response text
-    for the duration of the read; restored afterwards."""
-    saved = [(logging.getLogger(name), logging.getLogger(name).disabled)
-             for name in _QUIET_LOGGERS]  # fmt: skip
-    for logger, _ in saved:
-        logger.disabled = True
+    """Silence every logger that could carry a URL, header or response text,
+    and all of their child loggers, for the duration of the read; restored
+    afterwards.
+
+    Each is disabled (its own records are dropped), stops propagating, and
+    holds only a ``NullHandler``. Stopping propagation at the parent is what
+    catches a child logger, including one first created during the run: its
+    records reach that parent's ``NullHandler`` and go no further, neither to
+    the root handlers nor to logging's last-resort stderr handler.
+    """
+    names = set(_QUIET_LOGGERS) | set(_KNOWN_CHILD_LOGGERS)
+    names |= {
+        name
+        for name in list(logging.Logger.manager.loggerDict)
+        if any(name.startswith(parent + ".") for parent in _QUIET_LOGGERS)
+    }
+    saved = []
+    for name in sorted(names):
+        logger = logging.getLogger(name)
+        saved.append((logger, logger.disabled, logger.propagate, logger.handlers))
     try:
+        for logger, *_ in saved:
+            logger.disabled = True
+            logger.propagate = False
+            logger.handlers = [logging.NullHandler()]
         yield
     finally:
-        for logger, disabled in saved:
+        for logger, disabled, propagate, handlers in saved:
             logger.disabled = disabled
+            logger.propagate = propagate
+            logger.handlers = handlers
 
 
 def main(argv: list[str] | None = None, *,
@@ -323,7 +437,7 @@ def main(argv: list[str] | None = None, *,
             sys.stdout.write(HELP)
             return EXIT_COMPLETE
         with _quiet_logging():
-            envelope = asyncio.run(collect(providers, transport=transport))
+            envelope = run_bounded(providers, transport=transport)
         sys.stdout.write(_encode(envelope) + "\n")
         return EXIT_COMPLETE if envelope["complete"] else EXIT_INCOMPLETE
     except (KeyboardInterrupt, asyncio.CancelledError):

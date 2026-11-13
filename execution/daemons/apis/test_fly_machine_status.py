@@ -14,6 +14,8 @@ import json
 import logging
 import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import fly_machine_status
@@ -205,7 +207,7 @@ def test_hostile_payloads_and_error_bodies_never_reach_any_output(env, capsys, c
         "job_config_present": None,
     }
     assert doc["errors"] == [
-        {"provider": "codex", "code": "malformed_response", "http_status": None},
+        {"provider": "codex", "code": "unrecognized_state", "http_status": None},
         {"provider": "cursor", "code": "request_failed", "http_status": 500},
     ]
     assert_no_leak(out, err, logs)
@@ -230,7 +232,12 @@ def test_megabyte_fields_give_a_tiny_bounded_output(env, capsys, caplog):
     (httpx.Response(403, text=SENTINEL), "unknown", "request_failed", 403),
     (httpx.Response(503, json={"error": SENTINEL}), "unknown", "request_failed", 503),
     ({"id": "aaaa1111", "state": "zzz-" + SENTINEL, "instance_id": "i", "config": {}},
-     "unknown", "malformed_response", None),
+     "unknown", "unrecognized_state", None),
+    # A body cannot fake the command's own verdicts.
+    ({"id": "aaaa1111", "state": "absent", "instance_id": "i", "config": {}},
+     "unknown", "unrecognized_state", None),
+    ({"id": "aaaa1111", "state": "unknown", "instance_id": "i", "config": {}},
+     "unknown", "unrecognized_state", None),
     ({"id": "aaaa1111", "state": "stopped", "instance_id": "i", "config": [SENTINEL]},
      "unknown", "malformed_response", None),
     ({"id": "aaaa1111", "state": "stopped", "instance_id": "i"}, "unknown",
@@ -299,6 +306,36 @@ def test_bad_bindings_are_errors_not_empty_success(env, capsys, caplog, monkeypa
     assert_no_leak(out, err, logs)
 
 
+@pytest.mark.parametrize("bindings,faults", [
+    ({"cursor": ""}, {"cursor": "missing_binding"}),
+    ({"cursor": f"../{SENTINEL}"}, {"cursor": "invalid_binding"}),
+    ({"codex": "aaaa1111"}, {"claude": "duplicate_binding", "codex": "duplicate_binding"}),
+    ({"claude": "", "cursor": "x.y"}, {"claude": "missing_binding", "cursor": "invalid_binding"}),
+])  # fmt: skip
+@pytest.mark.parametrize("argv", [["--provider", "all"], []])
+def test_any_bad_binding_stops_a_multi_provider_run_before_any_request(
+    env, capsys, caplog, monkeypatch, bindings, faults, argv
+):
+    # Every requested binding is checked before the first read: one bad
+    # binding means no machine is read, not a partial read of the others.
+    for provider, value in bindings.items():
+        monkeypatch.setenv(fly_runner.login_machine_setting(provider), value)
+    fake = Fake({mid: _machine(mid) for mid in IDS.values()})
+    exit_code, out, err, logs = run(capsys, caplog, argv, fake)
+    doc = envelope(out)
+    assert exit_code == 2 and doc["complete"] is False
+    assert fake.requests == []
+    assert doc["machines"] == [
+        {"provider": p, "machine_state": "unknown",
+         "run_marker_present": None, "job_config_present": None}
+        for p in IDS
+    ]  # fmt: skip
+    assert doc["errors"] == [
+        {"provider": p, "code": code, "http_status": None} for p, code in faults.items()
+    ]
+    assert_no_leak(out, err, logs)
+
+
 # 4. Configuration and argument refusals before any call, with no reflection.
 
 
@@ -347,6 +384,14 @@ def test_help_is_static_and_reads_nothing(capsys, caplog, monkeypatch):
     for flag in ("--help", "-h"):
         code, out, err, _ = run(capsys, caplog, [flag])
         assert code == 0 and out == fly_machine_status.HELP and err == ""
+    # It names the default and the settings it reads (names, never values).
+    assert "defaults to all" in fly_machine_status.HELP
+    for setting in (
+        "APIS_FLY_APP",
+        "APIS_FLY_API_TOKEN",
+        "APIS_FLY_<PROVIDER>_MACHINE_ID",
+    ):
+        assert setting in fly_machine_status.HELP
 
 
 def test_unexpected_failure_prints_only_the_fixed_envelope(
@@ -360,6 +405,28 @@ def test_unexpected_failure_prints_only_the_fixed_envelope(
     code, out, err, logs = run(capsys, caplog, [], fake)
     assert code == 2 and envelope(out)["errors"][0]["code"] == "unexpected_error"
     assert "Traceback" not in out + err
+    assert_no_leak(out, err, logs)
+
+
+@pytest.mark.parametrize("bad_row", [
+    {"provider": "claude", "machine_state": "stopped", "run_marker_present": False,
+     "job_config_present": False, "leak": SENTINEL},
+    {"provider": "claude", "machine_state": SENTINEL, "run_marker_present": None,
+     "job_config_present": None},
+    {"provider": "claude", "machine_state": "stopped", "run_marker_present": SENTINEL,
+     "job_config_present": False},
+])  # fmt: skip
+def test_output_shape_check_refuses_a_row_outside_the_closed_envelope(
+    env, capsys, caplog, monkeypatch, bad_row
+):
+    # The last line of defence: should an upstream regression build a row
+    # with an extra key or an out-of-domain value, the encoder refuses it and
+    # only the fixed fallback is printed.
+    monkeypatch.setattr(fly_runner, "project_machine_status",
+                        lambda provider, machine, absent=False: dict(bad_row))  # fmt: skip
+    fake = Fake({mid: _machine(mid) for mid in IDS.values()})
+    code, out, err, logs = run(capsys, caplog, ["--provider", "claude"], fake)
+    assert code == 2 and out == fly_machine_status.FALLBACK_OUTPUT + "\n" and err == ""
     assert_no_leak(out, err, logs)
 
 
@@ -386,6 +453,136 @@ def test_interruption_prints_a_fixed_envelope(env, capsys, caplog, monkeypatch):
     code, out, err, logs = run(capsys, caplog, [])
     assert code == 2 and envelope(out)["errors"][0]["code"] == "interrupted"
     assert_no_leak(out, err, logs)
+
+
+# 4b. Low-level HTTP loggers, children included, are silent during the run.
+
+CHILD_LOGGERS = ("httpcore.http11", "httpcore.connection", "httpcore.http2",
+                 "httpcore.proxy", "httpcore.socks", "hpack.hpack", "h2.connection")  # fmt: skip
+
+
+def test_child_transport_loggers_never_reach_root_handlers(env, capsys, caplog):
+    # MockTransport never goes through httpcore, so this transport emits
+    # through the real child logger names itself, as httpcore's trace does,
+    # plus a child first created during the run. caplog's handler sits on the
+    # root logger at DEBUG: anything propagating there is captured.
+    fresh_child = "httpcore.created_during_run_" + str(time.monotonic_ns())
+
+    class Chatty(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            for name in (*CHILD_LOGGERS, fresh_child, "httpx", "httpcore"):
+                child = logging.getLogger(name)
+                child.debug("trace %s %s", SENTINEL, request.url)
+                child.warning("trace %s", SENTINEL)
+            mid = request.url.path.rsplit("/", 1)[-1]
+            return httpx.Response(200, json=_machine(mid))
+
+    caplog.set_level(logging.DEBUG)
+    code = fly_machine_status.main([], transport=Chatty())
+    out, err = capsys.readouterr()
+    assert code == 0 and envelope(out)["complete"] is True
+    assert SENTINEL not in caplog.text and err == ""  # not root, not last resort
+    assert_no_leak(out, err, caplog.text)
+    # Restored afterwards, and the instrument itself is live: the same child
+    # logger now reaches the root handler.
+    for name in (*CHILD_LOGGERS, fresh_child, "httpx", "httpcore"):
+        restored = logging.getLogger(name)
+        assert restored.disabled is False and restored.propagate is True
+        assert not any(isinstance(h, logging.NullHandler) for h in restored.handlers)
+    logging.getLogger("httpcore.http11").debug("after-the-run-marker")
+    assert "after-the-run-marker" in caplog.text
+
+
+# 4c. The deadline bounds the whole run, including cancelled work and close.
+
+
+async def _ignore_cancellation_forever():
+    while True:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            continue
+
+
+class IgnoresCancellation(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request):
+        await _ignore_cancellation_forever()
+
+
+class HangsOnClose(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request):
+        mid = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, json=_machine(mid))
+
+    async def aclose(self):
+        await _ignore_cancellation_forever()
+
+
+@pytest.mark.parametrize("transport_cls", [IgnoresCancellation, HangsOnClose])
+def test_deadline_bounds_cancelled_reads_and_a_hung_close(
+    env, capsys, caplog, monkeypatch, transport_cls
+):
+    deadline = 0.4
+    monkeypatch.setattr(fly_machine_status, "DEADLINE_SECONDS", deadline)
+    caplog.set_level(logging.DEBUG)
+    result: dict = {}
+
+    def target():
+        result["code"] = fly_machine_status.main([], transport=transport_cls())
+
+    # A thread, so a regression fails this test instead of hanging the suite.
+    worker = threading.Thread(target=target, daemon=True)
+    started = time.monotonic()
+    worker.start()
+    worker.join(timeout=10)
+    elapsed = time.monotonic() - started
+    assert not worker.is_alive(), "the run outlived its deadline"
+    assert elapsed < deadline + 1.0
+    out, err = capsys.readouterr()
+    doc = envelope(out)
+    assert result["code"] == 2 and doc["complete"] is False and err == ""
+    assert [e["code"] for e in doc["errors"]] == ["timed_out"] * 3
+    assert all(r["machine_state"] == "unknown" for r in doc["machines"])
+    assert "Traceback" not in out + err + caplog.text
+    assert_no_leak(out, err, caplog.text)
+
+
+def test_a_read_that_finished_keeps_its_row_when_another_ignores_cancellation(
+    env, capsys, caplog, monkeypatch
+):
+    # The drain after cancelling is itself bounded inside collect, so a stuck
+    # sibling costs only its own row, not the rows already read.
+    monkeypatch.setattr(fly_machine_status, "DEADLINE_SECONDS", 0.4)
+
+    class OneStuck(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            mid = request.url.path.rsplit("/", 1)[-1]
+            if mid == IDS["codex"]:
+                await _ignore_cancellation_forever()
+            return httpx.Response(200, json=_machine(mid))
+
+    caplog.set_level(logging.DEBUG)
+    result: dict = {}
+    worker = threading.Thread(
+        target=lambda: result.update(
+            code=fly_machine_status.main([], transport=OneStuck())
+        ),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=10)
+    assert not worker.is_alive(), "the run outlived its deadline"
+    out, err = capsys.readouterr()
+    doc = envelope(out)
+    assert result["code"] == 2 and err == ""
+    assert [r["machine_state"] for r in doc["machines"]] == [
+        "stopped",
+        "unknown",
+        "stopped",
+    ]
+    assert doc["errors"] == [
+        {"provider": "codex", "code": "timed_out", "http_status": None}
+    ]
 
 
 # 5. The transport oracle: GET of the exact known paths only, nothing else.
@@ -456,9 +653,15 @@ def test_projector_builds_fresh_records(env):
         fly_runner.project_machine_status("claude", None, absent=True)["machine_state"]
         == "absent"
     )
-    assert (
-        fly_runner.project_machine_status("claude", None)["machine_state"] == "unknown"
-    )
+    # Malformed input is unknown with null predicates: null, never false.
+    unknown = {"provider": "claude", "machine_state": "unknown",
+               "run_marker_present": None, "job_config_present": None}  # fmt: skip
+    assert fly_runner.project_machine_status("claude", None) == unknown
+    list_config = _machine(IDS["claude"], "stopped", [{"env": {"A": "1"}}])
+    assert fly_runner.project_machine_status("claude", list_config) == unknown
+    assert fly_runner.project_machine_status("claude", [SENTINEL]) == unknown
+    unknown_state = _machine(IDS["claude"], "zzz-unrecognized", {"env": {"A": "1"}})
+    assert fly_runner.project_machine_status("claude", unknown_state) == unknown
 
 
 def test_script_entrypoint_as_a_file(tmp_path):
