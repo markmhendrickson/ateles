@@ -280,6 +280,11 @@ class TestEmitHarnessEventRawCredentialFallback:
                 def log_message(self, *args):
                     return
 
+            procs = []
+            real_launch = si._launch_sender
+            monkeypatch.setattr(
+                si, "_launch_sender", lambda payload: procs.append(real_launch(payload))
+            )
             with _http_server(RedirectHandler) as source_url:
                 monkeypatch.setenv("NEOTOMA_BASE_URL", source_url)
                 monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "synthetic-redirect-token")
@@ -290,10 +295,18 @@ class TestEmitHarnessEventRawCredentialFallback:
                     log_tag="redirect-test",
                     session_id="sess-redirect",
                 )
+                # The POST now runs in a detached sender; wait for it here so
+                # the servers are still up while it runs.
+                assert len(procs) == 1
+                procs[0].wait(timeout=30)
 
         assert RedirectHandler.calls == 1
         assert received_authorization == []
-        assert "redirect" in capsys.readouterr().err.lower()
+        # The sender has no stderr the harness reads; its diagnostic goes to
+        # the per-checkout sender log instead.
+        log_text = (si.state_dir() / si._SENDER_LOG_NAME).read_text()
+        assert "redirect" in log_text.lower()
+        assert "synthetic-redirect-token" not in log_text
 
     def test_missing_env_file_present_loads_credentials_and_attempts_post(
         self, monkeypatch, tmp_path, capsys
@@ -321,10 +334,16 @@ class TestEmitHarnessEventRawCredentialFallback:
             return _FakeResponse()
 
         monkeypatch.setattr(si.urllib.request, "urlopen", _fake_urlopen)
+        payloads = []
+        monkeypatch.setattr(si, "_launch_sender", payloads.append)
 
         si.emit_harness_event_raw(
             "test-slug", {"event_type": "x"}, log_tag="test", session_id="sess-a",
         )
+        # The POST runs in the detached sender; drive its delivery function
+        # with the exact payload the hook handed over.
+        assert len(payloads) == 1
+        si.deliver_harness_event(payloads[0])
         assert len(seen_requests) == 1
         assert seen_requests[0].full_url == "https://file.example/store"
         assert seen_requests[0].headers.get("Authorization") == "Bearer file-token"
@@ -359,12 +378,15 @@ class TestEmitHarnessEventRawCredentialFallback:
             "urlopen",
             lambda *args, **kwargs: requests.append((args, kwargs)),
         )
+        launches = []
+        monkeypatch.setattr(si, "_launch_sender", launches.append)
 
         si.emit_harness_event_raw(
             "test-slug", {"event_type": "x"}, log_tag="test", session_id="sess-partial",
         )
 
         assert requests == []
+        assert launches == []
         assert "audit emission is being skipped" in capsys.readouterr().err
 
     @pytest.mark.parametrize(
@@ -401,10 +423,14 @@ class TestEmitHarnessEventRawCredentialFallback:
             return _FakeResponse()
 
         monkeypatch.setattr(si.urllib.request, "urlopen", _fake_urlopen)
+        payloads = []
+        monkeypatch.setattr(si, "_launch_sender", payloads.append)
 
         si.emit_harness_event_raw(
             "test-slug", {"event_type": "x"}, log_tag="test", session_id="sess-file",
         )
+        assert len(payloads) == 1
+        si.deliver_harness_event(payloads[0])
 
         assert len(requests) == 1
         assert requests[0].full_url == "https://file.example/store"

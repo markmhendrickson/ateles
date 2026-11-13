@@ -407,6 +407,79 @@ class TestWarnVsBlockBranch:
         assert code == 0
         assert calls == []
 
+    def test_emitted_discriminator_is_the_last_uuid_and_advances(
+        self, tmp_path, monkeypatch
+    ):
+        """The decision-shape row's idempotency key must be stable for a
+        re-run of the same stop and new for the next stop: `main()` passes
+        the transcript's last row uuid as `discriminator`."""
+        def _finding_row(uuid):
+            return {
+                "type": "assistant",
+                "uuid": uuid,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Shall I dispatch the fix now?"}],
+                },
+            }
+
+        p = tmp_path / "uuid_transcript.jsonl"
+        rows = [
+            {"type": "user", "uuid": "u-1", "message": {"role": "user", "content": "go"}},
+            _finding_row("a-1"),
+        ]
+        p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        calls = _no_emit(monkeypatch)
+        monkeypatch.setattr(dsg, "ENFORCE", False)
+        ev = {"transcript_path": str(p), "session_id": "s5"}
+
+        for _ in range(2):  # the same stop, run twice
+            monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(ev)))
+            dsg.main()
+        rows += [
+            {"type": "user", "uuid": "u-2", "message": {"role": "user", "content": "again"}},
+            _finding_row("a-2"),
+        ]
+        p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(ev)))
+        dsg.main()
+
+        assert [c[1].get("discriminator") for c in calls] == ["a-1", "a-1", "a-2"]
+
+    @pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\u0085"])
+    def test_two_consecutive_stops_get_distinct_keys_despite_raw_separators(
+        self, tmp_path, monkeypatch, sep
+    ):
+        """Regression (qa, PR 1743 round 2): rows carrying a raw U+2028 /
+        U+2029 / U+0085 were cut apart by str.splitlines() in the tail
+        reader, so stop 2 reused stop 1's key and its audit row was lost."""
+        def _row(uuid, role, text):
+            return {"type": role, "uuid": uuid,
+                    "message": {"role": role, "content": [{"type": "text", "text": text}]}}
+
+        finding = f"Shall I dispatch the fix now?{sep}"
+        p = tmp_path / "sep_transcript.jsonl"
+
+        def _write(rows):
+            p.write_text(
+                "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+                encoding="utf-8",
+            )
+
+        rows = [_row("u-1", "user", "go"), _row("a-1", "assistant", finding)]
+        _write(rows)
+        calls = _no_emit(monkeypatch)
+        monkeypatch.setattr(dsg, "ENFORCE", False)
+        ev = {"transcript_path": str(p), "session_id": "s6"}
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(ev)))
+        dsg.main()
+        rows += [_row("u-2", "user", f"again{sep}please"), _row("a-2", "assistant", finding)]
+        _write(rows)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(ev)))
+        dsg.main()
+
+        assert [c[1].get("discriminator") for c in calls] == ["a-1", "a-2"]
+
 
 class TestQuotedProseDoesNotFire:
     """ateles#1105 — the gate must judge how the turn ENDS, not what it quotes.

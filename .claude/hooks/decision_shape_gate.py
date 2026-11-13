@@ -99,7 +99,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _session_integrity import emit_harness_event_raw, read_hook_input  # noqa: E402
+from _session_integrity import (  # noqa: E402
+    emit_harness_event_raw, read_hook_input, transcript_event_discriminator,
+)
 
 ENFORCE = os.environ.get("ATELES_DECISION_SHAPE_ENFORCE", "") in ("1", "true", "yes")
 
@@ -556,11 +558,16 @@ def findings(text: str, asked_via_tool: bool = True) -> list[str]:
     return out
 
 
-def emit_finding_event(session_id: str, found: list[str], enforced: bool) -> None:
+def emit_finding_event(
+    session_id: str, found: list[str], enforced: bool, discriminator: str = "",
+) -> None:
     """Record this Stop-hook's finding via the shared harness_event POST
     helper, so a violation leaves a durable trace regardless of WARN/BLOCK
     mode. Own vocabulary (`enforced` + `findings`), not the session-integrity
     `integral|violated|exempt` enum — see the OBSERVABILITY docstring note.
+    `discriminator` (the transcript's last row uuid) keeps the idempotency
+    key stable for a retry of the same stop; "" falls back to the timestamp
+    key shape.
     """
     emit_harness_event_raw(f"decision-shape-{session_id}", {
         "event_type": "decision_shape_check",
@@ -568,7 +575,7 @@ def emit_finding_event(session_id: str, found: list[str], enforced: bool) -> Non
         "enforced": enforced,
         "findings_count": len(found),
         "findings": found,
-    }, log_tag="decision-shape", session_id=session_id)
+    }, log_tag="decision-shape", session_id=session_id, discriminator=discriminator)
 
 
 def main() -> int:
@@ -600,7 +607,10 @@ def main() -> int:
     # (BLOCK) vanishes once ATELES_DECISION_SHAPE_ENFORCE changes or the
     # session ends; the harness_event is what a later audit can check against.
     try:
-        emit_finding_event(ev.get("session_id", ""), found, ENFORCE)
+        emit_finding_event(
+            ev.get("session_id", ""), found, ENFORCE,
+            discriminator=transcript_event_discriminator(transcript),
+        )
     except Exception:
         pass
 
