@@ -484,3 +484,48 @@ def test_assess_memo_finds_duration_for_qta_audio(tmp_path, monkeypatch):
     assert found_transcript == transcript
     assert report is not None
     assert report.metrics.get("duration_seconds") == 200.0
+
+
+# ── Import scope: a run triggered by N new memos imports only those N ───────
+
+
+def test_import_command_names_only_the_new_files(tmp_path):
+    new = [tmp_path / "a.m4a", tmp_path / "b.qta"]
+    cmd = watch.build_import_command(new)
+    assert "--source" not in cmd
+    assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--file"] == [str(p) for p in new]
+    assert "--analyze" not in cmd  # ateles#747
+
+
+def test_run_import_passes_the_new_file_list(tmp_path, monkeypatch):
+    captured = {}
+
+    class _Done:
+        returncode = 0
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return _Done()
+
+    monkeypatch.setattr(watch.subprocess, "run", fake_run)
+    new = [tmp_path / "a.m4a", tmp_path / "b.m4a"]
+
+    assert watch.run_import(new) == 0
+    assert "--source" not in captured["cmd"]
+    assert captured["cmd"].count("--file") == 2
+
+
+def test_run_import_reports_lookup_unavailable(tmp_path, monkeypatch):
+    class _Done:
+        returncode = watch.IMPORT_EXIT_LOOKUP_UNAVAILABLE
+
+    monkeypatch.setattr(watch.subprocess, "run", lambda *_a, **_k: _Done())
+    monkeypatch.setattr(watch, "log_warning", lambda *_a, **_k: None)
+    assert watch.run_import([tmp_path / "a.m4a"]) == watch.IMPORT_EXIT_LOOKUP_UNAVAILABLE
+
+
+def test_lookup_unavailable_code_matches_the_importer():
+    sys.path.insert(0, str(watch.IMPORT_SCRIPT.parent))
+    import import_audio_from_desktop as iad
+
+    assert watch.IMPORT_EXIT_LOOKUP_UNAVAILABLE == iad.EXIT_LOOKUP_UNAVAILABLE

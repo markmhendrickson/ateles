@@ -648,8 +648,32 @@ def find_new_files(seen: set[str]) -> list[Path]:
     )
 
 
-def run_import() -> None:
-    """Invoke the import script, which handles dedup, transcription, and Neotoma storage."""
+# import_audio_from_desktop.py exits with this when its already-imported lookup
+# failed for every file and nothing was staged (EXIT_LOOKUP_UNAVAILABLE there).
+IMPORT_EXIT_LOOKUP_UNAVAILABLE = 75
+
+
+class _ImportDeferred(Exception):
+    """The importer could not tell new memos from imported ones; retry later."""
+
+
+def build_import_command(new_files: list[Path]) -> list[str]:
+    """The importer invocation for exactly the memos this poll found.
+
+    Passing each new file with --file (rather than --source <Recordings>) is
+    what keeps a run triggered by N new memos from rescanning the whole
+    library and re-staging every not-yet-stored recording in it.
+    """
+    cmd = [sys.executable, str(IMPORT_SCRIPT)]
+    for f in new_files:
+        cmd.extend(["--file", str(f)])
+    return cmd
+
+
+def run_import(new_files: list[Path]) -> int | None:
+    """Import exactly ``new_files``; the importer handles dedup, transcription
+    and Neotoma storage. Returns the importer's exit code, or None when it
+    could not be run to completion."""
     log.info("New Voice Memos detected — running import pipeline...")
     try:
         # No --analyze/--no-analyze flag here: import_audio_from_desktop.py
@@ -657,23 +681,25 @@ def run_import() -> None:
         # --analyze was never a declared argument, so passing it made
         # argparse exit 2 on every run (ateles#747). Do not restore it.
         result = subprocess.run(
-            [
-                sys.executable,
-                str(IMPORT_SCRIPT),
-                "--source",
-                str(RECORDINGS_DIR),
-            ],
+            build_import_command(new_files),
             timeout=7200,  # 2 hours max
             env=os.environ,
         )
         if result.returncode == 0:
             log.info("Import pipeline completed successfully.")
+        elif result.returncode == IMPORT_EXIT_LOOKUP_UNAVAILABLE:
+            log_warning(
+                "Import skipped: already-imported lookup unavailable; "
+                "new memos stay unseen and are retried next poll."
+            )
         else:
             log_warning(f"Import pipeline exited with code {result.returncode}.")
+        return result.returncode
     except subprocess.TimeoutExpired:
         log_error("Import pipeline timed out after 2 hours.")
     except Exception as e:
         log_error(f"Import pipeline error: {e}")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1066,8 +1092,15 @@ def main() -> None:
                     f"Importing {n} new memo{'s' if n != 1 else ''}…",
                 )
                 _job = _activity.started(f"importing {n} new voice memo{'s' if n != 1 else ''}") if _activity else None
+                lookup_unavailable = False
                 try:
-                    run_import()
+                    import_rc = run_import(new_files)
+                    lookup_unavailable = import_rc == IMPORT_EXIT_LOOKUP_UNAVAILABLE
+                    if lookup_unavailable:
+                        # Nothing was staged or transcribed. Leave the memos
+                        # unseen and unheld so the next poll retries them;
+                        # with nothing copied, a retry is only a lookup.
+                        raise _ImportDeferred()
 
                     # --- Clarity gate ---------------------------------------
                     # Transcription has run; decide per memo whether the
@@ -1137,18 +1170,22 @@ def main() -> None:
                         if entity_summary and entity_summary != "none":
                             _summary += f"; entities: {entity_summary[:80]}"
                         _job.finished(_summary)
+                except _ImportDeferred:
+                    if _job:
+                        _job.failed("already-imported lookup unavailable")
                 except Exception as _exc:
                     if _job:
                         _job.failed(f"import pipeline error: {type(_exc).__name__}")
                     raise
-                # Mark every memo we handled as seen — including held ones.
-                # A held memo must NOT be re-imported on the next poll (that
-                # was the hot-loop failure), but it is also not lost: it stays
-                # in held_memos.json and is re-surfaced on the reminder
-                # interval until released or discarded.
-                for f in new_files:
-                    seen.add(f.name)
-                save_seen(seen)
+                if not lookup_unavailable:
+                    # Mark every memo we handled as seen — including held
+                    # ones. A held memo must NOT be re-imported on the next
+                    # poll (that was the hot-loop failure), but it is also not
+                    # lost: it stays in held_memos.json and is re-surfaced on
+                    # the reminder interval until released or discarded.
+                    for f in new_files:
+                        seen.add(f.name)
+                    save_seen(seen)
             else:
                 log.debug("No new Voice Memos.")
 
