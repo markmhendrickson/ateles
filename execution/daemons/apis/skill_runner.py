@@ -1386,9 +1386,14 @@ def _write_harness_event(
     duration_ms: int | None = None,
     usage: "DispatchUsage | None" = None,
     resolved_tier: "model_tiering.ResolvedTier | None" = None,
+    event_at: str | None = None,
 ) -> None:
     """
     Best-effort write of a harness_event entity to Neotoma.
+
+    ``event_at`` is when the event happened. A caller that writes later than
+    that (the paced audit queue) passes the time it captured; without one the
+    write time is used, which is the event time for an inline write.
 
     Uses the same /store endpoint and pattern as lib/activity/_store_activity_log.
     Never raises — a harness_event failure must not crash dispatch.
@@ -1423,7 +1428,7 @@ def _write_harness_event(
         )
         return
 
-    event_at = datetime.now(timezone.utc).isoformat()
+    event_at = event_at or datetime.now(timezone.utc).isoformat()
     # canonical_name_fields per schema: session_id, event_type, event_at.
     session_key = agent_session_id or f"{role}:{task_entity_id}"
     idempotency_key = f"harness-event-{session_key}-{event_type}-{event_at}"
@@ -1564,8 +1569,14 @@ async def _emit_harness_event(**fields) -> None:
     at a time, so the dispatch it records never waits on Neotoma. Anywhere
     else it runs inline on a worker thread, as the direct
     ``asyncio.to_thread`` call it replaces did. ``fields`` are captured now,
-    so a queued row records the values at the moment of the event.
+    and ``event_at`` is stamped now unless the caller already set it, so a
+    queued row records the moment of the event, not the moment of its write
+    (``event_at`` is also part of the row's idempotency key).
     """
+    fields = {
+        **fields,
+        "event_at": fields.get("event_at") or datetime.now(timezone.utc).isoformat(),
+    }
     await audit_queue.emit(
         lambda: asyncio.to_thread(_write_harness_event, **fields),
         label=(
@@ -5127,7 +5138,51 @@ def _refuse_local_fallback(
     return result
 
 
-def _record_local_failover(
+def _local_failover_fields(
+    *,
+    skill: str,
+    role: str,
+    task_entity_id: str,
+    reason: str,
+    next_provider: str | None,
+    detail: str,
+) -> dict:
+    """The provider_failover row's fields, resolved at the failover.
+
+    The agent's signing subject and the local model are looked up here, and
+    the event time stamped here, so a row written later by the paced queue
+    still records what was true when the failover happened.
+    """
+    event_at = datetime.now(timezone.utc).isoformat()
+    try:
+        cfg = local_provider.load_config()
+    except Exception:  # noqa: BLE001 — provenance must not block the fallback
+        cfg = None
+    try:
+        agent_sub = _load_agent_def(role).aauth_sub
+    except Exception:  # noqa: BLE001 — provenance must not block the fallback
+        agent_sub = ""
+    return dict(
+        task_entity_id=task_entity_id,
+        role=role,
+        agent_sub=agent_sub,
+        event_type="provider_failover",
+        tool_name=f"{local_provider.LOCAL_PROVIDER}:{skill}",
+        success="false",
+        output_summary=(
+            f"provider={local_provider.LOCAL_PROVIDER} failover_reason={reason} "
+            f"next_provider={next_provider or 'none'} {detail}"
+        ),
+        usage=DispatchUsage(
+            provider=local_provider.LOCAL_PROVIDER,
+            model=cfg.model if cfg else None,
+            model_source="requested" if cfg else None,
+        ),
+        event_at=event_at,
+    )
+
+
+async def _record_local_failover(
     *,
     skill: str,
     role: str,
@@ -5136,30 +5191,22 @@ def _record_local_failover(
     next_provider: str | None,
     detail: str,
 ) -> None:
-    """harness_event row naming a claude-local failure and where the run went next."""
-    cfg = local_provider.load_config()
+    """harness_event row naming a claude-local failure and where the run went next.
+
+    Its values are resolved now (on a worker thread: the agent lookup may read
+    a file), then the row goes through ``_emit_harness_event``. Never raises.
+    """
     try:
-        agent_sub = _load_agent_def(role).aauth_sub
-    except Exception:  # noqa: BLE001 — provenance must not block the fallback
-        agent_sub = ""
-    try:
-        _write_harness_event(
-            task_entity_id=task_entity_id,
+        fields = await asyncio.to_thread(
+            _local_failover_fields,
+            skill=skill,
             role=role,
-            agent_sub=agent_sub,
-            event_type="provider_failover",
-            tool_name=f"{local_provider.LOCAL_PROVIDER}:{skill}",
-            success="false",
-            output_summary=(
-                f"provider={local_provider.LOCAL_PROVIDER} failover_reason={reason} "
-                f"next_provider={next_provider or 'none'} {detail}"
-            ),
-            usage=DispatchUsage(
-                provider=local_provider.LOCAL_PROVIDER,
-                model=cfg.model if cfg else None,
-                model_source="requested" if cfg else None,
-            ),
+            task_entity_id=task_entity_id,
+            reason=reason,
+            next_provider=next_provider,
+            detail=detail,
         )
+        await _emit_harness_event(**fields)
     except Exception as exc:  # noqa: BLE001
         log.debug(f"[apis] failover harness_event write failed: {exc}")
 
@@ -5528,7 +5575,7 @@ async def _run_provider_attempts(
                     else "no cheapest-tier model bound for a frontier provider — refusing"
                 )
             )
-            failover_fields = dict(
+            await _record_local_failover(
                 skill=skill,
                 role=(role or skill).lower(),
                 task_entity_id=task_entity_id,
@@ -5538,13 +5585,6 @@ async def _run_provider_attempts(
                     ("" if next_provider else "frontier_fallback=refused ")
                     + (result.error or result.stderr[:200])
                 ),
-            )
-            await audit_queue.emit(
-                # Bound now: this loop rebinds failover_fields on its next pass.
-                lambda fields=failover_fields: asyncio.to_thread(
-                    _record_local_failover, **fields
-                ),
-                label=f"harness_event provider_failover task={task_entity_id}",
             )
             if not allowed:
                 return _refuse_local_fallback(

@@ -11,7 +11,9 @@ Four behaviours, each with a test that fails without its change:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -144,8 +146,9 @@ async def test_skill_runner_harness_events_use_the_same_queue(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_full_queue_drops_the_row_with_a_warning(caplog):
-    queue = audit_queue.PacedAuditQueue(max_pending=2)
+async def test_a_full_queue_drops_the_row_with_a_rate_limited_warning(caplog):
+    clock = _FakeClock()
+    queue = audit_queue.PacedAuditQueue(max_pending=2, clock=clock, sleep=clock.sleep)
     release = asyncio.Event()
     ran: list[str] = []
 
@@ -156,18 +159,84 @@ async def test_a_full_queue_drops_the_row_with_a_warning(caplog):
             ran.append(name)
         return run
 
+    def drop_warnings():
+        return [
+            record.getMessage()
+            for record in caplog.records
+            if "audit row not written" in record.getMessage()
+        ]
+
     assert queue.submit(job("first"), label="first")
     await asyncio.sleep(0)  # the worker takes "first" and waits on it
     with caplog.at_level(logging.WARNING, logger="apis.audit_queue"):
         accepted = [queue.submit(job(name), label=name) for name in ("b", "c", "d")]
+        # Two more drops inside the same minute: counted, not logged.
+        queue.submit(job("e"), label="e")
+        queue.submit(job("f"), label="f")
+        assert len(drop_warnings()) == 1
+        clock.now += audit_queue.DROP_WARNING_INTERVAL_SECONDS
+        queue.submit(job("g"), label="g")
 
     assert accepted == [True, True, False]
-    assert queue.dropped == 1
-    assert "dropped d" in caplog.text
+    assert queue.dropped == 4
+    first, second = drop_warnings()
+    assert "queue is full" in first and "d was dropped and will not be retried" in first
+    assert "1 dropped since start, 0 of them not logged" in first
+    assert "g was dropped" in second
+    assert "4 dropped since start, 2 of them not logged" in second
     queue.min_gap_seconds = 0
     release.set()
     await queue.join()
     assert ran == ["first", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_the_worker_survives_a_job_that_raises(caplog):
+    queue = audit_queue.PacedAuditQueue(min_gap_seconds=0)
+    ran: list[str] = []
+
+    async def boom():
+        raise RuntimeError("store blew up")
+
+    async def good():
+        ran.append("good")
+
+    with caplog.at_level(logging.WARNING, logger="apis.audit_queue"):
+        queue.submit(boom, label="bad-row")
+        queue.submit(good, label="good-row")
+        worker = queue._worker
+        # Bounded: a worker killed by the raise would leave join() waiting forever.
+        await asyncio.wait_for(queue.join(), timeout=2)
+
+    assert ran == ["good"]
+    assert queue._worker is worker and not worker.done()
+    assert queue.in_flight() == 0
+    assert "audit store bad-row raised: RuntimeError: store blew up" in caplog.text
+    worker.cancel()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_logs_waiting_and_in_flight_rows(caplog):
+    queue = audit_queue.PacedAuditQueue(min_gap_seconds=0)
+    never = asyncio.Event()
+
+    async def hangs():
+        await never.wait()
+
+    for name in ("in-flight", "waiting-1", "waiting-2"):
+        queue.submit(hangs, label=name)
+    await asyncio.sleep(0)  # the worker starts the first row
+    assert queue.in_flight() == 1 and queue.pending() == 2
+
+    with caplog.at_level(logging.WARNING, logger="apis.audit_queue"):
+        queue._worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queue._worker
+
+    assert (
+        "audit queue stopped with 3 row(s) not confirmed written: 2 waiting, "
+        "1 in flight that may not have landed"
+    ) in caplog.text
 
 
 def test_without_pacing_enabled_audit_stores_stay_inline(monkeypatch):
@@ -185,6 +254,77 @@ def test_without_pacing_enabled_audit_stores_stay_inline(monkeypatch):
 
     assert audit_queue.active() is None
     assert len(stored) == 1 and stored[0].startswith("harness-event-")
+
+
+@pytest.mark.asyncio
+async def test_queued_skill_runner_row_records_the_event_time(monkeypatch):
+    """The row's event_at (and so its idempotency key) is the moment of the
+    event, not the moment the queue gets round to writing it."""
+    clock = _FakeClock()
+    queue = audit_queue.enable(
+        audit_queue.PacedAuditQueue(clock=clock, sleep=clock.sleep)
+    )
+    event_time = datetime(2026, 11, 13, 19, 48, 0, tzinfo=timezone.utc)
+    now = [event_time]
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now[0]
+
+    bodies: list[dict] = []
+
+    def fake_urlopen(req, timeout=None):
+        bodies.append(json.loads(req.data))
+        raise OSError("no network in tests")  # swallowed as a failed write
+
+    monkeypatch.setenv("NEOTOMA_BASE_URL", "https://neotoma.invalid")
+    monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", "not-a-real-token")
+    monkeypatch.setattr(skill_runner, "datetime", _FrozenDatetime)
+    monkeypatch.setattr(skill_runner.urllib.request, "urlopen", fake_urlopen)
+
+    await skill_runner._emit_harness_event(
+        task_entity_id="ent_task", role="cicada", agent_sub="",
+        event_type="subprocess", tool_name="claude:cicada", success="true",
+    )
+    now[0] = event_time + timedelta(minutes=5)  # the queue writes it later
+    await queue.join()
+
+    (body,) = bodies
+    assert body["entities"][0]["event_at"] == event_time.isoformat()
+    assert body["idempotency_key"].endswith(event_time.isoformat())
+
+
+@pytest.mark.asyncio
+async def test_pr_webhook_pull_request_row_is_written_inline_while_audit_is_queued(
+    monkeypatch,
+):
+    queue = audit_queue.enable()
+    never = asyncio.Event()
+    stores: list[tuple[list[str], dict]] = []
+
+    async def fake_store(self, entities, idempotency_key, **kwargs):
+        stores.append(([entity["entity_type"] for entity in entities], kwargs))
+        if kwargs.get("retry_once"):
+            await never.wait()  # the audit store hangs
+        return {"entities": []}
+
+    monkeypatch.setattr(SwarmDispatcher, "_store_entities", fake_store)
+    dispatcher = SwarmDispatcher(_StubNotifier(), _config(neotoma_token="t"))
+
+    await asyncio.wait_for(
+        dispatcher._log_harness_event(_trigger(body="Closes #1141.")), timeout=2
+    )
+
+    # Before _log_harness_event returned: the pull_request row was stored on
+    # the caller's time, as a plain store, and the audit row is still queued.
+    inline = [kwargs for types, kwargs in stores if types == ["pull_request"]]
+    assert inline == [{}]
+    await asyncio.sleep(0)
+    audit = [kwargs for types, kwargs in stores if types == ["harness_event"]]
+    assert audit == [{"retry_once": True}]
+    assert queue.in_flight() == 1
+    queue._worker.cancel()
 
 
 # ── (c) a slow audit store does not delay the work it records ───────────────
@@ -255,11 +395,10 @@ async def test_slow_panel_audit_store_does_not_delay_the_panel(monkeypatch):
 # ── (d) a timeout is an unknown outcome: one same-key retry ─────────────────
 
 
-def _status_error(code: int) -> httpx.HTTPStatusError:
+def _status_error(code: int, body: dict | None = None) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "https://neotoma.invalid/store")
-    return httpx.HTTPStatusError(
-        "status", request=request, response=httpx.Response(code, request=request)
-    )
+    response = httpx.Response(code, request=request, json=body or {})
+    return httpx.HTTPStatusError("status", request=request, response=response)
 
 
 def _run_audit_store(monkeypatch, outcomes):
@@ -299,7 +438,7 @@ def test_timed_out_audit_store_is_retried_once_with_the_same_key(monkeypatch, ca
 
 
 def test_audit_store_retries_a_timeout_at_most_once(monkeypatch, caplog):
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         calls, pauses = _run_audit_store(
             monkeypatch,
             [httpx.ReadTimeout(""), httpx.ReadTimeout(""), {"entities": []}],
@@ -307,14 +446,52 @@ def test_audit_store_retries_a_timeout_at_most_once(monkeypatch, caplog):
 
     assert len(calls) == 2
     assert pauses == [2.0]
-    assert "Neotoma store failed (harness-event-" in caplog.text
+    # A timeout is an unknown outcome, not a failure: the row may be stored.
+    assert "outcome unknown after 2 attempt(s) (ReadTimeout); the row may have been stored" in caplog.text
+    assert "Neotoma store failed" not in caplog.text
 
 
-def test_audit_store_does_not_retry_a_rejection(monkeypatch):
-    calls, pauses = _run_audit_store(monkeypatch, [_status_error(400), {}])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error_code": "ERR_IDEMPOTENCY_COLLISION", "message": "reuse"},
+        {"error": {"code": "ERR_IDEMPOTENCY_MISMATCH", "message": "reuse"}},
+    ],
+)
+def test_retry_refused_for_a_used_key_is_logged_as_already_stored(monkeypatch, caplog, body):
+    status = 409 if "error_code" in body else 400
+    with caplog.at_level(logging.INFO):
+        calls, _pauses = _run_audit_store(
+            monkeypatch, [httpx.ReadTimeout(""), _status_error(status, body)]
+        )
+
+    assert len(calls) == 2
+    assert "already stored" in caplog.text
+    assert "outcome unknown" not in caplog.text and "Neotoma store failed" not in caplog.text
+
+
+def test_retry_refused_for_another_reason_after_a_timeout_is_an_unknown_outcome(
+    monkeypatch, caplog
+):
+    with caplog.at_level(logging.INFO):
+        calls, _pauses = _run_audit_store(
+            monkeypatch,
+            [httpx.ReadTimeout(""), _status_error(400, {"error_code": "VALIDATION_ERROR"})],
+        )
+
+    assert len(calls) == 2
+    assert "outcome unknown" in caplog.text and "HTTP 400 VALIDATION_ERROR" in caplog.text
+    assert "already stored" not in caplog.text and "Neotoma store failed" not in caplog.text
+
+
+def test_audit_store_does_not_retry_a_rejection(monkeypatch, caplog):
+    with caplog.at_level(logging.ERROR):
+        calls, pauses = _run_audit_store(monkeypatch, [_status_error(400), {}])
 
     assert len(calls) == 1
     assert pauses == []
+    # Rejected on the first attempt, with no earlier timeout: a real failure.
+    assert "Neotoma store failed (harness-event-" in caplog.text
 
 
 @pytest.mark.parametrize("max_retries,expected_attempts", [(0, 1), (1, 2), (None, 3)])

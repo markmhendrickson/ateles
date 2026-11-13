@@ -174,6 +174,33 @@ AUDIT_STORE_TOTAL_SECONDS = (
 PR_REVIEW_STORE_ATTEMPT_TIMEOUT_SECONDS = 90.0
 PR_REVIEW_STORE_TOTAL_SECONDS = 240.0
 
+# Neotoma's error codes for a store whose idempotency key it already holds:
+# 409 ERR_IDEMPOTENCY_COLLISION and 400 ERR_IDEMPOTENCY_MISMATCH. An audit
+# retry carries the first attempt's exact body and key, so either one on the
+# retry means the first attempt was stored.
+NEOTOMA_KEY_ALREADY_USED_CODES = frozenset(
+    {"ERR_IDEMPOTENCY_COLLISION", "ERR_IDEMPOTENCY_MISMATCH"}
+)
+
+
+def _neotoma_error_code(exc: httpx.HTTPStatusError) -> str:
+    """The error code in a Neotoma error reply, or "" when there is none.
+
+    Neotoma answers in two shapes: ``{"error_code": ...}`` and
+    ``{"error": {"code": ...}}``.
+    """
+    try:
+        body = exc.response.json()
+    except Exception:  # noqa: BLE001 — a body that is not JSON has no code
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    code = body.get("error_code")
+    nested = body.get("error")
+    if not code and isinstance(nested, dict):
+        code = nested.get("code")
+    return code if isinstance(code, str) else ""
+
 # Parent-issue resolution (ateles#434, ateles#613, ateles#300).
 #
 # Two DISTINCT questions, deliberately not the same regex:
@@ -12062,8 +12089,9 @@ class SwarmDispatcher:
 
         # Build a PR-shaped trigger the readiness/route helpers expect.
         # Its delivery_id intentionally remains empty. handle_trigger already
-        # persisted one harness_event for every GitHub delivery before claims
-        # are coalesced; downstream panel state is canonically keyed by PR,
+        # queued one harness_event audit row for every GitHub delivery before
+        # claims are coalesced (best effort: a full queue drops it, and nothing
+        # reads it back); downstream panel state is canonically keyed by PR,
         # exact head, lens and content, not by whichever equivalent delivery
         # happened to win this in-process claim.
         pr_trigger = self._pr_trigger_from_api(trigger.repository, pr)
@@ -16294,21 +16322,9 @@ class SwarmDispatcher:
             return None
         try:
             if retry_once and not retry_transient:
-                result = await _neotoma_transient.acall_with_transient_retry(
-                    lambda time_limit: self._store_entities_once(
-                        entities, idempotency_key, time_limit, relationships
-                    ),
-                    label=f"store {idempotency_key}",
-                    attempt_timeout=NEOTOMA_STORE_ATTEMPT_TIMEOUT_SECONDS,
-                    total_seconds=AUDIT_STORE_TOTAL_SECONDS,
-                    max_retries=AUDIT_STORE_MAX_RETRIES,
+                return await self._store_with_one_retry(
+                    entities, idempotency_key, relationships
                 )
-                if isinstance(result, dict) and result.get("replayed"):
-                    log.info(
-                        f"[{DAEMON_NAME}] Neotoma store {idempotency_key}: "
-                        "answered as an idempotency replay (already stored)"
-                    )
-                return result
             if not retry_transient:
                 return await self._store_entities_once(
                     entities,
@@ -16331,6 +16347,83 @@ class SwarmDispatcher:
                 f"{_neotoma_transient.describe(exc)}"
             )
             return None
+
+    async def _store_with_one_retry(
+        self,
+        entities: list[dict],
+        idempotency_key: str,
+        relationships: list[dict] | None,
+    ) -> dict | None:
+        """The ``retry_once`` store, logged by what is actually known.
+
+        A timeout leaves the outcome unknown: the server may have stored the
+        row after the client gave up. So the log says "failed" only when
+        Neotoma rejected the first attempt; after a timeout it says the row
+        is already stored when the reply proves it (a replay, or a rejection
+        naming the idempotency key as already used), and "outcome unknown"
+        otherwise. None unless the store returned a result.
+        """
+        attempts = 0
+
+        async def attempt(time_limit: float) -> dict:
+            nonlocal attempts
+            attempts += 1
+            return await self._store_entities_once(
+                entities, idempotency_key, time_limit, relationships
+            )
+
+        try:
+            result = await _neotoma_transient.acall_with_transient_retry(
+                attempt,
+                label=f"store {idempotency_key}",
+                attempt_timeout=NEOTOMA_STORE_ATTEMPT_TIMEOUT_SECONDS,
+                total_seconds=AUDIT_STORE_TOTAL_SECONDS,
+                max_retries=AUDIT_STORE_MAX_RETRIES,
+            )
+        except httpx.HTTPStatusError as exc:
+            if attempts <= 1:
+                log.error(
+                    f"[{DAEMON_NAME}] Neotoma store failed ({idempotency_key}): "
+                    f"{_neotoma_transient.describe(exc)}"
+                )
+                return None
+            code = _neotoma_error_code(exc)
+            if code in NEOTOMA_KEY_ALREADY_USED_CODES:
+                log.info(
+                    f"[{DAEMON_NAME}] Neotoma store {idempotency_key}: already "
+                    f"stored — the retry was refused because Neotoma already "
+                    f"holds this idempotency key ({code})"
+                )
+            else:
+                log.warning(
+                    f"[{DAEMON_NAME}] Neotoma store {idempotency_key}: outcome "
+                    f"unknown — an earlier attempt timed out and may have been "
+                    f"stored, and the retry was refused "
+                    f"(HTTP {exc.response.status_code}{' ' + code if code else ''})"
+                )
+            return None
+        except Exception as exc:  # noqa: BLE001 — logged by kind below
+            if _neotoma_transient.is_transient(exc) or isinstance(
+                exc, asyncio.TimeoutError
+            ):
+                log.warning(
+                    f"[{DAEMON_NAME}] Neotoma store {idempotency_key}: outcome "
+                    f"unknown after {attempts} attempt(s) "
+                    f"({_neotoma_transient.describe(exc)}); the row may have "
+                    "been stored"
+                )
+            else:
+                log.error(
+                    f"[{DAEMON_NAME}] Neotoma store failed ({idempotency_key}): "
+                    f"{_neotoma_transient.describe(exc)}"
+                )
+            return None
+        if isinstance(result, dict) and result.get("replayed"):
+            log.info(
+                f"[{DAEMON_NAME}] Neotoma store {idempotency_key}: "
+                "answered as an idempotency replay (already stored)"
+            )
+        return result
 
     async def _store_entities_once(
         self,
