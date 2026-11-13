@@ -131,7 +131,7 @@ def fake_neotoma():
 
 
 def _run(cwd: Path, base_url: str | None = None, extra_env: dict | None = None):
-    env = {"PATH": "/usr/bin:/bin:/usr/local/bin"}
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "ATELES_POLICY_CACHE_TTL_S": "0"}
     if base_url:
         env["NEOTOMA_BASE_URL"] = base_url
     if extra_env:
@@ -154,7 +154,7 @@ def _run_reinject(cwd: Path):
         capture_output=True,
         text=True,
         cwd=str(cwd),
-        env={"PATH": "/usr/bin:/bin:/usr/local/bin"},
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "ATELES_POLICY_CACHE_TTL_S": "0"},
         timeout=15,
     )
 

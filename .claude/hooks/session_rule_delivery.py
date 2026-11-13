@@ -138,11 +138,19 @@ or unexpected exception prints nothing and exits 0. A per-turn hook that
 could ever block or visibly error on a transient network blip would make
 every prompt slower and noisier than the problem it fixes.
 
+NOTIFICATION TURNS ARE SKIPPED. A turn whose prompt is only an automated
+background-task notification (`is_task_notification_prompt`) makes no
+fetch, injects nothing and records nothing; the next operator prompt diffs
+against the last real delivery as before. The corpus read itself is shared
+for a short window across hook processes by
+`lib/daemon_runtime/policy_fetch_cache.py`.
+
 Never logs a rule body to stderr (only entity ids and counts) — some
 agent_policy rows hold operator payment details (CLAUDE.md).
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -299,11 +307,50 @@ _FULL_INDEX_HEADER = (
 )
 
 
+_NOTIFICATION_BLOCK = re.compile(
+    r"<task-notification>.*?</task-notification>", re.DOTALL
+)
+_SYSTEM_REMINDER_BLOCK = re.compile(
+    r"<system-reminder>.*?</system-reminder>", re.DOTALL
+)
+
+
+def is_task_notification_prompt(prompt: object) -> bool:
+    """True only when the prompt is an automated background-task notification
+    and nothing else.
+
+    The harness delivers a finished background task as a user turn whose text
+    starts with the `<task-notification>` envelope (the same marker
+    `decision_shape_gate._is_operator_prompt` already uses to tell such turns
+    from the operator). Such a turn carries no operator instruction, so
+    re-fetching the rule corpus for it is pure load; the next operator prompt
+    still delivers any change, since nothing is recorded as delivered here.
+
+    Strict on purpose, so an operator prompt is never skipped: the text must
+    START with the envelope, and once every complete notification block (and
+    any harness `<system-reminder>` block) is removed nothing but whitespace
+    may remain. Operator text before, between or after the blocks, or an
+    unclosed envelope, leaves the turn treated as an operator prompt. Each
+    block match is the shortest one, so text between two blocks cannot be
+    swallowed into a single match.
+    """
+    if not isinstance(prompt, str):
+        return False
+    if not prompt.lstrip().startswith("<task-notification>"):
+        return False
+    rest = _NOTIFICATION_BLOCK.sub("", prompt)
+    rest = _SYSTEM_REMINDER_BLOCK.sub("", rest)
+    return rest.strip() == ""
+
+
 def main() -> int:
     ev = read_hook_input()
     session_id = ev.get("session_id", "")
     if not session_id:
         return 0
+
+    if is_task_notification_prompt(ev.get("prompt")):
+        return 0  # automated notification turn: no fetch, no injection, no state change
 
     fetched = _fetch_rows_and_skills()
     if fetched is None:

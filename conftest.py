@@ -82,6 +82,12 @@ def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
     # The Neotoma alert sink (lib/notify/neotoma_sink.py) records to a local
     # directory in its default shadow mode; keep that out of the live one.
     os.environ["ATELES_NOTIFY_SINK_DIR"] = str(Path(state) / "notify-sink")
+    # The session-side agent_policy read is cached across processes for a
+    # short window (lib/daemon_runtime/policy_fetch_cache.py). Tests start
+    # fake Neotoma servers whose rows change between calls, so caching is
+    # off for the whole run (and the processes it starts); the cache's own
+    # tests turn it on against a private directory.
+    os.environ["ATELES_POLICY_CACHE_TTL_S"] = "0"
 
 
 @pytest.fixture(autouse=True)
@@ -110,3 +116,15 @@ def _isolate_notifier_state(monkeypatch, tmp_path_factory):
     from lib.notify import neotoma_sink  # noqa: PLC0415
 
     neotoma_sink._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _disable_policy_fetch_cache(monkeypatch, tmp_path_factory, _scrub_credential_environment):
+    """Keep the cross-process agent_policy cache off, and pointed at a private
+    directory, for every test. Fake Neotoma servers change their rows between
+    calls in one test, which a shared cache would hide; a cache test turns it
+    on itself."""
+    monkeypatch.setenv("ATELES_POLICY_CACHE_TTL_S", "0")
+    monkeypatch.setenv(
+        "ATELES_POLICY_CACHE_DIR", str(tmp_path_factory.mktemp("policy-cache") / "c")
+    )

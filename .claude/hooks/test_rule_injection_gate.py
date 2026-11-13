@@ -194,7 +194,7 @@ def edge_aware_fake_neotoma():
 
 
 def _run(event: dict, base_url: str | None = None):
-    env = {"PATH": "/usr/bin:/bin:/usr/local/bin"}
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "ATELES_POLICY_CACHE_TTL_S": "0"}
     if base_url:
         env["NEOTOMA_BASE_URL"] = base_url
     return subprocess.run(
@@ -1024,7 +1024,7 @@ class TestMalformedInputFailsOpen:
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
-            env={"PATH": "/usr/bin:/bin:/usr/local/bin"},
+            env={"PATH": "/usr/bin:/bin:/usr/local/bin", "ATELES_POLICY_CACHE_TTL_S": "0"},
             timeout=15,
         )
         assert result.returncode == 0

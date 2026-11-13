@@ -151,6 +151,11 @@ except ImportError:  # pragma: no cover
         unwrap_policy_entities,
     )
 
+try:  # same package-or-script import shape as agent_loader above
+    from . import policy_fetch_cache  # type: ignore
+except ImportError:  # pragma: no cover
+    import policy_fetch_cache  # type: ignore
+
 NEOTOMA_BASE_URL = os.environ.get(
     "NEOTOMA_BASE_URL", "https://neotoma.markmhendrickson.com"
 )
@@ -630,6 +635,77 @@ def _request(
     raise last_exc
 
 
+# Upper bound on pages read for one corpus fetch. At POLICY_QUERY_BODY's page
+# size this is several thousand rows; reaching it means the corpus (or the
+# server's paging) is not what this reader expects, and the fetch fails
+# loudly rather than returning a silently truncated corpus.
+POLICY_MAX_PAGES = 25
+
+
+class PolicyPagingError(ValueError):
+    """The paged corpus read could not be shown to be complete. Not a
+    `PolicyIndexError`, which means a render that cannot fit."""
+
+
+def _fetch_all_policy_entities(base_url: str, timeout: float) -> list:
+    """Every `agent_policy` entity wrapper, read page by page.
+
+    One request used to carry `limit: 200` with no offset, so a corpus past
+    200 rows was silently cut. This pages with `offset` (the same paging the
+    other `/entities/query` readers in this package use) until a short page,
+    or until a reported `total` is reached, and raises `PolicyPagingError`
+    when completeness cannot be shown: the page cap
+    is hit, a page repeats an entity already read (a server that ignores
+    `offset`), the response is malformed, or the final count disagrees with
+    a reported `total`. Every caller already treats a raised fetch as
+    "Neotoma unavailable" and fails open, so this changes a silent
+    truncation into that same visible degrade.
+    """
+    page_size = int(POLICY_QUERY_BODY.get("limit") or 200)
+    url = f"{base_url}/entities/query"
+    out: list = []
+    seen: set[str] = set()
+    total = None
+    for page in range(POLICY_MAX_PAGES):
+        body = {**POLICY_QUERY_BODY, "offset": page * page_size}
+        data = _request(url, body, timeout=timeout)
+        if not isinstance(data, dict):
+            raise PolicyPagingError("agent_policy page is not an object")
+        batch = data.get("entities")
+        if batch is None:
+            batch = data.get("results")
+        if batch is None:
+            batch = []
+        if not isinstance(batch, list):
+            raise PolicyPagingError("agent_policy page has no entity list")
+        for ent in batch:
+            eid = ent.get("entity_id") if isinstance(ent, dict) else None
+            if isinstance(eid, str) and eid:
+                if eid in seen:
+                    raise PolicyPagingError(
+                        f"agent_policy page at offset {page * page_size} repeats "
+                        "an entity already read (offset not honoured?)"
+                    )
+                seen.add(eid)
+        out.extend(batch)
+        reported = data.get("total")
+        if isinstance(reported, int) and not isinstance(reported, bool):
+            total = reported
+        if total is not None and len(out) >= total:
+            break
+        if len(batch) < page_size:
+            break
+    else:
+        raise PolicyPagingError(
+            f"agent_policy corpus exceeds {POLICY_MAX_PAGES} pages of {page_size}"
+        )
+    if total is not None and len(out) != total:
+        raise PolicyPagingError(
+            f"agent_policy read {len(out)} rows but the server reported {total}"
+        )
+    return out
+
+
 def fetch_active_policy_rows(
     base_url: str = NEOTOMA_BASE_URL, timeout: float = 10.0
 ) -> list[dict]:
@@ -644,9 +720,21 @@ def fetch_active_policy_rows(
     `AgentLoader.load_active_policies` calls, so there is one reader of
     agent_policy's response shape, not two that can silently diverge
     (Waxwing, ateles#1268 round 2).
+
+    Reads every page (`_fetch_all_policy_entities`), and shares the result
+    across processes for a short window through `policy_fetch_cache` (keyed
+    on the base URL and request body, never the token). Every hook caller
+    goes through here, so they all share one cached read; any cache problem
+    falls through to the live read, and a live-read failure raises exactly
+    as before. `AgentLoader.load_active_policies` (daemons) does not use
+    this function and keeps reading live.
     """
-    data = _request(f"{base_url}/entities/query", POLICY_QUERY_BODY, timeout=timeout)
-    return unwrap_policy_entities(data)
+    def _live() -> list[dict]:
+        return unwrap_policy_entities(
+            {"entities": _fetch_all_policy_entities(base_url, timeout)}
+        )
+
+    return policy_fetch_cache.cached_fetch(base_url, POLICY_QUERY_BODY, _live)
 
 
 def _session_scope_ok(
