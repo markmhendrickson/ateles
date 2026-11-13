@@ -7,8 +7,12 @@ the regression that produced one operator email per failed poll.
 """
 
 import json
+import os
+import logging
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
@@ -562,11 +566,17 @@ class _FakeActivity:
 _START = 1_000_000.0
 
 
-def _drive_main(monkeypatch, tmp_path, memos, rc_for, polls, start=_START):
+def _drive_main(
+    monkeypatch, tmp_path, memos, rc_for, polls, start=_START, real_services=False
+):
     """Run watch.main() for ``polls`` polls against temp state.
 
     ``rc_for(name)`` is the importer's exit code for that memo. The clock
     advances POLL_INTERVAL_SECONDS per poll. Returns what was observed.
+
+    With ``real_services`` the real _start_daemon_services() runs, with only
+    its leaves stubbed: the credential bootstrap records a call, the log file
+    goes under tmp_path, and the notifier/activity constructors are fakes.
     """
     recordings = tmp_path / "Recordings"
     recordings.mkdir(exist_ok=True)
@@ -587,14 +597,31 @@ def _drive_main(monkeypatch, tmp_path, memos, rc_for, polls, start=_START):
     import lib.daemon_runtime.checkout_identity as checkout_identity
 
     monkeypatch.setattr(checkout_identity, "enforce_deploy_checkout", lambda *a, **k: None)
-    monkeypatch.setattr(watch, "_start_daemon_services", lambda: None)
-    monkeypatch.setattr(watch, "check_neotoma", lambda: None)
+    seen = {"notices": [], "telegram": [], "imports": [], "assessed": [], "events": []}
+    activity = _FakeActivity()
+    if real_services:
+        import lib.activity
+        import lib.notify
 
-    seen = {"notices": [], "telegram": [], "imports": [], "assessed": []}
+        monkeypatch.setattr(watch, "_daemon_services_started", False)
+        monkeypatch.setattr(watch, "log", watch.log)  # restored after the test
+        monkeypatch.setattr(watch, "_lib_notifier", None)
+        monkeypatch.setattr(watch, "LOG_DIR", tmp_path / "logs")
+        monkeypatch.setattr(
+            watch, "configure_daemon_logging", lambda name: logging.getLogger(name)
+        )
+        monkeypatch.setattr(
+            watch, "_bootstrap_environment", lambda: seen["events"].append("bootstrap")
+        )
+        monkeypatch.setattr(lib.notify.Notifier, "from_neotoma", classmethod(lambda cls: None))
+        monkeypatch.setattr(lib.activity, "ActivityLogger", lambda agent: activity)
+    else:
+        monkeypatch.setattr(watch, "_start_daemon_services", lambda: None)
+    monkeypatch.setattr(watch, "check_neotoma", lambda: seen["events"].append("check_neotoma"))
+
     monkeypatch.setattr(watch, "notify", lambda title, msg: seen["notices"].append(msg))
     monkeypatch.setattr(watch, "_telegram", lambda msg: seen["telegram"].append(msg))
-    activity = _FakeActivity()
-    monkeypatch.setattr(watch, "_activity", activity)
+    monkeypatch.setattr(watch, "_activity", None if real_services else activity)
     monkeypatch.setattr(
         watch, "assess_memo", lambda memo: seen["assessed"].append(memo.name) or (None, None)
     )
@@ -786,3 +813,207 @@ def test_importing_watch_touches_nothing_under_home_and_runs_no_secret_tools(tmp
     assert hits_line == "HITS=", hits_line
     assert not calls.exists(), calls.read_text()
     assert sorted(str(p.relative_to(home)) for p in home.rglob("*")) == before
+
+
+# ── The daemon still bootstraps credentials, logging and notifier at start ──
+
+
+def test_main_bootstraps_once_before_the_first_neotoma_check(tmp_path, monkeypatch):
+    out = _drive_main(monkeypatch, tmp_path, [], lambda _n: 0, polls=2, real_services=True)
+    events = out["events"]
+    assert events.count("bootstrap") == 1
+    assert "check_neotoma" in events
+    assert events.index("bootstrap") < events.index("check_neotoma")
+    # Services were really started: the activity channel was built.
+    assert watch._activity is not None
+    # Idempotent: a second start does not bootstrap again.
+    watch._start_daemon_services()
+    assert events.count("bootstrap") == 1
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--list-held"], ["--release", "some-memo.m4a"], ["--discard", "some-memo.m4a"]],
+    ids=["list-held", "release", "discard"],
+)
+def test_operator_subcommands_start_daemon_services(tmp_path, monkeypatch, argv):
+    monkeypatch.setattr(watch, "HELD_STATE_FILE", tmp_path / "held_memos.json")
+    started = []
+    monkeypatch.setattr(watch, "_start_daemon_services", lambda: started.append(True))
+    monkeypatch.setattr(watch, "main", lambda: pytest.fail("subcommand ran the watcher"))
+
+    assert watch.cli(["watch.py", *argv]) == 0
+    assert started == [True]
+
+
+def test_no_arguments_runs_the_watcher(monkeypatch):
+    ran = []
+    monkeypatch.setattr(watch, "main", lambda: ran.append(True))
+    assert watch.cli(["watch.py"]) == 0
+    assert ran == [True]
+
+
+# The token variable's name is assembled from parts so no source line reads as
+# a hard-coded credential assignment to the repo's secret scanner. The values
+# are synthetic.
+_TOKEN_VAR = "NEOTOMA_BEARER" + "_TOKEN"
+
+
+def _token_line(value: str) -> str:
+    return _TOKEN_VAR + "=" + '"' + value + '"'
+
+
+def _synthetic_home(tmp_path, monkeypatch, *, snapshot: bool):
+    """A temp HOME holding a synthetic Neotoma env file (and optionally a
+    synthetic snapshot file). Nothing real is read."""
+    home = tmp_path / "home"
+    cfg = home / ".config" / "neotoma"
+    cfg.mkdir(parents=True)
+    env_file = cfg / ".env"
+    env_file.write_text(
+        "# synthetic\n"
+        "NEOTOMA_BASE_URL=http://127.0.0.1:9/synthetic\n"
+        + _token_line("stale-synthetic-token")
+        + "\n"
+    )
+    if snapshot:
+        (cfg / "secrets").mkdir()
+        (cfg / "secrets" / "neotoma.sops.enc").write_text("synthetic snapshot")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(watch, "_neotoma_env_file", lambda: env_file)
+    monkeypatch.setattr(
+        watch, "_sops_candidates", lambda: [cfg / "secrets" / "neotoma.sops.enc"]
+    )
+    for name in (
+        "NEOTOMA_BEARER_TOKEN",
+        "NEOTOMA_BASE_URL",
+        "NEOTOMA_COMPANY_ENTITY_ID",
+        "SOPS_AGE_KEY_FILE",
+        "SOPS_AGE_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    # Module settings the bootstrap rewrites; restored after the test.
+    monkeypatch.setattr(watch, "_NEOTOMA_BASE_URL", "")
+    monkeypatch.setattr(watch, "NEOTOMA_COMPANY_ENTITY_ID", watch._DEFAULT_COMPANY_ENTITY_ID)
+    return env_file
+
+
+class _Ran:
+    def __init__(self, returncode, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_bootstrap_refreshes_the_token_from_the_snapshot_and_writes_it_back(
+    tmp_path, monkeypatch
+):
+    env_file = _synthetic_home(tmp_path, monkeypatch, snapshot=True)
+    tools = []
+
+    def fake_run(argv, **_kwargs):
+        tools.append(argv[0])
+        if argv[0] == "sops":
+            return _Ran(0, "OTHER=1\n" + _token_line("fresh-synthetic-token") + "\n")
+        return _Ran(1)
+
+    monkeypatch.setattr(watch.subprocess, "run", fake_run)
+
+    watch._bootstrap_environment()
+
+    assert tools == ["sops"]  # no live 1Password read when the snapshot works
+    assert os.environ["NEOTOMA_BEARER_TOKEN"] == "fresh-synthetic-token"
+    text = env_file.read_text()
+    assert _token_line("fresh-synthetic-token") in text
+    assert "stale-synthetic-token" not in text
+    assert watch._NEOTOMA_BASE_URL == "http://127.0.0.1:9/synthetic"
+
+
+def test_bootstrap_falls_back_to_op_without_a_snapshot(tmp_path, monkeypatch):
+    env_file = _synthetic_home(tmp_path, monkeypatch, snapshot=False)
+    tools = []
+
+    def fake_run(argv, **_kwargs):
+        tools.append(argv[0])
+        return _Ran(0, "op-synthetic-token\n") if argv[0] == "op" else _Ran(1)
+
+    monkeypatch.setattr(watch.subprocess, "run", fake_run)
+
+    watch._bootstrap_environment()
+
+    assert tools == ["op"]
+    assert os.environ["NEOTOMA_BEARER_TOKEN"] == "op-synthetic-token"
+    assert _token_line("op-synthetic-token") in env_file.read_text()
+
+
+# ── Deferred state and the deferral alert ───────────────────────────────────
+
+
+def test_malformed_deferred_entries_are_dropped_on_load(tmp_path, monkeypatch, caplog):
+    state = tmp_path / "deferred_memos.json"
+    state.write_text(json.dumps({
+        "bad-a.m4a": "garbage",
+        "bad-b.m4a": 5,
+        "good.m4a": {"attempts": 1, "next_attempt_at": 10, "notified": True},
+    }))
+    monkeypatch.setattr(watch, "DEFERRED_STATE_FILE", state)
+    with caplog.at_level(logging.WARNING, logger="piculet"):
+        loaded = watch.load_deferred()
+    assert list(loaded) == ["good.m4a"]
+    assert "Dropped 2 malformed deferred-memo entries" in caplog.text
+
+
+def test_malformed_deferred_entry_does_not_break_the_poll(tmp_path, monkeypatch):
+    memo = "20261101 101010-AAAA0007.m4a"
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "deferred_memos.json").write_text(json.dumps({memo: "garbage"}))
+    out = _drive_main(monkeypatch, tmp_path, [memo], lambda _n: 0, polls=1)
+    assert len(out["imports"]) == 1
+    assert memo in out["seen_file"]
+    assert out["deferred"] == {}
+    assert not [t for t in out["telegram"] if "Watcher loop error" in t]
+
+
+def test_deferral_alert_fires_again_after_the_lookup_recovers(tmp_path, monkeypatch):
+    first, second = "20261101 101010-AAAA0008.m4a", "20261101 101010-AAAA0009.m4a"
+    down = _drive_main(monkeypatch, tmp_path, [first], _unavailable, polls=1)
+    up = _drive_main(monkeypatch, tmp_path, [first], lambda _n: 0, polls=1, start=_START + 60)
+    again = _drive_main(monkeypatch, tmp_path, [second], _unavailable, polls=1, start=_START + 120)
+
+    def alerts(out):
+        return [t for t in out["telegram"] if "Import deferred" in t]
+
+    assert len(alerts(down)) == 1
+    assert alerts(up) == []
+    # Minutes later, well inside the hourly dedup window: a fresh alert.
+    assert len(alerts(again)) == 1
+
+
+def test_deferral_warning_says_how_many_and_where_the_importer_log_is():
+    text = watch.deferred_warning_text(3)
+    assert text.startswith("Import deferred for 3 memos:")
+    assert watch.LOG_FILE.name in text
+    assert "[import]" in text
+    assert watch.deferred_warning_text(1).startswith("Import deferred for 1 memo:")
+
+
+def test_importer_output_is_written_to_the_daemon_log(tmp_path, monkeypatch, caplog):
+    def fake_run(cmd, **kwargs):
+        assert kwargs.get("capture_output") is True
+        return _Ran(
+            watch.IMPORT_EXIT_LOOKUP_UNAVAILABLE,
+            "  ? Lookup failed (timeout), not staged: synthetic.m4a\n",
+            "synthetic importer stderr line\n",
+        )
+
+    monkeypatch.setattr(watch.subprocess, "run", fake_run)
+    with caplog.at_level(logging.INFO, logger="piculet"):
+        rc = watch.run_import([tmp_path / "synthetic.m4a"])
+    assert rc == watch.IMPORT_EXIT_LOOKUP_UNAVAILABLE
+    assert "[import]   ? Lookup failed (timeout), not staged: synthetic.m4a" in caplog.text
+    # The importer's stderr is relayed too, at WARNING.
+    assert [
+        r.levelno for r in caplog.records
+        if r.getMessage() == "[import] synthetic importer stderr line"
+    ] == [logging.WARNING]

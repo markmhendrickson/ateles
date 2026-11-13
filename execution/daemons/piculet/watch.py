@@ -742,17 +742,24 @@ def run_import(new_files: list[Path]) -> int | None:
             build_import_command(new_files),
             timeout=7200,  # 2 hours max
             env=os.environ,
+            capture_output=True,
+            text=True,
         )
+        # The importer's own output (which names how a lookup failed) goes
+        # into this daemon's rotating log, so the deferral warning can say
+        # exactly where to look.
+        for line in (getattr(result, "stdout", "") or "").splitlines():
+            if line.strip():
+                log.info(f"[import] {line}")
+        for line in (getattr(result, "stderr", "") or "").splitlines():
+            if line.strip():
+                log.warning(f"[import] {line}")
         if result.returncode == 0:
             log.info("Import pipeline completed successfully.")
         elif result.returncode == IMPORT_EXIT_LOOKUP_UNAVAILABLE:
-            # One deduplicated operator warning for the condition (hourly
-            # reminder at most), however many memos or polls hit it.
-            log_warning(
-                "Import deferred: the already-imported lookup is unavailable. "
-                "Affected memos stay unseen and unheld, and are retried with "
-                "backoff (up to hourly); the importer log names the failure."
-            )
+            # The operator warning is raised once per poll by
+            # process_voice_memos, deduplicated under a stable key.
+            log.info("Import deferred: already-imported lookup unavailable.")
         else:
             log_warning(f"Import pipeline exited with code {result.returncode}.")
         return result.returncode
@@ -763,13 +770,59 @@ def run_import(new_files: list[Path]) -> int | None:
     return None
 
 
+# Stable dedup key for the deferral warning: its text carries a count, so the
+# text itself cannot be the key. Cleared when a lookup works again.
+DEFERRED_ALERT_KEY = "piculet:import-deferred"
+
+
+def _display_path(path: Path) -> str:
+    """``~/...`` form of a path under HOME, for operator messages."""
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
+def deferred_warning_text(waiting: int) -> str:
+    return (
+        f"Import deferred for {waiting} memo{'s' if waiting != 1 else ''}: the "
+        "already-imported lookup is unavailable. They stay unseen and unheld "
+        "and are retried with backoff (up to hourly). The importer's output, "
+        f"which names how the lookup failed, is in {_display_path(LOG_FILE)} "
+        "(lines tagged [import])."
+    )
+
+
+def _warn_import_deferred(waiting: int) -> None:
+    """Log the deferral every time; alert the operator once per condition
+    (hourly reminder), deduplicated on DEFERRED_ALERT_KEY."""
+    message = deferred_warning_text(waiting)
+    log.warning(message)
+    if _telegram_send_due(DEFERRED_ALERT_KEY, f"🟡 [piculet] WARNING: {message}"):
+        _notify_lib(f"piculet warning: {message}", priority="info")
+
+
+def _sanitize_deferred(data: dict) -> dict:
+    """Drop entries that are not objects; one log line names how many."""
+    bad = [name for name, entry in data.items() if not isinstance(entry, dict)]
+    for name in bad:
+        data.pop(name)
+    if bad:
+        log.warning(
+            f"Dropped {len(bad)} malformed deferred-memo entr"
+            f"{'y' if len(bad) == 1 else 'ies'}; those memos are retried as new."
+        )
+    return data
+
+
 def load_deferred() -> dict:
     """Load the deferred-memo table: memo filename -> retry state."""
     if DEFERRED_STATE_FILE.exists():
         try:
             data = json.loads(DEFERRED_STATE_FILE.read_text())
             if isinstance(data, dict):
-                return data
+                return _sanitize_deferred(data)
+            log.warning("Deferred state is not an object — starting empty.")
         except Exception as e:
             log.warning(f"Could not read deferred state ({e}) — starting empty.")
     return {}
@@ -786,7 +839,7 @@ def defer_backoff_seconds(attempts: int) -> int:
 
 def memo_import_due(deferred: dict, name: str, now: float) -> bool:
     entry = deferred.get(name)
-    if not entry:
+    if not isinstance(entry, dict) or not entry:
         return True
     try:
         return now >= float(entry.get("next_attempt_at", 0))
@@ -795,8 +848,13 @@ def memo_import_due(deferred: dict, name: str, now: float) -> bool:
 
 
 def record_deferral(deferred: dict, name: str, now: float) -> None:
-    entry = deferred.get(name) or {}
-    attempts = int(entry.get("attempts", 0)) + 1
+    entry = deferred.get(name)
+    if not isinstance(entry, dict):
+        entry = {}
+    try:
+        attempts = int(entry.get("attempts", 0)) + 1
+    except (TypeError, ValueError):
+        attempts = 1
     deferred[name] = {
         "reason": DEFERRED_REASON,
         "attempts": attempts,
@@ -866,6 +924,12 @@ def process_voice_memos(
                 f"Deferred {memo.name}: {DEFERRED_REASON}; "
                 f"attempt {deferred[memo.name]['attempts']}, next in {wait}s."
             )
+        if deferred_now:
+            _warn_import_deferred(len(deferred))
+        elif imported:
+            # The lookup answered again: a later outage alerts afresh
+            # instead of being swallowed by the hourly dedup.
+            _telegram_clear(DEFERRED_ALERT_KEY)
 
         # --- Clarity gate -----------------------------------------------
         # Transcription has run; decide per memo whether the transcript is
@@ -1478,15 +1542,21 @@ def list_held() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    # Operator subcommands run once and exit; no args starts the watcher.
-    if len(sys.argv) > 1 and sys.argv[1] in ("--release", "--discard", "--list-held"):
+def cli(argv: list[str]) -> int:
+    """Entry point. Operator subcommands run once and return an exit code;
+    no args starts the watcher (which does not return)."""
+    if len(argv) > 1 and argv[1] in ("--release", "--discard", "--list-held"):
         _start_daemon_services()
-        cmd = sys.argv[1]
+        cmd = argv[1]
         if cmd == "--list-held":
-            sys.exit(list_held())
-        if len(sys.argv) < 3:
+            return list_held()
+        if len(argv) < 3:
             print(f"usage: watch.py {cmd} '<memo filename>'")
-            sys.exit(2)
-        sys.exit(release_held(sys.argv[2], discard=(cmd == "--discard")))
+            return 2
+        return release_held(argv[2], discard=(cmd == "--discard"))
     main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv))
