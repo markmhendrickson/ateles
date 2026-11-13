@@ -105,6 +105,7 @@ download.html
 # belt-and-suspenders so a daemon write can't block interactive git work.
 execution/daemons/*/seen_files.json
 execution/daemons/*/seen_meeting_files.json
+execution/daemons/*/deferred_memos.json
 execution/daemons/*/*_state.json
 execution/daemons/*/.*_state.json
 execution/daemons/*/.*_last_run
