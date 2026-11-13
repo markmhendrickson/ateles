@@ -109,7 +109,7 @@ def project_dir():
 def _run(hook: str, cwd: Path, project_dir: Path, session_id: str,
          base_url: str | None = None, extra_env: dict | None = None):
     env = {
-        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "PATH": "/usr/bin:/bin:/usr/local/bin", "ATELES_POLICY_CACHE_TTL_S": "0",
         "CLAUDE_PROJECT_DIR": str(project_dir),
     }
     if base_url:
@@ -281,7 +281,7 @@ class TestFailOpen:
     def test_missing_session_id_is_a_noop(self, fake_neotoma, project_dir):
         base_url, handler = fake_neotoma
         handler.rows = [_row("ent_a", applies_when="always")]
-        env = {"PATH": "/usr/bin:/bin:/usr/local/bin",
+        env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "ATELES_POLICY_CACHE_TTL_S": "0",
                "CLAUDE_PROJECT_DIR": str(project_dir),
                "NEOTOMA_BASE_URL": base_url}
         result = subprocess.run(
@@ -629,3 +629,191 @@ class TestForgedBracketInRuleBodyDoesNotMarkAnotherRowDelivered:
             "ent_realvictim123 was genuinely rendered on retry and should "
             "now be recorded as delivered for real"
         )
+
+
+# ---------------------------------------------------------------------------
+# Automated task-notification turns make no fetch; operator prompts still do.
+# ---------------------------------------------------------------------------
+_NOTIFICATION = (
+    "<task-notification>\n<task-id>bg-1</task-id>\n<status>completed</status>\n"
+    "<summary>Background command finished</summary>\n</task-notification>"
+)
+
+
+def _run_prompt(project_dir: Path, session_id: str, base_url: str, prompt: str):
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "ATELES_POLICY_CACHE_TTL_S": "0",
+        "CLAUDE_PROJECT_DIR": str(project_dir),
+        "NEOTOMA_BASE_URL": base_url,
+    }
+    payload = json.dumps({
+        "session_id": session_id,
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": prompt,
+    })
+    return subprocess.run(
+        [sys.executable, HOOK], input=payload, capture_output=True, text=True,
+        cwd=str(REPO_ROOT), env=env, timeout=15,
+    )
+
+
+@pytest.fixture
+def counting_neotoma():
+    class _Counting(_FakeNeotomaHandler):
+        rows: list[dict] = []
+        requests = 0
+
+        def do_POST(self):  # noqa: N802
+            type(self).requests += 1
+            super().do_POST()
+
+    handler = type("Handler", (_Counting,), {"rows": [], "requests": 0})
+    port = _free_port()
+    server = http.server.HTTPServer(("127.0.0.1", port), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}", handler
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+class TestNotificationTurnSkipsFetch:
+    def test_notification_turn_makes_no_fetch_and_prints_nothing(self, counting_neotoma, project_dir):
+        base_url, handler = counting_neotoma
+        handler.rows = [_row("ent_a", rule="Rule A.", applies_when="always")]
+        result = _run_prompt(project_dir, "sess-notify", base_url, _NOTIFICATION)
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+        assert handler.requests == 0
+
+    def test_operator_prompt_still_fetches_and_delivers(self, counting_neotoma, project_dir):
+        base_url, handler = counting_neotoma
+        handler.rows = [_row("ent_a", rule="Rule A.", applies_when="always")]
+        result = _run_prompt(project_dir, "sess-operator", base_url, "please check the build")
+        assert result.returncode == 0
+        assert handler.requests >= 1
+        assert "ent_a" in result.stdout
+
+    def test_skipped_notification_does_not_swallow_the_next_operator_delivery(
+        self, counting_neotoma, project_dir
+    ):
+        base_url, handler = counting_neotoma
+        handler.rows = [_row("ent_a", rule="Rule A.", applies_when="always")]
+        _run_prompt(project_dir, "sess-mixed", base_url, "first operator prompt")
+        handler.rows = [
+            _row("ent_a", rule="Rule A.", applies_when="always"),
+            _row("ent_b", rule="Rule B.", applies_when="always"),
+        ]
+        before = handler.requests
+        skipped = _run_prompt(project_dir, "sess-mixed", base_url, _NOTIFICATION)
+        assert skipped.stdout.strip() == ""
+        assert handler.requests == before
+        delivered = _run_prompt(project_dir, "sess-mixed", base_url, "next operator prompt")
+        assert "ent_b" in delivered.stdout
+
+    def test_operator_text_after_a_notification_still_fetches(self, counting_neotoma, project_dir):
+        base_url, handler = counting_neotoma
+        handler.rows = [_row("ent_a", rule="Rule A.", applies_when="always")]
+        result = _run_prompt(
+            project_dir, "sess-appended", base_url, _NOTIFICATION + "\nalso, merge it"
+        )
+        assert handler.requests >= 1
+        assert "ent_a" in result.stdout
+
+
+class TestIsTaskNotificationPrompt:
+    @pytest.fixture(autouse=True)
+    def _mod(self):
+        sys.path.insert(0, str(Path(HOOK).parent))
+        import session_rule_delivery as mod  # noqa: PLC0415
+        self.check = mod.is_task_notification_prompt
+
+    @pytest.mark.parametrize("prompt", [
+        _NOTIFICATION,
+        "  \n" + _NOTIFICATION + "\n",
+        _NOTIFICATION + "\n" + _NOTIFICATION,
+        _NOTIFICATION + "\n<system-reminder>\nharness note\n</system-reminder>\n",
+    ])
+    def test_notification_only_prompts_are_recognised(self, prompt):
+        assert self.check(prompt) is True
+
+    @pytest.mark.parametrize("prompt", [
+        "",
+        "please merge the PR",
+        "what does <task-notification> mean?",
+        "note: " + _NOTIFICATION,
+        _NOTIFICATION + " and then deploy",
+        _NOTIFICATION + "\ndeploy\n" + _NOTIFICATION,
+        "<task-notification>\n<status>completed</status>\nunclosed, operator text",
+        None,
+        123,
+    ])
+    def test_operator_prompts_are_not_recognised(self, prompt):
+        assert self.check(prompt) is False
+
+
+# ---------------------------------------------------------------------------
+# End to end with the cache on, and the paging-failure label.
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def policy_counting_neotoma():
+    """Counts only agent_policy corpus queries (the GOVERNS-edge and
+    agent-definition lookups are separate requests)."""
+    class _Counting(_FakeNeotomaHandler):
+        rows: list[dict] = []
+        policy_queries = 0
+
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length)
+            try:
+                req = json.loads(raw or b"{}")
+            except ValueError:
+                req = {}
+            if isinstance(req, dict) and req.get("entity_type") == "agent_policy":
+                type(self).policy_queries += 1
+            body = json.dumps({"entities": self.rows}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    handler = type("Handler", (_Counting,), {"rows": [], "policy_queries": 0})
+    port = _free_port()
+    server = http.server.HTTPServer(("127.0.0.1", port), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}", handler
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+class TestCacheEndToEnd:
+    def test_two_hook_runs_share_one_corpus_read(self, policy_counting_neotoma, project_dir, tmp_path):
+        base_url, handler = policy_counting_neotoma
+        handler.rows = [_row("ent_a", rule="Rule A.", applies_when="always")]
+        extra = {"ATELES_POLICY_CACHE_TTL_S": "120",
+                 "ATELES_POLICY_CACHE_DIR": str(tmp_path / "policy-cache")}
+        first = _run(HOOK, REPO_ROOT, project_dir, "sess-e2e-1", base_url=base_url, extra_env=extra)
+        second = _run(HOOK, REPO_ROOT, project_dir, "sess-e2e-2", base_url=base_url, extra_env=extra)
+        assert first.returncode == 0 and second.returncode == 0
+        assert "ent_a" in first.stdout and "ent_a" in second.stdout
+        assert handler.policy_queries == 1
+        assert len(list((tmp_path / "policy-cache").glob("*.json"))) == 1
+
+
+class TestPagingFailureLabel:
+    def test_paging_failure_is_not_logged_as_unreachable(self, fake_neotoma, project_dir):
+        base_url, handler = fake_neotoma
+        handler.rows = [_row(f"ent_{i:04d}", applies_when="always") for i in range(300)]
+        result = _run(HOOK, REPO_ROOT, project_dir, "sess-paging", base_url=base_url)
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+        assert "paging failed" in result.stderr
+        assert "could not reach Neotoma" not in result.stderr

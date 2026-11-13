@@ -79,7 +79,7 @@ def _hook_commands(event: str) -> list[str]:
 
 def _run(command: str, event: dict, *, env: dict[str, str] | None = None):
     run_env = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"), "ATELES_POLICY_CACHE_TTL_S": "0",
     }
     if env:
         run_env.update(env)
@@ -152,7 +152,7 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
                 capture_output=True,
                 cwd=outside,
                 env={
-                    "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"), "ATELES_POLICY_CACHE_TTL_S": "0",
                     "NEOTOMA_BASE_URL": fake.base_url,
                     "CLAUDE_PROJECT_DIR": os.fspath(state_dir),
                 },
@@ -223,7 +223,7 @@ class TestCodexRuleDeliveryEffect(unittest.TestCase):
                 capture_output=True,
                 cwd=outside,
                 env={
-                    "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"), "ATELES_POLICY_CACHE_TTL_S": "0",
                     "NEOTOMA_BASE_URL": fake.base_url,
                     # Deliberately no CLAUDE_PROJECT_DIR — the real Codex shape.
                 },

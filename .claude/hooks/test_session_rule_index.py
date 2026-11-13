@@ -131,7 +131,7 @@ def fake_neotoma():
 
 
 def _run(cwd: Path, base_url: str | None = None, extra_env: dict | None = None):
-    env = {"PATH": "/usr/bin:/bin:/usr/local/bin"}
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "ATELES_POLICY_CACHE_TTL_S": "0"}
     if base_url:
         env["NEOTOMA_BASE_URL"] = base_url
     if extra_env:
@@ -154,7 +154,7 @@ def _run_reinject(cwd: Path):
         capture_output=True,
         text=True,
         cwd=str(cwd),
-        env={"PATH": "/usr/bin:/bin:/usr/local/bin"},
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "ATELES_POLICY_CACHE_TTL_S": "0"},
         timeout=15,
     )
 
@@ -172,7 +172,7 @@ def _render_supplied_policy(row: dict):
     flat_row = {**row["snapshot"], "_entity_id": row["entity_id"]}
     skills = render_skills([flat_row], agent_definition_id="", governs={})
     text, emitted_ids = render_index_text_with_ids(skills, rule_index_hook.BUDGET_CHARS)
-    return text, emitted_ids, [flat_row]
+    return text, emitted_ids, [flat_row], 0.0  # (index, ids, rows, read age in s)
 
 
 class TestDecisionCadenceComesFromLivePolicy:
@@ -606,3 +606,31 @@ class TestBudgetIsMeasuredAndSafelyBelowTheHardCap:
             "with a <persisted-output> pointer + preview instead of "
             "delivering the rendered rule index into context."
         )
+
+
+# ---------------------------------------------------------------------------
+# The header states how old the read is; a paging failure is labelled as one.
+# ---------------------------------------------------------------------------
+class TestHeaderAndFailureLabel:
+    def test_header_states_the_read_age_not_live(self, fake_neotoma, tmp_path):
+        base_url, handler = fake_neotoma
+        handler.rows = [_row("ent_a", applies_when="always")]
+        result = _run(tmp_path, base_url=base_url)
+        assert result.returncode == 0
+        assert "# Agent policy rule index (from Neotoma as of 0s ago, ateles#1261)" in result.stdout
+        assert "live from Neotoma" not in result.stdout
+
+    def test_header_reports_a_cached_age(self):
+        assert rule_index_hook.index_header(42.7) == (
+            "# Agent policy rule index (from Neotoma as of 42s ago, ateles#1261)\n"
+        )
+
+    def test_paging_failure_is_not_logged_as_unreachable(self, fake_neotoma, tmp_path):
+        base_url, handler = fake_neotoma
+        # 300 rows, offset ignored: page two repeats page one.
+        handler.rows = [_row(f"ent_{i:04d}", applies_when="always") for i in range(300)]
+        result = _run(tmp_path, base_url=base_url)
+        assert result.returncode == 0
+        assert "paging failed" in result.stderr
+        assert "could not reach Neotoma" not in result.stderr
+        assert "The rule index could not be loaded" in result.stdout

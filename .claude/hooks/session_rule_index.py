@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""SessionStart hook — push the live `agent_policy` rule index into context.
+"""SessionStart hook — push the current `agent_policy` rule index into context.
 
 ateles#1261 (E2 session transport). PR #1255 removed the swarm's governing
 rules from the MCP server's `instructions` field, which the client caps at
 ~2,048 chars across ALL connected servers — so a rule written to the record
 stopped reaching sessions entirely. This hook is the replacement: it renders
-`agent_policy` LIVE from Neotoma every time a session starts, resumes, is
-cleared, or is compacted, and prints the always-applies preamble plus one
+`agent_policy` from Neotoma every time a session starts, resumes, is
+cleared, or is compacted (read through the short-lived cross-process cache
+in `lib/daemon_runtime/policy_fetch_cache.py`, so the read can be up to that
+cache's lifetime old; the printed header says how old), and prints the always-applies preamble plus one
 line per conditional rule so the session can fetch the full rule by entity
 id before acting on it.
 
@@ -159,9 +161,10 @@ def _log(msg: str) -> None:
     sys.stderr.write(f"[session-rule-index] {msg}\n")
 
 
-def _render() -> tuple[str, frozenset[str], list[dict]] | None:
-    """Live-render the index plus the session-scoped raw rows it was built
-    from (for delivery-signature recording), or None on a genuine failure
+def _render() -> tuple[str, frozenset[str], list[dict], float] | None:
+    """Render the index plus the session-scoped raw rows it was built from
+    (for delivery-signature recording) and the age of the read in seconds,
+    or None on a genuine failure
     (fail-open): Neotoma unreachable, the renderer unimportable, or a corpus
     too large even for tier C. A merely large corpus does NOT hit this path
     — it returns a tiered (A/B/C) string from render_index_text_with_ids
@@ -173,7 +176,8 @@ def _render() -> tuple[str, frozenset[str], list[dict]] | None:
         if str(_LIB_DIR) not in sys.path:
             sys.path.insert(0, str(_LIB_DIR))
         from lib.daemon_runtime.policy_skill_renderer import (  # noqa: PLC0415
-            fetch_active_policy_rows,
+            describe_fetch_failure,
+            fetch_active_policy_rows_with_age,
             render_index_text_with_ids,
             render_skills,
             _session_scope_ok,
@@ -183,9 +187,9 @@ def _render() -> tuple[str, frozenset[str], list[dict]] | None:
         return None
 
     try:
-        rows = fetch_active_policy_rows()
+        rows, age_s = fetch_active_policy_rows_with_age()
     except Exception as exc:  # noqa: BLE001 — fail open on transport failure
-        _log(f"could not reach Neotoma: {type(exc).__name__}: {exc}")
+        _log(f"{describe_fetch_failure(exc)}: {type(exc).__name__}: {exc}")
         return None
 
     try:
@@ -195,10 +199,17 @@ def _render() -> tuple[str, frozenset[str], list[dict]] | None:
         # snapshot dicts with `_entity_id` stamped on) — scope on the row
         # directly, not `row["snapshot"]`, which does not exist here.
         scoped_rows = [r for r in rows if _session_scope_ok(r)]
-        return text, emitted_ids, scoped_rows
+        return text, emitted_ids, scoped_rows, age_s
     except Exception as exc:  # noqa: BLE001 — includes the budget-overflow raise
         _log(f"could not render rule index: {type(exc).__name__}: {exc}")
         return None
+
+
+def index_header(age_s: float) -> str:
+    """The index heading, stating how old the read is rather than claiming it
+    is live: the corpus comes through a short-lived cache."""
+    age = max(0, int(age_s))
+    return f"# Agent policy rule index (from Neotoma as of {age}s ago, ateles#1261)\n"
 
 
 def main() -> int:
@@ -208,15 +219,15 @@ def main() -> int:
     rendered = _render()
     if rendered is None:
         print(
-            "[agent_policy] The live rule index could not be loaded this "
+            "[agent_policy] The rule index could not be loaded this "
             "session — proceeding WITHOUT the swarm's governing rules from "
             "the record. See stderr for why; standing constraints in "
             "Repository or harness-local standing instructions still apply."
         )
         return 0
 
-    text, emitted_ids, scoped_rows = rendered
-    print("# Agent policy rule index (live from Neotoma, ateles#1261)\n")
+    text, emitted_ids, scoped_rows, age_s = rendered
+    print(index_header(age_s))
     print(text)
 
     if session_id:
