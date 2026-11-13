@@ -8,8 +8,9 @@ clear and compact, so a long-running session between those events never saw
 a rule created, backfilled, or changed after its one delivery. 38 backfilled
 summaries and 17 new rules never reached that session at all.
 
-This hook closes that gap on the cheap per-turn path: it re-fetches the
-live, session-scoped `agent_policy` set every prompt, hashes it (via the
+This hook closes that gap on the cheap per-turn path: it re-reads the
+session-scoped `agent_policy` set every operator prompt (through the
+short-lived policy cache, so up to its lifetime old), hashes it (via the
 SHARED `rule_index_state` module — see that file's docstring for why the
 signature logic lives there once rather than being copied), and injects
 ONLY what changed since the hash last delivered to this session — never the
@@ -194,6 +195,7 @@ def _fetch_rows_and_skills():
         if str(_LIB_DIR) not in sys.path:
             sys.path.insert(0, str(_LIB_DIR))
         from lib.daemon_runtime.policy_skill_renderer import (  # noqa: PLC0415
+            describe_fetch_failure,
             fetch_active_policy_rows,
             render_index_text_with_ids,
             render_skills,
@@ -206,7 +208,7 @@ def _fetch_rows_and_skills():
     try:
         rows = fetch_active_policy_rows()
     except Exception as exc:  # noqa: BLE001 — fail open on transport failure
-        _log(f"could not reach Neotoma: {type(exc).__name__}: {exc}")
+        _log(f"{describe_fetch_failure(exc)}: {type(exc).__name__}: {exc}")
         return None
 
     try:

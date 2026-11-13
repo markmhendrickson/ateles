@@ -753,3 +753,67 @@ class TestIsTaskNotificationPrompt:
     ])
     def test_operator_prompts_are_not_recognised(self, prompt):
         assert self.check(prompt) is False
+
+
+# ---------------------------------------------------------------------------
+# End to end with the cache on, and the paging-failure label.
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def policy_counting_neotoma():
+    """Counts only agent_policy corpus queries (the GOVERNS-edge and
+    agent-definition lookups are separate requests)."""
+    class _Counting(_FakeNeotomaHandler):
+        rows: list[dict] = []
+        policy_queries = 0
+
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length)
+            try:
+                req = json.loads(raw or b"{}")
+            except ValueError:
+                req = {}
+            if isinstance(req, dict) and req.get("entity_type") == "agent_policy":
+                type(self).policy_queries += 1
+            body = json.dumps({"entities": self.rows}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    handler = type("Handler", (_Counting,), {"rows": [], "policy_queries": 0})
+    port = _free_port()
+    server = http.server.HTTPServer(("127.0.0.1", port), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}", handler
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+class TestCacheEndToEnd:
+    def test_two_hook_runs_share_one_corpus_read(self, policy_counting_neotoma, project_dir, tmp_path):
+        base_url, handler = policy_counting_neotoma
+        handler.rows = [_row("ent_a", rule="Rule A.", applies_when="always")]
+        extra = {"ATELES_POLICY_CACHE_TTL_S": "120",
+                 "ATELES_POLICY_CACHE_DIR": str(tmp_path / "policy-cache")}
+        first = _run(HOOK, REPO_ROOT, project_dir, "sess-e2e-1", base_url=base_url, extra_env=extra)
+        second = _run(HOOK, REPO_ROOT, project_dir, "sess-e2e-2", base_url=base_url, extra_env=extra)
+        assert first.returncode == 0 and second.returncode == 0
+        assert "ent_a" in first.stdout and "ent_a" in second.stdout
+        assert handler.policy_queries == 1
+        assert len(list((tmp_path / "policy-cache").glob("*.json"))) == 1
+
+
+class TestPagingFailureLabel:
+    def test_paging_failure_is_not_logged_as_unreachable(self, fake_neotoma, project_dir):
+        base_url, handler = fake_neotoma
+        handler.rows = [_row(f"ent_{i:04d}", applies_when="always") for i in range(300)]
+        result = _run(HOOK, REPO_ROOT, project_dir, "sess-paging", base_url=base_url)
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+        assert "paging failed" in result.stderr
+        assert "could not reach Neotoma" not in result.stderr

@@ -706,6 +706,22 @@ def _fetch_all_policy_entities(base_url: str, timeout: float) -> list:
     return out
 
 
+def fetch_active_policy_rows_with_age(
+    base_url: str = NEOTOMA_BASE_URL, timeout: float = 10.0
+) -> tuple[list[dict], float]:
+    """`fetch_active_policy_rows`, plus how old the read is in seconds (0 for
+    a live read, the cached entry's age otherwise), so a caller that prints
+    the index can say how fresh it is instead of claiming "live"."""
+    def _live() -> list[dict]:
+        return unwrap_policy_entities(
+            {"entities": _fetch_all_policy_entities(base_url, timeout)}
+        )
+
+    return policy_fetch_cache.cached_fetch_with_age(
+        base_url, POLICY_QUERY_BODY, _live, token=NEOTOMA_BEARER_TOKEN
+    )
+
+
 def fetch_active_policy_rows(
     base_url: str = NEOTOMA_BASE_URL, timeout: float = 10.0
 ) -> list[dict]:
@@ -723,18 +739,25 @@ def fetch_active_policy_rows(
 
     Reads every page (`_fetch_all_policy_entities`), and shares the result
     across processes for a short window through `policy_fetch_cache` (keyed
-    on the base URL and request body, never the token). Every hook caller
-    goes through here, so they all share one cached read; any cache problem
-    falls through to the live read, and a live-read failure raises exactly
-    as before. `AgentLoader.load_active_policies` (daemons) does not use
-    this function and keeps reading live.
+    on the base URL, the request body and a digest of the token — never the
+    token itself). Every hook caller goes through here, so they all share
+    one cached read; any cache problem falls through to the live read, and a
+    live-read failure raises exactly as before. The result can therefore be
+    up to the cache lifetime old (`fetch_active_policy_rows_with_age` says
+    how old). `AgentLoader.load_active_policies` (daemons) does not use this
+    function and keeps reading live.
     """
-    def _live() -> list[dict]:
-        return unwrap_policy_entities(
-            {"entities": _fetch_all_policy_entities(base_url, timeout)}
-        )
+    return fetch_active_policy_rows_with_age(base_url, timeout)[0]
 
-    return policy_fetch_cache.cached_fetch(base_url, POLICY_QUERY_BODY, _live)
+
+def describe_fetch_failure(exc: BaseException) -> str:
+    """The log label for a failed corpus read, so a hook does not blame the
+    network for a read that reached Neotoma but could not be shown complete."""
+    if isinstance(exc, PolicyPagingError):
+        return "paging failed, could not read a complete rule corpus"
+    if isinstance(exc, policy_fetch_cache.PolicyFetchRecentlyFailed):
+        return "a concurrent rule read just failed, not retrying it"
+    return "could not reach Neotoma"
 
 
 def _session_scope_ok(

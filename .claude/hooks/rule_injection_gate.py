@@ -44,13 +44,16 @@ CATEGORY -> RULE IDS is a small local map (`_CATEGORY_RULE_IDS` below), never
 rule TEXT: only entity ids are named here, mirroring
 `install_codex_hooks.py`'s `MANAGED_SCRIPT_NAMES` precedent for "a short
 local list of identifiers is fine; the governed content stays in the single
-source." The hook fetches those rows live every time (same readers
+source." The hook fetches those rows on every matching action (same readers
 `session_rule_index.py` uses: `fetch_active_policy_rows` / `render_skills`,
 which resolves this session's own agent identity and live `GOVERNS` edges
 before scope-filtering — see `_fetch_rows_by_id`) and renders `.body` (the
 FULL `rule` text) — so an edit to a rule's content in Neotoma is picked up on
 the next matching action with no code change, and a rule retired or
-rescoped away from this session simply stops being injected.
+rescoped away from this session simply stops being injected. The read goes
+through the short-lived cross-process cache in
+`lib/daemon_runtime/policy_fetch_cache.py`, so such a change can take up to
+that cache's lifetime to show here.
 
 GRANT WRITES ALSO GET A PROBE REMINDER. The audited failure was not just a
 missing rule — it was a write reported "verified" from a read-back that
@@ -422,7 +425,8 @@ def matched_categories(tool_name: str, tool_input: dict) -> list[str]:
 
 
 def _fetch_rows_by_id(ids: set[str]) -> dict[str, dict]:
-    """Live-fetch active `agent_policy` rows, keyed by entity id, filtered to
+    """Fetch active `agent_policy` rows (through the short-lived policy
+    cache, so up to its lifetime old), keyed by entity id, filtered to
     `ids`. Returns {} on any transport/import failure (fail-open — the
     caller then injects nothing rather than block or crash)."""
     if not ids:
@@ -433,6 +437,7 @@ def _fetch_rows_by_id(ids: set[str]) -> dict[str, dict]:
         if str(_LIB_DIR) not in sys.path:
             sys.path.insert(0, str(_LIB_DIR))
         from lib.daemon_runtime.policy_skill_renderer import (  # noqa: PLC0415
+            describe_fetch_failure,
             fetch_active_policy_rows,
             render_skills,
         )
@@ -443,7 +448,7 @@ def _fetch_rows_by_id(ids: set[str]) -> dict[str, dict]:
     try:
         rows = fetch_active_policy_rows()
     except Exception as exc:  # noqa: BLE001 — fail open on transport failure
-        _log(f"could not reach Neotoma: {type(exc).__name__}: {exc}")
+        _log(f"{describe_fetch_failure(exc)}: {type(exc).__name__}: {exc}")
         return {}
 
     # `render_skills(rows)` is the SAME entry point `session_rule_index.py`

@@ -28,3 +28,7 @@ d73b2ce6ddd2d81b1342f28295b63047a88a19ad:execution/evals/fly_delivery_receipt/fl
 # ateles PR #1608: a synthetic nonce in the FIRST commit of the PR. Later commits
 # use a plain non-token value; the PR-range scan still reads the first commit.
 42f36fffb1990f92dbbcc642d74e77eae9243afa:execution/scripts/test_fly_jobs_in_flight.py:protected-patterns:19
+# ateles PR #1744: a synthetic token canary in the policy-cache test, flagged in an
+# EARLIER commit of the PR. The later commit marks the line gitleaks:allow; the
+# PR-range scan reads history.
+d4093a9e47e7a75ac949f9172164077c5e1907c1:lib/daemon_runtime/test_policy_fetch_cache.py:generic-api-key:25

@@ -22,7 +22,8 @@ import policy_skill_renderer as renderer
 
 cache_mod = renderer.policy_fetch_cache
 
-_TOKEN_CANARY = "tok-canary-6f1d0c2a9b"
+_TOKEN_CANARY = "tok-canary-6f1d0c2a9b"  # gitleaks:allow — synthetic test value
+_OTHER_TOKEN = "tok-canary-other-48e1"  # gitleaks:allow — synthetic test value
 
 
 def _entity(i: int, status: str = "active") -> dict:
@@ -303,8 +304,8 @@ class TestRefusal:
         b"",
         b"{not json",
         b"[]",
-        b'{"v": 1, "key": "wrong", "fetched_at": 0, "rows": []}',
-        b'{"v": 1}',
+        b'{"v": 2, "key": "wrong", "fetched_at": 0, "rows": []}',
+        b'{"v": 2}',
     ])
     def test_corrupt_entry_falls_through_and_is_rewritten(self, cache_dir, transport, content):
         renderer.fetch_active_policy_rows(base_url=BASE)
@@ -394,8 +395,10 @@ class TestPaging:
     def test_server_ignoring_offset_fails_loudly(self, monkeypatch):
         t = _CountingTransport([_entity(i) for i in range(300)], honour_offset=False)
         monkeypatch.setattr(renderer, "_request", t)
-        with pytest.raises(renderer.PolicyPagingError):
+        with pytest.raises(renderer.PolicyPagingError, match="repeats"):
             renderer.fetch_active_policy_rows(base_url=BASE)
+        # Caught on the second page, not after the 25-page cap.
+        assert len(t.calls) == 2
 
     def test_short_read_against_reported_total_fails_loudly(self, monkeypatch):
         t = _CountingTransport([_entity(i) for i in range(50)], report_total=True,
@@ -417,3 +420,320 @@ class TestPaging:
         with pytest.raises(renderer.PolicyPagingError):
             renderer.fetch_active_policy_rows(base_url=BASE)
         assert list(cache_dir.glob("*.json")) == []
+
+
+# ---------------------------------------------------------------------------
+# Correction round: token-scoped key, outage marker, pruning, backup
+# exclusion, the read's age, and the checks that previously had no test.
+# ---------------------------------------------------------------------------
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+
+
+def _fake_uid_fstat(monkeypatch, *, dirs: bool = False, files: bool = False):
+    """Make `os.fstat` report another owner for directories and/or regular
+    files only, so each owner check can be exercised on its own."""
+    real_fstat = os.fstat
+
+    def fake(fd):
+        st = real_fstat(fd)
+        hit = (dirs and stat.S_ISDIR(st.st_mode)) or (files and stat.S_ISREG(st.st_mode))
+        if not hit:
+            return st
+        seq = list(tuple(st))
+        seq[4] = st.st_uid + 1
+        return os.stat_result(seq)
+
+    monkeypatch.setattr(cache_mod.os, "fstat", fake)
+
+
+class TestTokenScopedKey:
+    def test_two_tokens_on_one_url_do_not_share_an_entry(self, cache_dir, transport, monkeypatch):
+        monkeypatch.setattr(renderer, "NEOTOMA_BEARER_TOKEN", _TOKEN_CANARY)
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        monkeypatch.setattr(renderer, "NEOTOMA_BEARER_TOKEN", _OTHER_TOKEN)
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        assert len(transport.calls) == 2
+        assert len(list(cache_dir.glob("*.json"))) == 2
+        # Each token still hits its own entry.
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        monkeypatch.setattr(renderer, "NEOTOMA_BEARER_TOKEN", _TOKEN_CANARY)
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        assert len(transport.calls) == 2
+
+    def test_neither_token_nor_its_digest_is_written(self, cache_dir, transport, monkeypatch):
+        monkeypatch.setattr(renderer, "NEOTOMA_BEARER_TOKEN", _TOKEN_CANARY)
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        digest = cache_mod._principal_digest(_TOKEN_CANARY)
+        assert digest and _TOKEN_CANARY not in digest
+        for path in cache_dir.iterdir():
+            for needle in (_TOKEN_CANARY, digest):
+                assert needle not in path.name
+                assert needle.encode() not in path.read_bytes()
+
+    def test_key_changes_with_the_token_only_through_its_digest(self):
+        body = {"entity_type": "agent_policy"}
+        assert cache_mod.cache_key(BASE, body, _TOKEN_CANARY) != cache_mod.cache_key(BASE, body, _OTHER_TOKEN)
+        assert cache_mod.cache_key(BASE, body, _TOKEN_CANARY) != cache_mod.cache_key(BASE, body, "")
+        assert cache_mod.cache_key(BASE, body, _TOKEN_CANARY) == cache_mod.cache_key(BASE, body, _TOKEN_CANARY)
+
+
+class TestOutageMarker:
+    def test_concurrent_failing_fetches_take_one_timeout_not_two(self, cache_dir):
+        body = {"entity_type": "agent_policy", "limit": 200}
+        calls = []
+        errors = []
+        delay = 1.0
+
+        def failing_fetch():
+            calls.append(threading.current_thread().name)
+            time.sleep(delay)
+            raise OSError("timed out")
+
+        def worker():
+            try:
+                cache_mod.cached_fetch(BASE, body, failing_fetch)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, name=f"hook-{i}") for i in range(2)]
+        start = time.monotonic()
+        threads[0].start()
+        time.sleep(0.1)  # the second hook arrives while the first is fetching
+        threads[1].start()
+        for t in threads:
+            t.join(timeout=10)
+        elapsed = time.monotonic() - start
+        assert len(calls) == 1, calls
+        assert elapsed < 1.6 * delay, elapsed
+        kinds = sorted(type(e).__name__ for e in errors)
+        assert kinds == ["OSError", "PolicyFetchRecentlyFailed"]
+        assert list(cache_dir.glob("*.json")) == []
+
+    def test_a_later_caller_still_tries_live_after_an_old_failure(self, cache_dir):
+        body = {"entity_type": "agent_policy", "limit": 200}
+        with pytest.raises(OSError):
+            cache_mod.cached_fetch(BASE, body, lambda: (_ for _ in ()).throw(OSError("down")))
+        assert cache_mod.cached_fetch(BASE, body, lambda: [{"_entity_id": "back"}]) == [
+            {"_entity_id": "back"}
+        ]
+        # Success clears the marker.
+        assert list(cache_dir.glob("*.failed")) == []
+
+
+class TestPruning:
+    def test_expired_files_are_deleted_on_write(self, cache_dir, transport):
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        old = time.time() - 1000
+        stale_entry = cache_dir / ("a" * 64 + ".json")
+        stale_marker = cache_dir / ("b" * 64 + ".failed")
+        stale_tmp = cache_dir / (".{}.json.123.{}.tmp".format("c" * 64, "d" * 16))
+        fresh_other = cache_dir / ("e" * 64 + ".json")
+        lock = cache_dir / ("f" * 64 + ".lock")
+        unrelated = cache_dir / "notes.txt"
+        for p in (stale_entry, stale_marker, stale_tmp, fresh_other, lock, unrelated):
+            p.write_text("{}")
+            os.chmod(p, 0o600)
+        for p in (stale_entry, stale_marker, stale_tmp, lock, unrelated):
+            os.utime(p, (old, old))
+        renderer.fetch_active_policy_rows(base_url="https://other.example.test")
+        assert not stale_entry.exists()
+        assert not stale_marker.exists()
+        assert not stale_tmp.exists()
+        assert fresh_other.exists()  # not expired yet
+        assert lock.exists()  # lock files are never removed
+        assert unrelated.exists()  # only names this module writes
+        assert len(list(cache_dir.glob("*.json"))) == 3
+
+    def test_young_temp_file_survives_even_past_a_short_ttl(self, cache_dir, transport, monkeypatch):
+        monkeypatch.setenv(cache_mod.TTL_ENV, "1")
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        tmp = cache_dir / (".{}.json.123.{}.tmp".format("c" * 64, "d" * 16))
+        tmp.write_text("{}")
+        past = time.time() - 30  # older than the TTL, younger than the grace
+        os.utime(tmp, (past, past))
+        renderer.fetch_active_policy_rows(base_url="https://other.example.test")
+        assert tmp.exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Time Machine exclusion is macOS-only")
+class TestBackupExclusionOnMac:
+    def test_cache_dir_carries_the_backup_exclusion_attribute(self, cache_dir, transport):
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        out = subprocess.run(
+            ["/usr/bin/xattr", "-px", cache_mod.BACKUP_EXCLUDE_XATTR, str(cache_dir)],
+            capture_output=True, text=True,
+        )
+        assert out.returncode == 0, out.stderr
+        assert "com.apple.backupd".encode().hex() in out.stdout.replace(" ", "").replace("\n", "").lower()
+
+
+class TestBackupExclusionFallback:
+    def test_tmutil_is_used_when_the_attribute_cannot_be_set(self, cache_dir, transport, monkeypatch):
+        monkeypatch.setattr(cache_mod, "_IS_DARWIN", True)
+
+        def no_xattr(fd):
+            raise OSError("no attribute support")
+
+        ran = []
+        monkeypatch.setattr(cache_mod, "_set_backup_exclusion_xattr", no_xattr)
+        monkeypatch.setattr(cache_mod.subprocess, "run", lambda argv, **kw: ran.append(argv))
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        assert ran == [["tmutil", "addexclusion", str(cache_dir)]]
+        # Not re-run once the directory exists.
+        renderer.fetch_active_policy_rows(base_url="https://other.example.test")
+        assert len(ran) == 1
+
+    def test_cache_carries_on_when_neither_works(self, cache_dir, transport, monkeypatch):
+        monkeypatch.setattr(cache_mod, "_IS_DARWIN", True)
+
+        def boom(*a, **kw):
+            raise OSError("unavailable")
+
+        monkeypatch.setattr(cache_mod, "_set_backup_exclusion_xattr", boom)
+        monkeypatch.setattr(cache_mod.subprocess, "run", boom)
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        assert len(transport.calls) == 1
+
+
+class TestReadAge:
+    def test_age_is_zero_live_and_the_entry_age_when_cached(self, cache_dir, transport, monkeypatch):
+        now = [2_000_000.0]
+        monkeypatch.setattr(cache_mod.time, "time", lambda: now[0])
+        _rows, age = renderer.fetch_active_policy_rows_with_age(base_url=BASE)
+        assert age == 0.0
+        now[0] += 37.0
+        _rows, age = renderer.fetch_active_policy_rows_with_age(base_url=BASE)
+        assert age == pytest.approx(37.0)
+        assert len(transport.calls) == 1
+
+
+class TestFailureLabels:
+    def test_paging_error_is_not_labelled_as_unreachable(self):
+        assert "paging failed" in renderer.describe_fetch_failure(renderer.PolicyPagingError("x"))
+        assert "reach" not in renderer.describe_fetch_failure(renderer.PolicyPagingError("x"))
+        assert renderer.describe_fetch_failure(OSError("x")) == "could not reach Neotoma"
+        assert "concurrent" in renderer.describe_fetch_failure(
+            cache_mod.PolicyFetchRecentlyFailed("x")
+        )
+
+
+class TestChecksThatHadNoTest:
+    def test_fresh_entry_with_the_wrong_key_falls_through(self, cache_dir, transport):
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        entry = next(cache_dir.glob("*.json"))
+        data = json.loads(entry.read_bytes())
+        data["key"] = "f" * 64  # unexpired, well-formed, wrong key
+        entry.write_text(json.dumps(data))
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        assert len(transport.calls) == 2
+
+    def test_other_owned_directory_alone_is_refused(self, cache_dir, transport, monkeypatch):
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        _fake_uid_fstat(monkeypatch, dirs=True)
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        assert len(transport.calls) == 2
+
+    def test_other_owned_entry_alone_is_refused(self, cache_dir, transport, monkeypatch):
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        _fake_uid_fstat(monkeypatch, files=True)
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        assert len(transport.calls) == 2
+
+    def test_hard_linked_entry_is_refused(self, cache_dir, transport, tmp_path):
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        entry = next(cache_dir.glob("*.json"))
+        os.link(entry, tmp_path / "second-name.json")
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        assert len(transport.calls) == 2
+
+    def test_entry_over_the_size_cap_is_refused_on_read(self, cache_dir, transport, monkeypatch):
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        entry = next(cache_dir.glob("*.json"))
+        monkeypatch.setattr(cache_mod, "MAX_ENTRY_BYTES", entry.stat().st_size - 1)
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        assert len(transport.calls) == 2
+
+    def test_entry_over_the_size_cap_is_not_written(self, cache_dir, transport, monkeypatch):
+        monkeypatch.setattr(cache_mod, "MAX_ENTRY_BYTES", 64)
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        assert list(cache_dir.glob("*.json")) == []
+
+    def test_non_regular_file_at_the_entry_name_is_refused(self, cache_dir, transport):
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        entry = next(cache_dir.glob("*.json"))
+        entry.unlink()
+        os.mkfifo(entry, 0o600)
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        assert len(transport.calls) == 2
+
+    def test_a_failed_cache_write_does_not_raise(self, cache_dir, transport, monkeypatch):
+        def broken_replace(src, dst):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(cache_mod.os, "replace", broken_replace)
+        rows = renderer.fetch_active_policy_rows(base_url=BASE)
+        assert len(rows) == 5
+        assert list(cache_dir.glob(".*.tmp")) == []  # temp file cleaned up
+
+    @pytest.mark.parametrize("raw,expected", [
+        (None, cache_mod.DEFAULT_TTL_S),
+        ("", cache_mod.DEFAULT_TTL_S),
+        ("abc", 0.0),
+        ("-5", 0.0),
+        ("0", 0.0),
+        ("nan", 0.0),
+        ("inf", 0.0),
+        ("30", 30.0),
+        ("100000", cache_mod.MAX_TTL_S),
+    ])
+    def test_ttl_parsing(self, monkeypatch, raw, expected):
+        if raw is None:
+            monkeypatch.delenv(cache_mod.TTL_ENV, raising=False)
+        else:
+            monkeypatch.setenv(cache_mod.TTL_ENV, raw)
+        assert cache_mod.ttl_seconds() == expected
+
+    def test_relative_cache_dir_is_rejected(self, tmp_path, transport, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv(cache_mod.TTL_ENV, "120")
+        monkeypatch.setenv(cache_mod.DIR_ENV, "rel/cache")
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        renderer.fetch_active_policy_rows(base_url=BASE)
+        assert len(transport.calls) == 2
+        assert not (tmp_path / "rel").exists()
+
+    @pytest.mark.parametrize("page", [
+        ["not", "an", "object"],
+        {"entities": "not a list"},
+    ])
+    def test_malformed_page_fails_loudly(self, monkeypatch, page):
+        monkeypatch.setattr(renderer, "_request", lambda url, body, timeout=10.0: page)
+        with pytest.raises(renderer.PolicyPagingError):
+            renderer.fetch_active_policy_rows(base_url=BASE)
+
+    def test_boolean_total_is_not_a_count(self, monkeypatch):
+        ents = [_entity(i) for i in range(3)]
+        monkeypatch.setattr(
+            renderer, "_request",
+            lambda url, body, timeout=10.0: {"entities": ents, "total": True},
+        )
+        # True would read as total == 1 and fail the count check.
+        assert len(renderer.fetch_active_policy_rows(base_url=BASE)) == 3
+
+
+class TestNonRegularFileRefusedDirectly:
+    @pytest.mark.parametrize("kind", ["fifo", "dir"])
+    def test_non_regular_entry_raises_cache_refused(self, cache_dir, kind):
+        dir_fd, _path = cache_mod._open_cache_dir()
+        try:
+            target = cache_dir / ("a" * 64 + ".json")
+            if kind == "fifo":
+                os.mkfifo(target, 0o600)
+            else:
+                target.mkdir(mode=0o700)
+            with pytest.raises(cache_mod.CacheRefused, match="not a regular file"):
+                cache_mod._read_json(dir_fd, target.name)
+        finally:
+            os.close(dir_fd)
