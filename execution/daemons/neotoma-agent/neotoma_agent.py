@@ -499,7 +499,16 @@ async def handle_event(event: NeotomaEvent, notifier: Notifier, grants: GrantChe
         title = snapshot.get("title", "(untitled)")
         log.info(f"[{DAEMON_NAME}] Task created: {title[:80]} ({entity_id})")
         if DUE_DATE_HYGIENE_ENABLED:
-            await apply_due_date_hygiene(entity_id, snapshot)
+            # An unread snapshot is {} — NOT "a task with no due date". Hygiene
+            # on it would write a default due date over the real one.
+            if not event.hydrated:
+                log.warning(
+                    f"[{DAEMON_NAME}] task {entity_id} snapshot could not be read "
+                    "— skipping due-date hygiene rather than defaulting over "
+                    "unknown fields"
+                )
+            else:
+                await apply_due_date_hygiene(entity_id, snapshot)
 
     elif entity_type == "issue" and action == "created":
         title = snapshot.get("title", "(untitled)")
