@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _session_integrity import (  # noqa: E402, F401
     read_hook_input, load_state, scan_transcript, emit_harness_event, log,
     neotoma_credentials, missing_credentials_warning_text,
+    credentials_have_control_char, unusable_credentials_warning_text,
     credentials_warning_already_delivered, mark_credentials_warning_delivered,
 )
 
@@ -99,10 +100,22 @@ def main() -> int:
     # attempt does not consume the one-shot per-session notice.
     base_url, token = neotoma_credentials()
     credentials_missing = not base_url or not token
-    notice_pending = credentials_missing and not credentials_warning_already_delivered(session_id)
-    system_message = (
-        missing_credentials_warning_text("session-integrity") if notice_pending else None
+    # A complete pair with a control character is refused by the emitter on
+    # every Stop; give it the same one-per-session visible notice.
+    credentials_unusable = (
+        not credentials_missing and credentials_have_control_char(base_url, token)
     )
+    notice_pending = (
+        (credentials_missing or credentials_unusable)
+        and not credentials_warning_already_delivered(session_id)
+    )
+    system_message = None
+    if notice_pending:
+        system_message = (
+            unusable_credentials_warning_text("session-integrity")
+            if credentials_unusable
+            else missing_credentials_warning_text("session-integrity")
+        )
 
     # Suppress emit_harness_event's own stderr warning exactly when this
     # function has decided to present the SAME notice itself via

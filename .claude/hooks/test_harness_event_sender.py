@@ -477,16 +477,69 @@ def _assert_no_token_form(text: str) -> None:
 
 
 class TestCredentialNeverLogged:
-    def test_control_character_token_is_refused_before_spawn(self, monkeypatch):
+    @pytest.mark.parametrize("sep", ["\n", "\r", "\t", "\x7f", "\x1b", "\x0b"])
+    def test_control_character_token_is_refused_before_spawn(self, monkeypatch, sep):
+        token = f"{NEWLINE_TOKEN_LEFT}{sep}{NEWLINE_TOKEN_RIGHT}"
         monkeypatch.setenv("NEOTOMA_BASE_URL", "http://127.0.0.1:9")
-        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", NEWLINE_TOKEN)
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", token)
         launches = _capture_launches(monkeypatch)
         si.emit_harness_event_raw("nl", {"event_type": "x"}, log_tag="t", discriminator="d1")
         assert launches == []
         text = (si.state_dir() / si._SENDER_LOG_NAME).read_text()
         assert "control character" in text
         assert "key=harness-event-nl-d1" in text
+        assert NEWLINE_TOKEN_LEFT not in text and NEWLINE_TOKEN_RIGHT not in text
         _assert_no_token_form(text)
+
+    @pytest.mark.parametrize("sep", ["\n", "\r", "\t"])
+    def test_control_character_in_base_url_is_refused_before_spawn(self, monkeypatch, sep):
+        monkeypatch.setenv("NEOTOMA_BASE_URL", f"http://127.0.0.1:9{sep}x")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", SYNTHETIC_TOKEN)
+        launches = _capture_launches(monkeypatch)
+        si.emit_harness_event_raw("url", {"event_type": "x"}, log_tag="t", discriminator="d1")
+        assert launches == []
+        assert "key=harness-event-url-d1" in (si.state_dir() / si._SENDER_LOG_NAME).read_text()
+
+    def test_unusable_credentials_notice_is_visible_once_per_session(
+        self, monkeypatch, capsys
+    ):
+        """A control-character pair must not skip silently on every Stop: one
+        notice per session, never carrying the token or any part of it."""
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://127.0.0.1:9")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", NEWLINE_TOKEN)
+        _capture_launches(monkeypatch)
+        for _ in range(2):
+            si.emit_harness_event_raw(
+                "nl", {"event_type": "x"}, log_tag="t", session_id="sess-ctl",
+                discriminator="d1",
+            )
+        err = capsys.readouterr().err
+        assert err.count("control character") == 1
+        assert "NOT being written" in err
+        _assert_no_token_form(err)
+
+    def test_stop_finalizer_presents_unusable_credentials_via_system_message_once(
+        self, monkeypatch, capsys
+    ):
+        import stop_finalizer as sf  # noqa: PLC0415
+
+        monkeypatch.setenv("NEOTOMA_BASE_URL", "http://127.0.0.1:9")
+        monkeypatch.setenv("NEOTOMA_BEARER_TOKEN", NEWLINE_TOKEN)
+        launches = _capture_launches(monkeypatch)
+        monkeypatch.setattr(sf, "ENFORCE", False)
+        monkeypatch.setattr(
+            sf, "read_hook_input", lambda: {"session_id": "sess-fin", "transcript_path": ""}
+        )
+        assert sf.main() == 0
+        first = capsys.readouterr()
+        payload = json.loads(first.out)
+        assert "NOT being written" in payload["systemMessage"]
+        assert first.err == ""
+        _assert_no_token_form(first.out)
+        assert launches == []
+        assert sf.main() == 0
+        second = capsys.readouterr()
+        assert second.out == ""
 
     def test_failure_is_logged_as_type_only_never_the_message(self, tmp_path):
         """Bypass the parent's check: even if such a token reached the
@@ -702,3 +755,139 @@ class TestSharedUuidRule:
         big = {"type": "progress", "data": "y" * (si._TRANSCRIPT_TAIL_BYTES + 10_000)}
         path = _write_transcript(tmp_path / "t.jsonl", [_row("a-early"), big])
         assert si.transcript_event_discriminator(path) == "a-early"
+
+    @pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\u0085", "\r"])
+    @pytest.mark.parametrize("big", [False, True])
+    def test_tail_reader_splits_rows_on_newline_only(self, tmp_path, sep, big):
+        """A raw separator inside a row's text must not cut the row: both
+        readers answer with the row's own uuid. `big` pushes the transcript
+        past the tail window so the tail reader starts mid-file."""
+        rows = [_row("a-early", text="early")]
+        if big:
+            rows.append({"type": "progress", "data": "y" * (si._TRANSCRIPT_TAIL_BYTES + 5_000)})
+        rows += [_row("u-2", "user", f"before{sep}after"), _row("a-LAST", text=f"x{sep}y")]
+        path = tmp_path / "t.jsonl"
+        path.write_text(
+            "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+            encoding="utf-8",
+        )
+        assert si.scan_transcript(str(path))["last_event_uuid"] == "a-LAST"
+        assert si.transcript_event_discriminator(str(path)) == "a-LAST"
+
+    def test_both_readers_use_the_one_row_splitter(self):
+        import inspect
+
+        assert "_iter_rows(" in inspect.getsource(si.scan_transcript)
+        assert "_iter_rows(" in inspect.getsource(si.transcript_event_discriminator)
+        assert "splitlines" not in inspect.getsource(si.transcript_event_discriminator)
+
+
+# ---------------------------------------------------------------------------
+# 9. Hardening that previously had no test able to fail.
+# ---------------------------------------------------------------------------
+def _status_handler(statuses: list[int]):
+    seen: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            seen.append(body)
+            code = statuses[min(len(seen), len(statuses)) - 1]
+            self.send_response(code)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args):
+            return
+
+    return Handler, seen
+
+
+class TestTransientStatusesAreRetried:
+    @pytest.mark.parametrize("status", [500, 503, 408, 429])
+    def test_transient_status_is_retried_once_with_the_same_key(self, tmp_path, status):
+        handler, seen = _status_handler([status, 200])
+        log_path = tmp_path / "sender.log"
+        with _http_server(handler) as url:
+            si.deliver_harness_event({
+                "base_url": url, "token": SYNTHETIC_TOKEN,
+                "body": {"idempotency_key": "harness-event-503"}, "timeout": 5,
+                "attempts": 2, "backoff": 0, "log_path": str(log_path), "log_tag": "t",
+            })
+        assert [b["idempotency_key"] for b in seen] == ["harness-event-503"] * 2
+        assert not log_path.exists()  # second attempt succeeded: nothing logged
+
+
+class TestLogPathIsNotFollowed:
+    def test_a_symlinked_log_path_is_not_written_through(self, tmp_path):
+        target = tmp_path / "victim.txt"
+        target.write_text("untouched")
+        link = tmp_path / "sender.log"
+        link.symlink_to(target)
+        si._append_sender_log(str(link), "should not land")
+        assert target.read_text() == "untouched"
+
+
+_SENDER = str(HOOKS_DIR / "_harness_event_sender.py")
+
+
+class TestLifetimeAlarm:
+    def test_alarm_ends_a_stuck_process_quietly_with_rc_0(self):
+        code = (
+            "import sys, time; sys.path.insert(0, %r); "
+            "import _harness_event_sender as s; s._arm_lifetime(1); time.sleep(10)"
+            % str(HOOKS_DIR)
+        )
+        started = time.monotonic()
+        result = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, timeout=30)
+        assert result.returncode == 0
+        assert time.monotonic() - started < 5.0
+
+    def test_forced_exit_leaves_one_key_only_log_line(self, tmp_path):
+        """Delivery hangs past a 1 s cap: the alarm ends the process, which
+        writes one line naming the key and never the token."""
+        log_path = tmp_path / "sender.log"
+        payload = {
+            "base_url": "http://127.0.0.1:9", "token": SYNTHETIC_TOKEN,
+            "body": {"idempotency_key": "harness-event-cap"},
+            "log_path": str(log_path), "log_tag": "t",
+        }
+        code = (
+            "import sys, time; sys.path.insert(0, %r); "
+            "import _session_integrity as si, _harness_event_sender as s; "
+            "si.sender_lifetime_s = lambda p: 1; "
+            "si.deliver_harness_event = lambda p: time.sleep(10); "
+            "sys.exit(s.main())" % str(HOOKS_DIR)
+        )
+        started = time.monotonic()
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", code], input=json.dumps(payload).encode(),
+            capture_output=True, timeout=30,
+        )
+        assert result.returncode == 0
+        assert time.monotonic() - started < 5.0
+        text = log_path.read_text()
+        assert text.count("\n") == 1
+        assert "lifetime cap reached" in text and "key=harness-event-cap" in text
+        assert SYNTHETIC_TOKEN not in text
+
+    def test_rearm_subtracts_elapsed_time_and_uses_the_payload_cap(self, monkeypatch):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_sender_rearm", _SENDER)
+        sender = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sender)
+        armed: list[int] = []
+        monkeypatch.setattr(sender, "_arm_lifetime", armed.append)
+        monkeypatch.setattr(si, "deliver_harness_event", lambda p: None)
+        monkeypatch.setattr(si, "sender_lifetime_s", lambda p: 100)
+        clock = iter([1000.0, 1030.0])  # 30 s pass reading stdin and importing
+        monkeypatch.setattr(sender.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(
+            sender.sys, "stdin", type("S", (), {"buffer": __import__("io").BytesIO(b'{"body": {}}')})()
+        )
+        assert sender.main() == 0
+        assert armed[0] == sender._BOOTSTRAP_LIFETIME_S
+        assert len(armed) == 2
+        assert 69 <= armed[1] <= 71, armed  # 100 - 30, not a fresh 100

@@ -29,6 +29,7 @@ environment without a venv.
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import os
 import subprocess
@@ -179,6 +180,18 @@ def missing_credentials_warning_text(log_tag: str) -> str:
     )
 
 
+def unusable_credentials_warning_text(log_tag: str) -> str:
+    """Notice for a complete pair that contains a control character: audit
+    emission is refused on every Stop until it is fixed. Names neither the
+    token nor any part of it."""
+    return (
+        f"[{log_tag}] WARNING: the Neotoma bearer token or base URL contains a "
+        "control character, so harness_event audit rows are NOT being written. "
+        "Stop-hook enforcement still runs from local session evidence. Fix the "
+        "value in its source (environment or ~/.config/neotoma/.env)."
+    )
+
+
 def credentials_warning_already_delivered(session_id: str) -> bool:
     """True once this session's missing-credentials notice has been
     delivered on ANY surface (stderr or a caller-owned presentation such as
@@ -325,15 +338,9 @@ def scan_transcript(transcript_path: str | None) -> dict:
     if not transcript_path or not os.path.exists(transcript_path):
         return summary
     try:
-        with open(transcript_path, "r") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
+        with open(transcript_path, "rb") as fh:
+            for line in _iter_rows(fh):
+                ev = _parse_row(line)
                 if not isinstance(ev, dict):
                     continue
                 row_uuid = _row_event_uuid(ev)
@@ -556,6 +563,20 @@ def _safe_discriminator(value) -> str:
     return cleaned[:_DISCRIMINATOR_MAX_LEN]
 
 
+def _iter_rows(binary_fh):
+    """The single definition of "what is one transcript row": a run of bytes
+    ending at b"\n", decoded as UTF-8 with replacement. Both
+    `scan_transcript` (whole file) and `transcript_event_discriminator`
+    (tail bytes, wrapped in `io.BytesIO`) iterate through it, so the two
+    cannot disagree about where a row ends. Iterating a BINARY handle splits
+    on b"\n" only; `str.splitlines()` and text-mode iteration would also
+    split on U+2028, U+2029, U+0085 and a bare CR, all of which can appear
+    raw inside a row (Node's JSON.stringify leaves U+2028 unescaped), cutting
+    that row into fragments that do not parse."""
+    for raw in binary_fh:
+        yield raw.decode("utf-8", errors="replace")
+
+
 def _row_event_uuid(row) -> str:
     """The sanitized `uuid` of one parsed transcript row, or "" when the row
     carries none. The single definition of "which rows identify a stop":
@@ -602,7 +623,7 @@ def transcript_event_discriminator(transcript_path: str | None) -> str:
             size = fh.tell()
             start = max(0, size - _TRANSCRIPT_TAIL_BYTES)
             fh.seek(start)
-            lines = fh.read().decode("utf-8", errors="replace").splitlines()
+            lines = list(_iter_rows(io.BytesIO(fh.read())))
         if start > 0 and lines:
             lines = lines[1:]  # the first line of a mid-file read may be partial
         for line in reversed(lines):
@@ -612,8 +633,8 @@ def transcript_event_discriminator(transcript_path: str | None) -> str:
         if start == 0:
             return ""
         last = ""
-        with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
+        with open(transcript_path, "rb") as fh:
+            for line in _iter_rows(fh):
                 found = _row_event_uuid(_parse_row(line))
                 if found:
                     last = found
@@ -636,6 +657,12 @@ def harness_event_idempotency_key(idempotency_slug: str, discriminator: str = ""
 
 def _has_control_char(value: str) -> bool:
     return any(ord(c) < 0x20 or ord(c) == 0x7F for c in value)
+
+
+def credentials_have_control_char(base_url: str, token: str) -> bool:
+    """True when a complete pair holds a control character and so would be
+    refused before any sender starts (see `emit_harness_event_raw`)."""
+    return _has_control_char(token) or _has_control_char(base_url)
 
 
 def sender_lifetime_s(payload: dict) -> int:
@@ -761,8 +788,15 @@ def _post_with_deadline(base_url: str, token: str, body: dict, timeout: float) -
     longer. The attempt runs in a daemon thread joined with `timeout`; if it
     is still running, the attempt is abandoned as a deadline failure. The
     abandoned thread cannot keep the process alive (daemon), and a retry
-    reuses the same key, so a late success of the abandoned attempt is
-    deduplicated server-side."""
+    reuses the same key and the IDENTICAL body, so a late success of the
+    abandoned attempt is deduplicated server-side.
+
+    ASSUMPTION worth knowing: that dedup rests on Neotoma's unique content
+    hash on sources (`sources(content_hash, user_id)`), which identical bodies
+    share; the `idempotency_key` alone is not guarded by a unique index
+    server-side. A body that ever varied between attempts (a timestamp, a
+    counter) would lose the protection, so the body is built once per stop
+    and never rebuilt per attempt."""
     outcome: dict = {}
 
     def _run() -> None:
@@ -906,7 +940,10 @@ def emit_harness_event_raw(
             _warn_missing_credentials_once(session_id, log_tag)
         return
     key = harness_event_idempotency_key(idempotency_slug, discriminator)
-    if _has_control_char(token) or _has_control_char(base_url):
+    if credentials_have_control_char(base_url, token):
+        if not suppress_stderr_warning and not credentials_warning_already_delivered(session_id):
+            sys.stderr.write(unusable_credentials_warning_text(log_tag) + "\n")
+            mark_credentials_warning_delivered(session_id)
         _append_sender_log(
             _sender_log_path(),
             f"[{log_tag}] harness_event emission skipped (non-fatal): the Neotoma "
